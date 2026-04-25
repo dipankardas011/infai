@@ -1,5 +1,14 @@
 # infai
 
+```text
+██╗███╗   ██╗███████╗ █████╗ ██╗
+██║████╗  ██║██╔════╝██╔══██╗██║
+██║██╔██╗ ██║█████╗  ███████║██║
+██║██║╚██╗██║██╔══╝  ██╔══██║██║
+██║██║ ╚████║██║     ██║  ██║██║
+╚═╝╚═╝  ╚═══╝╚═╝     ╚═╝  ╚═╝╚═╝
+```
+
 A terminal UI for managing [llama.cpp](https://github.com/ggerganov/llama.cpp) model profiles.  
 Store named launch profiles in SQLite and run `llama-server` with live log streaming.
 
