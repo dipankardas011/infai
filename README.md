@@ -10,18 +10,19 @@
 ```
 
 **Zero-management launch templates for [llama.cpp](https://github.com/ggerganov/llama.cpp).**  
-Create one-click runnable profiles, manage your inference engine and model locations simply, and monitor performance with live server logs.
+Simplify configuration management and run local models faster. Perfect for rapid experimentation and testing without the need to remember complex shell commands.
 
 ![profile config](profile-config.webp)
 ![running model](runningmodel.webp)
 
 ## Features
 
-- **One-Click Launch** — Instant start with pre-configured, named profiles (e.g., `text-only`, `low-vram`).
-- **Zero Template Management** — Stop messing with shell aliases and scripts; manage everything through a clean TUI.
+- **One-Click Launch** — Instant start with pre-configured profiles. No more memorizing long CLI commands.
+- **Faster Experiments** — Quickly swap between different quantization types, context sizes, and batch settings to test model performance.
+- **Zero Template Management** — Stop messing with shell aliases and scripts; manage everything through a clean, centralized TUI.
 - **Live Inference Logs** — Monitor your server in real-time with a built-in scrollable viewport.
-- **Smart UI** — Easy pickers for quantization types and context size units (K, M).
-- **Easy Path Management** — Quickly configure multiple scan folders and your `llama-server` binary path.
+- **Smart UI** — Intuitive pickers for quantization types and context size units (K, M).
+- **Centralized Path Control** — Manage all your model directories and your `llama-server` binary path in one place.
 - **Themes** — 11+ themes (Tokyonight, Gruvbox, Rose Pine, etc.) to match your terminal setup.
 
 ## Install
