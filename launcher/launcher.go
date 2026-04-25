@@ -7,7 +7,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/dipankardas011/ai-inferencing-tui/model"
+	"github.com/dipankardas011/infai/model"
 )
 
 func BuildArgs(serverBin string, m model.ModelEntry, p model.Profile) []string {

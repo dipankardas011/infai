@@ -1,4 +1,4 @@
-module github.com/dipankardas011/ai-inferencing-tui
+module github.com/dipankardas011/infai
 
 go 1.26.2
 

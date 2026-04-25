@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/dipankardas011/ai-inferencing-tui/model"
+	"github.com/dipankardas011/infai/model"
 )
 
 // modelItem wraps ModelEntry for the bubbles list.
@@ -64,7 +64,7 @@ func NewModelListModel(entries []model.ModelEntry, w, h int) ModelListModel {
 		items[i] = modelItem{entry: e}
 	}
 	l := list.New(items, modelDelegate{}, w, h-4)
-	l.Title = "ai-inferencing-tui"
+	l.Title = "infai"
 	l.Styles.Title = styleTitle
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)

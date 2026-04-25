@@ -7,8 +7,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/dipankardas011/ai-inferencing-tui/launcher"
-	"github.com/dipankardas011/ai-inferencing-tui/model"
+	"github.com/dipankardas011/infai/launcher"
+	"github.com/dipankardas011/infai/model"
 )
 
 // ConfirmModel is screen 4 — shows the assembled command before launch.

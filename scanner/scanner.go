@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dipankardas011/ai-inferencing-tui/model"
+	"github.com/dipankardas011/infai/model"
 )
 
 func isMmproj(name string) bool {

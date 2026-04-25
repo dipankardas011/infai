@@ -1,4 +1,4 @@
-# ai-inferencing-tui
+# infai
 
 A terminal UI for managing [llama.cpp](https://github.com/ggerganov/llama.cpp) model profiles.  
 Stop polluting your shell config with aliases — browse your GGUF models, store named launch profiles in SQLite, and run `llama-server` with live log streaming, all from one TUI.
@@ -18,15 +18,15 @@ Stop polluting your shell config with aliases — browse your GGUF models, store
 **Requires:** Go 1.23+, gcc (for `go-sqlite3` CGo)
 
 ```bash
-go install github.com/dipankardas011/ai-inferencing-tui@latest
+go install github.com/dipankardas011/infai@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/dipankardas011/ai-inferencing-tui
-cd ai-inferencing-tui
-go build -o ai-inferencing-tui .
+git clone https://github.com/dipankardas011/infai
+cd infai
+go build -o infai .
 ```
 
 ## Configuration
@@ -35,9 +35,9 @@ On first run the tool creates a SQLite database at the OS config directory:
 
 | OS      | Path |
 |---------|------|
-| Linux   | `~/.config/ai-inferencing-tui/config.db` |
-| macOS   | `~/Library/Application Support/ai-inferencing-tui/config.db` |
-| Windows | `%AppData%\ai-inferencing-tui\config.db` |
+| Linux   | `~/.config/infai/config.db` |
+| macOS   | `~/Library/Application Support/infai/config.db` |
+| Windows | `%AppData%\infai\config.db` |
 
 Two settings are seeded automatically and can be changed via a SQL client or by updating the `settings` table:
 

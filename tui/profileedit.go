@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/dipankardas011/ai-inferencing-tui/model"
+	"github.com/dipankardas011/infai/model"
 )
 
 type fieldKind int

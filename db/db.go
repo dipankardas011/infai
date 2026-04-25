@@ -7,7 +7,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"github.com/dipankardas011/ai-inferencing-tui/model"
+	"github.com/dipankardas011/infai/model"
 )
 
 type DB struct {
@@ -19,7 +19,7 @@ func Open() (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(cfgDir, "ai-inferencing-tui")
+	dir := filepath.Join(cfgDir, "infai")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}

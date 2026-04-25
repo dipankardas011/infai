@@ -6,9 +6,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/dipankardas011/ai-inferencing-tui/db"
-	"github.com/dipankardas011/ai-inferencing-tui/scanner"
-	"github.com/dipankardas011/ai-inferencing-tui/tui"
+	"github.com/dipankardas011/infai/db"
+	"github.com/dipankardas011/infai/scanner"
+	"github.com/dipankardas011/infai/tui"
 )
 
 func main() {

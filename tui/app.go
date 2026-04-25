@@ -1,9 +1,9 @@
 package tui
 
 import (
-	"github.com/dipankardas011/ai-inferencing-tui/db"
-	"github.com/dipankardas011/ai-inferencing-tui/model"
-	"github.com/dipankardas011/ai-inferencing-tui/scanner"
+	"github.com/dipankardas011/infai/db"
+	"github.com/dipankardas011/infai/model"
+	"github.com/dipankardas011/infai/scanner"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
