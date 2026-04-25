@@ -1,16 +1,14 @@
 package model
 
 type ModelEntry struct {
-	ID           int64
-	ScanDir      string
-	DirName      string
-	GGUFPath     string
-	MmprojPath   string
-	DisplayName  string
-	Checksum     string
-	LastVerified string
-	Architecture string
-	ModelName    string
+	ID          int64
+	ScanDir     string
+	DirName     string
+	GGUFPath    string
+	MmprojPath  string
+	DisplayName string
+	Type        string
+	Metadata    string
 }
 
 type GGUFMetadata struct {

@@ -16,8 +16,8 @@ import (
 )
 
 type syncRequest struct {
-	folder string
-	result chan syncResult
+	folders []string
+	result  chan syncResult
 }
 
 type syncResult struct {
@@ -80,11 +80,29 @@ func (m ExploreModel) SetSize(w, h int) ExploreModel {
 
 func (m ExploreModel) Dirs() []string { return m.dirs }
 
+func (m *ExploreModel) Close() {
+	if m.syncChan != nil {
+		close(m.syncChan)
+		m.syncChan = nil
+	}
+}
+
 func (m ExploreModel) syncWorker() {
 	for req := range m.syncChan {
-		entries, err := scanner.Scan([]string{req.folder})
+		entries, err := scanner.Scan(req.folders)
 		if err != nil {
 			req.result <- syncResult{err: fmt.Errorf("scan: %v", err)}
+			continue
+		}
+		var metaErr error
+		for i := range entries {
+			if err := scanner.LoadModelMetadata(m.database, &entries[i]); err != nil {
+				metaErr = fmt.Errorf("load metadata: %v", err)
+				break
+			}
+		}
+		if metaErr != nil {
+			req.result <- syncResult{err: metaErr}
 			continue
 		}
 		removed, updated, err := m.database.Sync(entries)
@@ -172,27 +190,34 @@ func (m ExploreModel) Update(msg tea.Msg) (ExploreModel, tea.Cmd) {
 			if m.syncing || len(m.dirs) == 0 {
 				break
 			}
-			folder := m.dirs[m.cursor]
-			result := make(chan syncResult)
-			m.syncChan <- syncRequest{folder: folder, result: result}
+			folders := make([]string, len(m.dirs))
+			copy(folders, m.dirs)
+			result := make(chan syncResult, 1)
+			ch := m.syncChan
 			m.syncing = true
-			return m, func() tea.Msg {
-				res := <-result
-				return syncDoneMsg{removed: res.removed, updated: res.updated, err: res.err}
-			}
+			return m, tea.Batch(
+				m.spinner.Tick,
+				func() tea.Msg {
+					ch <- syncRequest{folders: folders, result: result}
+					res := <-result
+					return syncDoneMsg{removed: res.removed, updated: res.updated, err: res.err}
+				},
+			)
 		}
 	case syncDoneMsg:
 		m.syncing = false
 		if msg.err != nil {
 			m.errMsg = msg.err.Error()
 		} else if msg.removed == 0 && msg.updated == 0 {
-			m.errMsg = "already in sync"
+			m.errMsg = styleSuccess.Render("✓ sync done")
 		} else {
 			m.errMsg = fmt.Sprintf("synced: %d updated, %d removed", msg.updated, msg.removed)
 		}
 	case spinner.TickMsg:
 		if m.syncing {
-			m.spinner, _ = m.spinner.Update(msg)
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
 		}
 	}
 	return m, nil
@@ -232,7 +257,7 @@ func (m ExploreModel) View() string {
 		if m.errMsg != "" {
 			sb.WriteString(errStyle.Render(m.errMsg) + "\n")
 		}
-		sb.WriteString(helpStyle.Render("a: add  d: remove  s: sync  ↑↓: navigate  esc: back & rescan"))
+		sb.WriteString(helpStyle.Render("a: add  d: remove  s: sync all  ↑↓: navigate  esc: back"))
 	}
 	content := sb.String()
 	tBox := ActiveTheme

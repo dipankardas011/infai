@@ -1,0 +1,2 @@
+ALTER TABLE models DROP COLUMN type;
+ALTER TABLE models DROP COLUMN metadata;

@@ -146,18 +146,16 @@ func (d *DB) RemoveScanDir(path string) error {
 
 func (d *DB) UpsertModel(m *model.ModelEntry) error {
 	res, err := d.conn.Exec(`
-INSERT INTO models (scan_dir, dir_name, gguf_path, mmproj_path, display_name, checksum, architecture, model_name)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO models (scan_dir, dir_name, gguf_path, mmproj_path, display_name, type, metadata)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(gguf_path) DO UPDATE SET
     scan_dir=excluded.scan_dir,
     dir_name=excluded.dir_name,
     mmproj_path=excluded.mmproj_path,
     display_name=excluded.display_name,
-    checksum=excluded.checksum,
-    architecture=excluded.architecture,
-    model_name=excluded.model_name,
-    last_verified=CURRENT_TIMESTAMP
-`, m.ScanDir, m.DirName, m.GGUFPath, m.MmprojPath, m.DisplayName, m.Checksum, m.Architecture, m.ModelName)
+    type=excluded.type,
+    metadata=excluded.metadata
+`, m.ScanDir, m.DirName, m.GGUFPath, m.MmprojPath, m.DisplayName, m.Type, m.Metadata)
 	if err != nil {
 		return err
 	}
@@ -170,6 +168,47 @@ ON CONFLICT(gguf_path) DO UPDATE SET
 	return err
 }
 
+func (d *DB) ListRecents(limit int) ([]RecentEntry, error) {
+	rows, err := d.conn.Query(`
+SELECT m.id, m.scan_dir, m.dir_name, m.gguf_path, m.mmproj_path, m.display_name,
+       p.id, p.model_id, p.name, p.port, p.host, p.context_size, p.ngl,
+       p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
+       p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
+       p.no_kv_offload, p.use_mmproj, p.extra_flags
+FROM recents r
+JOIN models m ON r.model_id = m.id
+JOIN profiles p ON r.profile_id = p.id
+ORDER BY r.last_used DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []RecentEntry
+	for rows.Next() {
+		var m model.ModelEntry
+		var p model.Profile
+		var flashAttn, jinja, noKVOffload, useMmproj int
+		err := rows.Scan(
+			&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName,
+			&p.ID, &p.ModelID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
+			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
+			&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
+			&noKVOffload, &useMmproj, &p.ExtraFlags,
+		)
+		if err != nil {
+			return nil, err
+		}
+		p.FlashAttn = flashAttn == 1
+		p.Jinja = jinja == 1
+		p.NoKVOffload = noKVOffload == 1
+		p.UseMmproj = useMmproj == 1
+		out = append(out, RecentEntry{Model: m, Profile: p})
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 	var removed, updated int
 
@@ -179,20 +218,20 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 	}
 	defer tx.Rollback()
 
-	existing, err := tx.Query(`SELECT id, gguf_path, checksum FROM models`)
+	existing, err := tx.Query(`SELECT id, gguf_path FROM models`)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	dbModels := make(map[int64]map[string]string)
+	dbModels := make(map[int64]string)
 	for existing.Next() {
 		var id int64
-		var path, checksum string
-		if err := existing.Scan(&id, &path, &checksum); err != nil {
+		var path string
+		if err := existing.Scan(&id, &path); err != nil {
 			existing.Close()
 			return 0, 0, err
 		}
-		dbModels[id] = map[string]string{"path": path, "checksum": checksum}
+		dbModels[id] = path
 	}
 	existing.Close()
 
@@ -201,9 +240,7 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 		scannedPaths[m.GGUFPath] = true
 	}
 
-	for id, info := range dbModels {
-		path := info["path"]
-
+	for id, path := range dbModels {
 		if _, exists := os.Stat(path); os.IsNotExist(exists) {
 			_, err := tx.Exec(`DELETE FROM models WHERE id = ?`, id)
 			if err != nil {
@@ -221,16 +258,6 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 		for _, s := range scanned {
 			if s.GGUFPath == path {
 				found = true
-				if s.Checksum != info["checksum"] && s.Checksum != "" {
-					_, err := tx.Exec(`
-						UPDATE models SET checksum = ?, architecture = ?, model_name = ?, last_verified = CURRENT_TIMESTAMP
-						WHERE id = ?
-					`, s.Checksum, s.Architecture, s.ModelName, id)
-					if err != nil {
-						return 0, 0, err
-					}
-					updated++
-				}
 				break
 			}
 		}
@@ -248,25 +275,25 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 	}
 
 	for _, m := range scanned {
-		if !scannedPaths[m.GGUFPath] {
+		if scannedPaths[m.GGUFPath] {
 			continue
 		}
 		_, err := tx.Exec(`
-			INSERT INTO models (scan_dir, dir_name, gguf_path, mmproj_path, display_name, checksum, architecture, model_name)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO models (scan_dir, dir_name, gguf_path, mmproj_path, display_name, type, metadata)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(gguf_path) DO UPDATE SET
 				scan_dir=excluded.scan_dir,
 				dir_name=excluded.dir_name,
 				mmproj_path=excluded.mmproj_path,
 				display_name=excluded.display_name,
-				checksum=excluded.checksum,
-				architecture=excluded.architecture,
-				model_name=excluded.model_name,
+				type=excluded.type,
+				metadata=excluded.metadata,
 				last_verified=CURRENT_TIMESTAMP
-		`, m.ScanDir, m.DirName, m.GGUFPath, m.MmprojPath, m.DisplayName, m.Checksum, m.Architecture, m.ModelName)
+		`, m.ScanDir, m.DirName, m.GGUFPath, m.MmprojPath, m.DisplayName, m.Type, m.Metadata)
 		if err != nil {
 			return 0, 0, err
 		}
+		updated++
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -277,7 +304,7 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 }
 
 func (d *DB) ListModels() ([]model.ModelEntry, error) {
-	rows, err := d.conn.Query(`SELECT id, scan_dir, dir_name, gguf_path, mmproj_path, display_name, checksum, architecture, model_name FROM models ORDER BY display_name`)
+	rows, err := d.conn.Query(`SELECT id, scan_dir, dir_name, gguf_path, mmproj_path, display_name, type, metadata FROM models ORDER BY display_name`)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +312,7 @@ func (d *DB) ListModels() ([]model.ModelEntry, error) {
 	var out []model.ModelEntry
 	for rows.Next() {
 		var m model.ModelEntry
-		if err := rows.Scan(&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Checksum, &m.Architecture, &m.ModelName); err != nil {
+		if err := rows.Scan(&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -294,7 +321,7 @@ func (d *DB) ListModels() ([]model.ModelEntry, error) {
 }
 
 func (d *DB) ListRecentModels(limit int) ([]model.ModelEntry, error) {
-	rows, err := d.conn.Query(`SELECT id, scan_dir, dir_name, gguf_path, mmproj_path, display_name, checksum, architecture, model_name FROM models ORDER BY last_used DESC LIMIT ?`, limit)
+	rows, err := d.conn.Query(`SELECT id, scan_dir, dir_name, gguf_path, mmproj_path, display_name, type, metadata FROM models ORDER BY last_used DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +329,7 @@ func (d *DB) ListRecentModels(limit int) ([]model.ModelEntry, error) {
 	var out []model.ModelEntry
 	for rows.Next() {
 		var m model.ModelEntry
-		if err := rows.Scan(&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Checksum, &m.Architecture, &m.ModelName); err != nil {
+		if err := rows.Scan(&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -384,47 +411,6 @@ func (d *DB) GetDefaultExecutorPath() (string, error) {
 type RecentEntry struct {
 	Model   model.ModelEntry
 	Profile model.Profile
-}
-
-func (d *DB) ListRecents(limit int) ([]RecentEntry, error) {
-	rows, err := d.conn.Query(`
-SELECT m.id, m.scan_dir, m.dir_name, m.gguf_path, m.mmproj_path, m.display_name, m.checksum, m.architecture, m.model_name,
-       p.id, p.model_id, p.name, p.port, p.host, p.context_size, p.ngl,
-       p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
-       p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
-       p.no_kv_offload, p.use_mmproj, p.extra_flags
-FROM recents r
-JOIN models m ON r.model_id = m.id
-JOIN profiles p ON r.profile_id = p.id
-ORDER BY r.last_used DESC
-LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []RecentEntry
-	for rows.Next() {
-		var m model.ModelEntry
-		var p model.Profile
-		var flashAttn, jinja, noKVOffload, useMmproj int
-		err := rows.Scan(
-			&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Checksum, &m.Architecture, &m.ModelName,
-			&p.ID, &p.ModelID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
-			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
-			&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
-			&noKVOffload, &useMmproj, &p.ExtraFlags,
-		)
-		if err != nil {
-			return nil, err
-		}
-		p.FlashAttn = flashAttn == 1
-		p.Jinja = jinja == 1
-		p.NoKVOffload = noKVOffload == 1
-		p.UseMmproj = useMmproj == 1
-		out = append(out, RecentEntry{Model: m, Profile: p})
-	}
-	return out, rows.Err()
 }
 
 func (d *DB) ListProfiles(modelID int64) ([]model.Profile, error) {

@@ -232,6 +232,7 @@ func (a *AppModel) updateHome(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.screen = screenModelList
 		return a, nil
 	case "f":
+		a.explore.Close()
 		a.explore = NewExploreModel(a.database, a.scanDirs, a.width, a.height)
 		a.screen = screenExplore
 		return a, nil
@@ -409,6 +410,11 @@ func (a *AppModel) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.screen = screenHome
 		return a, nil
 	case "enter":
+		if a.confirm.command == "" {
+			a.errMsg = "no command configured - press [c] on home screen"
+			a.screen = screenHome
+			return a, nil
+		}
 		args := a.confirm.Args()
 		if len(args) == 0 || args[0] == "" {
 			a.errMsg = "executor path not set - press [c] on home screen"
@@ -457,14 +463,10 @@ func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a *AppModel) updateExplore(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		// DB already updated immediately on each add/remove; just sync scanDirs and rescan.
 		a.scanDirs = a.explore.Dirs()
 		a.refreshHome()
 		a.screen = screenHome
-		return a, func() tea.Msg {
-			entries, _ := scanner.Scan(a.scanDirs)
-			return scanDoneMsg{entries: entries}
-		}
+		return a, nil
 	}
 	var cmd tea.Cmd
 	a.explore, cmd = a.explore.Update(msg)
@@ -473,12 +475,18 @@ func (a *AppModel) updateExplore(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *AppModel) View() string {
 	errBanner := ""
+	bannerLines := 0
 	if a.errMsg != "" {
 		errBanner = styleError.Render("error: "+a.errMsg) + "\n"
+		bannerLines = 2
 	}
 	switch a.screen {
 	case screenHome:
-		return errBanner + a.home.View()
+		h := a.home
+		if bannerLines > 0 {
+			h = h.SetSize(a.width, a.height-bannerLines)
+		}
+		return errBanner + h.View()
 	case screenModelList:
 		return errBanner + a.modelList.View()
 	case screenProfileList:
