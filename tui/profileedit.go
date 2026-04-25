@@ -15,14 +15,14 @@ import (
 type fieldKind int
 
 const (
-	fieldText   fieldKind = iota
+	fieldText fieldKind = iota
 	fieldInt
 	fieldFloat
 	fieldBool
 	fieldSelect
 )
 
-var cacheTypeOptions = []string{"(omit)", "f16", "bf16", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "q6_K"}
+var cacheTypeOptions = []string{"(omit)", "f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"}
 
 type formField struct {
 	label    string
@@ -46,6 +46,8 @@ type ProfileEditModel struct {
 	errMsg      string
 	viewOffset  int
 	visibleRows int
+	width       int
+	height      int
 	initialized bool
 }
 
@@ -82,7 +84,8 @@ func NewProfileEditModel(m model.ModelEntry, p *model.Profile, w, h int) Profile
 		{label: "Name", kind: fieldText, input: newTextInput("e.g. text-only")},
 		{label: "Port", kind: fieldInt, input: newTextInput("8000")},
 		{label: "Host", kind: fieldText, input: newTextInput("0.0.0.0")},
-		{label: "Context Size", kind: fieldInt, input: newTextInput("65536")},
+		{label: "Context Size", kind: fieldInt, input: newTextInput("64")},
+		newSelectField("Context Unit", []string{"None", "K", "M"}, nil),
 		{label: "NGL", kind: fieldText, input: newTextInput("auto")},
 		{label: "Batch Size", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
 		{label: "UBatch Size", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
@@ -103,7 +106,9 @@ func NewProfileEditModel(m model.ModelEntry, p *model.Profile, w, h int) Profile
 		fields:      fields,
 		modelEntry:  m,
 		modelID:     m.ID,
-		visibleRows: h - 8,
+		visibleRows: h - 12,
+		width:       w,
+		height:      h,
 	}
 
 	set := func(label, val string) {
@@ -122,6 +127,18 @@ func NewProfileEditModel(m model.ModelEntry, p *model.Profile, w, h int) Profile
 			}
 		}
 	}
+	setSelect := func(label, val string) {
+		for i := range em.fields {
+			if em.fields[i].label == label && em.fields[i].kind == fieldSelect {
+				for j, o := range em.fields[i].options {
+					if o == val {
+						em.fields[i].selIdx = j
+						return
+					}
+				}
+			}
+		}
+	}
 
 	if p != nil {
 		em.editingID = p.ID
@@ -129,7 +146,21 @@ func NewProfileEditModel(m model.ModelEntry, p *model.Profile, w, h int) Profile
 		set("Name", p.Name)
 		set("Port", strconv.Itoa(p.Port))
 		set("Host", p.Host)
-		set("Context Size", strconv.Itoa(p.ContextSize))
+
+		ctxVal := p.ContextSize
+		ctxUnit := "None"
+		if ctxVal > 0 {
+			if ctxVal%(1024*1024) == 0 {
+				ctxVal /= (1024 * 1024)
+				ctxUnit = "M"
+			} else if ctxVal%1024 == 0 {
+				ctxVal /= 1024
+				ctxUnit = "K"
+			}
+		}
+		set("Context Size", strconv.Itoa(ctxVal))
+		setSelect("Context Unit", ctxUnit)
+
 		set("NGL", p.NGL)
 		if p.BatchSize != nil {
 			set("Batch Size", strconv.Itoa(*p.BatchSize))
@@ -157,7 +188,8 @@ func NewProfileEditModel(m model.ModelEntry, p *model.Profile, w, h int) Profile
 	} else {
 		set("Port", "8000")
 		set("Host", "0.0.0.0")
-		set("Context Size", "65536")
+		set("Context Size", "64")
+		setSelect("Context Unit", "K")
 		set("NGL", "auto")
 	}
 
@@ -172,7 +204,9 @@ func (em ProfileEditModel) SetSize(w, h int) ProfileEditModel {
 	if !em.initialized {
 		return em
 	}
-	em.visibleRows = h - 8
+	em.width = w
+	em.height = h
+	em.visibleRows = h - 12
 	return em
 }
 
@@ -315,7 +349,15 @@ func (em ProfileEditModel) View() string {
 	}
 
 	help := styleHelp.Render("tab/↑↓: navigate  ←/→: cycle select  space: toggle  ctrl+s: save  esc: discard")
-	return title + "\n\n" + strings.Join(rows, "\n") + scrollHint + errLine + "\n\n" + help
+
+	content := title + "\n\n" + strings.Join(rows, "\n") + scrollHint + errLine + "\n\n" + help
+
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Muted).
+		Padding(1, 2)
+
+	return lipgloss.Place(em.width, em.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
 }
 
 // ToProfile extracts and validates form state into a Profile.
@@ -379,10 +421,22 @@ func (em ProfileEditModel) ToProfile() (model.Profile, error) {
 	if err != nil || port < 1 || port > 65535 {
 		return model.Profile{}, fmt.Errorf("Port must be 1-65535")
 	}
-	ctx, err := strconv.Atoi(get("Context Size"))
-	if err != nil || ctx <= 0 {
+
+	ctxVal, err := strconv.Atoi(get("Context Size"))
+	if err != nil || ctxVal <= 0 {
 		return model.Profile{}, fmt.Errorf("Context Size must be > 0")
 	}
+	unitPtr := getSelect("Context Unit")
+	ctx := ctxVal
+	if unitPtr != nil {
+		unit := *unitPtr
+		if unit == "K" {
+			ctx *= 1024
+		} else if unit == "M" {
+			ctx *= 1024 * 1024
+		}
+	}
+
 	ngl := get("NGL")
 	if ngl == "" {
 		ngl = "auto"

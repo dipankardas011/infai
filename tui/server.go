@@ -34,7 +34,7 @@ func listenForLog(ch <-chan string) tea.Cmd {
 	}
 }
 
-const maxLogLines = 2000
+const maxLogLines = 10000
 
 // ServerModel is screen 5 — shows live llama-server output.
 type ServerModel struct {
@@ -151,6 +151,15 @@ func (s ServerModel) SetSize(w, h int) ServerModel {
 }
 
 func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "c":
+			s.logs = nil
+			s.vp.SetContent("")
+			return s, nil
+		}
+	}
 	var cmd tea.Cmd
 	s.vp, cmd = s.vp.Update(msg)
 	return s, cmd
@@ -186,7 +195,7 @@ func (s ServerModel) View() string {
 		}
 		help = exitStatus + "\n" + styleHelp.Render("esc: back to profiles")
 	} else {
-		help = styleHelp.Render("s: stop server  esc: stop & back  ↑↓/pgup/pgdn: scroll logs")
+		help = styleHelp.Render("s: stop server  c: clear logs  esc: stop & back  ↑↓/pgup/pgdn: scroll logs")
 	}
 
 	return header + "\n\n" + logView + "\n" + help

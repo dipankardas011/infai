@@ -38,8 +38,9 @@ func Open() (*DB, error) {
 func (d *DB) Close() { d.conn.Close() }
 
 func (d *DB) migrate() error {
-	// Add scan_dir column to models for existing databases — ignore error if already exists.
+	// Add columns to models for existing databases — ignore error if already exists.
 	d.conn.Exec(`ALTER TABLE models ADD COLUMN scan_dir TEXT NOT NULL DEFAULT ''`)
+	d.conn.Exec(`ALTER TABLE models ADD COLUMN last_used DATETIME DEFAULT CURRENT_TIMESTAMP`)
 
 	_, err := d.conn.Exec(`
 CREATE TABLE IF NOT EXISTS models (
@@ -48,7 +49,8 @@ CREATE TABLE IF NOT EXISTS models (
     dir_name     TEXT NOT NULL,
     gguf_path    TEXT NOT NULL UNIQUE,
     mmproj_path  TEXT NOT NULL DEFAULT '',
-    display_name TEXT NOT NULL
+    display_name TEXT NOT NULL,
+    last_used    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS scan_dirs (
@@ -79,12 +81,24 @@ CREATE TABLE IF NOT EXISTS profiles (
     UNIQUE(model_id, name)
 );
 
+CREATE TABLE IF NOT EXISTS recents (
+    model_id   INTEGER NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    last_used  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (model_id, profile_id)
+);
+
+CREATE TABLE IF NOT EXISTS executors (
+    id              TEXT PRIMARY KEY,
+    path            TEXT NOT NULL,
+    is_default      INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO settings VALUES ('server_bin', '');
 INSERT OR IGNORE INTO settings VALUES ('theme', 'gruvbox');
 
 -- migrate legacy models_dir into scan_dirs exactly once, then drop it
@@ -167,6 +181,140 @@ func (d *DB) ListModels() ([]model.ModelEntry, error) {
 			return nil, err
 		}
 		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) ListRecentModels(limit int) ([]model.ModelEntry, error) {
+	rows, err := d.conn.Query(`SELECT id, scan_dir, dir_name, gguf_path, mmproj_path, display_name FROM models ORDER BY last_used DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.ModelEntry
+	for rows.Next() {
+		var m model.ModelEntry
+		if err := rows.Scan(&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) MarkModelUsed(id int64) error {
+	_, err := d.conn.Exec(`UPDATE models SET last_used = CURRENT_TIMESTAMP WHERE id = ?`, id)
+	return err
+}
+
+func (d *DB) MarkRecent(modelID, profileID int64) error {
+	_, err := d.conn.Exec(`
+INSERT INTO recents (model_id, profile_id, last_used)
+VALUES (?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(model_id, profile_id) DO UPDATE SET last_used=excluded.last_used
+`, modelID, profileID)
+	return err
+}
+
+type Executor struct {
+	ID        string
+	Path      string
+	IsDefault bool
+}
+
+func (d *DB) ListExecutors() ([]Executor, error) {
+	rows, err := d.conn.Query(`SELECT id, path, is_default FROM executors ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Executor
+	for rows.Next() {
+		var e Executor
+		var isDefault int
+		if err := rows.Scan(&e.ID, &e.Path, &isDefault); err != nil {
+			return nil, err
+		}
+		e.IsDefault = isDefault == 1
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) UpsertExecutor(e Executor) error {
+	_, err := d.conn.Exec(`
+INSERT INTO executors (id, path, is_default)
+VALUES (?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET path=excluded.path, is_default=excluded.is_default
+`, e.ID, e.Path, boolToInt(e.IsDefault))
+	return err
+}
+
+func (d *DB) SetDefaultExecutor(id string) error {
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`UPDATE executors SET is_default = 0`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE executors SET is_default = 1 WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) GetDefaultExecutorPath() (string, error) {
+	var path string
+	err := d.conn.QueryRow(`SELECT path FROM executors WHERE is_default = 1`).Scan(&path)
+	return path, err
+}
+
+type RecentEntry struct {
+	Model   model.ModelEntry
+	Profile model.Profile
+}
+
+func (d *DB) ListRecents(limit int) ([]RecentEntry, error) {
+	rows, err := d.conn.Query(`
+SELECT m.id, m.scan_dir, m.dir_name, m.gguf_path, m.mmproj_path, m.display_name,
+       p.id, p.model_id, p.name, p.port, p.host, p.context_size, p.ngl,
+       p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
+       p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
+       p.no_kv_offload, p.use_mmproj, p.extra_flags
+FROM recents r
+JOIN models m ON r.model_id = m.id
+JOIN profiles p ON r.profile_id = p.id
+ORDER BY r.last_used DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []RecentEntry
+	for rows.Next() {
+		var m model.ModelEntry
+		var p model.Profile
+		var flashAttn, jinja, noKVOffload, useMmproj int
+		err := rows.Scan(
+			&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName,
+			&p.ID, &p.ModelID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
+			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
+			&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
+			&noKVOffload, &useMmproj, &p.ExtraFlags,
+		)
+		if err != nil {
+			return nil, err
+		}
+		p.FlashAttn = flashAttn == 1
+		p.Jinja = jinja == 1
+		p.NoKVOffload = noKVOffload == 1
+		p.UseMmproj = useMmproj == 1
+		out = append(out, RecentEntry{Model: m, Profile: p})
 	}
 	return out, rows.Err()
 }

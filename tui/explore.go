@@ -162,5 +162,22 @@ func (m ExploreModel) View() string {
 		}
 		sb.WriteString(helpStyle.Render("a: add  d: remove  ↑↓: navigate  esc: back & rescan"))
 	}
-	return sb.String()
+	content := sb.String()
+	tBox := ActiveTheme
+
+	boxWidth := 60
+	if m.width < 60 {
+		boxWidth = m.width - 4
+	}
+	if boxWidth < 0 {
+		boxWidth = 0
+	}
+
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(tBox.Primary).
+		Padding(1, 2).
+		Width(boxWidth)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
 }

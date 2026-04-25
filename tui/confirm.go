@@ -18,20 +18,23 @@ type ConfirmModel struct {
 	profile    model.Profile
 	command    string
 	width      int
+	height     int
 }
 
-func NewConfirmModel(serverBin string, m model.ModelEntry, p model.Profile, w int) ConfirmModel {
+func NewConfirmModel(serverBin string, m model.ModelEntry, p model.Profile, w, h int) ConfirmModel {
 	return ConfirmModel{
 		serverBin:  serverBin,
 		modelEntry: m,
 		profile:    p,
 		command:    launcher.BuildCommand(serverBin, m, p),
 		width:      w,
+		height:     h,
 	}
 }
 
-func (c ConfirmModel) SetWidth(w int) ConfirmModel {
+func (c ConfirmModel) SetSize(w, h int) ConfirmModel {
 	c.width = w
+	c.height = h
 	c.command = launcher.BuildCommand(c.serverBin, c.modelEntry, c.profile)
 	return c
 }
@@ -40,10 +43,17 @@ func (c ConfirmModel) Update(_ tea.Msg) (ConfirmModel, tea.Cmd) { return c, nil 
 
 func (c ConfirmModel) View() string {
 	t := ActiveTheme
-	boxW := c.width - 6
-	if boxW < 40 {
-		boxW = 40
+
+	// Use a responsive width for the command box
+	targetW := 60
+	if c.width < 64 {
+		targetW = c.width - 8
 	}
+	if targetW < 30 {
+		targetW = 30
+	}
+
+	wrapped := formatCommand(c.Args(), targetW-8)
 
 	title := styleTitle.Render("Ready to launch")
 
@@ -52,8 +62,7 @@ func (c ConfirmModel) View() string {
 	profileLine := styleMuted.Render("profile: ") +
 		lipgloss.NewStyle().Foreground(t.Secondary).Bold(true).Render(c.profile.Name)
 
-	wrapped := wordWrap(c.command, boxW-6)
-	cmdBox := styleBox.Width(boxW).Render(
+	cmdBox := styleBox.Width(targetW).Render(
 		styleMuted.Render("$ ") + lipgloss.NewStyle().Foreground(t.Primary).Render(wrapped),
 	)
 
@@ -69,40 +78,80 @@ func (c ConfirmModel) View() string {
 		Render("  ESC to go back")
 
 	note := lipgloss.NewStyle().Foreground(t.Muted).Italic(true).Render(
-		fmt.Sprintf("llama-server will run inside the TUI — press s to stop it"),
+		fmt.Sprintf("llama-server will run inside the TUI"),
 	)
 
-	return title + "\n\n" +
-		modelLine + "\n" +
-		profileLine + "\n\n" +
-		cmdBox + "\n\n" +
-		enterHint + escHint + "\n\n" +
-		note
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		title,
+		"\n"+modelLine,
+		profileLine,
+		"\n"+cmdBox,
+		"\n"+enterHint+escHint,
+		"\n"+note,
+	)
+
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Muted).
+		Padding(1, 2)
+
+	return lipgloss.Place(c.width, c.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
 }
 
 func (c ConfirmModel) Args() []string {
 	return launcher.BuildArgs(c.serverBin, c.modelEntry, c.profile)
 }
 
-func wordWrap(s string, width int) string {
-	if width <= 0 {
-		return s
+func formatCommand(args []string, width int) string {
+	if len(args) == 0 {
+		return ""
 	}
-	words := strings.Fields(s)
+
 	var lines []string
-	cur := ""
-	for _, w := range words {
-		if cur == "" {
-			cur = w
-		} else if len(cur)+1+len(w) <= width {
-			cur += " " + w
-		} else {
-			lines = append(lines, cur)
-			cur = "  " + w
+	// Binary on first line
+	binLine := args[0]
+	if len(binLine) > width && width > 0 {
+		binLine = binLine[:width-3] + "..."
+	}
+	lines = append(lines, binLine+" \\")
+
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		displayArg := arg
+		if strings.ContainsAny(arg, " \t") {
+			displayArg = fmt.Sprintf("%q", arg)
 		}
+
+		// Check if this is a flag or a value
+		isFlag := strings.HasPrefix(arg, "-")
+
+		var line string
+		if isFlag {
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val := args[i+1]
+				displayVal := val
+				if strings.ContainsAny(val, " \t") {
+					displayVal = fmt.Sprintf("%q", val)
+				}
+				line = fmt.Sprintf("  %s %s", displayArg, displayVal)
+				i++
+			} else {
+				line = fmt.Sprintf("  %s", displayArg)
+			}
+		} else {
+			line = fmt.Sprintf("  %s", displayArg)
+		}
+
+		// If the combined flag+value line is too long, we must wrap it or truncate it
+		if width > 0 && len(line) > width {
+			line = line[:width-3] + "..."
+		}
+
+		if i < len(args)-1 {
+			line += " \\"
+		}
+		lines = append(lines, line)
 	}
-	if cur != "" {
-		lines = append(lines, cur)
-	}
+
 	return strings.Join(lines, "\n")
 }

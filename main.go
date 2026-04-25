@@ -24,11 +24,22 @@ func main() {
 		tui.SetTheme(theme)
 	}
 
-	serverBin, _ := database.GetSetting("server_bin")
-	if serverBin == "" {
+	serverBin, err := database.GetDefaultExecutorPath()
+	if err != nil || serverBin == "" {
 		if path, err := exec.LookPath("llama-server"); err == nil {
 			serverBin = path
+			_ = database.UpsertExecutor(db.Executor{
+				ID:        "llamacpp",
+				Path:      path,
+				IsDefault: true,
+			})
 		}
+	}
+
+	// Double check we have a binary
+	if serverBin == "" {
+		// Fallback to a prompt or sensible default if still empty?
+		// For now, keep it as is but it will cause issues if empty.
 	}
 
 	scanDirs, err := database.ListScanDirs()

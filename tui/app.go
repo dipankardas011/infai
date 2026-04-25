@@ -11,13 +11,15 @@ import (
 type screenKind int
 
 const (
-	screenModelList screenKind = iota
+	screenHome screenKind = iota
+	screenModelList
 	screenProfileList
 	screenProfileEdit
 	screenConfirm
 	screenServerRunning
 	screenExplore
 	screenExecutor
+	screenThemeSelector
 )
 
 // Cross-screen transition messages.
@@ -35,44 +37,62 @@ type AppModel struct {
 	height    int
 	errMsg    string
 
-	modelList   ModelListModel
-	profileList ProfileListModel
-	profileEdit ProfileEditModel
-	confirm     ConfirmModel
-	server      ServerModel
-	explore     ExploreModel
-	executor    ExecutorModel
+	modelList     ModelListModel
+	profileList   ProfileListModel
+	profileEdit   ProfileEditModel
+	confirm       ConfirmModel
+	server        ServerModel
+	explore       ExploreModel
+	executor      ExecutorModel
+	home          HomeModel
+	themeSelector ThemeSelectorModel
 
 	selectedModel   model.ModelEntry
 	selectedProfile model.Profile
 }
 
 func NewApp(database *db.DB, serverBin string, scanDirs []string, entries []model.ModelEntry, w, h int) AppModel {
+	recent, _ := database.ListRecents(2)
+
+	dbBin, err := database.GetDefaultExecutorPath()
+	if err == nil && dbBin != "" {
+		serverBin = dbBin
+	}
+
 	return AppModel{
-		database:  database,
-		serverBin: serverBin,
-		scanDirs:  scanDirs,
-		width:     w,
-		height:    h,
-		modelList: NewModelListModel(entries, w, h),
-		executor:  NewExecutorModel(database, serverBin, w, h),
+		database:      database,
+		serverBin:     serverBin,
+		scanDirs:      scanDirs,
+		width:         w,
+		height:        h,
+		home:          NewHomeModel(recent, scanDirs, serverBin, w, h),
+		modelList:     NewModelListModel(entries, w, h),
+		executor:      NewExecutorModel(database, serverBin, w, h),
+		themeSelector: NewThemeSelectorModel(w, h),
 	}
 }
 
 func (a *AppModel) Init() tea.Cmd { return nil }
+
+func (a *AppModel) refreshHome() {
+	recent, _ := a.database.ListRecents(2)
+	a.home = NewHomeModel(recent, a.scanDirs, a.serverBin, a.width, a.height)
+}
 
 func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
+		a.home = a.home.SetSize(a.width, a.height)
 		a.modelList = a.modelList.SetSize(a.width, a.height)
 		a.profileList = a.profileList.SetSize(a.width, a.height)
 		a.profileEdit = a.profileEdit.SetSize(a.width, a.height)
-		a.confirm = a.confirm.SetWidth(a.width)
+		a.confirm = a.confirm.SetSize(a.width, a.height)
 		a.server = a.server.SetSize(a.width, a.height)
 		a.explore = a.explore.SetSize(a.width, a.height)
 		a.executor = a.executor.SetSize(a.width, a.height)
+		a.themeSelector = a.themeSelector.SetSize(a.width, a.height)
 		return a, nil
 
 	case scanDoneMsg:
@@ -82,6 +102,7 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		a.modelList = a.modelList.SetEntries(msg.entries)
+		a.refreshHome()
 		return a, nil
 
 	case saveProfileMsg:
@@ -106,7 +127,8 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ExecutorSavedMsg:
 		a.serverBin = msg.Bin
-		a.screen = screenModelList
+		a.refreshHome()
+		a.screen = screenHome
 		return a, nil
 
 	// Server log streaming messages — only process when in server screen.
@@ -132,11 +154,13 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return a, tea.Quit
 		}
-		if a.screen == screenModelList && msg.String() == "q" && !a.modelList.IsFiltering() {
+		if a.screen == screenHome && msg.String() == "q" {
 			return a, tea.Quit
 		}
 
 		switch a.screen {
+		case screenHome:
+			return a.updateHome(msg)
 		case screenModelList:
 			return a.updateModelList(msg)
 		case screenProfileList:
@@ -151,11 +175,21 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateExplore(msg)
 		case screenExecutor:
 			return a.updateExecutor(msg)
+		case screenThemeSelector:
+			return a.updateThemeSelector(msg)
 		}
 	}
 
+	return a.handleNonKeyMsg(msg)
+}
+
+func (a *AppModel) handleNonKeyMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Non-key msgs: delegate to active sub-model.
 	switch a.screen {
+	case screenHome:
+		var cmd tea.Cmd
+		a.home, cmd = a.home.Update(msg)
+		return a, cmd
 	case screenModelList:
 		var cmd tea.Cmd
 		a.modelList, cmd = a.modelList.Update(msg)
@@ -180,8 +214,61 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.executor, cmd = a.executor.Update(msg)
 		return a, cmd
+	case screenThemeSelector:
+		var cmd tea.Cmd
+		a.themeSelector, cmd = a.themeSelector.Update(msg)
+		return a, cmd
 	}
 	return a, nil
+}
+
+func (a *AppModel) updateHome(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "a":
+		a.screen = screenModelList
+		return a, nil
+	case "f":
+		a.explore = NewExploreModel(a.database, a.scanDirs, a.width, a.height)
+		a.screen = screenExplore
+		return a, nil
+	case "c":
+		a.executor = NewExecutorModel(a.database, a.serverBin, a.width, a.height)
+		a.screen = screenExecutor
+		return a, nil
+	case "t":
+		a.themeSelector = NewThemeSelectorModel(a.width, a.height)
+		a.screen = screenThemeSelector
+		return a, nil
+	case "enter":
+		if entry, ok := a.home.Selected(); ok {
+			a.selectedModel = entry.Model
+			a.selectedProfile = entry.Profile
+			a.confirm = NewConfirmModel(a.serverBin, entry.Model, entry.Profile, a.width, a.height)
+			a.screen = screenConfirm
+			a.errMsg = ""
+			return a, nil
+		}
+	}
+	var cmd tea.Cmd
+	a.home, cmd = a.home.Update(msg)
+	return a, cmd
+}
+
+func (a *AppModel) updateThemeSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		a.screen = screenHome
+		return a, nil
+	case "enter":
+		theme := a.themeSelector.SelectedTheme()
+		SetTheme(theme.Name)
+		a.database.SetSetting("theme", theme.Name)
+		a.screen = screenHome
+		return a, nil
+	}
+	var cmd tea.Cmd
+	a.themeSelector, cmd = a.themeSelector.Update(msg)
+	return a, cmd
 }
 
 func (a *AppModel) updateExecutor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -189,7 +276,8 @@ func (a *AppModel) updateExecutor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		var cmd tea.Cmd
 		a.executor, cmd = a.executor.SaveAndExit()
-		a.screen = screenModelList
+		a.refreshHome()
+		a.screen = screenHome
 		return a, cmd
 	}
 	var cmd tea.Cmd
@@ -199,6 +287,16 @@ func (a *AppModel) updateExecutor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "q":
+		if !a.modelList.IsFiltering() {
+			return a, nil
+		}
+	case "esc":
+		if !a.modelList.IsFiltering() {
+			a.refreshHome()
+			a.screen = screenHome
+			return a, nil
+		}
 	case "enter":
 		if entry, ok := a.modelList.Selected(); ok {
 			a.selectedModel = entry
@@ -208,27 +306,11 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.errMsg = ""
 			return a, nil
 		}
-	case "e":
-		if !a.modelList.IsFiltering() {
-			a.explore = NewExploreModel(a.database, a.scanDirs, a.width, a.height)
-			a.screen = screenExplore
-			return a, nil
-		}
-	case "x":
-		if !a.modelList.IsFiltering() {
-			a.executor = NewExecutorModel(a.database, a.serverBin, a.width, a.height)
-			a.screen = screenExecutor
-			return a, nil
-		}
 	case "r":
 		return a, func() tea.Msg {
 			entries, _ := scanner.Scan(a.scanDirs)
 			return scanDoneMsg{entries: entries}
 		}
-	case "t":
-		name := CycleTheme()
-		a.database.SetSetting("theme", name)
-		return a, nil
 	}
 	var cmd tea.Cmd
 	a.modelList, cmd = a.modelList.Update(msg)
@@ -237,8 +319,11 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *AppModel) updateProfileList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "q":
+		return a, nil
 	case "esc", "backspace":
-		a.screen = screenModelList
+		a.refreshHome()
+		a.screen = screenHome
 		a.errMsg = ""
 		return a, nil
 
@@ -253,7 +338,7 @@ func (a *AppModel) updateProfileList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.selectedProfile = profile
-		a.confirm = NewConfirmModel(a.serverBin, a.selectedModel, profile, a.width)
+		a.confirm = NewConfirmModel(a.serverBin, a.selectedModel, profile, a.width, a.height)
 		a.screen = screenConfirm
 		a.errMsg = ""
 		return a, nil
@@ -317,10 +402,16 @@ func (a *AppModel) updateProfileEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a *AppModel) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		a.screen = screenProfileList
+		a.screen = screenHome
 		return a, nil
 	case "enter":
 		args := a.confirm.Args()
+		if len(args) == 0 || args[0] == "" {
+			a.errMsg = "executor path not set - press [c] on home screen"
+			a.screen = screenHome
+			return a, nil
+		}
+		_ = a.database.MarkRecent(a.selectedModel.ID, a.selectedProfile.ID)
 		sm, cmd, err := NewServerModel(
 			args,
 			a.selectedProfile.Name,
@@ -331,7 +422,8 @@ func (a *AppModel) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		)
 		if err != nil {
 			a.errMsg = err.Error()
-			a.screen = screenProfileList
+			a.screen = screenHome
+			a.refreshHome()
 			return a, nil
 		}
 		a.server = sm
@@ -348,7 +440,8 @@ func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "esc":
 		a.server = a.server.Stop()
-		a.screen = screenProfileList
+		a.refreshHome()
+		a.screen = screenHome
 		return a, nil
 	}
 	// Pass scrolling keys to viewport.
@@ -362,7 +455,8 @@ func (a *AppModel) updateExplore(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		// DB already updated immediately on each add/remove; just sync scanDirs and rescan.
 		a.scanDirs = a.explore.Dirs()
-		a.screen = screenModelList
+		a.refreshHome()
+		a.screen = screenHome
 		return a, func() tea.Msg {
 			entries, _ := scanner.Scan(a.scanDirs)
 			return scanDoneMsg{entries: entries}
@@ -379,6 +473,8 @@ func (a *AppModel) View() string {
 		errBanner = styleError.Render("error: "+a.errMsg) + "\n"
 	}
 	switch a.screen {
+	case screenHome:
+		return errBanner + a.home.View()
 	case screenModelList:
 		return errBanner + a.modelList.View()
 	case screenProfileList:
@@ -393,6 +489,8 @@ func (a *AppModel) View() string {
 		return a.explore.View()
 	case screenExecutor:
 		return a.executor.View()
+	case screenThemeSelector:
+		return a.themeSelector.View()
 	}
 	return ""
 }

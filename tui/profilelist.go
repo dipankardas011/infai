@@ -12,7 +12,6 @@ import (
 	"github.com/dipankardas011/infai/model"
 )
 
-
 type profileItem struct {
 	profile model.Profile
 	isNew   bool
@@ -28,7 +27,7 @@ func (p profileItem) FilterValue() string {
 type profileDelegate struct{}
 
 func (d profileDelegate) Height() int                             { return 2 }
-func (d profileDelegate) Spacing() int                           { return 1 }
+func (d profileDelegate) Spacing() int                            { return 1 }
 func (d profileDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
 
 func (d profileDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
@@ -88,18 +87,24 @@ type ProfileListModel struct {
 	deleteConfirm bool
 	deleteID      int64
 	statusMsg     string
+	width         int
+	height        int
 	initialized   bool
 }
 
 func NewProfileListModel(m model.ModelEntry, profiles []model.Profile, w, h int) ProfileListModel {
 	items := buildProfileItems(profiles)
-	l := list.New(items, profileDelegate{}, w, h-5)
+	listW := 60
+	if w < 60 {
+		listW = w - 4
+	}
+	l := list.New(items, profileDelegate{}, listW, h-8)
 	l.Title = "Profiles: " + m.DisplayName
 	l.Styles.Title = styleTitle
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(false)
 	l.SetShowHelp(false)
-	return ProfileListModel{list: l, profiles: profiles, modelEntry: m, initialized: true}
+	return ProfileListModel{list: l, profiles: profiles, modelEntry: m, width: w, height: h, initialized: true}
 }
 
 func buildProfileItems(profiles []model.Profile) []list.Item {
@@ -114,7 +119,12 @@ func (m ProfileListModel) SetSize(w, h int) ProfileListModel {
 	if !m.initialized {
 		return m
 	}
-	m.list.SetSize(w, h-5)
+	m.width, m.height = w, h
+	listW := 60
+	if w < 60 {
+		listW = w - 4
+	}
+	m.list.SetSize(listW, h-8)
 	return m
 }
 
@@ -125,12 +135,16 @@ func (m ProfileListModel) SetProfiles(profiles []model.Profile) ProfileListModel
 }
 
 func (m ProfileListModel) Update(msg tea.Msg) (ProfileListModel, tea.Cmd) {
+	if !m.initialized {
+		return m, nil
+	}
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	return m, cmd
 }
 
 func (m ProfileListModel) View() string {
+	t := ActiveTheme
 	status := ""
 	if m.deleteConfirm {
 		status = styleError.Render("Delete this profile? (y/n)")
@@ -139,7 +153,18 @@ func (m ProfileListModel) View() string {
 	}
 	help := styleHelp.Render("enter: launch/new  e: edit  d: delete  esc: back")
 	footer := status + "\n" + help
-	return m.list.View() + "\n" + footer
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		m.list.View(),
+		"\n"+footer,
+	)
+
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Muted).
+		Padding(1, 2)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
 }
 
 func (m ProfileListModel) Selected() (model.Profile, bool, bool) {
@@ -157,4 +182,3 @@ func (m ProfileListModel) SelectedProfile() (model.Profile, bool) {
 	}
 	return item.profile, true
 }
-

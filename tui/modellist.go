@@ -12,7 +12,7 @@ import (
 	"github.com/dipankardas011/infai/model"
 )
 
-const appVersion = "v0.2.0"
+const appVersion = "v0.4.0"
 
 const logoASCII = `
 ██╗███╗   ██╗███████╗ █████╗ ██╗
@@ -86,7 +86,11 @@ func NewModelListModel(entries []model.ModelEntry, w, h int) ModelListModel {
 
 func (m ModelListModel) SetSize(w, h int) ModelListModel {
 	m.width, m.height = w, h
-	m.list.SetSize(w, h-4)
+	listW := 60
+	if w < 60 {
+		listW = w - 4
+	}
+	m.list.SetSize(listW, h-8)
 	return m
 }
 
@@ -101,6 +105,9 @@ func (m ModelListModel) SetEntries(entries []model.ModelEntry) ModelListModel {
 }
 
 func (m ModelListModel) Update(msg tea.Msg) (ModelListModel, tea.Cmd) {
+	if len(m.entries) == 0 {
+		return m, nil
+	}
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	return m, cmd
@@ -110,10 +117,24 @@ func (m ModelListModel) View() string {
 	if len(m.entries) == 0 {
 		return m.emptyView()
 	}
+	t := ActiveTheme
 	help := styleHelp.Render(
-		"enter: select  r: rescan  e: explore folders  x: executor  t: theme(" + ActiveTheme.Name + ")  /: filter  q: quit",
+		"enter: select  r: rescan  /: filter  esc: back",
 	)
-	return m.list.View() + "\n" + help
+
+	listView := m.list.View()
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		listView,
+		"\n"+help,
+	)
+
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Muted).
+		Padding(1, 2)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
 }
 
 func (m ModelListModel) emptyView() string {
@@ -127,10 +148,17 @@ func (m ModelListModel) emptyView() string {
 	sb.WriteString("\n\n")
 	sb.WriteString(versionStyle.Render("  " + appVersion))
 	sb.WriteString("\n\n")
-	sb.WriteString(hintStyle.Render("  no models found — press [e] to add scan folders"))
+	sb.WriteString(hintStyle.Render("  no models found — press [f] to add scan folders"))
 	sb.WriteString("\n\n")
 	sb.WriteString(hintStyle.Render("  t: theme  q: quit"))
-	return sb.String()
+
+	content := sb.String()
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Muted).
+		Padding(1, 2)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
 }
 
 func (m ModelListModel) Selected() (model.ModelEntry, bool) {

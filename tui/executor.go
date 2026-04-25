@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
 
@@ -13,33 +14,49 @@ import (
 
 type ExecutorSavedMsg struct{ Bin string }
 
+var supportedExecutors = []string{"llamacpp"}
+
 type ExecutorModel struct {
-	database *db.DB
-	current  string
-	detected string
-	editing  bool
-	input    textinput.Model
-	errMsg   string
-	width    int
-	height   int
+	database  *db.DB
+	executors []db.Executor
+	cursor    int
+	detected  string
+	adding    bool
+	input     textinput.Model
+	typeIdx   int
+	errMsg    string
+	width     int
+	height    int
 }
 
 func NewExecutorModel(database *db.DB, current string, w, h int) ExecutorModel {
+	executors, _ := database.ListExecutors()
+
 	detected := ""
 	if path, err := exec.LookPath("llama-server"); err == nil {
 		detected = path
 	}
+
 	ti := textinput.New()
 	ti.Placeholder = "/path/to/llama-server"
 	ti.CharLimit = 512
-	ti.SetValue(current)
+
+	curIdx := 0
+	for i, e := range executors {
+		if e.IsDefault {
+			curIdx = i
+			break
+		}
+	}
+
 	return ExecutorModel{
-		database: database,
-		current:  current,
-		detected: detected,
-		input:    ti,
-		width:    w,
-		height:   h,
+		database:  database,
+		executors: executors,
+		cursor:    curIdx,
+		detected:  detected,
+		input:     ti,
+		width:     w,
+		height:    h,
 	}
 }
 
@@ -49,29 +66,48 @@ func (m ExecutorModel) SetSize(w, h int) ExecutorModel {
 }
 
 func (m ExecutorModel) Update(msg tea.Msg) (ExecutorModel, tea.Cmd) {
-	if m.editing {
+	if m.adding {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch msg.String() {
 			case "enter":
-				raw := strings.TrimSpace(m.input.Value())
-				m.editing = false
-				if raw == "" {
-					m.current = ""
+				id := supportedExecutors[m.typeIdx]
+				path := strings.TrimSpace(m.input.Value())
+				if path == "" {
+					m.errMsg = "path required"
 					return m, nil
 				}
-				path, err := expandPath(raw)
+
+				absPath, err := expandPath(path)
 				if err != nil {
 					m.errMsg = "bad path: " + err.Error()
 					return m, nil
 				}
-				m.current = path
-				m.errMsg = ""
+
+				// If this is the first executor, make it default
+				isDefault := len(m.executors) == 0
+
+				err = m.database.UpsertExecutor(db.Executor{
+					ID:        id,
+					Path:      absPath,
+					IsDefault: isDefault,
+				})
+				if err != nil {
+					m.errMsg = err.Error()
+					return m, nil
+				}
+
+				m.adding = false
+				m.input.SetValue("")
+				m.executors, _ = m.database.ListExecutors()
 				return m, nil
 			case "esc":
-				m.editing = false
-				m.input.SetValue(m.current)
+				m.adding = false
 				return m, nil
+			case "left":
+				m.typeIdx = (m.typeIdx - 1 + len(supportedExecutors)) % len(supportedExecutors)
+			case "right":
+				m.typeIdx = (m.typeIdx + 1) % len(supportedExecutors)
 			}
 		}
 		var cmd tea.Cmd
@@ -82,15 +118,34 @@ func (m ExecutorModel) Update(msg tea.Msg) (ExecutorModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "e":
-			m.editing = true
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "down", "j":
+			if m.cursor < len(m.executors)-1 {
+				m.cursor++
+			}
+		case "a":
+			m.adding = true
 			m.errMsg = ""
-			m.input.SetValue(m.current)
 			m.input.Focus()
 			return m, textinput.Blink
+		case "enter":
+			if len(m.executors) > 0 {
+				id := m.executors[m.cursor].ID
+				_ = m.database.SetDefaultExecutor(id)
+				m.executors, _ = m.database.ListExecutors()
+			}
 		case "d":
 			if m.detected != "" {
-				m.current = m.detected
+				// For 'd', we always use llamacpp and make it default
+				_ = m.database.UpsertExecutor(db.Executor{
+					ID:        "llamacpp",
+					Path:      m.detected,
+					IsDefault: true,
+				})
+				m.executors, _ = m.database.ListExecutors()
 				m.errMsg = ""
 			} else {
 				m.errMsg = "llama-server not found in PATH"
@@ -101,45 +156,70 @@ func (m ExecutorModel) Update(msg tea.Msg) (ExecutorModel, tea.Cmd) {
 }
 
 func (m ExecutorModel) SaveAndExit() (ExecutorModel, tea.Cmd) {
-	_ = m.database.SetSetting("server_bin", m.current)
-	return m, func() tea.Msg { return ExecutorSavedMsg{Bin: m.current} }
+	path, _ := m.database.GetDefaultExecutorPath()
+	return m, func() tea.Msg { return ExecutorSavedMsg{Bin: path} }
 }
 
 func (m ExecutorModel) View() string {
 	t := ActiveTheme
 	titleStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true).Padding(0, 1)
 	mutedStyle := lipgloss.NewStyle().Foreground(t.Muted)
-	valStyle := lipgloss.NewStyle().Foreground(t.Text).Bold(true)
+	selStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
 	helpStyle := lipgloss.NewStyle().Foreground(t.Muted).Italic(true)
 	errStyle := lipgloss.NewStyle().Foreground(t.Error)
-	detStyle := lipgloss.NewStyle().Foreground(t.Secondary)
+	defStyle := lipgloss.NewStyle().Foreground(t.Success).Bold(true)
 
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("executor · llama.cpp binary") + "\n\n")
+	sb.WriteString(titleStyle.Render("executors") + "\n\n")
 
-	cur := m.current
-	if cur == "" {
-		cur = mutedStyle.Render("(not set)")
+	if len(m.executors) == 0 {
+		sb.WriteString("  " + mutedStyle.Render("nothing") + "\n")
 	} else {
-		cur = valStyle.Render(cur)
-	}
-	sb.WriteString(mutedStyle.Render("  current:  ") + cur + "\n\n")
+		for i, e := range m.executors {
+			prefix := "  "
+			style := lipgloss.NewStyle()
+			if i == m.cursor {
+				prefix = selStyle.Render("▶ ")
+				style = selStyle
+			}
 
-	if m.detected != "" {
-		sb.WriteString(mutedStyle.Render("  detected: ") + detStyle.Render(m.detected) + "\n\n")
-	} else {
-		sb.WriteString(mutedStyle.Render("  detected: ") + mutedStyle.Render("not found in PATH") + "\n\n")
+			def := ""
+			if e.IsDefault {
+				def = defStyle.Render(" (default)")
+			}
+
+			sb.WriteString(fmt.Sprintf("%s%s: %s%s\n", prefix, style.Render(e.ID), e.Path, def))
+		}
 	}
 
-	if m.editing {
-		sb.WriteString(lipgloss.NewStyle().Foreground(t.Secondary).Render("  path: "))
-		sb.WriteString(m.input.View() + "\n")
-		sb.WriteString(helpStyle.Render("  enter: confirm  esc: cancel") + "\n")
+	sb.WriteString("\n")
+	if m.adding {
+		typeStr := supportedExecutors[m.typeIdx]
+		sb.WriteString(mutedStyle.Render("add executor:") + "\n")
+		sb.WriteString(fmt.Sprintf("  Type: < %s >\n", selStyle.Render(typeStr)))
+		sb.WriteString(fmt.Sprintf("  Path: %s\n", m.input.View()))
+		sb.WriteString("\n" + helpStyle.Render("enter: confirm  ←/→: cycle type  esc: cancel"))
 	} else {
 		if m.errMsg != "" {
 			sb.WriteString(errStyle.Render("  "+m.errMsg) + "\n")
 		}
-		sb.WriteString(helpStyle.Render("  e: edit path  d: use detected  esc: save & back"))
+		sb.WriteString(helpStyle.Render("enter: set default  a: add  d: use detected  esc: save & back"))
 	}
-	return sb.String()
+
+	content := sb.String()
+	boxWidth := 60
+	if m.width < 60 {
+		boxWidth = m.width - 4
+	}
+	if boxWidth < 0 {
+		boxWidth = 0
+	}
+
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Muted).
+		Padding(1, 2).
+		Width(boxWidth)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
 }
