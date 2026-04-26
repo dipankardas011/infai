@@ -3,12 +3,13 @@ package tui
 import (
 	"time"
 
+	"github.com/charmbracelet/bubbles/help"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/dipankardas011/infai/db"
 	"github.com/dipankardas011/infai/model"
 	"github.com/dipankardas011/infai/scanner"
-
-	"github.com/charmbracelet/bubbles/help"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 type toastTickMsg struct{}
@@ -42,10 +43,10 @@ type syncDoneMsg struct {
 
 // AppModel is the root bubbletea model.
 type AppModel struct {
-	screen    screenKind
-	database  *db.DB
-	serverBin string
-	scanDirs  []string
+	screen       screenKind
+	database     *db.DB
+	serverBin    string
+	scanDirs     []string
 	width        int
 	height       int
 	errMsg       string
@@ -581,19 +582,32 @@ func (a *AppModel) View() string {
 }
 
 func (a *AppModel) helpView() string {
+	t := ActiveTheme
+
+	var helpContent string
 	switch a.screen {
 	case screenHome:
-		return a.help.View(keys.Home)
+		helpContent = a.help.View(keys.Home)
 	case screenModelList:
-		return a.help.View(keys.ModelList)
+		helpContent = a.help.View(keys.ModelList)
 	case screenProfileList:
-		return a.help.View(keys.ProfileList)
+		helpContent = a.help.View(keys.ProfileList)
 	case screenConfirm:
-		return a.help.View(keys.Confirm)
+		helpContent = a.help.View(keys.Confirm)
 	case screenServerRunning:
-		return a.help.View(keys.Server)
+		helpContent = a.help.View(keys.Server)
 	case screenExplore:
-		return a.help.View(keys.Explore)
+		helpContent = a.help.View(keys.Explore)
+	default:
+		return ""
 	}
-	return ""
+
+	a.help.Styles.ShortKey = lipgloss.NewStyle().Foreground(t.Secondary).Bold(true)
+	a.help.Styles.ShortDesc = lipgloss.NewStyle().Foreground(t.Muted)
+	a.help.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(t.Muted)
+	a.help.Styles.FullKey = lipgloss.NewStyle().Foreground(t.Secondary).Bold(true)
+	a.help.Styles.FullDesc = lipgloss.NewStyle().Foreground(t.Muted)
+	a.help.Styles.FullSeparator = lipgloss.NewStyle().Foreground(t.Muted)
+
+	return lipgloss.Place(a.width, 1, lipgloss.Center, lipgloss.Center, helpContent)
 }
