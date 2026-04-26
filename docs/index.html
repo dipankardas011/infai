@@ -3,16 +3,50 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>infai — Lightweight local LLM launcher</title>
-  <meta name="description" content="A lightweight, simple terminal UI for local LLM inference. Auto-detect GGUF models, save profiles, and launch fast.">
+  <title>infai — Lightweight llama.cpp launcher for GGUF models</title>
+  <meta name="description" content="infai is a lightweight terminal UI for local llama.cpp inference. Auto-detect GGUF models, save launch profiles, and run fast on macOS and Linux.">
+  <meta name="keywords" content="llama.cpp, GGUF, local LLM, local inference, terminal UI, model launcher, macOS, Linux">
+  <meta name="robots" content="index,follow,max-image-preview:large">
+  <meta name="author" content="Dipankar Das">
+  <link rel="canonical" href="https://infai.dipankar-das.com/">
   <meta property="og:title" content="infai — Lightweight local LLM launcher">
-  <meta property="og:description" content="A lightweight, simple terminal UI to auto-detect models, save launch profiles, and run local inference without flag soup.">
+  <meta property="og:description" content="A lightweight terminal UI for local llama.cpp inference. Auto-detect GGUF models, save launch profiles, and run without flag soup.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://infai.dipankar-das.com">
+  <meta property="og:url" content="https://infai.dipankar-das.com/">
+  <meta property="og:image" content="https://infai.dipankar-das.com/runningmodel.webp">
+  <meta property="og:image:alt" content="infai run screen with live logs and system/model metrics">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="infai — Lightweight llama.cpp launcher for GGUF models">
+  <meta name="twitter:description" content="Launch local llama.cpp models faster with a terminal UI: model auto-detection, reusable profiles, live logs, and metrics.">
+  <meta name="twitter:image" content="https://infai.dipankar-das.com/runningmodel.webp">
+  <meta name="theme-color" content="#111827">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "infai",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux",
+      "description": "A lightweight terminal UI for local llama.cpp inference with GGUF auto-detection, reusable profiles, and live logs/metrics.",
+      "url": "https://infai.dipankar-das.com/",
+      "downloadUrl": "https://github.com/dipankardas011/infai/releases",
+      "softwareVersion": "latest",
+      "license": "https://github.com/dipankardas011/infai/blob/main/LICENSE",
+      "isAccessibleForFree": true,
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "sameAs": [
+        "https://github.com/dipankardas011/infai"
+      ]
+    }
+  </script>
 </head>
 <body>
 
@@ -42,7 +76,7 @@
   <header class="hero">
     <div class="hero-inner">
       <div class="hero-label">
-        <span class="blink">_</span> local inference, simplified
+        <span class="blink">_</span> lightweight inference harness
       </div>
       <h1>
         <span class="hero-line reveal-line" style="--d:0">You bought</span>
@@ -50,9 +84,9 @@
         <span class="hero-line hero-accent reveal-line" style="--d:2">Now use it.</span>
       </h1>
       <p class="hero-sub reveal-up" style="--d:3">
-        infai auto-detects your GGUF models, wraps llama.cpp in a terminal UI,
-        and launches inference servers with one keypress.<br>
-        Lightweight. Simple. No flag soup, YAML sprawl, or shell scripts.
+        infai is a lightweight harness for local inference. It auto-detects your models, 
+        manages complex configurations, and launches fast.<br>
+        One-click profiles. Persistent settings. Real-time metrics. No flag soup.
       </p>
       <div class="hero-actions reveal-up" style="--d:4">
         <a href="#install" class="btn-primary">
@@ -156,29 +190,29 @@
       <div class="feat reveal-up" style="--d:0">
         <span class="feat-marker">//</span>
         <div>
-          <h3>Lightweight by design</h3>
-          <p>Minimal dependencies, terminal-native UX, and fast startup. infai stays out of your way and keeps local inference simple.</p>
+          <h3>Persistent configurations</h3>
+          <p>The system remembers your complex flags, not you. Configure once, reuse instantly.</p>
         </div>
       </div>
       <div class="feat reveal-up" style="--d:1">
         <span class="feat-marker">//</span>
         <div>
-          <h3>Auto-detection</h3>
-          <p>Point at your model directories. infai scans for GGUF files and indexes them. New model? Just rescan.</p>
+          <h3>Model auto-discovery</h3>
+          <p>Point at your directories. infai indexes GGUF files and sets them up instantly.</p>
         </div>
       </div>
       <div class="feat reveal-up" style="--d:2">
         <span class="feat-marker">//</span>
         <div>
-          <h3>Reusable profiles</h3>
-          <p>Multiple configs per model. Compare Q4_K_M vs Q5_K_S, or 4K vs 64K context, in seconds flat.</p>
+          <h3>One-click management</h3>
+          <p>Switch between context sizes, quantizations, or backends in seconds. Run directly on your hardware.</p>
         </div>
       </div>
       <div class="feat reveal-up" style="--d:3">
         <span class="feat-marker">//</span>
         <div>
           <h3>Live logs + metrics</h3>
-          <p>Real-time viewport with process and system stats. No tmux splits, no tail -f, no second monitor needed.</p>
+          <p>Real-time viewport with process and system telemetry. No tmux splits or second monitor needed.</p>
         </div>
       </div>
       <div class="feat reveal-up" style="--d:4">
@@ -257,12 +291,12 @@
 
   <!-- ROADMAP -->
   <section class="roadmap" id="roadmap">
-    <h2 class="reveal-up">What's next</h2>
+      <h2 class="reveal-up">What's next</h2>
     <p class="roadmap-sub reveal-up">llama.cpp today. Your single control plane for all local inference tomorrow.</p>
     <div class="roadmap-timeline">
       <div class="roadmap-line" aria-hidden="true"></div>
 
-      <div class="roadmap-node done reveal-up" style="--d:1">
+      <div class="roadmap-node done reveal-up" style="--d:0">
         <div class="node-dot"></div>
         <div class="node-content">
           <span class="node-status">shipped</span>
@@ -271,7 +305,7 @@
         </div>
       </div>
 
-      <div class="roadmap-node done reveal-up" style="--d:0">
+      <div class="roadmap-node done reveal-up" style="--d:1">
         <div class="node-dot"></div>
         <div class="node-content">
           <span class="node-status">shipped</span>
