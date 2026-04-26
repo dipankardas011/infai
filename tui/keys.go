@@ -50,6 +50,20 @@ func (k exploreKeyMap) ShortHelp() []key.Binding {
 }
 func (k exploreKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
 
+type fileBrowserKeyMap struct {
+	Up     key.Binding
+	Down   key.Binding
+	Back   key.Binding
+	Open   key.Binding
+	Home   key.Binding
+	Select key.Binding
+}
+
+func (k fileBrowserKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Up, k.Down, k.Back, k.Open, k.Home, k.Select}
+}
+func (k fileBrowserKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
+
 type profileListKeyMap struct {
 	Enter  key.Binding
 	Edit   key.Binding
@@ -101,6 +115,7 @@ var keys = struct {
 	Home        homeKeyMap
 	ModelList   modelListKeyMap
 	Explore     exploreKeyMap
+	FileBrowser fileBrowserKeyMap
 	ProfileList profileListKeyMap
 	Confirm     confirmKeyMap
 	Server      serverKeyMap
@@ -128,6 +143,14 @@ var keys = struct {
 		Sync: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sync all")),
 		Back: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		Help: key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	},
+	FileBrowser: fileBrowserKeyMap{
+		Up:     key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "nav")),
+		Down:   key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "nav")),
+		Back:   key.NewBinding(key.WithKeys("left", "backspace", "b"), key.WithHelp("←", "back")),
+		Open:   key.NewBinding(key.WithKeys("right", "/"), key.WithHelp("→", "open")),
+		Home:   key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "home")),
+		Select: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
 	},
 	ProfileList: profileListKeyMap{
 		Enter:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "launch")),

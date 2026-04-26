@@ -525,6 +525,8 @@ func (a *AppModel) updateExplore(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		a.scanDirs = a.explore.Dirs()
 		a.refreshHome()
+		entries, _ := a.database.ListModels()
+		a.modelList = a.modelList.SetEntries(entries)
 		a.screen = screenHome
 		return a, nil
 	}
@@ -597,7 +599,11 @@ func (a *AppModel) helpView() string {
 	case screenServerRunning:
 		helpContent = a.help.View(keys.Server)
 	case screenExplore:
-		helpContent = a.help.View(keys.Explore)
+		if a.explore.AddingBrowse() {
+			helpContent = a.help.View(keys.FileBrowser)
+		} else {
+			helpContent = a.help.View(keys.Explore)
+		}
 	case screenExecutor:
 		helpContent = a.help.View(keys.Executor)
 	default:

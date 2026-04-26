@@ -8,13 +8,28 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dipankardas011/infai/db"
 	"github.com/dipankardas011/infai/scanner"
 )
+
+type FileBrowserSavedMsg struct{ Path string }
+
+type fileEntry struct {
+	name  string
+	path  string
+	isDir bool
+}
+
+type FileBrowserModel struct {
+	cursor     int
+	entries    []fileEntry
+	currentDir string
+	width      int
+	height     int
+}
 
 type syncRequest struct {
 	folders []string
@@ -38,33 +53,198 @@ func expandPath(p string) (string, error) {
 	return filepath.Abs(p)
 }
 
+func NewFileBrowserModel() FileBrowserModel {
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	if cwd == "" {
+		cwd = home
+	}
+	entries := loadDirEntries(cwd)
+	return FileBrowserModel{
+		cursor:     0,
+		entries:    entries,
+		currentDir: cwd,
+		width:      60,
+		height:     20,
+	}
+}
+
+func loadDirEntries(dir string) []fileEntry {
+	entries := []fileEntry{}
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return entries
+	}
+	for _, f := range files {
+		name := f.Name()
+		if name == "." || name == ".." {
+			continue
+		}
+		if name[0] == '.' {
+			continue
+		}
+		info, err := f.Info()
+		if err != nil {
+			continue
+		}
+		entries = append(entries, fileEntry{
+			name:  name,
+			path:  filepath.Join(dir, name),
+			isDir: info.IsDir(),
+		})
+	}
+	slices.SortFunc(entries, func(a, b fileEntry) int {
+		if a.isDir != b.isDir {
+			if a.isDir {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.name, b.name)
+	})
+	return entries
+}
+
+func (m FileBrowserModel) SetSize(w, h int) FileBrowserModel {
+	m.width, m.height = w, h
+	return m
+}
+
+func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "down", "j":
+			if m.cursor < len(m.entries)-1 {
+				m.cursor++
+			}
+		case "enter":
+			if len(m.entries) == 0 {
+				var nm FileBrowserModel = m
+				return nm, func() tea.Msg { return FileBrowserSavedMsg{Path: m.currentDir} }
+			}
+			entry := m.entries[m.cursor]
+			if entry.isDir {
+				var nm FileBrowserModel = m
+				return nm, func() tea.Msg { return FileBrowserSavedMsg{Path: entry.path} }
+			}
+		case "right", "/":
+			if len(m.entries) > 0 && m.entries[m.cursor].isDir {
+				m.currentDir = m.entries[m.cursor].path
+				m.entries = loadDirEntries(m.currentDir)
+				m.cursor = 0
+			}
+		case "left", "backspace", "b":
+			if m.currentDir != "/" {
+				m.currentDir = filepath.Dir(m.currentDir)
+				if m.currentDir == "." {
+					m.currentDir = "/"
+				}
+				m.entries = loadDirEntries(m.currentDir)
+				m.cursor = 0
+			}
+		case "home":
+			home, _ := os.UserHomeDir()
+			m.currentDir = home
+			m.entries = loadDirEntries(home)
+			m.cursor = 0
+		case "esc":
+			var nm FileBrowserModel = m
+			return nm, func() tea.Msg { return FileBrowserSavedMsg{Path: ""} }
+		}
+	}
+	return m, nil
+}
+
+func (m FileBrowserModel) View() string {
+	t := ActiveTheme
+	mutedStyle := lipgloss.NewStyle().Foreground(t.Muted)
+	dirStyle := lipgloss.NewStyle().Foreground(t.Secondary).Bold(true)
+	selStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
+	fileIcon := "  "
+	folderIcon := lipgloss.NewStyle().Foreground(t.Primary).Render("> ")
+
+	var sb strings.Builder
+	sb.WriteString(dirStyle.Render(m.currentDir) + "\n")
+
+	maxEntries := m.height - 4
+	if maxEntries < 0 {
+		maxEntries = 0
+	}
+
+	displayEntries := m.entries
+	if len(displayEntries) > maxEntries {
+		displayEntries = displayEntries[:maxEntries]
+	}
+
+	if len(displayEntries) == 0 {
+		sb.WriteString(mutedStyle.Render("  (empty)") + "\n")
+	} else {
+		start := 0
+		end := len(displayEntries)
+		if m.cursor >= maxEntries/2 && len(m.entries) > maxEntries {
+			start = m.cursor - maxEntries/2
+			end = start + maxEntries
+			if end > len(m.entries) {
+				end = len(m.entries)
+				start = end - maxEntries
+			}
+		}
+		for i := start; i < end; i++ {
+			entry := displayEntries[i]
+			icon := fileIcon
+			if entry.isDir {
+				icon = folderIcon
+			}
+			if i == m.cursor {
+				sb.WriteString(selStyle.Render("▶ "+icon+entry.name) + "\n")
+			} else {
+				sb.WriteString(mutedStyle.Render("  "+icon+entry.name) + "\n")
+			}
+		}
+	}
+
+	boxWidth := m.width - 4
+	if boxWidth < 0 {
+		boxWidth = 0
+	}
+
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Muted).
+		Padding(1, 1).
+		Width(boxWidth)
+
+	return boxStyle.Render(sb.String())
+}
+
 type ExploreModel struct {
 	database *db.DB
 	dirs     []string
 	syncChan chan syncRequest
 
-	cursor  int
-	adding  bool
-	input   textinput.Model
-	errMsg  string
-	width   int
-	height  int
-	syncing bool
-	spinner spinner.Model
+	cursor       int
+	addingBrowse bool
+	fileBrowser  FileBrowserModel
+	errMsg       string
+	width        int
+	height       int
+	syncing      bool
+	spinner      spinner.Model
 }
 
 func NewExploreModel(database *db.DB, dirs []string, w, h int) ExploreModel {
 	cp := make([]string, len(dirs))
 	copy(cp, dirs)
-	ti := textinput.New()
-	ti.Placeholder = "/path/to/models"
-	ti.CharLimit = 256
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	m := ExploreModel{
 		database: database,
 		dirs:     cp,
-		input:    ti,
 		width:    w,
 		height:   h,
 		spinner:  s,
@@ -80,6 +260,8 @@ func (m ExploreModel) SetSize(w, h int) ExploreModel {
 }
 
 func (m ExploreModel) Dirs() []string { return m.dirs }
+
+func (m ExploreModel) AddingBrowse() bool { return m.addingBrowse }
 
 func (m *ExploreModel) Close() {
 	if m.syncChan != nil {
@@ -116,42 +298,34 @@ func (m ExploreModel) syncWorker() {
 }
 
 func (m ExploreModel) Update(msg tea.Msg) (ExploreModel, tea.Cmd) {
-	if m.adding {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-			case "enter":
-				raw := strings.TrimSpace(m.input.Value())
-				m.adding = false
-				m.input.SetValue("")
-				if raw == "" {
-					return m, nil
-				}
-				path, err := expandPath(raw)
-				if err != nil {
-					m.errMsg = "bad path: " + err.Error()
-					return m, nil
-				}
-				if slices.Contains(m.dirs, path) {
-					m.errMsg = "already in list"
-					return m, nil
-				}
-				if err := m.database.AddScanDir(path); err != nil {
-					m.errMsg = err.Error()
-					return m, nil
-				}
-				m.dirs = append(m.dirs, path)
-				m.cursor = len(m.dirs) - 1
-				m.errMsg = ""
-				return m, nil
-			case "esc":
-				m.adding = false
-				m.input.SetValue("")
-				return m, nil
+	if m.addingBrowse {
+		var cmd tea.Cmd
+		m.fileBrowser, cmd = m.fileBrowser.Update(msg)
+		if _, ok := msg.(tea.KeyMsg); ok {
+			switch msg.(type) {
+			case FileBrowserSavedMsg:
+			default:
+				return m, cmd
 			}
 		}
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
+		if fm, ok := msg.(FileBrowserSavedMsg); ok {
+			m.addingBrowse = false
+			if fm.Path == "" {
+				return m, nil
+			}
+			path := fm.Path
+			if slices.Contains(m.dirs, path) {
+				m.errMsg = "already in list"
+				return m, nil
+			}
+			if err := m.database.AddScanDir(path); err != nil {
+				m.errMsg = err.Error()
+				return m, nil
+			}
+			m.dirs = append(m.dirs, path)
+			m.cursor = len(m.dirs) - 1
+			m.errMsg = styleSuccess.Render("✓ added " + filepath.Base(path))
+		}
 		return m, cmd
 	}
 
@@ -167,10 +341,9 @@ func (m ExploreModel) Update(msg tea.Msg) (ExploreModel, tea.Cmd) {
 				m.cursor++
 			}
 		case "a":
-			m.adding = true
-			m.errMsg = ""
-			m.input.Focus()
-			return m, textinput.Blink
+			m.addingBrowse = true
+			m.fileBrowser = NewFileBrowserModel().SetSize(m.width, m.height)
+			return m, nil
 		case "d", "delete":
 			if len(m.dirs) == 0 {
 				break
@@ -227,7 +400,6 @@ func (m ExploreModel) View() string {
 	titleStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true).Padding(0, 1)
 	mutedStyle := lipgloss.NewStyle().Foreground(t.Muted)
 	selStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
-	helpStyle := lipgloss.NewStyle().Foreground(t.Muted).Italic(true)
 	errStyle := lipgloss.NewStyle().Foreground(t.Error)
 
 	var sb strings.Builder
@@ -248,13 +420,15 @@ func (m ExploreModel) View() string {
 	sb.WriteString("\n")
 	if m.syncing {
 		sb.WriteString(styleSelected.Render(m.spinner.View()+" syncing...") + "\n")
-	} else if m.adding {
-		sb.WriteString(lipgloss.NewStyle().Foreground(t.Secondary).Render("add folder: "))
-		sb.WriteString(m.input.View() + "\n")
-		sb.WriteString(helpStyle.Render("enter: confirm  esc: cancel add") + "\n")
+	} else if m.addingBrowse {
+		return m.fileBrowser.View()
 	} else {
 		if m.errMsg != "" {
-			sb.WriteString(errStyle.Render(m.errMsg) + "\n")
+			if strings.HasPrefix(m.errMsg, "\x1b[") || strings.HasPrefix(m.errMsg, "✓") {
+				sb.WriteString(m.errMsg + "\n")
+			} else {
+				sb.WriteString(errStyle.Render(m.errMsg) + "\n")
+			}
 		}
 	}
 	content := sb.String()

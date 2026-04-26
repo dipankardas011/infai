@@ -254,14 +254,7 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 			continue
 		}
 
-		found := false
-		for _, s := range scanned {
-			if s.GGUFPath == path {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !scannedPaths[path] {
 			_, err := tx.Exec(`DELETE FROM models WHERE id = ?`, id)
 			if err != nil {
 				return 0, 0, err
@@ -274,10 +267,12 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 		}
 	}
 
+	seen := make(map[string]bool)
 	for _, m := range scanned {
-		if scannedPaths[m.GGUFPath] {
+		if seen[m.GGUFPath] {
 			continue
 		}
+		seen[m.GGUFPath] = true
 		_, err := tx.Exec(`
 			INSERT INTO models (scan_dir, dir_name, gguf_path, mmproj_path, display_name, type, metadata)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
