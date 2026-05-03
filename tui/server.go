@@ -18,7 +18,10 @@ import (
 
 const stopGraceTimeout = 5 * time.Second
 
-var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+var (
+	ansiEscape    = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	promptProgress = regexp.MustCompile(`prompt processing progress,.*progress = ([0-9.]+)`)
+)
 
 func stripAnsi(s string) string {
 	return ansiEscape.ReplaceAllString(s, "")
@@ -58,6 +61,7 @@ type ServerModel struct {
 	port            int
 	systemUsage     string
 	modelUsage      string
+	promptProgress  int // 0 = none, 1–100 = active
 	startedAt       time.Time
 	stoppedAt       time.Time
 	stopped         bool
@@ -136,7 +140,26 @@ func NewServerModel(args []string, profileName, modelName, modelType string, con
 
 func (s ServerModel) HandleLogLine(line string) (ServerModel, tea.Cmd) {
 	s = s.appendLogLine(line)
+	s = s.updatePromptProgress(line)
 	return s, listenForLog(s.logCh, s.exitCh)
+}
+
+func (s ServerModel) updatePromptProgress(line string) ServerModel {
+	if strings.Contains(line, "prompt processing done") {
+		s.promptProgress = 100
+		return s
+	}
+	if !strings.Contains(line, "prompt processing progress") {
+		return s
+	}
+	matches := promptProgress.FindStringSubmatch(line)
+	if len(matches) < 2 {
+		return s
+	}
+	var progress float64
+	fmt.Sscanf(matches[1], "%f", &progress)
+	s.promptProgress = int(progress * 100)
+	return s
 }
 
 func (s ServerModel) appendLogLine(line string) ServerModel {
@@ -343,6 +366,9 @@ func (s ServerModel) View() string {
 	if s.modelUsage != "" {
 		resourceLines = append(resourceLines, dim.Render("  proc    ")+splitMetricParts(s.modelUsage, val, dot))
 	}
+	if s.promptProgress > 0 {
+		resourceLines = append(resourceLines, dim.Render("  prompt  ")+hi.Render(fmt.Sprintf("%d%%", s.promptProgress)))
+	}
 
 	// ── throughput section (divider + gen + prefill) ───────────────────────
 	var throughputLines []string
@@ -400,6 +426,7 @@ func (s ServerModel) View() string {
 	parts = append(parts, resourceLines...)
 	parts = append(parts, throughputLines...)
 	header := strings.Join(parts, "\n")
+}
 
 	// Log viewport
 	logView := s.vp.View()
