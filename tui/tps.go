@@ -82,7 +82,6 @@ type liveMetricsMsg struct {
 	deferred          int
 	totalGenTokens    int64
 	totalPromptTokens int64
-	nDecodeTotal      int64
 	ok                bool
 }
 
@@ -94,6 +93,8 @@ func tickLiveMetrics() tea.Cmd {
 	})
 }
 
+var metricsHTTPClient = &http.Client{Timeout: 2 * time.Second}
+
 func getLiveMetricsCmd(host string, port int) tea.Cmd {
 	return func() tea.Msg {
 		return fetchLiveMetrics(host, port)
@@ -102,8 +103,7 @@ func getLiveMetricsCmd(host string, port int) tea.Cmd {
 
 func fetchLiveMetrics(host string, port int) liveMetricsMsg {
 	url := fmt.Sprintf("http://%s:%d/metrics", host, port)
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := metricsHTTPClient.Get(url)
 	if err != nil {
 		return liveMetricsMsg{}
 	}
@@ -111,7 +111,7 @@ func fetchLiveMetrics(host string, port int) liveMetricsMsg {
 
 	var avgTPS, prefillTPS float64
 	var active, deferred int
-	var totalGenTokens, totalPromptTokens, nDecodeTotal int64
+	var totalGenTokens, totalPromptTokens int64
 	found := 0
 
 	sc := bufio.NewScanner(resp.Body)
@@ -155,18 +155,12 @@ func fetchLiveMetrics(host string, port int) liveMetricsMsg {
 				totalPromptTokens = int64(v)
 				found++
 			}
-		case "llamacpp:n_decode_total":
-			if v, err := strconv.ParseFloat(fields[1], 64); err == nil {
-				nDecodeTotal = int64(v)
-				found++
-			}
 		}
 	}
 	return liveMetricsMsg{
 		avgTPS: avgTPS, prefillTPS: prefillTPS,
 		active: active, deferred: deferred,
 		totalGenTokens: totalGenTokens, totalPromptTokens: totalPromptTokens,
-		nDecodeTotal: nDecodeTotal,
-		ok:           found > 0,
+		ok: found > 0,
 	}
 }

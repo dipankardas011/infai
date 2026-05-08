@@ -44,37 +44,36 @@ const maxLogLines = 10000
 
 // ServerModel is screen 5 — shows live llama-server output.
 type ServerModel struct {
-	cmd              *exec.Cmd
-	launchArgs       []string
-	logCh            chan string
-	exitCh           chan error
-	logs             []string
-	vp               viewport.Model
-	profileName      string
-	modelName        string
-	modelType        string
-	contextSize      int
-	host             string
-	port             int
-	systemUsage      string
-	modelUsage       string
-	startedAt        time.Time
-	stoppedAt        time.Time
-	stopped          bool
-	stopping         bool
-	forceKilled      bool
-	exitErr          error
-	tpsHistory       []float64
-	liveTPS          float64
-	livePrefillTPS   float64
-	liveActive       int
-	liveDeferred     int
-	liveTotalGen     int64
-	liveTotalPrompt  int64
-	liveNDecodeTotal int64
-	width            int
-	height           int
-	initialized      bool
+	cmd             *exec.Cmd
+	launchArgs      []string
+	logCh           chan string
+	exitCh          chan error
+	logs            []string
+	vp              viewport.Model
+	profileName     string
+	modelName       string
+	modelType       string
+	contextSize     int
+	host            string
+	port            int
+	systemUsage     string
+	modelUsage      string
+	startedAt       time.Time
+	stoppedAt       time.Time
+	stopped         bool
+	stopping        bool
+	forceKilled     bool
+	exitErr         error
+	tpsHistory      []float64
+	liveTPS         float64
+	livePrefillTPS  float64
+	liveActive      int
+	liveDeferred    int
+	liveTotalGen    int64
+	liveTotalPrompt int64
+	width           int
+	height          int
+	initialized     bool
 }
 
 // NewServerModel starts the server process and returns the model + initial listen cmd.
@@ -109,7 +108,7 @@ func NewServerModel(args []string, profileName, modelName, modelType string, con
 		exitCh <- err
 	}()
 
-	vpH := max(h-11, 5)
+	vpH := max(h-7, 5) // initial: 2 header lines; computeVPH() corrects once metrics load
 	vp := viewport.New(w-4, vpH)
 	vp.Style = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -194,16 +193,49 @@ func (s ServerModel) ForceKill() ServerModel {
 	return s
 }
 
+// computeVPH derives the viewport content height from the current header line count.
+func (s ServerModel) computeVPH() int {
+	lines := 2 // line1 (status) + line2 (model)
+	if s.systemUsage != "" {
+		lines++
+	}
+	if s.modelUsage != "" {
+		lines++
+	}
+	n := len(s.tpsHistory)
+	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0
+	if hasTPS {
+		lines++ // divider
+		if s.liveTPS > 0 || n > 0 {
+			lines++ // gen line
+		}
+		if s.livePrefillTPS > 0 || s.liveTotalGen > 0 || s.liveTotalPrompt > 0 {
+			lines++ // prefill line
+		}
+	}
+	return max(s.height-lines-5, 5)
+}
+
 func (s ServerModel) SetSize(w, h int) ServerModel {
 	if !s.initialized {
 		return s
 	}
 	s.width = w
 	s.height = h
-	vpH := max(h-11, 5)
 	s.vp.Width = w - 4
-	s.vp.Height = vpH
+	s.vp.Height = s.computeVPH()
 	return s
+}
+
+// splitMetricParts splits a metrics string on "  |  " separators,
+// renders each part with style, and joins with dot.
+func splitMetricParts(metric string, style lipgloss.Style, dot string) string {
+	parts := strings.Split(metric, "  |  ")
+	rendered := make([]string, len(parts))
+	for i, p := range parts {
+		rendered[i] = style.Render(strings.TrimSpace(p))
+	}
+	return strings.Join(rendered, dot)
 }
 
 func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
@@ -214,6 +246,7 @@ func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 		}
 		s.systemUsage = msg.System
 		s.modelUsage = msg.Model
+		s.vp.Height = s.computeVPH()
 		return s, tickMetrics()
 	case tickMetricsMsg:
 		if s.stopped {
@@ -234,7 +267,7 @@ func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 			s.liveDeferred = msg.deferred
 			s.liveTotalGen = msg.totalGenTokens
 			s.liveTotalPrompt = msg.totalPromptTokens
-			s.liveNDecodeTotal = msg.nDecodeTotal
+			s.vp.Height = s.computeVPH()
 		}
 		return s, tickLiveMetrics()
 	case tickLiveMetricsMsg:
@@ -303,20 +336,12 @@ func (s ServerModel) View() string {
 
 	// ── lines 3-4: hardware resources ─────────────────────────────────────
 	dot := dim.Render("  •  ")
-	splitMetric := func(s string) string {
-		parts := strings.Split(s, "  |  ")
-		rendered := make([]string, len(parts))
-		for i, p := range parts {
-			rendered[i] = val.Render(strings.TrimSpace(p))
-		}
-		return strings.Join(rendered, dot)
-	}
 	var resourceLines []string
 	if s.systemUsage != "" {
-		resourceLines = append(resourceLines, dim.Render("  sys     ")+splitMetric(s.systemUsage))
+		resourceLines = append(resourceLines, dim.Render("  sys     ")+splitMetricParts(s.systemUsage, val, dot))
 	}
 	if s.modelUsage != "" {
-		resourceLines = append(resourceLines, dim.Render("  proc    ")+splitMetric(s.modelUsage))
+		resourceLines = append(resourceLines, dim.Render("  proc    ")+splitMetricParts(s.modelUsage, val, dot))
 	}
 
 	// ── throughput section (divider + gen + prefill) ───────────────────────
