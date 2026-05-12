@@ -426,7 +426,6 @@ func (s ServerModel) View() string {
 	parts = append(parts, resourceLines...)
 	parts = append(parts, throughputLines...)
 	header := strings.Join(parts, "\n")
-}
 
 	// Log viewport
 	logView := s.vp.View()
