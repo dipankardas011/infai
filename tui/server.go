@@ -366,9 +366,6 @@ func (s ServerModel) View() string {
 	if s.modelUsage != "" {
 		resourceLines = append(resourceLines, dim.Render("  proc    ")+splitMetricParts(s.modelUsage, val, dot))
 	}
-	if s.promptProgress > 0 {
-		resourceLines = append(resourceLines, dim.Render("  prompt  ")+hi.Render(fmt.Sprintf("%d%%", s.promptProgress)))
-	}
 
 	// ── throughput section (divider + gen + prefill) ───────────────────────
 	var throughputLines []string
@@ -391,6 +388,9 @@ func (s ServerModel) View() string {
 		}
 		if s.liveActive > 0 {
 			genSegs = append(genSegs, lipgloss.NewStyle().Foreground(t.Success).Render(fmt.Sprintf("● %d active", s.liveActive)))
+		}
+		if s.promptProgress > 0 {
+			genSegs = append(genSegs, hi.Render(fmt.Sprintf("%d%% prompt", s.promptProgress)))
 		}
 		if s.liveDeferred > 0 {
 			genSegs = append(genSegs, dim.Render(fmt.Sprintf("%d queued", s.liveDeferred)))
