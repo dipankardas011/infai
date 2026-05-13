@@ -227,9 +227,9 @@ func (s ServerModel) computeVPH() int {
 	}
 	n := len(s.tpsHistory)
 	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0
-	if hasTPS {
+	if hasTPS || s.promptProgress > 0 {
 		lines++ // divider
-		if s.liveTPS > 0 || n > 0 {
+		if s.liveTPS > 0 || n > 0 || s.promptProgress > 0 {
 			lines++ // gen line
 		}
 		if s.livePrefillTPS > 0 || s.liveTotalGen > 0 || s.liveTotalPrompt > 0 {
@@ -372,7 +372,7 @@ func (s ServerModel) View() string {
 	_, p50, p95, n := computeTPSStats(s.tpsHistory)
 	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0
 
-	if hasTPS {
+	if hasTPS || s.promptProgress > 0 {
 		divider := dim.Render("  " + strings.Repeat("─", max(s.width-6, 20)))
 		throughputLines = append(throughputLines, divider)
 
