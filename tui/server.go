@@ -157,7 +157,9 @@ func (s ServerModel) updatePromptProgress(line string) ServerModel {
 		return s
 	}
 	var progress float64
-	fmt.Sscanf(matches[1], "%f", &progress)
+	if _, err := fmt.Sscanf(matches[1], "%f", &progress); err != nil {
+		return s
+	}
 	s.promptProgress = int(progress * 100)
 	return s
 }
@@ -226,8 +228,8 @@ func (s ServerModel) computeVPH() int {
 		lines++
 	}
 	n := len(s.tpsHistory)
-	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0
-	if hasTPS || s.promptProgress > 0 {
+	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0 || s.promptProgress > 0
+	if hasTPS {
 		lines++ // divider
 		if s.liveTPS > 0 || n > 0 || s.promptProgress > 0 {
 			lines++ // gen line
@@ -284,6 +286,10 @@ func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 			return s, nil
 		}
 		if msg.ok {
+			// Reset prompt progress once generation starts.
+			if s.liveActive > 0 {
+				s.promptProgress = 0
+			}
 			s.liveTPS = msg.avgTPS
 			s.livePrefillTPS = msg.prefillTPS
 			s.liveActive = msg.active
@@ -370,9 +376,9 @@ func (s ServerModel) View() string {
 	// ── throughput section (divider + gen + prefill) ───────────────────────
 	var throughputLines []string
 	_, p50, p95, n := computeTPSStats(s.tpsHistory)
-	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0
+	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0 || s.promptProgress > 0
 
-	if hasTPS || s.promptProgress > 0 {
+	if hasTPS {
 		divider := dim.Render("  " + strings.Repeat("─", max(s.width-6, 20)))
 		throughputLines = append(throughputLines, divider)
 
@@ -389,9 +395,6 @@ func (s ServerModel) View() string {
 		if s.liveActive > 0 {
 			genSegs = append(genSegs, lipgloss.NewStyle().Foreground(t.Success).Render(fmt.Sprintf("● %d active", s.liveActive)))
 		}
-		if s.promptProgress > 0 {
-			genSegs = append(genSegs, hi.Render(fmt.Sprintf("%d%% prompt", s.promptProgress)))
-		}
 		if s.liveDeferred > 0 {
 			genSegs = append(genSegs, dim.Render(fmt.Sprintf("%d queued", s.liveDeferred)))
 		}
@@ -404,6 +407,9 @@ func (s ServerModel) View() string {
 		var prefillSegs []string
 		if s.livePrefillTPS > 0 {
 			prefillSegs = append(prefillSegs, val.Render(fmt.Sprintf("%.0f t/s", s.livePrefillTPS)))
+		}
+		if s.promptProgress > 0 {
+			prefillSegs = append(prefillSegs, hi.Render(fmt.Sprintf("%d%% prompt", s.promptProgress)))
 		}
 		var lifetimeSegs []string
 		if s.liveTotalGen > 0 {
