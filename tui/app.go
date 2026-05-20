@@ -103,6 +103,9 @@ func NewApp(database *db.DB, serverBin string, scanDirs []string, entries []mode
 				break
 			}
 		}
+		if selProfile.Name == "" {
+			return nil, fmt.Errorf("profile %q not found", launchProfileName)
+		}
 	}
 
 	return &AppModel{
