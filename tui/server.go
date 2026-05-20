@@ -18,7 +18,10 @@ import (
 
 const stopGraceTimeout = 5 * time.Second
 
-var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+var (
+	ansiEscape    = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	promptProgress = regexp.MustCompile(`prompt processing progress,.*progress = ([0-9.]+)`)
+)
 
 func stripAnsi(s string) string {
 	return ansiEscape.ReplaceAllString(s, "")
@@ -58,6 +61,7 @@ type ServerModel struct {
 	port            int
 	systemUsage     string
 	modelUsage      string
+	promptProgress  int // 0 = none, 1–100 = active
 	startedAt       time.Time
 	stoppedAt       time.Time
 	stopped         bool
@@ -136,7 +140,28 @@ func NewServerModel(args []string, profileName, modelName, modelType string, con
 
 func (s ServerModel) HandleLogLine(line string) (ServerModel, tea.Cmd) {
 	s = s.appendLogLine(line)
+	s = s.updatePromptProgress(line)
 	return s, listenForLog(s.logCh, s.exitCh)
+}
+
+func (s ServerModel) updatePromptProgress(line string) ServerModel {
+	if strings.Contains(line, "prompt processing done") {
+		s.promptProgress = 100
+		return s
+	}
+	if !strings.Contains(line, "prompt processing progress") {
+		return s
+	}
+	matches := promptProgress.FindStringSubmatch(line)
+	if len(matches) < 2 {
+		return s
+	}
+	var progress float64
+	if _, err := fmt.Sscanf(matches[1], "%f", &progress); err != nil {
+		return s
+	}
+	s.promptProgress = int(progress * 100)
+	return s
 }
 
 func (s ServerModel) appendLogLine(line string) ServerModel {
@@ -203,10 +228,10 @@ func (s ServerModel) computeVPH() int {
 		lines++
 	}
 	n := len(s.tpsHistory)
-	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0
+	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0 || s.promptProgress > 0
 	if hasTPS {
 		lines++ // divider
-		if s.liveTPS > 0 || n > 0 {
+		if s.liveTPS > 0 || n > 0 || s.promptProgress > 0 {
 			lines++ // gen line
 		}
 		if s.livePrefillTPS > 0 || s.liveTotalGen > 0 || s.liveTotalPrompt > 0 {
@@ -261,6 +286,10 @@ func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 			return s, nil
 		}
 		if msg.ok {
+			// Reset prompt progress once generation starts.
+			if s.liveActive > 0 {
+				s.promptProgress = 0
+			}
 			s.liveTPS = msg.avgTPS
 			s.livePrefillTPS = msg.prefillTPS
 			s.liveActive = msg.active
@@ -347,7 +376,7 @@ func (s ServerModel) View() string {
 	// ── throughput section (divider + gen + prefill) ───────────────────────
 	var throughputLines []string
 	_, p50, p95, n := computeTPSStats(s.tpsHistory)
-	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0
+	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0 || s.promptProgress > 0
 
 	if hasTPS {
 		divider := dim.Render("  " + strings.Repeat("─", max(s.width-6, 20)))
@@ -378,6 +407,9 @@ func (s ServerModel) View() string {
 		var prefillSegs []string
 		if s.livePrefillTPS > 0 {
 			prefillSegs = append(prefillSegs, val.Render(fmt.Sprintf("%.0f t/s", s.livePrefillTPS)))
+		}
+		if s.promptProgress > 0 {
+			prefillSegs = append(prefillSegs, hi.Render(fmt.Sprintf("%d%% prompt", s.promptProgress)))
 		}
 		var lifetimeSegs []string
 		if s.liveTotalGen > 0 {
