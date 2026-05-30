@@ -414,7 +414,7 @@ SELECT id, model_id, name, port, host, context_size, ngl,
        batch_size, ubatch_size, cache_type_k, cache_type_v,
        flash_attn, jinja, temperature, reasoning_budget, top_p, top_k,
        no_kv_offload, use_mmproj, extra_flags
-FROM profiles WHERE model_id = ? ORDER BY name`, modelID)
+FROM profiles WHERE model_id = ? OR ? = 0 ORDER BY name`, modelID, modelID)
 	if err != nil {
 		return nil, err
 	}
