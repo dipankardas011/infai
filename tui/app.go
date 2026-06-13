@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dipankardas011/infai/db"
+	"github.com/dipankardas011/infai/launcher"
 	"github.com/dipankardas011/infai/model"
 	"github.com/dipankardas011/infai/scanner"
 )
@@ -28,13 +29,9 @@ type screenKind int
 const (
 	screenHome screenKind = iota
 	screenModelList
-	screenProfileBrowser
-	screenProfileList
 	screenProfileEdit
 	screenConfirm
 	screenServerRunning
-	screenExplore
-	screenExecutor
 	screenThemeSelector
 )
 
@@ -45,7 +42,7 @@ const (
 	modelListPickForProfile
 )
 
-// Cross-screen transition messages.
+// Cross-screen messages
 type scanDoneMsg struct {
 	entries []model.ModelEntry
 	err     error
@@ -71,17 +68,15 @@ type AppModel struct {
 	help         help.Model
 	showFullHelp bool
 
-	modelList      ModelListModel
-	profileBrowser ProfileBrowserModel
-	profileList    ProfileListModel
-	profileEdit    ProfileEditModel
-	confirm        ConfirmModel
-	server         ServerModel
-	explore        ExploreModel
-	executor       ExecutorModel
-	home           HomeModel
-	themeSelector  ThemeSelectorModel
+	// Sub-models
+	home          HomeModel
+	modelList     ModelListModel
+	profileEdit   ProfileEditModel
+	confirm       ConfirmModel
+	server        ServerModel
+	themeSelector ThemeSelectorModel
 
+	// State tracking
 	selectedModel     model.ModelEntry
 	selectedProfile   model.Profile
 	modelListPurpose  modelListPurpose
@@ -92,7 +87,7 @@ type AppModel struct {
 func NewApp(database *db.DB, serverBin string, scanDirs []string, entries []model.ModelEntry, w, h int) AppModel {
 	var startupErrs []string
 
-	recent, err := database.ListRecents(2)
+	recent, err := database.ListRecents(3)
 	if err != nil {
 		startupErrs = append(startupErrs, fmt.Sprintf("failed to load recents: %v", err))
 	}
@@ -109,19 +104,24 @@ func NewApp(database *db.DB, serverBin string, scanDirs []string, entries []mode
 		startupErrs = append(startupErrs, fmt.Sprintf("failed to load profiles: %v", err))
 	}
 
+	// Load theme from settings
+	if themeName, err := database.GetSetting("theme"); err == nil && themeName != "" {
+		SetTheme(themeName)
+	}
+
+	home := NewHomeModel(database, serverBin, scanDirs, entries, recent, profiles, w, h)
+
 	return AppModel{
-		database:       database,
-		serverBin:      serverBin,
-		scanDirs:       scanDirs,
-		width:          w,
-		height:         h,
-		errMsg:         strings.Join(startupErrs, "; "),
-		help:           help.New(),
-		home:           NewHomeModel(recent, scanDirs, serverBin, w, h),
-		modelList:      NewModelListModel(entries, w, h),
-		profileBrowser: NewProfileBrowserModel(profiles, w, h),
-		executor:       NewExecutorModel(database, serverBin, w, h),
-		themeSelector:  NewThemeSelectorModel(w, h),
+		database:      database,
+		serverBin:     serverBin,
+		scanDirs:      scanDirs,
+		width:         w,
+		height:        h,
+		errMsg:        strings.Join(startupErrs, "; "),
+		help:          help.New(),
+		home:          home,
+		modelList:     NewModelListModel(entries, w, h),
+		themeSelector: NewThemeSelectorModel(w, h),
 	}
 }
 
@@ -133,24 +133,37 @@ func (a *AppModel) setErr(msg string) {
 }
 
 func (a *AppModel) refreshHome() {
-	recent, err := a.database.ListRecents(2)
+	recents, err := a.database.ListRecents(3)
 	if err != nil {
 		a.setErr(err.Error())
 		return
 	}
-	a.home = NewHomeModel(recent, a.scanDirs, a.serverBin, a.width, a.height)
-}
-
-func (a *AppModel) refreshProfileBrowser() {
 	profiles, err := a.database.ListAllProfiles()
 	if err != nil {
 		a.setErr(err.Error())
 		return
 	}
-	a.profileBrowser = a.profileBrowser.SetEntries(profiles).SetSize(a.width, a.height)
+	a.home = a.home.RefreshProfiles(recents, profiles)
+	a.home = a.home.RefreshModels(a.scanDirs, a.database)
+	a.home = a.home.RefreshEngines(a.serverBin, a.database)
+	// Sync serverBin from engines tab (may have been updated)
+	a.serverBin = a.home.EffectiveServerBin()
 }
 
 func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Check minimum window size on the main home screen
+	if a.screen == screenHome {
+		if w, ok := msg.(tea.WindowSizeMsg); ok {
+			if w.Width < MinWindowWidth || w.Height < MinWindowHeight {
+				return a, nil
+			}
+		}
+		if a.width > 0 && a.height > 0 &&
+			(a.width < MinWindowWidth || a.height < MinWindowHeight) {
+			return a, nil
+		}
+	}
+
 	switch msg := msg.(type) {
 
 	case toastTickMsg:
@@ -168,14 +181,75 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.help.Width = msg.Width
 		a.home = a.home.SetSize(a.width, a.height)
 		a.modelList = a.modelList.SetSize(a.width, a.height)
-		a.profileBrowser = a.profileBrowser.SetSize(a.width, a.height)
-		a.profileList = a.profileList.SetSize(a.width, a.height)
 		a.profileEdit = a.profileEdit.SetSize(a.width, a.height)
 		a.confirm = a.confirm.SetSize(a.width, a.height)
 		a.server = a.server.SetSize(a.width, a.height)
-		a.explore = a.explore.SetSize(a.width, a.height)
-		a.executor = a.executor.SetSize(a.width, a.height)
 		a.themeSelector = a.themeSelector.SetSize(a.width, a.height)
+		return a, nil
+
+	case profilesTabLaunchMsg:
+		a.selectedModel = msg.entry.Model
+		a.selectedProfile = msg.entry.Profile
+		// Launch directly — no confirm screen
+		args := launcher.BuildArgs(a.serverBin, msg.entry.Model, msg.entry.Profile)
+		if len(args) == 0 || args[0] == "" {
+			a.setErr("executor path not set — set one in Engines tab")
+			return a, nil
+		}
+		_ = a.database.MarkRecent(a.selectedModel.ID, a.selectedProfile.ID)
+		sm, cmd, err := NewServerModel(
+			args,
+			a.selectedProfile.Name,
+			a.selectedModel.DisplayName,
+			a.selectedModel.Type,
+			a.selectedProfile.ContextSize,
+			a.selectedProfile.Host,
+			a.selectedProfile.Port,
+			a.width,
+			a.height,
+		)
+		if err != nil {
+			a.setErr(err.Error())
+			a.refreshHome()
+			return a, nil
+		}
+		a.server = sm
+		a.screen = screenServerRunning
+		return a, cmd
+
+	case profilesTabNewProfileMsg:
+		return a.openProfileModelPicker(screenHome)
+
+	case profilesTabEditProfileMsg:
+		profile, err := a.database.GetProfile(msg.entry.Profile.ID)
+		if err != nil {
+			a.setErr(err.Error())
+			return a, nil
+		}
+		a.selectedModel = msg.entry.Model
+		a.profileEdit = NewProfileEditModel(msg.entry.Model, &profile, a.width, a.height)
+		a.profileEditReturn = screenHome
+		a.screen = screenProfileEdit
+		a.errMsg = ""
+		return a, nil
+
+	case profilesTabDeleteProfileMsg:
+		if err := a.database.DeleteProfile(msg.id); err != nil {
+			a.setErr(err.Error())
+			return a, nil
+		}
+		a.refreshHome()
+		return a, nil
+
+	case modelsTabSyncDoneMsg:
+		if msg.err != nil {
+			a.setErr(msg.err.Error())
+			return a, nil
+		}
+		// Refresh scanned models
+		entries, _ := a.database.ListModels()
+		a.modelList = a.modelList.SetEntries(entries)
+		a.refreshHome()
 		return a, nil
 
 	case scanDoneMsg:
@@ -189,7 +263,6 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		a.modelList = a.modelList.SetEntries(msg.entries)
-		a.refreshProfileBrowser()
 		a.refreshHome()
 		return a, nil
 
@@ -199,19 +272,8 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setErr(err.Error())
 			return a, nil
 		}
-		switch a.profileEditReturn {
-		case screenProfileBrowser:
-			a.refreshProfileBrowser()
-			a.screen = screenProfileBrowser
-		default:
-			profiles, err := a.database.ListProfiles(a.selectedModel.ID)
-			if err != nil {
-				a.setErr(err.Error())
-				return a, nil
-			}
-			a.profileList = a.profileList.SetProfiles(profiles)
-			a.screen = screenProfileList
-		}
+		a.refreshHome()
+		a.screen = screenHome
 		return a, nil
 
 	case deleteProfileMsg:
@@ -219,25 +281,10 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setErr(err.Error())
 			return a, nil
 		}
-		if a.screen == screenProfileBrowser {
-			a.refreshProfileBrowser()
-			return a, nil
-		}
-		profiles, err := a.database.ListProfiles(a.selectedModel.ID)
-		if err != nil {
-			a.setErr(err.Error())
-			return a, nil
-		}
-		a.profileList = a.profileList.SetProfiles(profiles)
-		return a, nil
-
-	case ExecutorSavedMsg:
-		a.serverBin = msg.Bin
 		a.refreshHome()
-		a.screen = screenHome
 		return a, nil
 
-	// Server log streaming messages — only process when in server screen.
+	// Server log streaming
 	case logLineMsg:
 		if a.screen == screenServerRunning {
 			var cmd tea.Cmd
@@ -260,6 +307,7 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.KeyMsg:
+		// Global keys
 		if msg.String() == "ctrl+c" {
 			if a.screen == screenServerRunning {
 				if a.server.stopping || a.server.stopped {
@@ -282,44 +330,48 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.quitArmed = false
 			a.errMsg = ""
 		}
+
+		// Global 'q' quit on home
 		if a.screen == screenHome && msg.String() == "q" {
 			return a, tea.Quit
 		}
-		if msg.String() == "?" && a.screen != screenProfileEdit && a.screen != screenExecutor {
+
+		// Theme key works everywhere except editor/server
+		if msg.String() == "t" && a.screen != screenProfileEdit && a.screen != screenServerRunning {
+			a.themeSelector = NewThemeSelectorModel(a.width, a.height)
+			a.screen = screenThemeSelector
+			return a, nil
+		}
+
+		// Help toggle
+		if msg.String() == "?" && a.screen != screenProfileEdit {
 			a.showFullHelp = !a.showFullHelp
 			a.help.ShowAll = a.showFullHelp
 			return a, nil
 		}
 
+		// Dispatch to active screen
 		switch a.screen {
 		case screenHome:
 			return a.updateHome(msg)
 		case screenModelList:
 			return a.updateModelList(msg)
-		case screenProfileBrowser:
-			return a.updateProfileBrowser(msg)
-		case screenProfileList:
-			return a.updateProfileList(msg)
 		case screenProfileEdit:
 			return a.updateProfileEdit(msg)
 		case screenConfirm:
 			return a.updateConfirm(msg)
 		case screenServerRunning:
 			return a.updateServer(msg)
-		case screenExplore:
-			return a.updateExplore(msg)
-		case screenExecutor:
-			return a.updateExecutor(msg)
 		case screenThemeSelector:
 			return a.updateThemeSelector(msg)
 		}
 	}
 
+	// Non-key messages: delegate to active sub-model
 	return a.handleNonKeyMsg(msg)
 }
 
 func (a *AppModel) handleNonKeyMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Non-key msgs: delegate to active sub-model.
 	switch a.screen {
 	case screenHome:
 		var cmd tea.Cmd
@@ -329,29 +381,17 @@ func (a *AppModel) handleNonKeyMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.modelList, cmd = a.modelList.Update(msg)
 		return a, cmd
-	case screenProfileBrowser:
-		var cmd tea.Cmd
-		a.profileBrowser, cmd = a.profileBrowser.Update(msg)
-		return a, cmd
-	case screenProfileList:
-		var cmd tea.Cmd
-		a.profileList, cmd = a.profileList.Update(msg)
-		return a, cmd
 	case screenProfileEdit:
 		var cmd tea.Cmd
 		a.profileEdit, cmd = a.profileEdit.Update(msg)
 		return a, cmd
+	case screenConfirm:
+		var cmd tea.Cmd
+		a.confirm, cmd = a.confirm.Update(msg)
+		return a, cmd
 	case screenServerRunning:
 		var cmd tea.Cmd
 		a.server, cmd = a.server.Update(msg)
-		return a, cmd
-	case screenExplore:
-		var cmd tea.Cmd
-		a.explore, cmd = a.explore.Update(msg)
-		return a, cmd
-	case screenExecutor:
-		var cmd tea.Cmd
-		a.executor, cmd = a.executor.Update(msg)
 		return a, cmd
 	case screenThemeSelector:
 		var cmd tea.Cmd
@@ -362,35 +402,6 @@ func (a *AppModel) handleNonKeyMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *AppModel) updateHome(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "a":
-		a.refreshProfileBrowser()
-		a.screen = screenProfileBrowser
-		return a, nil
-	case "f":
-		a.explore.Close()
-		a.explore = NewExploreModel(a.database, a.scanDirs, a.width, a.height)
-		a.screen = screenExplore
-		return a, nil
-	case "c":
-		a.executor = NewExecutorModel(a.database, a.serverBin, a.width, a.height)
-		a.screen = screenExecutor
-		return a, nil
-	case "t":
-		a.themeSelector = NewThemeSelectorModel(a.width, a.height)
-		a.screen = screenThemeSelector
-		return a, nil
-	case "enter":
-		if entry, ok := a.home.Selected(); ok {
-			a.selectedModel = entry.Model
-			a.selectedProfile = entry.Profile
-			a.confirm = NewConfirmModel(a.serverBin, entry.Model, entry.Profile, a.width, a.height)
-			a.confirmReturn = screenHome
-			a.screen = screenConfirm
-			a.errMsg = ""
-			return a, nil
-		}
-	}
 	var cmd tea.Cmd
 	a.home, cmd = a.home.Update(msg)
 	return a, cmd
@@ -413,20 +424,6 @@ func (a *AppModel) updateThemeSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
-func (a *AppModel) updateExecutor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		var cmd tea.Cmd
-		a.executor, cmd = a.executor.SaveAndExit()
-		a.refreshHome()
-		a.screen = screenHome
-		return a, cmd
-	}
-	var cmd tea.Cmd
-	a.executor, cmd = a.executor.Update(msg)
-	return a, cmd
-}
-
 func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q":
@@ -436,8 +433,8 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		if !a.modelList.IsFiltering() {
 			if a.modelListPurpose == modelListPickForProfile {
-				a.refreshProfileBrowser()
-				a.screen = screenProfileBrowser
+				a.refreshHome()
+				a.screen = screenHome
 				return a, nil
 			}
 			a.refreshHome()
@@ -449,20 +446,12 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.selectedModel = entry
 			if a.modelListPurpose == modelListPickForProfile {
 				a.profileEdit = NewProfileEditModel(entry, nil, a.width, a.height)
-				a.profileEditReturn = screenProfileBrowser
+				a.profileEditReturn = screenHome
 				a.screen = screenProfileEdit
 				a.errMsg = ""
 				return a, nil
 			}
-			profiles, err := a.database.ListProfiles(entry.ID)
-			if err != nil {
-				a.setErr(err.Error())
-				return a, nil
-			}
-			a.profileList = NewProfileListModel(entry, profiles, a.width, a.height)
-			a.screen = screenProfileList
-			a.errMsg = ""
-			return a, nil
+			// Browsing model list directly
 		}
 	case "r":
 		return a, func() tea.Msg {
@@ -475,176 +464,27 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
-func (a *AppModel) openProfileModelPicker() (tea.Model, tea.Cmd) {
+func (a *AppModel) openProfileModelPicker(returnScreen screenKind) (tea.Model, tea.Cmd) {
 	entries, err := a.database.ListModels()
 	if err != nil {
 		a.setErr(err.Error())
 		return a, nil
 	}
 	if len(entries) == 0 {
-		a.setErr("no models found - press [f] on home to add scan folders")
+		a.setErr("no models found - add scan folders in Models tab")
 		return a, nil
 	}
 	a.modelList = NewModelListModel(entries, a.width, a.height).SetTitle("Choose model for new profile")
 	a.modelListPurpose = modelListPickForProfile
+	a.profileEditReturn = returnScreen
 	a.screen = screenModelList
 	return a, nil
-}
-
-func (a *AppModel) updateProfileBrowser(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if a.profileBrowser.IsFiltering() {
-		if msg.String() == "esc" {
-			var cmd tea.Cmd
-			a.profileBrowser, cmd = a.profileBrowser.Update(msg)
-			return a, cmd
-		}
-		var cmd tea.Cmd
-		a.profileBrowser, cmd = a.profileBrowser.Update(msg)
-		return a, cmd
-	}
-
-	if a.profileBrowser.deleteConfirm {
-		switch msg.String() {
-		case "y":
-			id := a.profileBrowser.deleteID
-			a.profileBrowser.deleteConfirm = false
-			a.profileBrowser.deleteID = 0
-			return a, func() tea.Msg { return deleteProfileMsg{id: id} }
-		case "n", "esc":
-			a.profileBrowser.deleteConfirm = false
-			a.profileBrowser.deleteID = 0
-			return a, nil
-		default:
-			return a, nil
-		}
-	}
-
-	switch msg.String() {
-	case "esc", "backspace":
-		a.refreshHome()
-		a.screen = screenHome
-		a.errMsg = ""
-		return a, nil
-	case "n":
-		return a.openProfileModelPicker()
-	case "enter":
-		entry, ok := a.profileBrowser.Selected()
-		if !ok {
-			break
-		}
-		profile, err := a.database.GetProfile(entry.Profile.ID)
-		if err != nil {
-			a.setErr(err.Error())
-			return a, nil
-		}
-		a.selectedModel = entry.Model
-		a.selectedProfile = profile
-		a.confirm = NewConfirmModel(a.serverBin, entry.Model, profile, a.width, a.height)
-		a.confirmReturn = screenProfileBrowser
-		a.screen = screenConfirm
-		a.errMsg = ""
-		return a, nil
-	case "e":
-		if entry, ok := a.profileBrowser.SelectedProfile(); ok {
-			profile, err := a.database.GetProfile(entry.Profile.ID)
-			if err != nil {
-				a.setErr(err.Error())
-				return a, nil
-			}
-			a.selectedModel = entry.Model
-			a.profileEdit = NewProfileEditModel(entry.Model, &profile, a.width, a.height)
-			a.profileEditReturn = screenProfileBrowser
-			a.screen = screenProfileEdit
-			return a, nil
-		}
-	case "d":
-		if a.profileBrowser.deleteConfirm {
-			break
-		}
-		if entry, ok := a.profileBrowser.SelectedProfile(); ok {
-			a.profileBrowser.deleteConfirm = true
-			a.profileBrowser.deleteID = entry.Profile.ID
-			return a, nil
-		}
-	}
-	var cmd tea.Cmd
-	a.profileBrowser, cmd = a.profileBrowser.Update(msg)
-	return a, cmd
-}
-
-func (a *AppModel) updateProfileList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q":
-		return a, nil
-	case "esc", "backspace":
-		a.refreshHome()
-		a.screen = screenHome
-		a.errMsg = ""
-		return a, nil
-
-	case "enter":
-		profile, isNew, ok := a.profileList.Selected()
-		if !ok {
-			break
-		}
-		if isNew {
-			a.profileEdit = NewProfileEditModel(a.selectedModel, nil, a.width, a.height)
-			a.profileEditReturn = screenProfileList
-			a.screen = screenProfileEdit
-			return a, nil
-		}
-		a.selectedProfile = profile
-		a.confirm = NewConfirmModel(a.serverBin, a.selectedModel, profile, a.width, a.height)
-		a.confirmReturn = screenProfileList
-		a.screen = screenConfirm
-		a.errMsg = ""
-		return a, nil
-
-	case "e":
-		if profile, ok := a.profileList.SelectedProfile(); ok {
-			a.profileEdit = NewProfileEditModel(a.selectedModel, &profile, a.width, a.height)
-			a.profileEditReturn = screenProfileList
-			a.screen = screenProfileEdit
-			return a, nil
-		}
-
-	case "d":
-		if a.profileList.deleteConfirm {
-			break
-		}
-		if profile, ok := a.profileList.SelectedProfile(); ok {
-			a.profileList.deleteConfirm = true
-			a.profileList.deleteID = profile.ID
-			return a, nil
-		}
-
-	case "y":
-		if a.profileList.deleteConfirm {
-			id := a.profileList.deleteID
-			a.profileList.deleteConfirm = false
-			a.profileList.deleteID = 0
-			return a, func() tea.Msg { return deleteProfileMsg{id: id} }
-		}
-
-	case "n":
-		if a.profileList.deleteConfirm {
-			a.profileList.deleteConfirm = false
-			a.profileList.deleteID = 0
-			return a, nil
-		}
-	}
-	var cmd tea.Cmd
-	a.profileList, cmd = a.profileList.Update(msg)
-	return a, cmd
 }
 
 func (a *AppModel) updateProfileEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		a.screen = a.profileEditReturn
-		if a.screen == screenHome {
-			a.screen = screenProfileList
-		}
 		a.profileEdit.errMsg = ""
 		return a, nil
 	case "ctrl+s":
@@ -663,20 +503,20 @@ func (a *AppModel) updateProfileEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a *AppModel) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		a.screen = a.confirmReturn
-		if a.screen == screenHome {
+		if a.confirmReturn == screenHome {
 			a.refreshHome()
 		}
+		a.screen = screenHome
 		return a, nil
 	case "enter":
 		if a.confirm.command == "" {
-			a.setErr("no command configured - press [c] on home screen")
+			a.setErr("no executor configured - set one in Engines tab")
 			a.screen = screenHome
 			return a, nil
 		}
 		args := a.confirm.Args()
 		if len(args) == 0 || args[0] == "" {
-			a.setErr("executor path not set - press [c] on home screen")
+			a.setErr("executor path not set - set one in Engines tab")
 			a.screen = screenHome
 			return a, nil
 		}
@@ -725,6 +565,18 @@ func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		a.server = sm
 		return a, cmd
+	case "y":
+		// Copy logs to clipboard
+		logText := strings.Join(a.server.logs, "\n")
+		bin, err := CopyToClipboard(logText)
+		if err != nil {
+			a.setErr("clipboard copy failed: " + err.Error())
+		} else if bin != "" {
+			a.setErr("logs copied to clipboard via " + bin)
+		} else {
+			a.setErr("no clipboard tool found (install wl-copy, xclip, or pbcopy)")
+		}
+		return a, nil
 	case "esc":
 		if a.server.stopped {
 			a.refreshHome()
@@ -737,32 +589,18 @@ func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.screen = screenHome
 		return a, cmd
 	}
-	// Pass scrolling keys to viewport.
+	// Pass scrolling keys to viewport
 	var cmd tea.Cmd
 	a.server, cmd = a.server.Update(msg)
 	return a, cmd
 }
 
-func (a *AppModel) updateExplore(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		a.scanDirs = a.explore.Dirs()
-		a.refreshHome()
-		entries, err := a.database.ListModels()
-		if err != nil {
-			a.setErr(err.Error())
-			return a, nil
-		}
-		a.modelList = a.modelList.SetEntries(entries)
-		a.screen = screenHome
-		return a, nil
-	}
-	var cmd tea.Cmd
-	a.explore, cmd = a.explore.Update(msg)
-	return a, cmd
-}
-
 func (a *AppModel) View() string {
+	// Minimum size warning
+	if a.width < MinWindowWidth || a.height < MinWindowHeight {
+		return RenderMinSizeWarning(a.width, a.height)
+	}
+
 	toast := ""
 	toastLines := 0
 	if a.errMsg != "" {
@@ -778,7 +616,17 @@ func (a *AppModel) View() string {
 			helpLines = 3
 		}
 	}
-	reservedH := toastLines + helpLines
+
+	// Global header is shown on every screen.
+	headerView := RenderHeader(a.width)
+	headerLines := 1
+
+	// Account for the "\n" separator before helpView.
+	sepLines := 0
+	if helpView != "" {
+		sepLines = 1
+	}
+	reservedH := headerLines + toastLines + helpLines + sepLines
 	innerH := max(a.height-reservedH, 5)
 
 	var body string
@@ -787,25 +635,21 @@ func (a *AppModel) View() string {
 		body = a.home.SetSize(a.width, innerH).View()
 	case screenModelList:
 		body = a.modelList.SetSize(a.width, innerH).View()
-	case screenProfileBrowser:
-		body = a.profileBrowser.SetSize(a.width, innerH).View()
-	case screenProfileList:
-		body = a.profileList.SetSize(a.width, innerH).View()
 	case screenProfileEdit:
 		body = a.profileEdit.SetSize(a.width, innerH).View()
 	case screenConfirm:
 		body = a.confirm.SetSize(a.width, innerH).View()
 	case screenServerRunning:
 		body = a.server.SetSize(a.width, innerH).View()
-	case screenExplore:
-		body = a.explore.SetSize(a.width, innerH).View()
-	case screenExecutor:
-		body = a.executor.SetSize(a.width, innerH).View()
 	case screenThemeSelector:
 		body = a.themeSelector.SetSize(a.width, innerH).View()
 	}
 
-	out := toast + body
+	// Final safety: active screen must not exceed the space reserved for it.
+	// This preserves fixed header/footer regions in all screens.
+	body = lipgloss.NewStyle().MaxHeight(innerH).Render(body)
+
+	out := headerView + "\n" + toast + body
 	if helpView != "" {
 		out += "\n" + helpView
 	}
@@ -818,29 +662,22 @@ func (a *AppModel) helpView() string {
 	var helpContent string
 	switch a.screen {
 	case screenHome:
-		helpContent = a.help.View(keys.Home)
+		switch a.home.activeTab {
+		case tabProfiles:
+			helpContent = a.help.View(keys.Profiles)
+		case tabModels:
+			helpContent = a.help.View(keys.Models)
+		case tabEngines:
+			helpContent = a.help.View(keys.Engines)
+		}
 	case screenModelList:
 		helpContent = a.help.View(keys.ModelList)
-	case screenProfileBrowser:
-		helpContent = a.help.View(keys.ProfileBrowser)
-	case screenProfileList:
-		helpContent = a.help.View(keys.ProfileList)
 	case screenConfirm:
 		helpContent = a.help.View(keys.Confirm)
 	case screenServerRunning:
 		helpContent = a.serverHelpView()
-	case screenExplore:
-		if a.explore.AddingBrowse() {
-			helpContent = a.help.View(keys.FileBrowser)
-		} else {
-			helpContent = a.help.View(keys.Explore)
-		}
-	case screenExecutor:
-		if a.executor.AddingBrowse() {
-			helpContent = a.help.View(keys.FileBrowser)
-		} else {
-			helpContent = a.help.View(keys.Executor)
-		}
+	case screenThemeSelector:
+		helpContent = a.help.View(keys.Theme)
 	default:
 		return ""
 	}
@@ -858,12 +695,12 @@ func (a *AppModel) helpView() string {
 func (a *AppModel) serverHelpView() string {
 	if a.showFullHelp {
 		if a.server.stopped {
-			return a.help.FullHelpView([][]key.Binding{{keys.Server.Restart, keys.Server.Clear}, {keys.Server.Back, keys.Server.Help}})
+			return a.help.FullHelpView([][]key.Binding{{keys.Server.Restart, keys.Server.Clear, keys.Server.Copy}, {keys.Server.Back, keys.Server.Help}})
 		}
-		return a.help.FullHelpView([][]key.Binding{{keys.Server.Stop, keys.Server.Clear}, {keys.Server.BackStop, keys.Server.Help}})
+		return a.help.FullHelpView([][]key.Binding{{keys.Server.Stop, keys.Server.Clear, keys.Server.Copy}, {keys.Server.BackStop, keys.Server.Help}})
 	}
 	if a.server.stopped {
-		return a.help.ShortHelpView([]key.Binding{keys.Server.Restart, keys.Server.Clear, keys.Server.Back, keys.Server.Help})
+		return a.help.ShortHelpView([]key.Binding{keys.Server.Restart, keys.Server.Clear, keys.Server.Copy, keys.Server.Back, keys.Server.Help})
 	}
-	return a.help.ShortHelpView([]key.Binding{keys.Server.Stop, keys.Server.Clear, keys.Server.BackStop, keys.Server.Help})
+	return a.help.ShortHelpView([]key.Binding{keys.Server.Stop, keys.Server.Clear, keys.Server.Copy, keys.Server.BackStop, keys.Server.Help})
 }

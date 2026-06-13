@@ -19,7 +19,7 @@ import (
 const stopGraceTimeout = 5 * time.Second
 
 var (
-	ansiEscape    = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	ansiEscape     = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	promptProgress = regexp.MustCompile(`prompt processing progress,.*progress = ([0-9.]+)`)
 )
 
@@ -114,6 +114,9 @@ func NewServerModel(args []string, profileName, modelName, modelType string, con
 
 	vpH := max(h-7, 5) // initial: 2 header lines; computeVPH() corrects once metrics load
 	vp := viewport.New(w-4, vpH)
+	// Use bubbles/viewport native horizontal scrolling instead of drawing a
+	// fake scrollbar. Left/right now actually scroll long log lines.
+	vp.SetHorizontalStep(8)
 	vp.Style = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colorPrimary)
