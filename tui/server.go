@@ -1,31 +1,22 @@
 package tui
 
 import (
-	"bufio"
 	"fmt"
-	"io"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/dipankardas011/infai/runner"
 )
 
 const stopGraceTimeout = 5 * time.Second
 
-var (
-	ansiEscape     = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-	promptProgress = regexp.MustCompile(`prompt processing progress,.*progress = ([0-9.]+)`)
-)
-
-func stripAnsi(s string) string {
-	return ansiEscape.ReplaceAllString(s, "")
-}
+var promptProgress = regexp.MustCompile(`prompt processing progress,.*progress = ([0-9.]+)`)
 
 // Tea messages for server I/O.
 type logLineMsg string
@@ -47,10 +38,10 @@ const maxLogLines = 10000
 
 // ServerModel is screen 5 — shows live llama-server output.
 type ServerModel struct {
-	cmd             *exec.Cmd
+	process         *runner.ServerProcess
 	launchArgs      []string
-	logCh           chan string
-	exitCh          chan error
+	logCh           <-chan string
+	exitCh          <-chan error
 	logs            []string
 	vp              viewport.Model
 	profileName     string
@@ -82,37 +73,14 @@ type ServerModel struct {
 
 // NewServerModel starts the server process and returns the model + initial listen cmd.
 func NewServerModel(args []string, profileName, modelName, modelType string, contextSize int, host string, port, w, h int) (ServerModel, tea.Cmd, error) {
-	cmd := exec.Command(args[0], args[1:]...)
-
-	pr, pw := io.Pipe()
-	cmd.Stdout = pw
-	cmd.Stderr = pw
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	if err := cmd.Start(); err != nil {
+	process, err := runner.StartServer(args)
+	if err != nil {
 		return ServerModel{}, nil, err
 	}
+	logCh := process.Logs()
+	exitCh := process.Exits()
 
-	logCh := make(chan string, 256)
-	exitCh := make(chan error, 1)
-
-	// goroutine: read lines → channel
-	go func() {
-		sc := bufio.NewScanner(pr)
-		for sc.Scan() {
-			logCh <- stripAnsi(sc.Text())
-		}
-		close(logCh)
-	}()
-
-	// goroutine: wait for exit → close pipe, capture err
-	go func() {
-		err := cmd.Wait()
-		pw.Close()
-		exitCh <- err
-	}()
-
-	vpH := max(h-7, 5) // initial: 2 header lines; computeVPH() corrects once metrics load
+	vpH := max(h-7, 1) // initial: 2 header lines; computeVPH() corrects once metrics load
 	vp := viewport.New(w-4, vpH)
 	// Use bubbles/viewport native horizontal scrolling instead of drawing a
 	// fake scrollbar. Left/right now actually scroll long log lines.
@@ -122,8 +90,8 @@ func NewServerModel(args []string, profileName, modelName, modelType string, con
 		BorderForeground(colorPrimary)
 
 	m := ServerModel{
-		cmd:         cmd,
-		launchArgs:  append([]string(nil), args...),
+		process:     process,
+		launchArgs:  process.Args(),
 		logCh:       logCh,
 		exitCh:      exitCh,
 		vp:          vp,
@@ -133,12 +101,12 @@ func NewServerModel(args []string, profileName, modelName, modelType string, con
 		contextSize: contextSize,
 		host:        host,
 		port:        port,
-		startedAt:   time.Now(),
+		startedAt:   process.StartedAt(),
 		width:       w,
 		height:      h,
 		initialized: true,
 	}
-	return m, tea.Batch(listenForLog(logCh, exitCh), getMetricsCmd(cmd.Process.Pid), getLiveMetricsCmd(host, port)), nil
+	return m, tea.Batch(listenForLog(logCh, exitCh), getMetricsCmd(process.PID()), getLiveMetricsCmd(host, port)), nil
 }
 
 func (s ServerModel) HandleLogLine(line string) (ServerModel, tea.Cmd) {
@@ -204,19 +172,19 @@ func (s ServerModel) Restart() (ServerModel, tea.Cmd, error) {
 }
 
 func (s ServerModel) Stop() (ServerModel, tea.Cmd) {
-	if s.cmd == nil || s.cmd.Process == nil || s.stopped || s.stopping {
+	if s.process == nil || s.process.PID() == 0 || s.stopped || s.stopping {
 		return s, nil
 	}
 	s.stopping = true
-	syscall.Kill(-s.cmd.Process.Pid, syscall.SIGTERM)
+	_ = s.process.Stop()
 	cmd := tea.Tick(stopGraceTimeout, func(time.Time) tea.Msg { return stopTimeoutMsg{} })
 	return s, cmd
 }
 
 func (s ServerModel) ForceKill() ServerModel {
-	if s.cmd != nil && s.cmd.Process != nil && !s.stopped {
+	if s.process != nil && s.process.PID() != 0 && !s.stopped {
 		s.forceKilled = true
-		syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+		_ = s.process.ForceKill()
 	}
 	return s
 }
@@ -241,7 +209,7 @@ func (s ServerModel) computeVPH() int {
 			lines++ // prefill line
 		}
 	}
-	return max(s.height-lines-5, 5)
+	return max(s.height-lines-5, 1)
 }
 
 func (s ServerModel) SetSize(w, h int) ServerModel {
@@ -280,10 +248,10 @@ func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 		if s.stopped {
 			return s, nil
 		}
-		if s.cmd == nil || s.cmd.Process == nil {
+		if s.process == nil || s.process.PID() == 0 {
 			return s, nil
 		}
-		return s, getMetricsCmd(s.cmd.Process.Pid)
+		return s, getMetricsCmd(s.process.PID())
 	case liveMetricsMsg:
 		if s.stopped {
 			return s, nil
@@ -338,8 +306,8 @@ func (s ServerModel) View() string {
 		status = dim.Render(label)
 	}
 	pid := ""
-	if s.cmd != nil && s.cmd.Process != nil {
-		pid = dim.Render(fmt.Sprintf("  pid:%d", s.cmd.Process.Pid))
+	if s.process != nil && s.process.PID() != 0 {
+		pid = dim.Render(fmt.Sprintf("  pid:%d", s.process.PID()))
 	}
 	uptime := ""
 	if !s.startedAt.IsZero() {

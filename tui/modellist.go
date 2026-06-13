@@ -73,7 +73,7 @@ func NewModelListModel(entries []model.ModelEntry, w, h int) ModelListModel {
 	for i, e := range entries {
 		items[i] = modelItem{entry: e}
 	}
-	l := list.New(items, modelDelegate{}, w, h-4)
+	l := list.New(items, modelDelegate{}, max(w-8, 20), max(h-6, 1))
 	l.Title = "Models"
 	l.Styles.Title = styleTitle
 	l.SetShowStatusBar(false)
@@ -85,10 +85,13 @@ func NewModelListModel(entries []model.ModelEntry, w, h int) ModelListModel {
 func (m ModelListModel) SetSize(w, h int) ModelListModel {
 	m.width, m.height = w, h
 	listW := 60
-	if w < 60 {
-		listW = w - 4
+	if w < 68 {
+		listW = w - 8
 	}
-	m.list.SetSize(listW, h-8)
+	if listW < 20 {
+		listW = 20
+	}
+	m.list.SetSize(listW, max(h-6, 1))
 	return m
 }
 
@@ -128,7 +131,8 @@ func (m ModelListModel) View() string {
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Muted).
-		Padding(1, 2)
+		Padding(1, 2).
+		MaxHeight(max(m.height, 1))
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
 }
@@ -152,7 +156,8 @@ func (m ModelListModel) emptyView() string {
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Muted).
-		Padding(1, 2)
+		Padding(1, 2).
+		MaxHeight(max(m.height, 1))
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
 }

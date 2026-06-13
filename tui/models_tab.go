@@ -10,58 +10,50 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/dipankardas011/infai/db"
-	"github.com/dipankardas011/infai/scanner"
+	"github.com/dipankardas011/infai/backend"
 )
 
-// ModelsTabModel manages scan directory listing in the Models tab.
+// ModelsTabModel is presentation for scan directory management.
+// DB/scanner work is delegated to backend.Service.
 type ModelsTabModel struct {
-	database  *db.DB
+	service   *backend.Service
 	dirs      []string
 	modelCnt  int
 	cursor    int
 	scrollOff int
 
-	// Add folder file browser
 	addingBrowse bool
 	fileBrowser  FileBrowserModel
 
-	// Sync state
-	syncing  bool
-	spinner  spinner.Model
-	syncChan chan syncRequest
+	syncing bool
+	spinner spinner.Model
 
 	errMsg string
 	width  int
 	height int
 }
 
-// Messages
 type modelsTabSyncDoneMsg struct {
 	removed, updated int
 	err              error
 }
 
-func NewModelsTabModel(database *db.DB, dirs []string, w, h int) ModelsTabModel {
-	models, _ := database.ListModels()
-
+func NewModelsTabModel(service *backend.Service, dirs []string, w, h int) ModelsTabModel {
+	models, _ := service.ListModels()
 	cp := make([]string, len(dirs))
 	copy(cp, dirs)
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 
-	m := ModelsTabModel{
-		database: database,
+	return ModelsTabModel{
+		service:  service,
 		dirs:     cp,
 		modelCnt: len(models),
 		spinner:  s,
 		width:    w,
 		height:   h,
-		syncChan: make(chan syncRequest),
 	}
-	go m.syncWorker()
-	return m
 }
 
 func (m ModelsTabModel) SetSize(w, h int) ModelsTabModel {
@@ -71,39 +63,7 @@ func (m ModelsTabModel) SetSize(w, h int) ModelsTabModel {
 	return m
 }
 
-func (m *ModelsTabModel) Close() {
-	if m.syncChan != nil {
-		close(m.syncChan)
-		m.syncChan = nil
-	}
-}
-
-func (m ModelsTabModel) syncWorker() {
-	for req := range m.syncChan {
-		entries, err := scanner.Scan(req.folders)
-		if err != nil {
-			req.result <- syncResult{err: fmt.Errorf("scan: %v", err)}
-			continue
-		}
-		var metaErr error
-		for i := range entries {
-			if err := scanner.LoadModelMetadata(m.database, &entries[i]); err != nil {
-				metaErr = fmt.Errorf("load metadata: %v", err)
-				break
-			}
-		}
-		if metaErr != nil {
-			req.result <- syncResult{err: metaErr}
-			continue
-		}
-		removed, updated, err := m.database.Sync(entries)
-		if err != nil {
-			req.result <- syncResult{err: fmt.Errorf("sync: %v", err)}
-			continue
-		}
-		req.result <- syncResult{removed: removed, updated: updated}
-	}
-}
+func (m *ModelsTabModel) Close() {}
 
 func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 	if m.addingBrowse {
@@ -121,14 +81,13 @@ func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 			if fm.Path == "" {
 				return m, nil
 			}
-			// Check if already added
 			for _, d := range m.dirs {
 				if d == fm.Path {
 					m.errMsg = styleError.Render("already in list")
 					return m, nil
 				}
 			}
-			if err := m.database.AddScanDir(fm.Path); err != nil {
+			if err := m.service.AddScanDir(fm.Path); err != nil {
 				m.errMsg = styleError.Render(err.Error())
 				return m, nil
 			}
@@ -164,7 +123,7 @@ func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 				break
 			}
 			path := m.dirs[m.cursor]
-			if err := m.database.RemoveScanDir(path); err != nil {
+			if err := m.service.RemoveScanDir(path); err != nil {
 				m.errMsg = styleError.Render(err.Error())
 				break
 			}
@@ -172,26 +131,22 @@ func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 			if m.cursor >= len(m.dirs) && m.cursor > 0 {
 				m.cursor--
 			}
-			m.errMsg = styleSuccess.Render("✓ removed")
-			// Refresh model count
-			models, _ := m.database.ListModels()
+			models, _ := m.service.ListModels()
 			m.modelCnt = len(models)
+			m.errMsg = styleSuccess.Render("✓ removed")
 		case "s":
 			if m.syncing || len(m.dirs) == 0 {
 				break
 			}
-			folders := make([]string, len(m.dirs))
-			copy(folders, m.dirs)
-			result := make(chan syncResult, 1)
-			ch := m.syncChan
+			folders := append([]string(nil), m.dirs...)
+			service := m.service
 			m.syncing = true
 			m.errMsg = ""
 			return m, tea.Batch(
 				m.spinner.Tick,
 				func() tea.Msg {
-					ch <- syncRequest{folders: folders, result: result}
-					res := <-result
-					return modelsTabSyncDoneMsg{removed: res.removed, updated: res.updated, err: res.err}
+					res, err := service.SyncModels(folders)
+					return modelsTabSyncDoneMsg{removed: res.Removed, updated: res.Updated, err: err}
 				},
 			)
 		}
@@ -201,7 +156,7 @@ func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 			m.errMsg = styleError.Render(msg.err.Error())
 		} else {
 			m.errMsg = styleSuccess.Render(fmt.Sprintf("✓ synced: %d updated, %d removed", msg.updated, msg.removed))
-			models, _ := m.database.ListModels()
+			models, _ := m.service.ListModels()
 			m.modelCnt = len(models)
 		}
 	case spinner.TickMsg:
@@ -212,8 +167,10 @@ func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 		}
 	}
 
-	// Clamp scroll
 	maxVisible := m.height - 8
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
 	if m.cursor < m.scrollOff {
 		m.scrollOff = m.cursor
 	} else if m.cursor >= m.scrollOff+maxVisible {
@@ -228,7 +185,6 @@ func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 
 func (m ModelsTabModel) View() string {
 	t := ActiveTheme
-
 	if m.addingBrowse {
 		return m.fileBrowser.View()
 	}
@@ -240,14 +196,12 @@ func (m ModelsTabModel) View() string {
 
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Model Directories") + "\n")
-
 	if m.modelCnt > 0 {
 		sb.WriteString(mutedStyle.Render(fmt.Sprintf("  %d models discovered\n", m.modelCnt)))
 	}
 	sb.WriteString("\n")
 
 	maxVisible := max(m.height-10, 3)
-
 	if len(m.dirs) == 0 {
 		sb.WriteString(mutedStyle.Render("  No folders configured.") + "\n")
 		sb.WriteString(mutedStyle.Render("  Press [a] to add a scan folder.") + "\n")
@@ -256,7 +210,6 @@ func (m ModelsTabModel) View() string {
 		if end > len(m.dirs) {
 			end = len(m.dirs)
 		}
-
 		for i := m.scrollOff; i < end; i++ {
 			d := m.dirs[i]
 			prefix := "  "
@@ -265,12 +218,8 @@ func (m ModelsTabModel) View() string {
 				prefix = selStyle.Render("▶ ")
 				style = successStyle
 			}
-			// Truncate long paths
 			display := d
-			availW := m.width - 10
-			if availW < 10 {
-				availW = 10
-			}
+			availW := max(m.width-10, 10)
 			if len(display) > availW {
 				display = "…" + display[len(display)-(availW-3):]
 			}
@@ -279,23 +228,18 @@ func (m ModelsTabModel) View() string {
 	}
 
 	sb.WriteString("\n")
-
 	if m.syncing {
 		sb.WriteString(styleSelected.Render(m.spinner.View()+" syncing...") + "\n")
 	} else if m.errMsg != "" {
 		sb.WriteString(m.errMsg + "\n")
 	}
 
-	boxW := m.width - 4
-	if boxW < 30 {
-		boxW = 30
-	}
-
-	boxStyle := lipgloss.NewStyle().
+	boxW := max(m.width-4, 30)
+	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Muted).
 		Padding(1, 2).
-		Width(boxW)
-
-	return boxStyle.Render(sb.String())
+		Width(boxW).
+		MaxHeight(max(m.height, 1)).
+		Render(sb.String())
 }

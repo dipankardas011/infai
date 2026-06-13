@@ -4,6 +4,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/dipankardas011/infai/backend"
 	"github.com/dipankardas011/infai/db"
 	"github.com/dipankardas011/infai/model"
 )
@@ -19,6 +20,7 @@ var tabNames = []string{"Profiles", "Models", "Engines"}
 // HomeModel is the tabbed home screen with 3 tabs.
 type HomeModel struct {
 	activeTab int
+	service   *backend.Service
 
 	profilesTab ProfilesTabModel
 	modelsTab   ModelsTabModel
@@ -29,7 +31,7 @@ type HomeModel struct {
 }
 
 func NewHomeModel(
-	database *db.DB,
+	service *backend.Service,
 	serverBin string,
 	scanDirs []string,
 	entries []model.ModelEntry,
@@ -39,9 +41,10 @@ func NewHomeModel(
 ) HomeModel {
 	return HomeModel{
 		activeTab:   tabProfiles,
+		service:     service,
 		profilesTab: NewProfilesTabModel(recents, allProfiles, w, h),
-		modelsTab:   NewModelsTabModel(database, scanDirs, w, h),
-		enginesTab:  NewEnginesTabModel(database, serverBin, w, h),
+		modelsTab:   NewModelsTabModel(service, scanDirs, w, h),
+		enginesTab:  NewEnginesTabModel(service, serverBin, w, h),
 		width:       w,
 		height:      h,
 	}
@@ -61,15 +64,15 @@ func (m HomeModel) RefreshProfiles(recents []db.RecentEntry, all []db.ProfileEnt
 	return m
 }
 
-func (m HomeModel) RefreshModels(dirs []string, db2 *db.DB) HomeModel {
-	models, _ := db2.ListModels()
-	m.modelsTab = NewModelsTabModel(db2, dirs, m.width, m.height)
+func (m HomeModel) RefreshModels(dirs []string) HomeModel {
+	models, _ := m.service.ListModels()
+	m.modelsTab = NewModelsTabModel(m.service, dirs, m.width, m.height)
 	m.modelsTab.modelCnt = len(models)
 	return m
 }
 
-func (m HomeModel) RefreshEngines(serverBin string, db2 *db.DB) HomeModel {
-	m.enginesTab = NewEnginesTabModel(db2, serverBin, m.width, m.height)
+func (m HomeModel) RefreshEngines(serverBin string) HomeModel {
+	m.enginesTab = NewEnginesTabModel(m.service, serverBin, m.width, m.height)
 	return m
 }
 

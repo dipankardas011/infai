@@ -206,7 +206,8 @@ func (em ProfileEditModel) SetSize(w, h int) ProfileEditModel {
 	}
 	em.width = w
 	em.height = h
-	em.visibleRows = h - 12
+	em.visibleRows = em.computeVisibleRows()
+	em.scrollTo(em.focused)
 	return em
 }
 
@@ -268,27 +269,79 @@ func (em ProfileEditModel) Update(msg tea.Msg) (ProfileEditModel, tea.Cmd) {
 	return em, nil
 }
 
+func (em ProfileEditModel) computeVisibleRows() int {
+	// AppModel has already reserved global header/footer/help. This screen owns
+	// em.height lines. Border+padding consume 4 lines. Inside the box we keep:
+	// title+blank (2), blank+help (2), optional error (1). Everything else is
+	// the scrollable field list.
+	overhead := 8
+	if em.errMsg != "" {
+		overhead++
+	}
+	rows := em.height - overhead
+	if rows < 1 {
+		rows = 1
+	}
+	if rows > len(em.fields) {
+		rows = len(em.fields)
+	}
+	return rows
+}
+
 func (em *ProfileEditModel) scrollTo(idx int) {
 	if em.visibleRows <= 0 {
-		return
+		em.visibleRows = em.computeVisibleRows()
 	}
 	if idx < em.viewOffset {
 		em.viewOffset = idx
 	} else if idx >= em.viewOffset+em.visibleRows {
 		em.viewOffset = idx - em.visibleRows + 1
 	}
+	if em.viewOffset < 0 {
+		em.viewOffset = 0
+	}
+	maxOffset := len(em.fields) - em.visibleRows
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if em.viewOffset > maxOffset {
+		em.viewOffset = maxOffset
+	}
 }
 
 func (em ProfileEditModel) View() string {
 	t := ActiveTheme
-	title := styleTitle.Render("Edit Profile — " + em.modelEntry.DisplayName)
+	visibleRows := em.computeVisibleRows()
+	if visibleRows != em.visibleRows {
+		em.visibleRows = visibleRows
+		em.scrollTo(em.focused)
+	}
+
+	boxW := em.width - 4
+	if boxW > 96 {
+		boxW = 96
+	}
+	if boxW < 44 {
+		boxW = max(em.width-2, 20)
+	}
+	innerW := max(boxW-6, 20) // border + horizontal padding
+	labelW := 18
+	if innerW < 58 {
+		labelW = 14
+	}
+	valueW := innerW - labelW - 6
+	if valueW < 10 {
+		valueW = 10
+	}
+
+	title := styleTitle.Render("Edit Profile — " + truncatePath(em.modelEntry.DisplayName, max(innerW-18, 12)))
 	var rows []string
 
-	end := min(em.viewOffset+em.visibleRows, len(em.fields))
+	end := min(em.viewOffset+visibleRows, len(em.fields))
 
 	for i := em.viewOffset; i < end; i++ {
 		f := em.fields[i]
-		label := styleLabel.Render(f.label)
+		label := lipgloss.NewStyle().Foreground(t.Muted).Width(labelW).Align(lipgloss.Right).Render(f.label)
 		focused := i == em.focused
 
 		var value string
@@ -325,6 +378,8 @@ func (em ProfileEditModel) View() string {
 			}
 
 		default:
+			// Keep long fields (especially Extra Flags) usable at any terminal width.
+			f.input.Width = valueW
 			value = f.input.View()
 		}
 
@@ -336,8 +391,8 @@ func (em ProfileEditModel) View() string {
 	}
 
 	scrollHint := ""
-	if len(em.fields) > em.visibleRows {
-		scrollHint = " " + styleMuted.Render(fmt.Sprintf("(%d/%d)", em.focused+1, len(em.fields)))
+	if len(em.fields) > visibleRows {
+		scrollHint = " " + styleMuted.Render(fmt.Sprintf("field %d/%d", em.focused+1, len(em.fields)))
 	}
 
 	errLine := ""
@@ -349,12 +404,15 @@ func (em ProfileEditModel) View() string {
 
 	content := title + "\n\n" + strings.Join(rows, "\n") + scrollHint + errLine + "\n\n" + help
 
-	boxStyle := lipgloss.NewStyle().
+	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Muted).
-		Padding(1, 2)
+		Padding(1, 2).
+		Width(boxW).
+		MaxHeight(max(em.height, 1)).
+		Render(content)
 
-	return lipgloss.Place(em.width, em.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
+	return lipgloss.Place(em.width, em.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 // ToProfile extracts and validates form state into a Profile.

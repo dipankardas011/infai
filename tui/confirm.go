@@ -91,7 +91,8 @@ func (c ConfirmModel) View() string {
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Muted).
-		Padding(1, 2)
+		Padding(1, 2).
+		MaxHeight(max(c.height, 1))
 
 	return lipgloss.Place(c.width, c.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
 }

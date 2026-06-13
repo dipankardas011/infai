@@ -1,9 +1,6 @@
 package tui
 
 import (
-	"database/sql"
-	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -12,10 +9,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/dipankardas011/infai/backend"
 	"github.com/dipankardas011/infai/db"
-	"github.com/dipankardas011/infai/launcher"
 	"github.com/dipankardas011/infai/model"
-	"github.com/dipankardas011/infai/scanner"
 )
 
 type toastTickMsg struct{}
@@ -57,7 +53,7 @@ type syncDoneMsg struct {
 // AppModel is the root bubbletea model.
 type AppModel struct {
 	screen       screenKind
-	database     *db.DB
+	service      *backend.Service
 	serverBin    string
 	scanDirs     []string
 	width        int
@@ -85,34 +81,32 @@ type AppModel struct {
 }
 
 func NewApp(database *db.DB, serverBin string, scanDirs []string, entries []model.ModelEntry, w, h int) AppModel {
+	service := backend.New(database)
 	var startupErrs []string
 
-	recent, err := database.ListRecents(3)
+	data, err := service.LoadHomeData(serverBin)
 	if err != nil {
-		startupErrs = append(startupErrs, fmt.Sprintf("failed to load recents: %v", err))
+		startupErrs = append(startupErrs, err.Error())
 	}
-
-	dbBin, err := database.GetDefaultExecutorPath()
-	if err == nil && dbBin != "" {
-		serverBin = dbBin
-	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		startupErrs = append(startupErrs, fmt.Sprintf("failed to load executor: %v", err))
+	if data.ServerBin != "" {
+		serverBin = data.ServerBin
 	}
-
-	profiles, err := database.ListAllProfiles()
-	if err != nil {
-		startupErrs = append(startupErrs, fmt.Sprintf("failed to load profiles: %v", err))
+	if len(data.ScanDirs) > 0 {
+		scanDirs = data.ScanDirs
+	}
+	if len(data.Models) > 0 {
+		entries = data.Models
 	}
 
 	// Load theme from settings
-	if themeName, err := database.GetSetting("theme"); err == nil && themeName != "" {
+	if themeName, err := service.GetSetting("theme"); err == nil && themeName != "" {
 		SetTheme(themeName)
 	}
 
-	home := NewHomeModel(database, serverBin, scanDirs, entries, recent, profiles, w, h)
+	home := NewHomeModel(service, serverBin, scanDirs, entries, data.Recents, data.Profiles, w, h)
 
 	return AppModel{
-		database:      database,
+		service:       service,
 		serverBin:     serverBin,
 		scanDirs:      scanDirs,
 		width:         w,
@@ -133,21 +127,22 @@ func (a *AppModel) setErr(msg string) {
 }
 
 func (a *AppModel) refreshHome() {
-	recents, err := a.database.ListRecents(3)
+	data, err := a.service.LoadHomeData(a.serverBin)
 	if err != nil {
 		a.setErr(err.Error())
-		return
 	}
-	profiles, err := a.database.ListAllProfiles()
-	if err != nil {
-		a.setErr(err.Error())
-		return
+	if data.ServerBin != "" {
+		a.serverBin = data.ServerBin
 	}
-	a.home = a.home.RefreshProfiles(recents, profiles)
-	a.home = a.home.RefreshModels(a.scanDirs, a.database)
-	a.home = a.home.RefreshEngines(a.serverBin, a.database)
-	// Sync serverBin from engines tab (may have been updated)
-	a.serverBin = a.home.EffectiveServerBin()
+	a.scanDirs = data.ScanDirs
+	a.modelList = a.modelList.SetEntries(data.Models)
+	a.home = a.home.RefreshProfiles(data.Recents, data.Profiles)
+	a.home = a.home.RefreshModels(a.scanDirs)
+	a.home = a.home.RefreshEngines(a.serverBin)
+	// Sync serverBin from engines tab (may have been updated in UI state).
+	if effective := a.home.EffectiveServerBin(); effective != "" {
+		a.serverBin = effective
+	}
 }
 
 func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -191,12 +186,12 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.selectedModel = msg.entry.Model
 		a.selectedProfile = msg.entry.Profile
 		// Launch directly — no confirm screen
-		args := launcher.BuildArgs(a.serverBin, msg.entry.Model, msg.entry.Profile)
-		if len(args) == 0 || args[0] == "" {
-			a.setErr("executor path not set — set one in Engines tab")
+		args, err := a.service.BuildLaunchArgs(a.serverBin, msg.entry.Model, msg.entry.Profile)
+		if err != nil {
+			a.setErr(err.Error())
 			return a, nil
 		}
-		_ = a.database.MarkRecent(a.selectedModel.ID, a.selectedProfile.ID)
+		_ = a.service.MarkRecent(a.selectedModel.ID, a.selectedProfile.ID)
 		sm, cmd, err := NewServerModel(
 			args,
 			a.selectedProfile.Name,
@@ -221,7 +216,7 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.openProfileModelPicker(screenHome)
 
 	case profilesTabEditProfileMsg:
-		profile, err := a.database.GetProfile(msg.entry.Profile.ID)
+		profile, err := a.service.GetProfile(msg.entry.Profile.ID)
 		if err != nil {
 			a.setErr(err.Error())
 			return a, nil
@@ -234,7 +229,7 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case profilesTabDeleteProfileMsg:
-		if err := a.database.DeleteProfile(msg.id); err != nil {
+		if err := a.service.DeleteProfile(msg.id); err != nil {
 			a.setErr(err.Error())
 			return a, nil
 		}
@@ -246,29 +241,34 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setErr(msg.err.Error())
 			return a, nil
 		}
-		// Refresh scanned models
-		entries, _ := a.database.ListModels()
+		entries, _ := a.service.ListModels()
+		a.modelList = a.modelList.SetEntries(entries)
+		a.refreshHome()
+		return a, nil
+
+	case syncDoneMsg:
+		if msg.err != nil {
+			a.setErr(msg.err.Error())
+			return a, nil
+		}
+		entries, _ := a.service.ListModels()
 		a.modelList = a.modelList.SetEntries(entries)
 		a.refreshHome()
 		return a, nil
 
 	case scanDoneMsg:
+		// Legacy message kept for compatibility with older screens. New scan/sync
+		// workflows should go through backend.Service.
 		if msg.err != nil {
 			a.setErr(msg.err.Error())
 			return a, nil
 		}
-		for i := range msg.entries {
-			if err := a.database.UpsertModel(&msg.entries[i]); err != nil {
-				a.setErr(err.Error())
-			}
-		}
-		a.modelList = a.modelList.SetEntries(msg.entries)
 		a.refreshHome()
 		return a, nil
 
 	case saveProfileMsg:
 		p := msg.profile
-		if err := a.database.UpsertProfile(&p); err != nil {
+		if err := a.service.SaveProfile(&p); err != nil {
 			a.setErr(err.Error())
 			return a, nil
 		}
@@ -277,7 +277,7 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case deleteProfileMsg:
-		if err := a.database.DeleteProfile(msg.id); err != nil {
+		if err := a.service.DeleteProfile(msg.id); err != nil {
 			a.setErr(err.Error())
 			return a, nil
 		}
@@ -415,7 +415,7 @@ func (a *AppModel) updateThemeSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		theme := a.themeSelector.SelectedTheme()
 		SetTheme(theme.Name)
-		a.database.SetSetting("theme", theme.Name)
+		a.service.SetSetting("theme", theme.Name)
 		a.screen = screenHome
 		return a, nil
 	}
@@ -454,9 +454,11 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Browsing model list directly
 		}
 	case "r":
+		service := a.service
+		folders := append([]string(nil), a.scanDirs...)
 		return a, func() tea.Msg {
-			entries, err := scanner.Scan(a.scanDirs)
-			return scanDoneMsg{entries: entries, err: err}
+			res, err := service.SyncModels(folders)
+			return syncDoneMsg{removed: res.Removed, updated: res.Updated, err: err}
 		}
 	}
 	var cmd tea.Cmd
@@ -465,7 +467,7 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *AppModel) openProfileModelPicker(returnScreen screenKind) (tea.Model, tea.Cmd) {
-	entries, err := a.database.ListModels()
+	entries, err := a.service.ListModels()
 	if err != nil {
 		a.setErr(err.Error())
 		return a, nil
@@ -520,7 +522,7 @@ func (a *AppModel) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.screen = screenHome
 			return a, nil
 		}
-		_ = a.database.MarkRecent(a.selectedModel.ID, a.selectedProfile.ID)
+		_ = a.service.MarkRecent(a.selectedModel.ID, a.selectedProfile.ID)
 		sm, cmd, err := NewServerModel(
 			args,
 			a.selectedProfile.Name,

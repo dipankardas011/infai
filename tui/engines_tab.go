@@ -8,18 +8,19 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/dipankardas011/infai/backend"
 	"github.com/dipankardas011/infai/db"
 )
 
-// EnginesTabModel manages inference engine executor configuration.
+// EnginesTabModel presents inference engine executor configuration.
+// Persistence is delegated to backend.Service.
 type EnginesTabModel struct {
-	database  *db.DB
+	service   *backend.Service
 	executors []db.Executor
 	cursor    int
 	detected  string
-	path      string // current effective path
+	path      string
 
-	// Add file browser for picking new executor
 	addingBrowse bool
 	fileBrowser  FileBrowserModel
 
@@ -28,21 +29,16 @@ type EnginesTabModel struct {
 	height int
 }
 
-func NewEnginesTabModel(database *db.DB, currentPath string, w, h int) EnginesTabModel {
-	executors, _ := database.ListExecutors()
-
+func NewEnginesTabModel(service *backend.Service, currentPath string, w, h int) EnginesTabModel {
+	executors, _ := service.ListExecutors()
 	detected := ""
 	if p, err := exec.LookPath("llama-server"); err == nil {
 		detected = p
 	}
-
-	// Determine effective path
 	path := currentPath
 	if path == "" && detected != "" {
 		path = detected
 	}
-
-	// Find cursor on default
 	curIdx := 0
 	for i, e := range executors {
 		if e.IsDefault {
@@ -50,9 +46,8 @@ func NewEnginesTabModel(database *db.DB, currentPath string, w, h int) EnginesTa
 			break
 		}
 	}
-
 	return EnginesTabModel{
-		database:  database,
+		service:   service,
 		executors: executors,
 		cursor:    curIdx,
 		detected:  detected,
@@ -69,9 +64,7 @@ func (m EnginesTabModel) SetSize(w, h int) EnginesTabModel {
 	return m
 }
 
-func (m EnginesTabModel) EffectivePath() string {
-	return m.path
-}
+func (m EnginesTabModel) EffectivePath() string { return m.path }
 
 type enginesTabSavedMsg struct{ Path string }
 
@@ -91,25 +84,17 @@ func (m EnginesTabModel) Update(msg tea.Msg) (EnginesTabModel, tea.Cmd) {
 			if fm.Path == "" {
 				return m, nil
 			}
-
 			absPath, err := expandPath(fm.Path)
 			if err != nil {
 				m.errMsg = styleError.Render("bad path: " + err.Error())
 				return m, nil
 			}
-
 			isDefault := len(m.executors) == 0
-			err = m.database.UpsertExecutor(db.Executor{
-				ID:        "llamacpp",
-				Path:      absPath,
-				IsDefault: isDefault,
-			})
-			if err != nil {
+			if err := m.service.SaveExecutor(db.Executor{ID: "llamacpp", Path: absPath, IsDefault: isDefault}); err != nil {
 				m.errMsg = styleError.Render(err.Error())
 				return m, nil
 			}
-
-			m.executors, _ = m.database.ListExecutors()
+			m.executors, _ = m.service.ListExecutors()
 			m.path = absPath
 			m.errMsg = styleSuccess.Render("✓ executor configured")
 		}
@@ -127,19 +112,21 @@ func (m EnginesTabModel) Update(msg tea.Msg) (EnginesTabModel, tea.Cmd) {
 		case "enter":
 			if len(m.executors) > 0 && m.cursor < len(m.executors) {
 				id := m.executors[m.cursor].ID
-				_ = m.database.SetDefaultExecutor(id)
-				m.executors, _ = m.database.ListExecutors()
+				if err := m.service.SetDefaultExecutor(id); err != nil {
+					m.errMsg = styleError.Render(err.Error())
+					return m, nil
+				}
+				m.executors, _ = m.service.ListExecutors()
 				m.path = m.executors[m.cursor].Path
 				m.errMsg = styleSuccess.Render("✓ default set")
 			}
 		case "d":
 			if m.detected != "" {
-				_ = m.database.UpsertExecutor(db.Executor{
-					ID:        "llamacpp",
-					Path:      m.detected,
-					IsDefault: true,
-				})
-				m.executors, _ = m.database.ListExecutors()
+				if err := m.service.SaveExecutor(db.Executor{ID: "llamacpp", Path: m.detected, IsDefault: true}); err != nil {
+					m.errMsg = styleError.Render(err.Error())
+					return m, nil
+				}
+				m.executors, _ = m.service.ListExecutors()
 				m.path = m.detected
 				m.errMsg = styleSuccess.Render("✓ using system llama-server")
 			} else {
@@ -164,7 +151,6 @@ func (m EnginesTabModel) SaveAndExit() (EnginesTabModel, tea.Cmd) {
 
 func (m EnginesTabModel) View() string {
 	t := ActiveTheme
-
 	if m.addingBrowse {
 		return m.fileBrowser.View()
 	}
@@ -176,16 +162,12 @@ func (m EnginesTabModel) View() string {
 
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Inference Engine") + "\n\n")
-
-	// Show current path
 	sb.WriteString(mutedStyle.Render("  Executor: ") + successStyle.Render(m.path) + "\n")
-
 	if m.detected != "" && m.path != m.detected {
 		sb.WriteString(mutedStyle.Render("  Detected: ") + mutedStyle.Render(m.detected) + "\n")
 	} else if m.detected == "" && m.path == "" {
 		sb.WriteString(mutedStyle.Render("  Not found in PATH") + "\n")
 	}
-
 	sb.WriteString("\n")
 
 	if len(m.executors) > 0 {
@@ -205,14 +187,11 @@ func (m EnginesTabModel) View() string {
 		}
 		sb.WriteString("\n")
 	}
-
 	sb.WriteString(mutedStyle.Render("  a: add  d: auto-detect  enter: set default") + "\n")
-
 	if m.errMsg != "" {
 		sb.WriteString("\n" + m.errMsg)
 	}
 
-	content := sb.String()
 	boxW := 60
 	if m.width < 64 {
 		boxW = m.width - 8
@@ -220,13 +199,12 @@ func (m EnginesTabModel) View() string {
 	if boxW < 30 {
 		boxW = 30
 	}
-
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Muted).
-		Padding(1, 2).
-		Width(boxW)
-
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-		boxStyle.Render(strings.TrimRight(content, "\n")))
+		lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(t.Muted).
+			Padding(1, 2).
+			Width(boxW).
+			MaxHeight(max(m.height, 1)).
+			Render(strings.TrimRight(sb.String(), "\n")))
 }

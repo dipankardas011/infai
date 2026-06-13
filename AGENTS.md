@@ -46,25 +46,31 @@ infai is a **single-binary TUI application** built on the [Bubble Tea](https://g
 
 ```
 main.go
+  ├── backend.Service          — UI-free app/use-case layer
+  │     ├── profile CRUD + recents
+  │     ├── scan folder sync (scanner + db)
+  │     ├── executor settings
+  │     └── launch arg construction
+  ├── runner.ServerProcess     — UI-free llama-server process execution
   └── tui.AppModel (root bubbletea model)
         ├── HomeModel           — tabbed dashboard (3 tabs)
         │     ├── ProfilesTabModel    — profile list + config preview split panel
-        │     ├── ModelsTabModel      — scan directory management
-        │     └── EnginesTabModel     — inference engine executor config
+        │     ├── ModelsTabModel      — scan directory presentation
+        │     └── EnginesTabModel     — inference engine presentation
         ├── ModelListModel      — model picker (for new profiles)
         ├── ProfileEditModel    — form editor for profile fields
-        ├── ConfirmModel        — review & launch confirmation
         ├── ServerModel         — live server logs + metrics viewport
         └── ThemeSelectorModel  — theme picker
 
         ┌─ db.DB (SQLite persistence)
         ├─ scanner.Scan() (disk scanning for GGUF/MLX/safetensors)
         ├─ launcher.BuildArgs() (command construction)
-        └─ scrollbar.go (scrollbar rendering + clipboard)
+        └─ runner.StartServer() (process execution)
 ```
 
 ### Core Design Decisions
 
+- **Layered architecture** — `tui` is presentation, `backend` owns use-cases/errors, `runner` owns process execution
 - **No web server** — everything runs in a single terminal via Bubble Tea's event loop
 - **SQLite with embedded migrations** — all config stored locally; migrations use `go:embed`
 - **Cross-platform** — Goreleaser multi-arch builds (linux-amd64/arm64, darwin-amd64/arm64)
@@ -83,8 +89,10 @@ main.go
 |---------|------|---------|
 | `main` | `main.go` | Entry point, DB init, scan, TUI bootstrap |
 | `config` | `config/version.go` | Version string (injected via ldflags) |
+| `backend` | `backend/service.go` | UI-free application/use-case layer over DB, scanner, launcher |
 | `db` | `db/db.go` | SQLite persistence, migrations, CRUD |
-| `launcher` | `launcher/launcher.go` | Args building & process execution |
+| `launcher` | `launcher/launcher.go` | Command/args construction |
+| `runner` | `runner/server.go` | UI-free llama-server process execution and log channels |
 | `model` | `model/types.go` | Domain types: `ModelEntry`, `Profile`, `GGUFMetadata` |
 | `scanner` | `scanner/scanner.go` | Disk scanning for model files |
 | `tui` | `tui/*.go` | All TUI screens, styles, themes, keys, scrollbars |
@@ -94,15 +102,15 @@ main.go
 
 | File | Responsibility |
 |------|----------------|
-| `app.go` | Root model, screen routing, key dispatch, message handling |
+| `app.go` | Root model, screen routing, key dispatch, message handling; calls `backend.Service` for use-cases |
 | `home.go` | Tabbed dashboard container (3 tabs), tab switching, view composition |
 | `profiles_tab.go` | Profiles tab: split panel (left=list, right=config preview), scrollable both sides, launch/edit/delete/new |
-| `models_tab.go` | Models tab: scan directory list, add/remove/sync with file browser |
-| `engines_tab.go` | Engines tab: inference engine executor configuration |
+| `models_tab.go` | Models tab presentation: scan directory list, add/remove/sync via `backend.Service` |
+| `engines_tab.go` | Engines tab presentation: executor config via `backend.Service` |
 | `modellist.go` | Filterable model picker with bubbles/list (used for new profile) |
 | `profileedit.go` | Multi-field form editor with scroll, validation (19 fields) |
 | `confirm.go` | Command preview before launch |
-| `server.go` | Live log streaming, viewport, status, horizontal+vertical scrollbars |
+| `server.go` | Server presentation: live logs, metrics viewport, stop/restart UI; process work delegated to `runner` |
 | `metrics.go` | System + process metrics via gopsutil + nvidia-smi |
 | `tps.go` | TPS history, percentile computation, live `/metrics` polling |
 | `scrollbar.go` | Custom vertical/horizontal scrollbar rendering + clipboard utility |
