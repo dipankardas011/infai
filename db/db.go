@@ -170,7 +170,7 @@ ON CONFLICT(gguf_path) DO UPDATE SET
 
 func (d *DB) ListRecents(limit int) ([]RecentEntry, error) {
 	rows, err := d.conn.Query(`
-SELECT m.id, m.scan_dir, m.dir_name, m.gguf_path, m.mmproj_path, m.display_name,
+SELECT m.id, m.scan_dir, m.dir_name, m.gguf_path, m.mmproj_path, m.display_name, m.type, m.metadata,
        p.id, p.model_id, p.name, p.port, p.host, p.context_size, p.ngl,
        p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
        p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
@@ -191,7 +191,7 @@ LIMIT ?`, limit)
 		var p model.Profile
 		var flashAttn, jinja, noKVOffload, useMmproj int
 		err := rows.Scan(
-			&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName,
+			&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata,
 			&p.ID, &p.ModelID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
 			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
 			&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
@@ -415,8 +415,11 @@ type ProfileEntry struct {
 
 func (d *DB) ListAllProfiles() ([]ProfileEntry, error) {
 	rows, err := d.conn.Query(`
-SELECT m.id, m.scan_dir, m.gguf_path, m.mmproj_path, m.display_name, m.type,
-       p.id, p.model_id, p.name, p.port, p.host, p.context_size
+SELECT m.id, m.scan_dir, m.dir_name, m.gguf_path, m.mmproj_path, m.display_name, m.type, m.metadata,
+       p.id, p.model_id, p.name, p.port, p.host, p.context_size, p.ngl,
+       p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
+       p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
+       p.no_kv_offload, p.use_mmproj, p.extra_flags
 FROM profiles p
 JOIN models m ON p.model_id = m.id
 ORDER BY lower(m.display_name), lower(p.name)`)
@@ -429,13 +432,21 @@ ORDER BY lower(m.display_name), lower(p.name)`)
 	for rows.Next() {
 		var m model.ModelEntry
 		var p model.Profile
+		var flashAttn, jinja, noKVOffload, useMmproj int
 		err := rows.Scan(
-			&m.ID, &m.ScanDir, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Type,
-			&p.ID, &p.ModelID, &p.Name, &p.Port, &p.Host, &p.ContextSize,
+			&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata,
+			&p.ID, &p.ModelID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
+			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
+			&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
+			&noKVOffload, &useMmproj, &p.ExtraFlags,
 		)
 		if err != nil {
 			return nil, err
 		}
+		p.FlashAttn = flashAttn == 1
+		p.Jinja = jinja == 1
+		p.NoKVOffload = noKVOffload == 1
+		p.UseMmproj = useMmproj == 1
 		out = append(out, ProfileEntry{Model: m, Profile: p})
 	}
 	return out, rows.Err()

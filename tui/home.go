@@ -130,10 +130,8 @@ func (m HomeModel) View() string {
 	// m.height = space AFTER AppModel reserves global header/toast/help lines.
 	// Home reserves exactly 2 lines for tabs + divider. Everything else
 	// must scroll inside the active tab; it must never grow this view.
-	bodyH := m.height - 2
-	if bodyH < 1 {
-		bodyH = 1
-	}
+	bodyArea := NewArea(m.width, m.height).ReserveHeight(2) // tabs + divider
+	bodyH := max(bodyArea.H, 1)
 	innerW := m.width
 
 	// Tabs
@@ -151,7 +149,7 @@ func (m HomeModel) View() string {
 	}
 
 	// Never allow tab content to push header/tabs out of the window.
-	body = lipgloss.NewStyle().MaxHeight(bodyH).Render(body)
+	body = ClampHeight(bodyArea, body)
 
 	// Divider below tabs
 	divStyle := lipgloss.NewStyle().Foreground(t.Muted)

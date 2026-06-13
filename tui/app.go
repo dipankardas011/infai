@@ -629,7 +629,8 @@ func (a *AppModel) View() string {
 		sepLines = 1
 	}
 	reservedH := headerLines + toastLines + helpLines + sepLines
-	innerH := max(a.height-reservedH, 5)
+	contentArea := NewArea(a.width, a.height).ReserveHeight(reservedH)
+	innerH := max(contentArea.H, 1)
 
 	var body string
 	switch a.screen {
@@ -649,7 +650,7 @@ func (a *AppModel) View() string {
 
 	// Final safety: active screen must not exceed the space reserved for it.
 	// This preserves fixed header/footer regions in all screens.
-	body = lipgloss.NewStyle().MaxHeight(innerH).Render(body)
+	body = ClampHeight(contentArea, body)
 
 	out := headerView + "\n" + toast + body
 	if helpView != "" {
