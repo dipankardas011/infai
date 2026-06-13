@@ -16,6 +16,16 @@ import (
 
 type toastTickMsg struct{}
 
+type toastKind int
+
+const (
+	toastNone toastKind = iota
+	toastInfo
+	toastSuccess
+	toastWarning
+	toastError
+)
+
 func toastTick() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return toastTickMsg{} })
 }
@@ -59,6 +69,7 @@ type AppModel struct {
 	width        int
 	height       int
 	errMsg       string
+	errKind      toastKind
 	errMsgTicks  int
 	quitArmed    bool
 	help         help.Model
@@ -121,10 +132,16 @@ func NewApp(database *db.DB, serverBin string, scanDirs []string, entries []mode
 
 func (a *AppModel) Init() tea.Cmd { return toastTick() }
 
-func (a *AppModel) setErr(msg string) {
+func (a *AppModel) setToast(kind toastKind, msg string) {
 	a.errMsg = msg
+	a.errKind = kind
 	a.errMsgTicks = 0
 }
+
+func (a *AppModel) setErr(msg string)     { a.setToast(toastError, msg) }
+func (a *AppModel) setInfo(msg string)    { a.setToast(toastInfo, msg) }
+func (a *AppModel) setSuccess(msg string) { a.setToast(toastSuccess, msg) }
+func (a *AppModel) setWarning(msg string) { a.setToast(toastWarning, msg) }
 
 func (a *AppModel) refreshHome() {
 	data, err := a.service.LoadHomeData(a.serverBin)
@@ -166,6 +183,7 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.errMsgTicks++
 			if a.errMsgTicks >= 4 {
 				a.errMsg = ""
+				a.errKind = toastNone
 				a.errMsgTicks = 0
 			}
 		}
@@ -316,19 +334,20 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				var cmd tea.Cmd
 				a.server, cmd = a.server.Stop()
-				a.setErr("shutting down server (SIGTERM)... ctrl+c again to force quit")
+				a.setWarning("shutting down server (SIGTERM)... ctrl+c again to force quit")
 				return a, cmd
 			}
 			if a.quitArmed {
 				return a, tea.Quit
 			}
 			a.quitArmed = true
-			a.setErr("press ctrl+c again to quit")
+			a.setWarning("press ctrl+c again to quit")
 			return a, nil
 		}
 		if a.quitArmed {
 			a.quitArmed = false
 			a.errMsg = ""
+			a.errKind = toastNone
 		}
 
 		// Global 'q' quit on home
@@ -568,15 +587,18 @@ func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.server = sm
 		return a, cmd
 	case "y":
-		// Copy logs to clipboard
 		logText := strings.Join(a.server.logs, "\n")
+		if strings.TrimSpace(logText) == "" {
+			a.setInfo("no log lines to copy yet")
+			return a, nil
+		}
 		bin, err := CopyToClipboard(logText)
 		if err != nil {
 			a.setErr("clipboard copy failed: " + err.Error())
 		} else if bin != "" {
-			a.setErr("logs copied to clipboard via " + bin)
+			a.setSuccess("copied log lines to clipboard via " + bin)
 		} else {
-			a.setErr("no clipboard tool found (install wl-copy, xclip, or pbcopy)")
+			a.setWarning("no clipboard tool found (install wl-copy, xclip, or pbcopy)")
 		}
 		return a, nil
 	case "esc":
@@ -597,6 +619,21 @@ func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
+func (a *AppModel) renderToast() string {
+	switch a.errKind {
+	case toastSuccess:
+		return styleSuccess.Render("✓ " + a.errMsg)
+	case toastWarning:
+		return lipgloss.NewStyle().Foreground(ActiveTheme.Secondary).Bold(true).Render("! " + a.errMsg)
+	case toastInfo:
+		return styleMuted.Render("• " + a.errMsg)
+	case toastError:
+		fallthrough
+	default:
+		return styleError.Render("✗ " + a.errMsg)
+	}
+}
+
 func (a *AppModel) View() string {
 	// Minimum size warning
 	if a.width < MinWindowWidth || a.height < MinWindowHeight {
@@ -606,7 +643,7 @@ func (a *AppModel) View() string {
 	toast := ""
 	toastLines := 0
 	if a.errMsg != "" {
-		toast = styleError.Render("⚠ "+a.errMsg) + "\n"
+		toast = a.renderToast() + "\n"
 		toastLines = 2
 	}
 
