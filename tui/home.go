@@ -81,10 +81,10 @@ func (m HomeModel) View() string {
 		Render(strings.Repeat("─", hrWidth))
 
 	// Recents Section
-	recentTitle := styleKey.Render("Recents") + styleMuted.Render(" [a]ll")
+	recentTitle := styleKey.Render("Recent launches")
 	var recentItems []string
 	if len(m.recentModels) == 0 {
-		recentItems = append(recentItems, styleMuted.Render("  No recents found. Press [a] to see all or [f] to add folders."))
+		recentItems = append(recentItems, styleMuted.Render("  No recents found. Press [a] to create a profile or [f] to add folders."))
 	} else {
 		for i, entry := range m.recentModels {
 			prefix := "  "
