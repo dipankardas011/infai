@@ -78,6 +78,23 @@ func (k profileListKeyMap) ShortHelp() []key.Binding {
 }
 func (k profileListKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
 
+type profileBrowserKeyMap struct {
+	Enter  key.Binding
+	New    key.Binding
+	Edit   key.Binding
+	Delete key.Binding
+	Filter key.Binding
+	Back   key.Binding
+	Help   key.Binding
+}
+
+func (k profileBrowserKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Enter, k.New, k.Edit, k.Delete, k.Filter, k.Back, k.Help}
+}
+func (k profileBrowserKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{{k.Enter, k.New, k.Edit, k.Delete}, {k.Filter, k.Back, k.Help}}
+}
+
 type confirmKeyMap struct {
 	Launch key.Binding
 	Back   key.Binding
@@ -115,18 +132,19 @@ func (k executorKeyMap) ShortHelp() []key.Binding {
 func (k executorKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
 
 var keys = struct {
-	Home        homeKeyMap
-	ModelList   modelListKeyMap
-	Explore     exploreKeyMap
-	FileBrowser fileBrowserKeyMap
-	ProfileList profileListKeyMap
-	Confirm     confirmKeyMap
-	Server      serverKeyMap
-	Executor    executorKeyMap
+	Home           homeKeyMap
+	ModelList      modelListKeyMap
+	Explore        exploreKeyMap
+	FileBrowser    fileBrowserKeyMap
+	ProfileList    profileListKeyMap
+	ProfileBrowser profileBrowserKeyMap
+	Confirm        confirmKeyMap
+	Server         serverKeyMap
+	Executor       executorKeyMap
 }{
 	Home: homeKeyMap{
 		Enter:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
-		All:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all models")),
+		All:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "profiles")),
 		Folders:   key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "folders")),
 		Configure: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "executor")),
 		Theme:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
@@ -161,6 +179,15 @@ var keys = struct {
 		Edit:   key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 		Delete: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
 		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		Help:   key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	},
+	ProfileBrowser: profileBrowserKeyMap{
+		Enter:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "launch")),
+		New:    key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
+		Edit:   key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
+		Delete: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+		Filter: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "home")),
 		Help:   key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	},
 	Confirm: confirmKeyMap{

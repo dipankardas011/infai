@@ -13,8 +13,7 @@ import (
 	"github.com/dipankardas011/infai/model"
 )
 
-const logoASCII = `
-██╗███╗   ██╗███████╗ █████╗ ██╗
+const logoASCII = `██╗███╗   ██╗███████╗ █████╗ ██╗
 ██║████╗  ██║██╔════╝██╔══██╗██║
 ██║██╔██╗ ██║█████╗  ███████║██║
 ██║██║╚██╗██║██╔══╝  ██╔══██║██║
@@ -75,7 +74,7 @@ func NewModelListModel(entries []model.ModelEntry, w, h int) ModelListModel {
 		items[i] = modelItem{entry: e}
 	}
 	l := list.New(items, modelDelegate{}, w, h-4)
-	l.Title = "infai"
+	l.Title = "Models"
 	l.Styles.Title = styleTitle
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
@@ -100,6 +99,11 @@ func (m ModelListModel) SetEntries(entries []model.ModelEntry) ModelListModel {
 		items[i] = modelItem{entry: e}
 	}
 	m.list.SetItems(items)
+	return m
+}
+
+func (m ModelListModel) SetTitle(title string) ModelListModel {
+	m.list.Title = title
 	return m
 }
 

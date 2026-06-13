@@ -408,6 +408,39 @@ type RecentEntry struct {
 	Profile model.Profile
 }
 
+type ProfileEntry struct {
+	Model   model.ModelEntry
+	Profile model.Profile
+}
+
+func (d *DB) ListAllProfiles() ([]ProfileEntry, error) {
+	rows, err := d.conn.Query(`
+SELECT m.id, m.scan_dir, m.gguf_path, m.mmproj_path, m.display_name, m.type,
+       p.id, p.model_id, p.name, p.port, p.host, p.context_size
+FROM profiles p
+JOIN models m ON p.model_id = m.id
+ORDER BY lower(m.display_name), lower(p.name)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ProfileEntry
+	for rows.Next() {
+		var m model.ModelEntry
+		var p model.Profile
+		err := rows.Scan(
+			&m.ID, &m.ScanDir, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Type,
+			&p.ID, &p.ModelID, &p.Name, &p.Port, &p.Host, &p.ContextSize,
+		)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ProfileEntry{Model: m, Profile: p})
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) ListProfiles(modelID int64) ([]model.Profile, error) {
 	rows, err := d.conn.Query(`
 SELECT id, model_id, name, port, host, context_size, ngl,
@@ -428,6 +461,27 @@ FROM profiles WHERE model_id = ? ORDER BY name`, modelID)
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+func (d *DB) GetProfile(id int64) (model.Profile, error) {
+	rows, err := d.conn.Query(`
+SELECT id, model_id, name, port, host, context_size, ngl,
+       batch_size, ubatch_size, cache_type_k, cache_type_v,
+       flash_attn, jinja, temperature, reasoning_budget, top_p, top_k,
+       no_kv_offload, use_mmproj, extra_flags
+FROM profiles WHERE id = ?`, id)
+	if err != nil {
+		return model.Profile{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return model.Profile{}, sql.ErrNoRows
+	}
+	p, err := scanProfile(rows)
+	if err != nil {
+		return model.Profile{}, err
+	}
+	return p, rows.Err()
 }
 
 func (d *DB) UpsertProfile(p *model.Profile) error {
