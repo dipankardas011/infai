@@ -92,7 +92,8 @@ func (m ThemeSelectorModel) View() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Muted).
 		Padding(1, 2).
-		Width(boxW)
+		Width(boxW).
+		MaxHeight(max(m.height, 1))
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(content))
 }

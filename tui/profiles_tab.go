@@ -439,5 +439,6 @@ func (m ProfilesTabModel) deleteConfirmView() string {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(t.Error).
 			Padding(2, 4).
+			MaxHeight(max(m.height, 1)).
 			Render(msg))
 }

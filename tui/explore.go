@@ -322,7 +322,8 @@ func (m FileBrowserModel) View() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Muted).
 		Padding(1, 1).
-		Width(boxWidth)
+		Width(boxWidth).
+		MaxHeight(max(m.height, 1))
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(strings.TrimRight(sb.String(), "\n")))
 }
