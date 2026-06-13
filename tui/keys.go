@@ -2,26 +2,23 @@ package tui
 
 import "github.com/charmbracelet/bubbles/key"
 
+// ── Home (tabbed) ──────────────────────────────────────────────────────────
 type homeKeyMap struct {
-	All       key.Binding
-	Folders   key.Binding
-	Configure key.Binding
-	Theme     key.Binding
-	Enter     key.Binding
-	Quit      key.Binding
-	Help      key.Binding
+	TabLeft  key.Binding
+	TabRight key.Binding
+	Quit     key.Binding
+	Theme    key.Binding
+	Help     key.Binding
 }
 
 func (k homeKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Enter, k.All, k.Folders, k.Configure, k.Theme, k.Quit, k.Help}
+	return []key.Binding{k.TabLeft, k.TabRight, k.Theme, k.Quit, k.Help}
 }
 func (k homeKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{
-		{k.Enter, k.All, k.Folders},
-		{k.Configure, k.Theme, k.Quit},
-	}
+	return [][]key.Binding{{k.TabLeft, k.TabRight, k.Theme, k.Quit, k.Help}}
 }
 
+// ── Model List ─────────────────────────────────────────────────────────────
 type modelListKeyMap struct {
 	Enter  key.Binding
 	Rescan key.Binding
@@ -37,64 +34,7 @@ func (k modelListKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{{k.Enter, k.Rescan}, {k.Filter, k.Back}}
 }
 
-type exploreKeyMap struct {
-	Add  key.Binding
-	Del  key.Binding
-	Sync key.Binding
-	Back key.Binding
-	Help key.Binding
-}
-
-func (k exploreKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Add, k.Del, k.Sync, k.Back, k.Help}
-}
-func (k exploreKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
-
-type fileBrowserKeyMap struct {
-	Up     key.Binding
-	Down   key.Binding
-	Back   key.Binding
-	Open   key.Binding
-	Home   key.Binding
-	Select key.Binding
-	Filter key.Binding
-}
-
-func (k fileBrowserKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Back, k.Open, k.Home, k.Select, k.Filter}
-}
-func (k fileBrowserKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
-
-type profileListKeyMap struct {
-	Enter  key.Binding
-	Edit   key.Binding
-	Delete key.Binding
-	Back   key.Binding
-	Help   key.Binding
-}
-
-func (k profileListKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Enter, k.Edit, k.Delete, k.Back, k.Help}
-}
-func (k profileListKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
-
-type profileBrowserKeyMap struct {
-	Enter  key.Binding
-	New    key.Binding
-	Edit   key.Binding
-	Delete key.Binding
-	Filter key.Binding
-	Back   key.Binding
-	Help   key.Binding
-}
-
-func (k profileBrowserKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Enter, k.New, k.Edit, k.Delete, k.Filter, k.Back, k.Help}
-}
-func (k profileBrowserKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Enter, k.New, k.Edit, k.Delete}, {k.Filter, k.Back, k.Help}}
-}
-
+// ── Confirm ────────────────────────────────────────────────────────────────
 type confirmKeyMap struct {
 	Launch key.Binding
 	Back   key.Binding
@@ -104,90 +44,109 @@ type confirmKeyMap struct {
 func (k confirmKeyMap) ShortHelp() []key.Binding  { return []key.Binding{k.Launch, k.Back, k.Help} }
 func (k confirmKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
 
+// ── Server (logs) ──────────────────────────────────────────────────────────
 type serverKeyMap struct {
 	Stop     key.Binding
 	Restart  key.Binding
 	Clear    key.Binding
+	Copy     key.Binding
 	Back     key.Binding
 	BackStop key.Binding
 	Help     key.Binding
 }
 
 func (k serverKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Stop, k.Clear, k.BackStop, k.Help}
+	return []key.Binding{k.Stop, k.Clear, k.Copy, k.BackStop, k.Help}
 }
 func (k serverKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
 
-type executorKeyMap struct {
-	Enter key.Binding
-	Add   key.Binding
-	Del   key.Binding
-	Back  key.Binding
-	Help  key.Binding
+// ── Theme ──────────────────────────────────────────────────────────────────
+type themeKeyMap struct {
+	Select key.Binding
+	Back   key.Binding
 }
 
-func (k executorKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Enter, k.Add, k.Del, k.Back, k.Help}
+func (k themeKeyMap) ShortHelp() []key.Binding  { return []key.Binding{k.Select, k.Back} }
+func (k themeKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
+
+type profileTabKeyMap struct {
+	Launch  key.Binding
+	New     key.Binding
+	Edit    key.Binding
+	Delete  key.Binding
+	Filter  key.Binding
+	TabLeft key.Binding
+	TabRight key.Binding
+	Theme   key.Binding
+	Quit    key.Binding
+	Help    key.Binding
 }
-func (k executorKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
+
+func (k profileTabKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Launch, k.New, k.Edit, k.Delete, k.Filter, k.TabLeft, k.TabRight, k.Help}
+}
+func (k profileTabKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{{k.Launch, k.New, k.Edit, k.Delete}, {k.Filter, k.TabLeft, k.TabRight, k.Theme, k.Quit}}
+}
+
+type modelsTabKeyMap struct {
+	Add      key.Binding
+	Remove   key.Binding
+	Sync     key.Binding
+	TabLeft  key.Binding
+	TabRight key.Binding
+	Theme    key.Binding
+	Quit     key.Binding
+	Help     key.Binding
+}
+
+func (k modelsTabKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Add, k.Remove, k.Sync, k.TabLeft, k.TabRight, k.Help}
+}
+func (k modelsTabKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{{k.Add, k.Remove, k.Sync}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
+}
+
+type enginesTabKeyMap struct {
+	Add      key.Binding
+	Detect   key.Binding
+	SetDef   key.Binding
+	TabLeft  key.Binding
+	TabRight key.Binding
+	Theme    key.Binding
+	Quit     key.Binding
+	Help     key.Binding
+}
+
+func (k enginesTabKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Add, k.Detect, k.SetDef, k.TabLeft, k.TabRight, k.Help}
+}
+func (k enginesTabKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{{k.Add, k.Detect, k.SetDef}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
+}
 
 var keys = struct {
-	Home           homeKeyMap
-	ModelList      modelListKeyMap
-	Explore        exploreKeyMap
-	FileBrowser    fileBrowserKeyMap
-	ProfileList    profileListKeyMap
-	ProfileBrowser profileBrowserKeyMap
-	Confirm        confirmKeyMap
-	Server         serverKeyMap
-	Executor       executorKeyMap
+	Home       homeKeyMap
+	Profiles   profileTabKeyMap
+	Models     modelsTabKeyMap
+	Engines    enginesTabKeyMap
+	ModelList  modelListKeyMap
+	Confirm    confirmKeyMap
+	Server     serverKeyMap
+	Theme      themeKeyMap
 }{
 	Home: homeKeyMap{
-		Enter:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
-		All:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "profiles")),
-		Folders:   key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "folders")),
-		Configure: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "executor")),
-		Theme:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
-		Quit:      key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
-		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		TabLeft:  key.NewBinding(key.WithKeys("left", "shift+tab"), key.WithHelp("←/s-tab", "prev tab")),
+		TabRight: key.NewBinding(key.WithKeys("right", "tab"), key.WithHelp("→/tab", "next tab")),
+		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
+		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	},
 	ModelList: modelListKeyMap{
 		Enter:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
 		Rescan: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rescan")),
 		Filter: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		Help:   key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-	},
-	Explore: exploreKeyMap{
-		Add:  key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add")),
-		Del:  key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d", "remove")),
-		Sync: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sync all")),
-		Back: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		Help: key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-	},
-	FileBrowser: fileBrowserKeyMap{
-		Up:     key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "nav")),
-		Down:   key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "nav")),
-		Back:   key.NewBinding(key.WithKeys("left", "backspace", "b"), key.WithHelp("←", "back")),
-		Open:   key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "open")),
-		Home:   key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "home")),
-		Select: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
-		Filter: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-	},
-	ProfileList: profileListKeyMap{
-		Enter:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "launch")),
-		Edit:   key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
-		Delete: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
-		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		Help:   key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-	},
-	ProfileBrowser: profileBrowserKeyMap{
-		Enter:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "launch")),
-		New:    key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
-		Edit:   key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
-		Delete: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
-		Filter: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "home")),
 		Help:   key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	},
 	Confirm: confirmKeyMap{
@@ -199,15 +158,45 @@ var keys = struct {
 		Stop:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stop")),
 		Restart:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "restart")),
 		Clear:    key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "clear logs")),
+		Copy:     key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy logs")),
 		Back:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		BackStop: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "stop & back")),
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	},
-	Executor: executorKeyMap{
-		Enter: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "set default")),
-		Add:   key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add")),
-		Del:   key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d", "use detected")),
-		Back:  key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "save & back")),
-		Help:  key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	Profiles: profileTabKeyMap{
+		Launch:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "launch")),
+		New:      key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
+		Edit:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
+		Delete:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")),
+		Filter:   key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+		TabLeft:  key.NewBinding(key.WithKeys("left", "shift+tab"), key.WithHelp("←", "prev tab")),
+		TabRight: key.NewBinding(key.WithKeys("right", "tab"), key.WithHelp("→", "next tab")),
+		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
+		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	},
+	Models: modelsTabKeyMap{
+		Add:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add folder")),
+		Remove:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "remove")),
+		Sync:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sync")),
+		TabLeft:  key.NewBinding(key.WithKeys("left", "shift+tab"), key.WithHelp("←", "prev tab")),
+		TabRight: key.NewBinding(key.WithKeys("right", "tab"), key.WithHelp("→", "next tab")),
+		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
+		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	},
+	Engines: enginesTabKeyMap{
+		Add:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add")),
+		Detect:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "detect")),
+		SetDef:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "set default")),
+		TabLeft:  key.NewBinding(key.WithKeys("left", "shift+tab"), key.WithHelp("←", "prev tab")),
+		TabRight: key.NewBinding(key.WithKeys("right", "tab"), key.WithHelp("→", "next tab")),
+		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
+		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	},
+	Theme: themeKeyMap{
+		Select: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
+		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 	},
 }

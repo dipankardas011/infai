@@ -1,162 +1,179 @@
 package tui
 
 import (
-	"fmt"
-	"strings"
-
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/dipankardas011/infai/config"
+
 	"github.com/dipankardas011/infai/db"
+	"github.com/dipankardas011/infai/model"
 )
 
+const (
+	tabProfiles = iota
+	tabModels
+	tabEngines
+)
+
+var tabNames = []string{"Profiles", "Models", "Engines"}
+
+// HomeModel is the tabbed home screen with 3 tabs.
 type HomeModel struct {
-	recentModels []db.RecentEntry
-	folders      []string
-	executor     string
-	cursor       int
-	width        int
-	height       int
+	activeTab int
+
+	profilesTab ProfilesTabModel
+	modelsTab   ModelsTabModel
+	enginesTab  EnginesTabModel
+
+	width  int
+	height int
 }
 
-func NewHomeModel(recent []db.RecentEntry, folders []string, executor string, w, h int) HomeModel {
+func NewHomeModel(
+	database *db.DB,
+	serverBin string,
+	scanDirs []string,
+	entries []model.ModelEntry,
+	recents []db.RecentEntry,
+	allProfiles []db.ProfileEntry,
+	w, h int,
+) HomeModel {
 	return HomeModel{
-		recentModels: recent,
-		folders:      folders,
-		executor:     executor,
-		width:        w,
-		height:       h,
+		activeTab:   tabProfiles,
+		profilesTab: NewProfilesTabModel(recents, allProfiles, w, h),
+		modelsTab:   NewModelsTabModel(database, scanDirs, w, h),
+		enginesTab:  NewEnginesTabModel(database, serverBin, w, h),
+		width:       w,
+		height:      h,
 	}
 }
 
 func (m HomeModel) SetSize(w, h int) HomeModel {
-	m.width, m.height = w, h
+	m.width = w
+	m.height = h
+	m.profilesTab = m.profilesTab.SetSize(w, h)
+	m.modelsTab = m.modelsTab.SetSize(w, h)
+	m.enginesTab = m.enginesTab.SetSize(w, h)
 	return m
 }
 
+func (m HomeModel) RefreshProfiles(recents []db.RecentEntry, all []db.ProfileEntry) HomeModel {
+	m.profilesTab = m.profilesTab.SetData(recents, all)
+	return m
+}
+
+func (m HomeModel) RefreshModels(dirs []string, db2 *db.DB) HomeModel {
+	models, _ := db2.ListModels()
+	m.modelsTab = NewModelsTabModel(db2, dirs, m.width, m.height)
+	m.modelsTab.modelCnt = len(models)
+	return m
+}
+
+func (m HomeModel) RefreshEngines(serverBin string, db2 *db.DB) HomeModel {
+	m.enginesTab = NewEnginesTabModel(db2, serverBin, m.width, m.height)
+	return m
+}
+
+func (m HomeModel) EffectiveServerBin() string {
+	return m.enginesTab.EffectivePath()
+}
+
 func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case "down", "j":
-			if m.cursor < len(m.recentModels)-1 {
-				m.cursor++
-			}
+	// Tab switching keys work regardless of tab state
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch key.String() {
+		case "left", "shift+tab":
+			m.activeTab = (m.activeTab - 1 + len(tabNames)) % len(tabNames)
+			return m, nil
+		case "right", "tab":
+			m.activeTab = (m.activeTab + 1) % len(tabNames)
+			return m, nil
 		}
+		// Number keys for tabs
+		if key.String() == "1" {
+			m.activeTab = tabProfiles
+			return m, nil
+		}
+		if key.String() == "2" {
+			m.activeTab = tabModels
+			return m, nil
+		}
+		if key.String() == "3" {
+			m.activeTab = tabEngines
+			return m, nil
+		}
+	}
+
+	// Delegate to active tab
+	switch m.activeTab {
+	case tabProfiles:
+		var cmd tea.Cmd
+		m.profilesTab, cmd = m.profilesTab.Update(msg)
+		return m, cmd
+	case tabModels:
+		var cmd tea.Cmd
+		m.modelsTab, cmd = m.modelsTab.Update(msg)
+		return m, cmd
+	case tabEngines:
+		var cmd tea.Cmd
+		m.enginesTab, cmd = m.enginesTab.Update(msg)
+		return m, cmd
 	}
 	return m, nil
 }
 
-func (m HomeModel) Selected() (db.RecentEntry, bool) {
-	if len(m.recentModels) == 0 {
-		return db.RecentEntry{}, false
-	}
-	return m.recentModels[m.cursor], true
-}
-
 func (m HomeModel) View() string {
 	t := ActiveTheme
-	logoStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
-	versionStyle := lipgloss.NewStyle().Foreground(t.Secondary)
 
-	header := lipgloss.JoinHorizontal(lipgloss.Bottom,
-		logoStyle.Render(logoASCII),
-		versionStyle.Render("  ("+config.Version()+")"),
-	)
-
-	hrWidth := 60
-	if m.width < 60 {
-		hrWidth = m.width - 4
+	// m.height = space AFTER AppModel reserves global header/toast/help lines.
+	// Home reserves exactly 2 lines for tabs + divider. Everything else
+	// must scroll inside the active tab; it must never grow this view.
+	bodyH := m.height - 2
+	if bodyH < 1 {
+		bodyH = 1
 	}
-	if hrWidth < 0 {
-		hrWidth = 0
-	}
+	innerW := m.width
 
-	hr := lipgloss.NewStyle().
-		Foreground(t.Muted).
-		Render(strings.Repeat("─", hrWidth))
+	// Tabs
+	tabs := RenderTabs(tabNames, m.activeTab, innerW)
 
-	// Recents Section
-	recentTitle := styleKey.Render("Recent launches")
-	var recentItems []string
-	if len(m.recentModels) == 0 {
-		recentItems = append(recentItems, styleMuted.Render("  No recents found. Press [a] to create a profile or [f] to add folders."))
-	} else {
-		for i, entry := range m.recentModels {
-			prefix := "  "
-			style := lipgloss.NewStyle().Foreground(t.Text)
-			if i == m.cursor {
-				prefix = styleSelected.Render("▶ ")
-				style = styleSelected
-			}
-			label := fmt.Sprintf("%s (%s)", entry.Model.DisplayName, entry.Profile.Name)
-			recentItems = append(recentItems, prefix+style.Render(label))
-		}
-	}
-	recentBox := lipgloss.JoinVertical(lipgloss.Left,
-		recentTitle,
-		lipgloss.JoinVertical(lipgloss.Left, recentItems...),
-	)
-
-	// Folders Section
-	folderTitle := styleKey.Render("Folders") + styleMuted.Render(" [f]olders")
-	var folderItems []string
-	if len(m.folders) == 0 {
-		folderItems = append(folderItems, styleMuted.Render("  No folders configured."))
-	} else {
-		displayFolders := m.folders
-		if len(displayFolders) > 2 {
-			displayFolders = displayFolders[:2]
-		}
-		for _, f := range displayFolders {
-			folderItems = append(folderItems, "  "+styleSuccess.Render(f))
-		}
-		if len(m.folders) > 2 {
-			folderItems = append(folderItems, styleMuted.Render(fmt.Sprintf("  ... and %d more", len(m.folders)-2)))
-		}
-	}
-	folderBox := lipgloss.JoinVertical(lipgloss.Left,
-		folderTitle,
-		lipgloss.JoinVertical(lipgloss.Left, folderItems...),
-	)
-
-	// Executor Section
-	execTitle := styleKey.Render("Executor") + styleMuted.Render(" [c]onfigure")
-	execVal := "  " + styleMuted.Render("Not set (llama-server)")
-	if m.executor != "" {
-		execVal = "  " + styleSuccess.Render(m.executor)
-	}
-	execBox := lipgloss.JoinVertical(lipgloss.Left,
-		execTitle,
-		execVal,
-	)
-
-	// Layout containers
-	containerWidth := 60
-	if m.width < 60 {
-		containerWidth = m.width - 4
-	}
-	if containerWidth < 0 {
-		containerWidth = 0
+	// Tab content
+	var body string
+	switch m.activeTab {
+	case tabProfiles:
+		body = m.profilesTab.SetSize(innerW, bodyH).View()
+	case tabModels:
+		body = m.modelsTab.SetSize(innerW, bodyH).View()
+	case tabEngines:
+		body = m.enginesTab.SetSize(innerW, bodyH).View()
 	}
 
-	containerStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Muted).
-		Padding(1, 2).
-		Width(containerWidth)
+	// Never allow tab content to push header/tabs out of the window.
+	body = lipgloss.NewStyle().MaxHeight(bodyH).Render(body)
 
-	content := lipgloss.JoinVertical(lipgloss.Center,
-		header,
-		hr,
-		containerStyle.Render(recentBox),
-		containerStyle.Render(folderBox),
-		containerStyle.Render(execBox),
-	)
+	// Divider below tabs
+	divStyle := lipgloss.NewStyle().Foreground(t.Muted)
+	divider := divStyle.Render(horizontalLine(innerW))
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+	return tabs + "\n" + divider + "\n" + body
+}
+
+// Messages the home model can produce for AppModel
+type homeMsgLaunch struct {
+	model   model.ModelEntry
+	profile model.Profile
+}
+type homeMsgNewProfile struct{}
+type homeMsgEditProfile struct {
+	model   model.ModelEntry
+	profile model.Profile
+}
+type homeMsgDeleteProfile struct {
+	id int64
+}
+type homeMsgSyncDone struct {
+	removed, updated int
+	err              error
+}
+type homeMsgExecutorUpdated struct {
+	path string
 }

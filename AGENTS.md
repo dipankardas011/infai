@@ -36,6 +36,8 @@ CGO_ENABLED=1 go build -o infai .
 - macOS: `~/Library/Application Support/infai/config.db`
 - Windows: `%AppData%\infai\config.db`
 
+**Minimum terminal size**: 60×20 characters. A warning is displayed if the window is too small.
+
 ---
 
 ## Architecture Overview
@@ -45,19 +47,20 @@ infai is a **single-binary TUI application** built on the [Bubble Tea](https://g
 ```
 main.go
   └── tui.AppModel (root bubbletea model)
-        ├── HomeModel           — dashboard with recents, folders, executor
-        ├── ModelListModel      — browsable, filterable model list
-        ├── ProfileListModel    — list of launch profiles for a model
+        ├── HomeModel           — tabbed dashboard (3 tabs)
+        │     ├── ProfilesTabModel    — profile list + config preview split panel
+        │     ├── ModelsTabModel      — scan directory management
+        │     └── EnginesTabModel     — inference engine executor config
+        ├── ModelListModel      — model picker (for new profiles)
         ├── ProfileEditModel    — form editor for profile fields
         ├── ConfirmModel        — review & launch confirmation
         ├── ServerModel         — live server logs + metrics viewport
-        ├── ExploreModel        — scan directory management
-        ├── ExecutorModel       — llama-server binary configuration
         └── ThemeSelectorModel  — theme picker
 
         ┌─ db.DB (SQLite persistence)
         ├─ scanner.Scan() (disk scanning for GGUF/MLX/safetensors)
-        └─ launcher.BuildArgs() (command construction)
+        ├─ launcher.BuildArgs() (command construction)
+        └─ scrollbar.go (scrollbar rendering + clipboard)
 ```
 
 ### Core Design Decisions
@@ -66,6 +69,11 @@ main.go
 - **SQLite with embedded migrations** — all config stored locally; migrations use `go:embed`
 - **Cross-platform** — Goreleaser multi-arch builds (linux-amd64/arm64, darwin-amd64/arm64)
 - **gopsutil integration** — real-time system/process metrics (CPU, RAM, GPU via nvidia-smi)
+- **Tabbed home screen** — three tabs (Profiles, Models, Inference Engines) for intuitive navigation
+- **Split-panel profiles** — left panel uses `bubbles/list`, right panel uses `bubbles/viewport`
+- **Direct launch** — Enter on a profile launches the server immediately (no confirm screen)
+- **Per-tab keymaps** — Help bar changes to show relevant keys for each tab
+- **Clipboard integration** — copy server logs via `wl-copy`, `xclip`, or `pbcopy`
 
 ---
 
@@ -79,80 +87,146 @@ main.go
 | `launcher` | `launcher/launcher.go` | Args building & process execution |
 | `model` | `model/types.go` | Domain types: `ModelEntry`, `Profile`, `GGUFMetadata` |
 | `scanner` | `scanner/scanner.go` | Disk scanning for model files |
-| `tui` | `tui/*.go` | All TUI screens, styles, themes, keys |
+| `tui` | `tui/*.go` | All TUI screens, styles, themes, keys, scrollbars |
 | `migrations` | `migrations/*.sql` | SQL migrations (embedded) |
 
 ### Key Files in `tui/`
 
 | File | Responsibility |
 |------|----------------|
-| `app.go` | Root model, screen routing, key dispatch, view composition |
-| `home.go` | Dashboard: recents list, folder display, executor status |
-| `modellist.go` | Filterable model list with bubbles/list |
-| `profilelist.go` | Profile list per model, "new profile" item |
-| `profileedit.go` | Multi-field form editor with scroll, validation |
+| `app.go` | Root model, screen routing, key dispatch, message handling |
+| `home.go` | Tabbed dashboard container (3 tabs), tab switching, view composition |
+| `profiles_tab.go` | Profiles tab: split panel (left=list, right=config preview), scrollable both sides, launch/edit/delete/new |
+| `models_tab.go` | Models tab: scan directory list, add/remove/sync with file browser |
+| `engines_tab.go` | Engines tab: inference engine executor configuration |
+| `modellist.go` | Filterable model picker with bubbles/list (used for new profile) |
+| `profileedit.go` | Multi-field form editor with scroll, validation (19 fields) |
 | `confirm.go` | Command preview before launch |
-| `server.go` | Live log streaming, viewport, status display |
+| `server.go` | Live log streaming, viewport, status, horizontal+vertical scrollbars |
 | `metrics.go` | System + process metrics via gopsutil + nvidia-smi |
 | `tps.go` | TPS history, percentile computation, live `/metrics` polling |
-| `explore.go` | Scan directory management with file browser |
-| `executor.go` | Executor binary configuration |
+| `scrollbar.go` | Custom vertical/horizontal scrollbar rendering + clipboard utility |
+| `header.go` | Header rendering ("infai" + version), tab bar, min-size warning |
 | `theme_selector.go` | Theme selection screen |
 | `styles.go` | Lipgloss style variables, theme-reactive rebuild |
 | `themes.go` | Theme definitions, cycling, active theme |
 | `keys.go` | All key bindings per screen (bubbles/key) |
-| `confirm.go` | Launch confirmation with command wrapping |
 
 ---
 
 ## TUI Screens & Navigation
 
+### Home Screen (Tabbed)
+
+The home screen uses a **3-tab layout** with a header bar, tab navigation, and context-sensitive content:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ infai v1.0.0                              t:theme  ?:help │  ← header
+│ [ Profiles ]  Models    Engines                           │  ← tab bar
+├──────────────────────────────────────────────────────────┤
+│ ┌──────────────────┐ ┌──────────────────────────────────┐│
+│ │ + New Profile    │ │ Profile Config          ░│       ││
+│ │ ▶ my-profile     │ │ ░│                                 ││
+│ │   llama-3b       │ │ Model: llama-3b                   ││
+│ │   recent-q4      │ │ ▓│                                  ││
+│ │ ──────────       │ │ Host: 0.0.0.0       ░│           ││
+│ │   vision-profile │ │ Port: 8000                        ││
+│ │   text-only      │ │ ░│                                  ││
+│ │                  │ │ enter:launch  e:edit  x:delete    ││
+│ └──────────────────┘ └──────────────────────────────────┘│
+└──────────────────────────────────────────────────────────┘
+←/s-tab:prev tab  →/tab:next tab  t:theme  q:quit  ?:help
+```
+
+### Screen Flow
+
 ```
                     ┌──────────┐
-                    │   Home   │  ← Entry point, shows recents
+                    │   Home   │  ← Tabbed dashboard (entry point)
+                    │  (3 tabs)│
                     └────┬─────┘
-                         │ enter (on recent) or
-              ┌──────────┴──────────┐
-              │                     │
-       ┌──────▼──────┐        ┌────▼─────┐
-       │   All Models│        │  Folders │
-       │   (press a) │        │ (press f)│
-       └──────┬──────┘        └──────────┘
-              │ enter
-       ┌──────▼──────┐
-       │ Profile List│
-       └──────┬──────┘
-              │ enter
-        ┌─────┴─────┐
-        │           │
-   ┌────▼───┐  ┌────▼────────┐
-   │Confirm │  │ ProfileEdit │
-   └────┬───┘  └─────────────┘
-        │ enter
-   ┌────▼────────┐
-   │  Server Log │  ← Live llama-server output
-   └─────────────┘
+                         │
+            ┌────────────┼────────────┐
+            │            │            │
+     ┌──────▼──────┐ ┌──▼────┐ ┌─────▼──────┐
+     │  Profiles   │ │Models │ │Inference   │
+     │   Tab       │ │ Tab   │ │Engines Tab │
+     └──────┬──────┘ └───────┘ └────────────┘
+            │
+    ┌───────┼───────────┐
+    │       │           │
+    │  enter│(selected) │  n (new profile)
+    │       │           │
+┌───▼──┐ ┌──▼───┐  ┌────▼─────┐
+│Conf. │ │Edit  │  │Model     │
+│irm   │ │Prof. │  │Picker    │
+└──┬───┘ └──────┘  └────┬─────┘
+   │ enter               │ enter
+┌──▼────────┐       ┌────▼─────┐
+│  Server   │       │  Edit    │
+│  Logs     │       │  Profile │
+└───────────┘       └──────────┘
 ```
+
+### Tabs
+
+| Tab | Shortcut | Content |
+|-----|----------|---------|
+| **Profiles** | `1` | Top 3 recent profiles + separator + all profiles (left panel). Configuration preview (right panel). Scrollbars on both. |
+| **Models** | `2` | List of scan directories. Add folder (opens file browser), sync, delete. Model count shown. |
+| **Engines** | `3` | Current executor path. Auto-detect, add custom, set default. |
+
+### Profile Tab Key Bindings
+
+| Key | Action |
+|-----|--------|
+| `↑/↓` or `j/k` | Navigate profile list (bubbles/list with built-in scrollbar) |
+| `enter` | Launch selected profile **directly** (no confirm screen) |
+| `n` | Create new profile (opens Model Picker → Profile Edit) |
+| `e` | Edit selected profile |
+| `x` | Delete selected profile (with confirmation dialog) |
+| `/` | Filter profiles (bubbles/list built-in filtering) |
+
+### Server Screen Key Bindings
+
+| Key | Action |
+|-----|--------|
+| `s` | Stop server (SIGTERM) |
+| `r` | Restart stopped server |
+| `c` | Clear logs |
+| `y` | Copy all logs to clipboard |
+| `esc` | Stop & return home (if running) or just return (if stopped) |
+| `↑/↓/pgup/pgdn` | Scroll logs vertically |
+| `←/→` | Scroll logs horizontally (with scrollbar indicator) |
 
 ### Additional Screens
 
-| Screen | Entry Key | Description |
-|--------|-----------|-------------|
-| **Executor** | `c` on Home | Configure `llama-server` binary paths |
-| **Theme Selector** | `t` on Home | Pick from 5 built-in themes |
+| Screen | Entry | Description |
+|--------|-------|-------------|
+| **Model Picker** | `n` on Profiles tab | Browsable, filterable model list for creating profiles |
+| **Profile Edit** | `e` on profile or via new profile flow | 19-field form editor with Tab navigation, Ctrl+S to save |
+| **Server Logs** | `enter` on profile (auto-launch) | Live logs with bubbles/viewport scrollbars, metrics, clipboard copy |
+| **Theme Selector** | `t` (global) | Pick from 5 built-in themes |
+| **File Browser** | `a` in Models tab or Engines tab | Directory picker with up/down/enter/back navigation and `/` filter |
 
 ### Screen IDs (internal)
 
 ```go
-screenHome = iota       // 0 — dashboard
-screenModelList         // 1 — all models
-screenProfileList       // 2 — profiles
-screenProfileEdit       // 3 — profile form
-screenConfirm           // 4 — launch confirmation
-screenServerRunning     // 5 — server logs
-screenExplore           // 6 — scan folders
-screenExecutor          // 7 — executors
-screenThemeSelector     // 8 — themes
+screenHome = iota       // 0 — tabbed dashboard
+screenModelList         // 1 — model picker
+screenProfileEdit       // 2 — profile form
+screenConfirm           // 3 — launch confirmation
+screenServerRunning     // 4 — server logs
+screenThemeSelector     // 5 — themes
+```
+
+### Tab IDs (internal)
+
+```go
+tabProfiles = 0         // Profile management
+tabModels   = 1         // Scan directory management
+tabEngines  = 2         // Executor configuration
 ```
 
 ---
@@ -241,7 +315,7 @@ The `db.DB` type provides:
 - **Settings**: `GetSetting(key)`, `SetSetting(key, value)`
 - **Scan dirs**: `ListScanDirs()`, `AddScanDir(path)`, `RemoveScanDir(path)`
 - **Models**: `UpsertModel()`, `ListModels()`, `ListRecents(limit)`, `MarkModelUsed(id)`, `Sync(scanned)` (full sync with removal detection)
-- **Profiles**: `ListProfiles(modelID)`, `UpsertProfile()`, `DeleteProfile(id)`, `MarkRecent(modelID, profileID)`
+- **Profiles**: `ListProfiles(modelID)`, `ListAllProfiles()`, `UpsertProfile()`, `GetProfile(id)`, `DeleteProfile(id)`, `MarkRecent(modelID, profileID)`
 - **Executors**: `ListExecutors()`, `UpsertExecutor()`, `SetDefaultExecutor(id)`, `GetDefaultExecutorPath()`
 
 ### Key Pattern: Full Sync (`Sync`)
@@ -265,9 +339,10 @@ The `Sync()` method performs a **diff-and-replace** operation:
 4. Upsert each model into DB
 5. Load theme from settings → apply
 6. Find default executor (DB → PATH fallback to "llama-server")
-7. Create AppModel with initial data
-8. Run Bubble Tea program (alt screen, mouse cell motion)
-9. Handle SIGTERM/SIGINT for clean shutdown
+7. Load recent profiles (limit 3) + all profiles from DB
+8. Create AppModel with HomeModel (tabbed, initialized with data)
+9. Run Bubble Tea program (alt screen, mouse cell motion)
+10. Handle SIGTERM/SIGINT for clean shutdown
 ```
 
 ### 2. Model Discovery & Scanning
@@ -282,16 +357,18 @@ The scanner supports three model formats:
 
 **Validation**: GGUF files are validated by reading the first 4 bytes and checking the magic number.
 
-### 3. Profile Launch
+### 3. Profile Launch (from Profiles Tab)
 
 ```go
-// 1. User selects model → sees profile list
-// 2. Select/create profile → goes to Confirm screen
-// 3. ConfirmModel.BuildCommand() constructs shell-quoted command string
-// 4. User presses Enter:
-//    a. MarkRecent(modelID, profileID) → updates recents
-//    b. NewServerModel(args) → spawns llama-server with piped stdout/stderr
-//    c. Switch to ServerRunning screen
+// 1. User navigates Profiles tab, selects a profile
+// 2. Right panel shows full configuration preview
+// 3. User presses Enter:
+//    a. profilesTabLaunchMsg sent → AppModel
+//    b. launcher.BuildArgs(executor, model, profile) → CLI args
+//    c. MarkRecent(modelID, profileID) → updates recents
+//    d. NewServerModel(args) → spawns llama-server with piped stdout/stderr
+//    e. Switch to ServerRunning screen
+// No confirm screen — one-press launch for speed.
 ```
 
 **Process Management**:
@@ -299,8 +376,42 @@ The scanner supports three model formats:
 - Stdout/stderr piped through `io.Pipe` → goroutine reads lines → `logLineMsg` channel
 - Stop: `SIGTERM` → 5s grace → `SIGKILL` if unresponsive
 - Restart: tear down and re-spawn with same args
+- Logs: max 10,000 lines retained; clear with `c`; copy to clipboard with `y`
 
-### 4. Profile Form (ProfileEditModel)
+### 4. Profile Creation (from Profiles Tab)
+
+```go
+// 1. User presses 'n' on Profiles tab
+//    → profilesTabNewProfileMsg
+//    → openProfileModelPicker → switches to ModelList screen
+// 2. User selects a model → switches to ProfileEdit screen
+// 3. User fills form (19 fields), presses Ctrl+S
+//    → saveProfileMsg → UpsertProfile → back to Home (Profiles tab)
+```
+
+### 5. Profile Deletion (from Profiles Tab)
+
+```go
+// 1. User selects profile → right panel shows config
+// 2. User presses 'x' → delete confirmation shown in right panel
+// 3. 'y' confirms → profilesTabDeleteProfileMsg → DeleteProfile → refresh home
+// 4. 'n' or esc cancels
+```
+
+### 6. Models Tab — Scan Directory Management
+
+```go
+// User manages model directories:
+// - 'a' → opens file browser → select folder → AddScanDir
+// - 'd' → RemoveScanDir (on selected folder)
+// - 's' → sync all folders:
+//   1. scanner.Scan(folders)
+//   2. LoadModelMetadata for each entry
+//   3. db.Sync(scanned) → upsert new, remove stale
+//   4. Refresh home with new model count
+```
+
+### 7. Profile Form (ProfileEditModel)
 
 19 form fields with 4 kinds:
 - **fieldText** — text input (Name, Host, NGL, Extra Flags)
@@ -310,15 +421,6 @@ The scanner supports three model formats:
 - **fieldSelect** — left/right cycle (Context Unit, Cache Type K/V)
 
 Navigation: Tab/Shift-Tab or Arrow keys. Scrollable via `viewOffset`. Save via Ctrl+S.
-
-### 5. Scan Directory Sync
-
-```go
-// User adds/removes folders → presses "s" for sync:
-// 1. ExploreModel sends syncRequest to syncWorker goroutine
-// 2. syncWorker: Scan() all folders → LoadModelMetadata() → DB.Sync()
-// 3. Result sent back → syncDoneMsg → root model updates lists
-```
 
 ---
 
@@ -395,6 +497,23 @@ type Theme struct {
 - Theme persisted in DB as `settings.theme` key
 - Theme applied at startup if set in DB
 
+### Scrollbar Rendering
+
+Uses standard Bubble Tea components for scrolling:
+- **Profiles tab left panel**: `bubbles/list` with built-in vertical scrollbar
+- **Profiles tab right panel**: `bubbles/viewport` with built-in vertical scrollbar
+- **Server logs**: `bubbles/viewport` with built-in vertical scrollbar + custom horizontal scrollbar via `scrollbar.go`
+- **Models tab**: Custom list with `scrollbar.go` rendering for vertical scrollbar
+- All scrollbars theme-reactive via `rebuildStyles()`
+
+### Clipboard Integration
+
+Server logs can be copied to the system clipboard via `y` key. Uses:
+- `wl-copy` on Wayland
+- `xclip -selection clipboard` on X11
+- `pbcopy` on macOS
+- Falls back gracefully if no clipboard tool is available
+
 ---
 
 ## Build & Release
@@ -439,26 +558,63 @@ Multi-arch cross-compilation via Docker:
 
 - **Package naming**: Short, lowercase, one word (e.g., `db`, `tui`, `scanner`)
 - **Type composition over inheritance**: Each screen is a struct with `Init()`, `Update()`, `View()` methods
-- **Message types**: Unexported internal messages (e.g., `toastTickMsg`, `scanDoneMsg`), exported inter-screen messages (e.g., `saveProfileMsg`, `syncDoneMsg`)
+- **Message types**: Unexported internal messages (e.g., `toastTickMsg`, `profilesTabLaunchMsg`), exported inter-screen messages (e.g., `saveProfileMsg`)
 - **Error handling**: Errors propagated to UI via `a.setErr(msg)` toast pattern (auto-dismiss after 4 seconds)
 - **Optional values**: Use pointers (`*int`, `*float64`, `*string`) for nullable profile fields
 
 ### Key Binding Conventions
 
 - Defined in `keys.go` using `bubbles/key.NewBinding()`
+- **Per-tab keymaps**: Help bar changes to show tab-specific keys (Profiles/Models/Engines each have their own keymap)
 - Arrow keys + vim-style (`j`/`k`) always paired
-- Navigation: `tab`/`shift+tab` for forms, `up`/`down` for lists
-- `?` toggles full help on all screens (except profile edit and executor)
+- Navigation: `tab`/`shift+tab` for forms, `up`/`down` for lists, `←/→` for tabs
+- Number keys `1`/`2`/`3` for direct tab access
+- `?` toggles full help on all screens (except profile edit)
 - `esc` = back on most screens
-- `q` = quit (on Home or Model List)
+- `q` = quit (on Home)
+- `t` = theme selector (global, except in editor/server)
 
 ### Screen Design
 
-- All screens centered in a `lipgloss.Place(... Center Center ...)` container
-- Rounded border boxes with theme-colored borders
-- Width capped at 60 chars (responsive: `min(60, width - 4)`)
+- **Home screen**: Header bar ("infai" + version) → Tab bar → Content area
+- Tab bar shows active tab with inverted colors (primary bg, bg fg)
+- Inactive tabs shown in muted color
+- All screens use rounded border boxes with theme-colored borders
+- Responsive width: minimum 60 chars, adapts to terminal width
 - Help bar at bottom using `bubbles/help`
 - Toast errors shown at top in red with ⚠ prefix
+
+### Tab Design
+
+- **Profiles tab**: Horizontal split (40% left / 60% right)
+  - Left panel: scrollable profile list with custom vertical scrollbar
+  - Right panel: scrollable configuration preview with vertical scrollbar
+  - "New Profile" always at top of list
+  - Top 3 recents grouped separately with separator line
+- **Models tab**: Single panel with directory list
+  - Built-in file browser for adding directories
+  - Sync with spinner indicator
+- **Engines tab**: Single panel with executor info
+  - Shows current path, detected binary, saved executors
+
+### Scrollbar Conventions
+
+- **Vertical scrollbar**: Rendered alongside content as a single-character column
+  - `░` for track, `▓` for thumb
+  - Thumb position and size proportional to viewport/content ratio
+- **Horizontal scrollbar**: Rendered below log viewport as a single line
+  - `─` for track, `━` for thumb
+  - Controlled with `←`/`→` keys (5-char increments)
+- Scrollbar colors update with theme changes via `rebuildStyles()`
+
+### Responsive Design
+
+- **Minimum window size**: 60 cols × 20 rows
+  - Warning screen shown if terminal is below minimum
+- **Content width**: Adapts to terminal width, capped per-container
+- **Split panel**: Always horizontal, left panel ~40%, right ~60%
+- **Long paths**: Truncated with `…` prefix when exceeding available width
+- **Small terminals**: Panels shrink proportionally; content may overflow with scrollbars
 
 ### Scanner Conventions
 
@@ -480,4 +636,5 @@ The codebase currently has no test files. When adding tests:
 - Unit test `db` CRUD operations (use `:memory:` SQLite)
 - Unit test `launcher.BuildArgs()` for various profile configs
 - Unit test `scanner.Scan()` with mock directories
+- Unit test `tui.RenderScrollbar()` for edge cases (empty, single item, many items)
 - Table-driven tests for profile validation (`ToProfile()`)
