@@ -16,25 +16,32 @@ type GGUFMetadata struct {
 	ModelName    string
 }
 
+type InferenceEngine struct {
+	ID   string
+	Name string
+	Path string
+}
+
 type Profile struct {
-	ID              int64
-	ModelID         int64
-	Name            string
-	Port            int
-	Host            string
-	ContextSize     int
-	NGL             string
-	BatchSize       *int
-	UBatchSize      *int
-	CacheTypeK      *string
-	CacheTypeV      *string
-	FlashAttn       bool
-	Jinja           bool
-	Temperature     *float64
-	ReasoningBudget *int
-	TopP            *float64
-	TopK            *int
-	NoKVOffload     bool
-	UseMmproj       bool
-	ExtraFlags      string
+	ID                int64
+	ModelID           int64
+	InferenceEngineID string
+	Name              string
+	Port              int
+	Host              string
+	ContextSize       int
+	NGL               string
+	BatchSize         *int
+	UBatchSize        *int
+	CacheTypeK        *string
+	CacheTypeV        *string
+	FlashAttn         bool
+	Jinja             bool
+	Temperature       *float64
+	ReasoningBudget   *int
+	TopP              *float64
+	TopK              *int
+	NoKVOffload       bool
+	UseMmproj         bool
+	ExtraFlags        string
 }

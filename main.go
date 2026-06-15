@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 
@@ -54,19 +53,7 @@ func main() {
 		tui.SetTheme(theme)
 	}
 
-	serverBin, err := database.GetDefaultExecutorPath()
-	if err != nil || serverBin == "" {
-		if path, err := exec.LookPath("llama-server"); err == nil {
-			serverBin = path
-			_ = database.UpsertExecutor(db.Executor{
-				ID:        "llamacpp",
-				Path:      path,
-				IsDefault: true,
-			})
-		}
-	}
-
-	app := tui.NewApp(database, serverBin, scanDirs, entries, 80, 24)
+	app := tui.NewApp(database, scanDirs, entries, 80, 24)
 	p := tea.NewProgram(&app, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	sigChan := make(chan os.Signal, 1)

@@ -139,9 +139,31 @@ func (d *DB) AddScanDir(path string) error {
 	return err
 }
 
-func (d *DB) RemoveScanDir(path string) error {
-	_, err := d.conn.Exec(`DELETE FROM scan_dirs WHERE path = ?`, path)
-	return err
+func (d *DB) RemoveScanDir(path string) (err error) {
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Deleting models first lets model/profile/recent cascades happen in the
+	// same transaction as removing the scan directory entry.
+	if _, err = tx.Exec(`DELETE FROM models WHERE scan_dir = ?`, path); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM scan_dirs WHERE path = ?`, path); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func (d *DB) UpsertModel(m *model.ModelEntry) error {
@@ -171,13 +193,15 @@ ON CONFLICT(gguf_path) DO UPDATE SET
 func (d *DB) ListRecents(limit int) ([]RecentEntry, error) {
 	rows, err := d.conn.Query(`
 SELECT m.id, m.scan_dir, m.dir_name, m.gguf_path, m.mmproj_path, m.display_name, m.type, m.metadata,
-       p.id, p.model_id, p.name, p.port, p.host, p.context_size, p.ngl,
+       ie.id, ie.name, ie.path,
+       p.id, p.model_id, p.inference_engine_id, p.name, p.port, p.host, p.context_size, p.ngl,
        p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
        p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
        p.no_kv_offload, p.use_mmproj, p.extra_flags
 FROM recents r
 JOIN models m ON r.model_id = m.id
 JOIN profiles p ON r.profile_id = p.id
+JOIN inference_engine ie ON p.inference_engine_id = ie.id
 ORDER BY r.last_used DESC
 LIMIT ?`, limit)
 	if err != nil {
@@ -188,11 +212,13 @@ LIMIT ?`, limit)
 	var out []RecentEntry
 	for rows.Next() {
 		var m model.ModelEntry
+		var ie model.InferenceEngine
 		var p model.Profile
 		var flashAttn, jinja, noKVOffload, useMmproj int
 		err := rows.Scan(
 			&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata,
-			&p.ID, &p.ModelID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
+			&ie.ID, &ie.Name, &ie.Path,
+			&p.ID, &p.ModelID, &p.InferenceEngineID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
 			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
 			&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
 			&noKVOffload, &useMmproj, &p.ExtraFlags,
@@ -204,7 +230,7 @@ LIMIT ?`, limit)
 		p.Jinja = jinja == 1
 		p.NoKVOffload = noKVOffload == 1
 		p.UseMmproj = useMmproj == 1
-		out = append(out, RecentEntry{Model: m, Profile: p})
+		out = append(out, RecentEntry{Model: m, InferenceEngine: ie, Profile: p})
 	}
 	return out, rows.Err()
 }
@@ -346,83 +372,94 @@ ON CONFLICT(model_id, profile_id) DO UPDATE SET last_used=excluded.last_used
 	return err
 }
 
-type Executor struct {
-	ID        string
-	Path      string
-	IsDefault bool
+func (d *DB) CreateInferenceEngine(e model.InferenceEngine) error {
+	_, err := d.conn.Exec(`INSERT INTO inference_engine (id, name, path) VALUES (?, ?, ?)`, e.ID, e.Name, e.Path)
+	return err
 }
 
-func (d *DB) ListExecutors() ([]Executor, error) {
-	rows, err := d.conn.Query(`SELECT id, path, is_default FROM executors ORDER BY id`)
+func (d *DB) UpdateInferenceEngineName(id, name string) error {
+	_, err := d.conn.Exec(`UPDATE inference_engine SET name = ? WHERE id = ?`, name, id)
+	return err
+}
+
+func (d *DB) UpdateInferenceEnginePath(id, path string) error {
+	_, err := d.conn.Exec(`UPDATE inference_engine SET path = ? WHERE id = ?`, path, id)
+	return err
+}
+
+func (d *DB) GetInferenceEngineByID(id string) (model.InferenceEngine, error) {
+	var e model.InferenceEngine
+	err := d.conn.QueryRow(`SELECT id, name, path FROM inference_engine WHERE id = ?`, id).Scan(&e.ID, &e.Name, &e.Path)
+	return e, err
+}
+
+func (d *DB) ListInferenceEngines() ([]model.InferenceEngine, error) {
+	rows, err := d.conn.Query(`SELECT id, name, path FROM inference_engine ORDER BY lower(name)`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var out []Executor
+	var out []model.InferenceEngine
 	for rows.Next() {
-		var e Executor
-		var isDefault int
-		if err := rows.Scan(&e.ID, &e.Path, &isDefault); err != nil {
+		var e model.InferenceEngine
+		if err := rows.Scan(&e.ID, &e.Name, &e.Path); err != nil {
 			return nil, err
 		}
-		e.IsDefault = isDefault == 1
 		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
-func (d *DB) UpsertExecutor(e Executor) error {
-	_, err := d.conn.Exec(`
-INSERT INTO executors (id, path, is_default)
-VALUES (?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET path=excluded.path, is_default=excluded.is_default
-`, e.ID, e.Path, boolToInt(e.IsDefault))
-	return err
-}
-
-func (d *DB) SetDefaultExecutor(id string) error {
+func (d *DB) DeleteInferenceEngine(id string) (err error) {
 	tx, err := d.conn.Begin()
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
-	if _, err := tx.Exec(`UPDATE executors SET is_default = 0`); err != nil {
+	if _, err = tx.Exec(`DELETE FROM profiles WHERE inference_engine_id = ?`, id); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE executors SET is_default = 1 WHERE id = ?`, id); err != nil {
+	if _, err = tx.Exec(`DELETE FROM inference_engine WHERE id = ?`, id); err != nil {
 		return err
 	}
-	return tx.Commit()
-}
-
-func (d *DB) GetDefaultExecutorPath() (string, error) {
-	var path string
-	err := d.conn.QueryRow(`SELECT path FROM executors WHERE is_default = 1`).Scan(&path)
-	return path, err
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 type RecentEntry struct {
-	Model   model.ModelEntry
-	Profile model.Profile
+	Model           model.ModelEntry
+	InferenceEngine model.InferenceEngine
+	Profile         model.Profile
 }
 
 type ProfileEntry struct {
-	Model   model.ModelEntry
-	Profile model.Profile
+	Model           model.ModelEntry
+	InferenceEngine model.InferenceEngine
+	Profile         model.Profile
 }
 
 func (d *DB) ListAllProfiles() ([]ProfileEntry, error) {
 	rows, err := d.conn.Query(`
 SELECT m.id, m.scan_dir, m.dir_name, m.gguf_path, m.mmproj_path, m.display_name, m.type, m.metadata,
-       p.id, p.model_id, p.name, p.port, p.host, p.context_size, p.ngl,
+       ie.id, ie.name, ie.path,
+       p.id, p.model_id, p.inference_engine_id, p.name, p.port, p.host, p.context_size, p.ngl,
        p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
        p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
        p.no_kv_offload, p.use_mmproj, p.extra_flags
 FROM profiles p
 JOIN models m ON p.model_id = m.id
-ORDER BY lower(m.display_name), lower(p.name)`)
+JOIN inference_engine ie ON p.inference_engine_id = ie.id
+ORDER BY lower(m.display_name), lower(ie.name), lower(p.name)`)
 	if err != nil {
 		return nil, err
 	}
@@ -431,11 +468,13 @@ ORDER BY lower(m.display_name), lower(p.name)`)
 	var out []ProfileEntry
 	for rows.Next() {
 		var m model.ModelEntry
+		var ie model.InferenceEngine
 		var p model.Profile
 		var flashAttn, jinja, noKVOffload, useMmproj int
 		err := rows.Scan(
 			&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata,
-			&p.ID, &p.ModelID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
+			&ie.ID, &ie.Name, &ie.Path,
+			&p.ID, &p.ModelID, &p.InferenceEngineID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
 			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
 			&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
 			&noKVOffload, &useMmproj, &p.ExtraFlags,
@@ -447,14 +486,14 @@ ORDER BY lower(m.display_name), lower(p.name)`)
 		p.Jinja = jinja == 1
 		p.NoKVOffload = noKVOffload == 1
 		p.UseMmproj = useMmproj == 1
-		out = append(out, ProfileEntry{Model: m, Profile: p})
+		out = append(out, ProfileEntry{Model: m, InferenceEngine: ie, Profile: p})
 	}
 	return out, rows.Err()
 }
 
 func (d *DB) ListProfiles(modelID int64) ([]model.Profile, error) {
 	rows, err := d.conn.Query(`
-SELECT id, model_id, name, port, host, context_size, ngl,
+SELECT id, model_id, inference_engine_id, name, port, host, context_size, ngl,
        batch_size, ubatch_size, cache_type_k, cache_type_v,
        flash_attn, jinja, temperature, reasoning_budget, top_p, top_k,
        no_kv_offload, use_mmproj, extra_flags
@@ -476,7 +515,7 @@ FROM profiles WHERE model_id = ? ORDER BY name`, modelID)
 
 func (d *DB) GetProfile(id int64) (model.Profile, error) {
 	rows, err := d.conn.Query(`
-SELECT id, model_id, name, port, host, context_size, ngl,
+SELECT id, model_id, inference_engine_id, name, port, host, context_size, ngl,
        batch_size, ubatch_size, cache_type_k, cache_type_v,
        flash_attn, jinja, temperature, reasoning_budget, top_p, top_k,
        no_kv_offload, use_mmproj, extra_flags
@@ -497,12 +536,13 @@ FROM profiles WHERE id = ?`, id)
 
 func (d *DB) UpsertProfile(p *model.Profile) error {
 	res, err := d.conn.Exec(`
-INSERT INTO profiles (model_id, name, port, host, context_size, ngl,
+INSERT INTO profiles (model_id, inference_engine_id, name, port, host, context_size, ngl,
     batch_size, ubatch_size, cache_type_k, cache_type_v,
     flash_attn, jinja, temperature, reasoning_budget, top_p, top_k,
     no_kv_offload, use_mmproj, extra_flags)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(model_id, name) DO UPDATE SET
+    inference_engine_id=excluded.inference_engine_id,
     port=excluded.port, host=excluded.host, context_size=excluded.context_size,
     ngl=excluded.ngl, batch_size=excluded.batch_size, ubatch_size=excluded.ubatch_size,
     cache_type_k=excluded.cache_type_k, cache_type_v=excluded.cache_type_v,
@@ -511,7 +551,7 @@ ON CONFLICT(model_id, name) DO UPDATE SET
     top_p=excluded.top_p, top_k=excluded.top_k,
     no_kv_offload=excluded.no_kv_offload, use_mmproj=excluded.use_mmproj,
     extra_flags=excluded.extra_flags
-`, p.ModelID, p.Name, p.Port, p.Host, p.ContextSize, p.NGL,
+`, p.ModelID, p.InferenceEngineID, p.Name, p.Port, p.Host, p.ContextSize, p.NGL,
 		p.BatchSize, p.UBatchSize, p.CacheTypeK, p.CacheTypeV,
 		boolToInt(p.FlashAttn), boolToInt(p.Jinja),
 		p.Temperature, p.ReasoningBudget, p.TopP, p.TopK,
@@ -537,7 +577,7 @@ func scanProfile(rows *sql.Rows) (model.Profile, error) {
 	var p model.Profile
 	var flashAttn, jinja, noKVOffload, useMmproj int
 	err := rows.Scan(
-		&p.ID, &p.ModelID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
+		&p.ID, &p.ModelID, &p.InferenceEngineID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
 		&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
 		&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
 		&noKVOffload, &useMmproj, &p.ExtraFlags,

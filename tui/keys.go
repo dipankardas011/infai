@@ -70,16 +70,16 @@ func (k themeKeyMap) ShortHelp() []key.Binding  { return []key.Binding{k.Select,
 func (k themeKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
 
 type profileTabKeyMap struct {
-	Launch  key.Binding
-	New     key.Binding
-	Edit    key.Binding
-	Delete  key.Binding
-	Filter  key.Binding
-	TabLeft key.Binding
+	Launch   key.Binding
+	New      key.Binding
+	Edit     key.Binding
+	Delete   key.Binding
+	Filter   key.Binding
+	TabLeft  key.Binding
 	TabRight key.Binding
-	Theme   key.Binding
-	Quit    key.Binding
-	Help    key.Binding
+	Theme    key.Binding
+	Quit     key.Binding
+	Help     key.Binding
 }
 
 func (k profileTabKeyMap) ShortHelp() []key.Binding {
@@ -109,8 +109,8 @@ func (k modelsTabKeyMap) FullHelp() [][]key.Binding {
 
 type enginesTabKeyMap struct {
 	Add      key.Binding
-	Detect   key.Binding
-	SetDef   key.Binding
+	Rename   key.Binding
+	Delete   key.Binding
 	TabLeft  key.Binding
 	TabRight key.Binding
 	Theme    key.Binding
@@ -119,25 +119,25 @@ type enginesTabKeyMap struct {
 }
 
 func (k enginesTabKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Add, k.Detect, k.SetDef, k.TabLeft, k.TabRight, k.Help}
+	return []key.Binding{k.Add, k.Rename, k.Delete, k.TabLeft, k.TabRight, k.Help}
 }
 func (k enginesTabKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Add, k.Detect, k.SetDef}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
+	return [][]key.Binding{{k.Add, k.Rename, k.Delete}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
 }
 
 var keys = struct {
-	Home       homeKeyMap
-	Profiles   profileTabKeyMap
-	Models     modelsTabKeyMap
-	Engines    enginesTabKeyMap
-	ModelList  modelListKeyMap
-	Confirm    confirmKeyMap
-	Server     serverKeyMap
-	Theme      themeKeyMap
+	Home      homeKeyMap
+	Profiles  profileTabKeyMap
+	Models    modelsTabKeyMap
+	Engines   enginesTabKeyMap
+	ModelList modelListKeyMap
+	Confirm   confirmKeyMap
+	Server    serverKeyMap
+	Theme     themeKeyMap
 }{
 	Home: homeKeyMap{
-		TabLeft:  key.NewBinding(key.WithKeys("left", "shift+tab"), key.WithHelp("←/s-tab", "prev tab")),
-		TabRight: key.NewBinding(key.WithKeys("right", "tab"), key.WithHelp("→/tab", "next tab")),
+		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),
+		TabRight: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
 		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
 		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
@@ -169,8 +169,8 @@ var keys = struct {
 		Edit:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 		Delete:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")),
 		Filter:   key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-		TabLeft:  key.NewBinding(key.WithKeys("left", "shift+tab"), key.WithHelp("←", "prev tab")),
-		TabRight: key.NewBinding(key.WithKeys("right", "tab"), key.WithHelp("→", "next tab")),
+		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),
+		TabRight: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
 		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
 		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
@@ -179,18 +179,18 @@ var keys = struct {
 		Add:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add folder")),
 		Remove:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "remove")),
 		Sync:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sync")),
-		TabLeft:  key.NewBinding(key.WithKeys("left", "shift+tab"), key.WithHelp("←", "prev tab")),
-		TabRight: key.NewBinding(key.WithKeys("right", "tab"), key.WithHelp("→", "next tab")),
+		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),
+		TabRight: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
 		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
 		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	},
 	Engines: enginesTabKeyMap{
-		Add:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add")),
-		Detect:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "detect")),
-		SetDef:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "set default")),
-		TabLeft:  key.NewBinding(key.WithKeys("left", "shift+tab"), key.WithHelp("←", "prev tab")),
-		TabRight: key.NewBinding(key.WithKeys("right", "tab"), key.WithHelp("→", "next tab")),
+		Add:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add folder")),
+		Rename:   key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "rename")),
+		Delete:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")),
+		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),
+		TabRight: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
 		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
 		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
