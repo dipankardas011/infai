@@ -1,10 +1,13 @@
 package backend
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
-	"os/exec"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/google/uuid"
 
 	"github.com/dipankardas011/infai/db"
 	"github.com/dipankardas011/infai/launcher"
@@ -37,14 +40,14 @@ func (s *Service) SetSetting(key, value string) error {
 }
 
 type HomeData struct {
-	ScanDirs  []string
-	Models    []model.ModelEntry
-	Recents   []db.RecentEntry
-	Profiles  []db.ProfileEntry
-	ServerBin string
+	ScanDirs         []string
+	Models           []model.ModelEntry
+	Recents          []db.RecentEntry
+	Profiles         []db.ProfileEntry
+	InferenceEngines []model.InferenceEngine
 }
 
-func (s *Service) LoadHomeData(serverBin string) (HomeData, error) {
+func (s *Service) LoadHomeData() (HomeData, error) {
 	var data HomeData
 	var errs []error
 
@@ -64,36 +67,17 @@ func (s *Service) LoadHomeData(serverBin string) (HomeData, error) {
 	if err != nil {
 		errs = append(errs, fmt.Errorf("profiles: %w", err))
 	}
-	resolvedBin, err := s.DefaultExecutorPath(serverBin)
+	inferenceEngines, err := s.db.ListInferenceEngines()
 	if err != nil {
-		errs = append(errs, fmt.Errorf("executor: %w", err))
-	} else {
-		serverBin = resolvedBin
+		errs = append(errs, fmt.Errorf("inference engines: %w", err))
 	}
 
 	data.ScanDirs = scanDirs
 	data.Models = models
 	data.Recents = recents
 	data.Profiles = profiles
-	data.ServerBin = serverBin
+	data.InferenceEngines = inferenceEngines
 	return data, errors.Join(errs...)
-}
-
-func (s *Service) DefaultExecutorPath(fallback string) (string, error) {
-	path, err := s.db.GetDefaultExecutorPath()
-	if err == nil && path != "" {
-		return path, nil
-	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", err
-	}
-	if fallback != "" {
-		return fallback, nil
-	}
-	if detected, err := exec.LookPath("llama-server"); err == nil {
-		return detected, nil
-	}
-	return "", nil
 }
 
 func (s *Service) ListModels() ([]model.ModelEntry, error) {
@@ -107,6 +91,12 @@ func (s *Service) GetProfile(id int64) (model.Profile, error) {
 func (s *Service) SaveProfile(p *model.Profile) error {
 	if p == nil {
 		return fmt.Errorf("profile is nil")
+	}
+	if p.InferenceEngineID == "" {
+		return fmt.Errorf("inference engine is required")
+	}
+	if _, err := s.db.GetInferenceEngineByID(p.InferenceEngineID); err != nil {
+		return fmt.Errorf("inference engine: %w", err)
 	}
 	return s.db.UpsertProfile(p)
 }
@@ -125,21 +115,46 @@ func (s *Service) MarkRecent(modelID, profileID int64) error {
 	return s.db.MarkRecent(modelID, profileID)
 }
 
-func (s *Service) BuildLaunchArgs(serverBin string, m model.ModelEntry, p model.Profile) ([]string, error) {
-	if serverBin == "" {
-		return nil, fmt.Errorf("executor path is empty")
-	}
+func (s *Service) BuildLaunchArgs(m model.ModelEntry, p model.Profile) ([]string, error) {
 	if m.ID <= 0 {
 		return nil, fmt.Errorf("invalid model")
 	}
 	if p.ID <= 0 {
 		return nil, fmt.Errorf("invalid profile")
 	}
-	args := launcher.BuildArgs(serverBin, m, p)
+	if p.InferenceEngineID == "" {
+		return nil, fmt.Errorf("profile has no inference engine")
+	}
+	engine, err := s.db.GetInferenceEngineByID(p.InferenceEngineID)
+	if err != nil {
+		return nil, fmt.Errorf("inference engine: %w", err)
+	}
+	engineBin, err := resolveInferenceEngineBinary(engine.Path)
+	if err != nil {
+		return nil, err
+	}
+	args := launcher.BuildArgs(engineBin, m, p)
 	if len(args) == 0 || args[0] == "" {
 		return nil, fmt.Errorf("failed to build launch args")
 	}
 	return args, nil
+}
+
+func resolveInferenceEngineBinary(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("inference engine path is empty")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("inference engine path: %w", err)
+	}
+	if !info.IsDir() {
+		return path, nil
+	}
+	bin := "llama-server"
+
+	return filepath.Join(path, bin), nil
 }
 
 type SyncResult struct {
@@ -186,23 +201,66 @@ func (s *Service) RemoveScanDir(path string) error {
 	return s.db.RemoveScanDir(path)
 }
 
-func (s *Service) ListExecutors() ([]db.Executor, error) {
-	return s.db.ListExecutors()
+func (s *Service) CreateInferenceEngine(name, path string) (model.InferenceEngine, error) {
+	name = strings.TrimSpace(name)
+	path = strings.TrimSpace(path)
+	if name == "" {
+		return model.InferenceEngine{}, fmt.Errorf("inference engine name is empty")
+	}
+	if path == "" {
+		return model.InferenceEngine{}, fmt.Errorf("inference engine path is empty")
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return model.InferenceEngine{}, err
+	}
+	engine := model.InferenceEngine{ID: id.String(), Name: name, Path: path}
+	if err := s.db.CreateInferenceEngine(engine); err != nil {
+		return model.InferenceEngine{}, err
+	}
+	return engine, nil
 }
 
-func (s *Service) SaveExecutor(e db.Executor) error {
-	if e.ID == "" {
-		return fmt.Errorf("executor id is empty")
-	}
-	if e.Path == "" {
-		return fmt.Errorf("executor path is empty")
-	}
-	return s.db.UpsertExecutor(e)
-}
-
-func (s *Service) SetDefaultExecutor(id string) error {
+func (s *Service) UpdateInferenceEngineName(id, name string) error {
+	id = strings.TrimSpace(id)
+	name = strings.TrimSpace(name)
 	if id == "" {
-		return fmt.Errorf("executor id is empty")
+		return fmt.Errorf("inference engine id is empty")
 	}
-	return s.db.SetDefaultExecutor(id)
+	if name == "" {
+		return fmt.Errorf("inference engine name is empty")
+	}
+	return s.db.UpdateInferenceEngineName(id, name)
+}
+
+func (s *Service) UpdateInferenceEnginePath(id, path string) error {
+	id = strings.TrimSpace(id)
+	path = strings.TrimSpace(path)
+	if id == "" {
+		return fmt.Errorf("inference engine id is empty")
+	}
+	if path == "" {
+		return fmt.Errorf("inference engine path is empty")
+	}
+	return s.db.UpdateInferenceEnginePath(id, path)
+}
+
+func (s *Service) GetInferenceEngineByID(id string) (model.InferenceEngine, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.InferenceEngine{}, fmt.Errorf("inference engine id is empty")
+	}
+	return s.db.GetInferenceEngineByID(id)
+}
+
+func (s *Service) ListInferenceEngines() ([]model.InferenceEngine, error) {
+	return s.db.ListInferenceEngines()
+}
+
+func (s *Service) DeleteInferenceEngine(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("inference engine id is empty")
+	}
+	return s.db.DeleteInferenceEngine(id)
 }

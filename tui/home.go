@@ -32,7 +32,6 @@ type HomeModel struct {
 
 func NewHomeModel(
 	service *backend.Service,
-	serverBin string,
 	scanDirs []string,
 	entries []model.ModelEntry,
 	recents []db.RecentEntry,
@@ -44,7 +43,7 @@ func NewHomeModel(
 		service:     service,
 		profilesTab: NewProfilesTabModel(recents, allProfiles, w, h),
 		modelsTab:   NewModelsTabModel(service, scanDirs, w, h),
-		enginesTab:  NewEnginesTabModel(service, serverBin, w, h),
+		enginesTab:  NewEnginesTabModel(service, w, h),
 		width:       w,
 		height:      h,
 	}
@@ -71,23 +70,19 @@ func (m HomeModel) RefreshModels(dirs []string) HomeModel {
 	return m
 }
 
-func (m HomeModel) RefreshEngines(serverBin string) HomeModel {
-	m.enginesTab = NewEnginesTabModel(m.service, serverBin, m.width, m.height)
+func (m HomeModel) RefreshEngines() HomeModel {
+	m.enginesTab = NewEnginesTabModel(m.service, m.width, m.height)
 	return m
-}
-
-func (m HomeModel) EffectiveServerBin() string {
-	return m.enginesTab.EffectivePath()
 }
 
 func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 	// Tab switching keys work regardless of tab state
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.String() {
-		case "left", "shift+tab":
+		case "shift+tab":
 			m.activeTab = (m.activeTab - 1 + len(tabNames)) % len(tabNames)
 			return m, nil
-		case "right", "tab":
+		case "tab":
 			m.activeTab = (m.activeTab + 1) % len(tabNames)
 			return m, nil
 		}

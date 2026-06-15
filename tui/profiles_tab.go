@@ -36,9 +36,9 @@ func (p profileTabItem) FilterValue() string {
 	case p.isSep:
 		return ""
 	case p.recent != nil:
-		return p.recent.Profile.Name + " " + p.recent.Model.DisplayName
+		return p.recent.Profile.Name + " " + p.recent.Model.DisplayName + " " + p.recent.InferenceEngine.Name
 	case p.entry != nil:
-		return p.entry.Profile.Name + " " + p.entry.Model.DisplayName
+		return p.entry.Profile.Name + " " + p.entry.Model.DisplayName + " " + p.entry.InferenceEngine.Name
 	}
 	return ""
 }
@@ -48,10 +48,10 @@ func (p profileTabItem) Description() string {
 		return ""
 	}
 	if p.recent != nil {
-		return "recent · " + p.recent.Model.DisplayName
+		return "recent · " + p.recent.Model.DisplayName + " · " + p.recent.InferenceEngine.Name
 	}
 	if p.entry != nil {
-		return p.entry.Model.DisplayName
+		return p.entry.Model.DisplayName + " · " + p.entry.InferenceEngine.Name
 	}
 	return ""
 }
@@ -222,7 +222,7 @@ func (m ProfilesTabModel) selectedEntry() *db.ProfileEntry {
 		return nil
 	}
 	if item.recent != nil {
-		return &db.ProfileEntry{Model: item.recent.Model, Profile: item.recent.Profile}
+		return &db.ProfileEntry{Model: item.recent.Model, InferenceEngine: item.recent.InferenceEngine, Profile: item.recent.Profile}
 	}
 	return item.entry
 }
@@ -243,6 +243,7 @@ func (m *ProfilesTabModel) updateViewport() {
 
 	p := entry.Profile
 	m2 := entry.Model
+	engine := entry.InferenceEngine
 
 	titleStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
 	sectionStyle := lipgloss.NewStyle().Foreground(t.Secondary).Bold(true)
@@ -253,7 +254,9 @@ func (m *ProfilesTabModel) updateViewport() {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render(p.Name) + "\n")
-	sb.WriteString(fieldLabel.Render("Model") + "  " + fieldVal.Render(m2.DisplayName) + "\n\n")
+	sb.WriteString(fieldLabel.Render("Model") + "  " + fieldVal.Render(m2.DisplayName) + "\n")
+	sb.WriteString(fieldLabel.Render("Engine") + "  " + fieldVal.Render(engine.Name) + "\n")
+	sb.WriteString(fieldLabel.Render("Engine Path") + "  " + fieldVal.Render(engine.Path) + "\n\n")
 
 	sb.WriteString(sectionStyle.Render("Network") + "\n")
 	sb.WriteString(fieldLabel.Render("Host") + "  " + fieldVal.Render(p.Host) + "\n")

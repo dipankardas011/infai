@@ -7,6 +7,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/golang-migrate/migrate/v4 v4.18.0
+	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.42
 	github.com/shirou/gopsutil/v4 v4.26.3
 )

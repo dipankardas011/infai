@@ -32,8 +32,9 @@ type formField struct {
 	optional bool
 	disabled bool
 	// fieldSelect only
-	options []string
-	selIdx  int
+	options      []string
+	optionValues []string
+	selIdx       int
 }
 
 // ProfileEditModel is screen 3.
@@ -41,6 +42,7 @@ type ProfileEditModel struct {
 	fields      []formField
 	focused     int
 	modelEntry  model.ModelEntry
+	engines     []model.InferenceEngine
 	editingID   int64
 	modelID     int64
 	errMsg      string
@@ -71,7 +73,21 @@ func newSelectField(label string, options []string, currentVal *string) formFiel
 	return formField{label: label, kind: fieldSelect, options: options, selIdx: idx}
 }
 
-func NewProfileEditModel(m model.ModelEntry, p *model.Profile, w, h int) ProfileEditModel {
+func newEngineSelectField(engines []model.InferenceEngine, currentID string) formField {
+	options := make([]string, 0, len(engines))
+	values := make([]string, 0, len(engines))
+	idx := 0
+	for i, e := range engines {
+		options = append(options, e.Name)
+		values = append(values, e.ID)
+		if e.ID == currentID {
+			idx = i
+		}
+	}
+	return formField{label: "Inference Engine", kind: fieldSelect, options: options, optionValues: values, selIdx: idx}
+}
+
+func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p *model.Profile, w, h int) ProfileEditModel {
 	hasMmproj := m.MmprojPath != ""
 
 	var cacheKVal, cacheVVal *string
@@ -80,8 +96,14 @@ func NewProfileEditModel(m model.ModelEntry, p *model.Profile, w, h int) Profile
 		cacheVVal = p.CacheTypeV
 	}
 
+	currentEngineID := ""
+	if p != nil {
+		currentEngineID = p.InferenceEngineID
+	}
+
 	fields := []formField{
 		{label: "Name", kind: fieldText, input: newTextInput("e.g. text-only")},
+		newEngineSelectField(engines, currentEngineID),
 		{label: "Port", kind: fieldInt, input: newTextInput("8000")},
 		{label: "Host", kind: fieldText, input: newTextInput("0.0.0.0")},
 		{label: "Context Size", kind: fieldInt, input: newTextInput("64")},
@@ -105,6 +127,7 @@ func NewProfileEditModel(m model.ModelEntry, p *model.Profile, w, h int) Profile
 	em := ProfileEditModel{
 		fields:      fields,
 		modelEntry:  m,
+		engines:     engines,
 		modelID:     m.ID,
 		visibleRows: h - 12,
 		width:       w,
@@ -216,7 +239,7 @@ func (em ProfileEditModel) Update(msg tea.Msg) (ProfileEditModel, tea.Cmd) {
 	case tea.KeyMsg:
 		f := &em.fields[em.focused]
 		switch msg.String() {
-		case "tab", "down":
+		case "tab":
 			if f.kind != fieldBool && f.kind != fieldSelect {
 				f.input.Blur()
 			}
@@ -228,7 +251,7 @@ func (em ProfileEditModel) Update(msg tea.Msg) (ProfileEditModel, tea.Cmd) {
 			em.scrollTo(em.focused)
 			return em, textinput.Blink
 
-		case "shift+tab", "up":
+		case "shift+tab":
 			if f.kind != fieldBool && f.kind != fieldSelect {
 				f.input.Blur()
 			}
@@ -247,13 +270,13 @@ func (em ProfileEditModel) Update(msg tea.Msg) (ProfileEditModel, tea.Cmd) {
 			}
 
 		case "left":
-			if f.kind == fieldSelect {
+			if f.kind == fieldSelect && len(f.options) > 0 {
 				f.selIdx = (f.selIdx - 1 + len(f.options)) % len(f.options)
 				return em, nil
 			}
 
 		case "right":
-			if f.kind == fieldSelect {
+			if f.kind == fieldSelect && len(f.options) > 0 {
 				f.selIdx = (f.selIdx + 1) % len(f.options)
 				return em, nil
 			}
@@ -360,21 +383,20 @@ func (em ProfileEditModel) View() string {
 			}
 
 		case fieldSelect:
-			prev := styleMuted.Render("◀")
-			next := styleMuted.Render("▶")
-			opt := f.options[f.selIdx]
+			opt := "(none)"
+			if len(f.options) > 0 {
+				opt = f.options[f.selIdx]
+			}
 			optStr := ""
-			if opt == "(omit)" {
+			if opt == "(omit)" || opt == "(none)" {
 				optStr = styleMuted.Render(opt)
 			} else {
 				optStr = lipgloss.NewStyle().Foreground(t.Primary).Render(opt)
 			}
 			if focused {
-				prev = styleKey.Render("◀")
-				next = styleKey.Render("▶")
-				value = prev + " " + optStr + " " + next + styleMuted.Render("  ←/→")
+				value = optStr + styleMuted.Render("  ←/→ to change")
 			} else {
-				value = prev + " " + optStr + " " + next
+				value = optStr
 			}
 
 		default:
@@ -400,7 +422,7 @@ func (em ProfileEditModel) View() string {
 		errLine = "\n" + styleError.Render("  ✗ "+em.errMsg)
 	}
 
-	help := styleHelp.Render("tab/↑↓: navigate  ←/→: cycle select  space: toggle  ctrl+s: save  esc: discard")
+	help := styleHelp.Render("tab/s-tab: navigate  ←/→: cycle select  space: toggle  ctrl+s: save  esc: discard")
 
 	content := title + "\n\n" + strings.Join(rows, "\n") + scrollHint + errLine + "\n\n" + help
 
@@ -436,6 +458,9 @@ func (em ProfileEditModel) ToProfile() (model.Profile, error) {
 	getSelect := func(label string) *string {
 		for _, f := range em.fields {
 			if f.label == label && f.kind == fieldSelect {
+				if len(f.options) == 0 {
+					return nil
+				}
 				if f.options[f.selIdx] == "(omit)" {
 					return nil
 				}
@@ -444,6 +469,17 @@ func (em ProfileEditModel) ToProfile() (model.Profile, error) {
 			}
 		}
 		return nil
+	}
+	getSelectValue := func(label string) string {
+		for _, f := range em.fields {
+			if f.label == label && f.kind == fieldSelect && len(f.options) > 0 {
+				if len(f.optionValues) == len(f.options) {
+					return f.optionValues[f.selIdx]
+				}
+				return f.options[f.selIdx]
+			}
+		}
+		return ""
 	}
 	optInt := func(label string) (*int, error) {
 		v := get(label)
@@ -471,6 +507,10 @@ func (em ProfileEditModel) ToProfile() (model.Profile, error) {
 	name := get("Name")
 	if name == "" {
 		return model.Profile{}, fmt.Errorf("Name is required")
+	}
+	engineID := getSelectValue("Inference Engine")
+	if engineID == "" {
+		return model.Profile{}, fmt.Errorf("Inference Engine is required")
 	}
 	port, err := strconv.Atoi(get("Port"))
 	if err != nil || port < 1 || port > 65535 {
@@ -523,25 +563,26 @@ func (em ProfileEditModel) ToProfile() (model.Profile, error) {
 	}
 
 	return model.Profile{
-		ID:              em.editingID,
-		ModelID:         em.modelID,
-		Name:            name,
-		Port:            port,
-		Host:            get("Host"),
-		ContextSize:     ctx,
-		NGL:             ngl,
-		BatchSize:       batchSize,
-		UBatchSize:      ubatchSize,
-		CacheTypeK:      getSelect("Cache Type K"),
-		CacheTypeV:      getSelect("Cache Type V"),
-		FlashAttn:       getBool("Flash Attn"),
-		Jinja:           getBool("Jinja"),
-		Temperature:     temp,
-		ReasoningBudget: rb,
-		TopP:            topP,
-		TopK:            topK,
-		NoKVOffload:     getBool("No KV Offload"),
-		UseMmproj:       getBool("Use Mmproj"),
-		ExtraFlags:      get("Extra Flags"),
+		ID:                em.editingID,
+		ModelID:           em.modelID,
+		InferenceEngineID: engineID,
+		Name:              name,
+		Port:              port,
+		Host:              get("Host"),
+		ContextSize:       ctx,
+		NGL:               ngl,
+		BatchSize:         batchSize,
+		UBatchSize:        ubatchSize,
+		CacheTypeK:        getSelect("Cache Type K"),
+		CacheTypeV:        getSelect("Cache Type V"),
+		FlashAttn:         getBool("Flash Attn"),
+		Jinja:             getBool("Jinja"),
+		Temperature:       temp,
+		ReasoningBudget:   rb,
+		TopP:              topP,
+		TopK:              topK,
+		NoKVOffload:       getBool("No KV Offload"),
+		UseMmproj:         getBool("Use Mmproj"),
+		ExtraFlags:        get("Extra Flags"),
 	}, nil
 }

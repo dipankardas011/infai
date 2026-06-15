@@ -64,7 +64,6 @@ type syncDoneMsg struct {
 type AppModel struct {
 	screen       screenKind
 	service      *backend.Service
-	serverBin    string
 	scanDirs     []string
 	width        int
 	height       int
@@ -91,16 +90,13 @@ type AppModel struct {
 	confirmReturn     screenKind
 }
 
-func NewApp(database *db.DB, serverBin string, scanDirs []string, entries []model.ModelEntry, w, h int) AppModel {
+func NewApp(database *db.DB, scanDirs []string, entries []model.ModelEntry, w, h int) AppModel {
 	service := backend.New(database)
 	var startupErrs []string
 
-	data, err := service.LoadHomeData(serverBin)
+	data, err := service.LoadHomeData()
 	if err != nil {
 		startupErrs = append(startupErrs, err.Error())
-	}
-	if data.ServerBin != "" {
-		serverBin = data.ServerBin
 	}
 	if len(data.ScanDirs) > 0 {
 		scanDirs = data.ScanDirs
@@ -114,11 +110,10 @@ func NewApp(database *db.DB, serverBin string, scanDirs []string, entries []mode
 		SetTheme(themeName)
 	}
 
-	home := NewHomeModel(service, serverBin, scanDirs, entries, data.Recents, data.Profiles, w, h)
+	home := NewHomeModel(service, scanDirs, entries, data.Recents, data.Profiles, w, h)
 
 	return AppModel{
 		service:       service,
-		serverBin:     serverBin,
 		scanDirs:      scanDirs,
 		width:         w,
 		height:        h,
@@ -144,22 +139,15 @@ func (a *AppModel) setSuccess(msg string) { a.setToast(toastSuccess, msg) }
 func (a *AppModel) setWarning(msg string) { a.setToast(toastWarning, msg) }
 
 func (a *AppModel) refreshHome() {
-	data, err := a.service.LoadHomeData(a.serverBin)
+	data, err := a.service.LoadHomeData()
 	if err != nil {
 		a.setErr(err.Error())
-	}
-	if data.ServerBin != "" {
-		a.serverBin = data.ServerBin
 	}
 	a.scanDirs = data.ScanDirs
 	a.modelList = a.modelList.SetEntries(data.Models)
 	a.home = a.home.RefreshProfiles(data.Recents, data.Profiles)
 	a.home = a.home.RefreshModels(a.scanDirs)
-	a.home = a.home.RefreshEngines(a.serverBin)
-	// Sync serverBin from engines tab (may have been updated in UI state).
-	if effective := a.home.EffectiveServerBin(); effective != "" {
-		a.serverBin = effective
-	}
+	a.home = a.home.RefreshEngines()
 }
 
 func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -204,7 +192,7 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.selectedModel = msg.entry.Model
 		a.selectedProfile = msg.entry.Profile
 		// Launch directly — no confirm screen
-		args, err := a.service.BuildLaunchArgs(a.serverBin, msg.entry.Model, msg.entry.Profile)
+		args, err := a.service.BuildLaunchArgs(msg.entry.Model, msg.entry.Profile)
 		if err != nil {
 			a.setErr(err.Error())
 			return a, nil
@@ -239,8 +227,13 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setErr(err.Error())
 			return a, nil
 		}
+		engines, err := a.service.ListInferenceEngines()
+		if err != nil {
+			a.setErr(err.Error())
+			return a, nil
+		}
 		a.selectedModel = msg.entry.Model
-		a.profileEdit = NewProfileEditModel(msg.entry.Model, &profile, a.width, a.height)
+		a.profileEdit = NewProfileEditModel(msg.entry.Model, engines, &profile, a.width, a.height)
 		a.profileEditReturn = screenHome
 		a.screen = screenProfileEdit
 		a.errMsg = ""
@@ -251,6 +244,14 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setErr(err.Error())
 			return a, nil
 		}
+		a.refreshHome()
+		return a, nil
+
+	case enginesTabChangedMsg:
+		a.refreshHome()
+		return a, nil
+
+	case modelsTabChangedMsg:
 		a.refreshHome()
 		return a, nil
 
@@ -464,7 +465,17 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if entry, ok := a.modelList.Selected(); ok {
 			a.selectedModel = entry
 			if a.modelListPurpose == modelListPickForProfile {
-				a.profileEdit = NewProfileEditModel(entry, nil, a.width, a.height)
+				engines, err := a.service.ListInferenceEngines()
+				if err != nil {
+					a.setErr(err.Error())
+					return a, nil
+				}
+				if len(engines) == 0 {
+					a.setErr("no inference engines configured - add one in Engines tab")
+					a.screen = screenHome
+					return a, nil
+				}
+				a.profileEdit = NewProfileEditModel(entry, engines, nil, a.width, a.height)
 				a.profileEditReturn = screenHome
 				a.screen = screenProfileEdit
 				a.errMsg = ""
@@ -486,6 +497,15 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *AppModel) openProfileModelPicker(returnScreen screenKind) (tea.Model, tea.Cmd) {
+	engines, err := a.service.ListInferenceEngines()
+	if err != nil {
+		a.setErr(err.Error())
+		return a, nil
+	}
+	if len(engines) == 0 {
+		a.setErr("no inference engines configured - add one in Engines tab")
+		return a, nil
+	}
 	entries, err := a.service.ListModels()
 	if err != nil {
 		a.setErr(err.Error())

@@ -38,6 +38,8 @@ type modelsTabSyncDoneMsg struct {
 	err              error
 }
 
+type modelsTabChangedMsg struct{}
+
 func NewModelsTabModel(service *backend.Service, dirs []string, w, h int) ModelsTabModel {
 	models, _ := service.ListModels()
 	cp := make([]string, len(dirs))
@@ -134,6 +136,7 @@ func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 			models, _ := m.service.ListModels()
 			m.modelCnt = len(models)
 			m.errMsg = styleSuccess.Render("✓ removed")
+			return m, func() tea.Msg { return modelsTabChangedMsg{} }
 		case "s":
 			if m.syncing || len(m.dirs) == 0 {
 				break

@@ -2,58 +2,45 @@ package tui
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dipankardas011/infai/backend"
-	"github.com/dipankardas011/infai/db"
+	"github.com/dipankardas011/infai/model"
 )
 
-// EnginesTabModel presents inference engine executor configuration.
+// EnginesTabModel presents inference engine configuration.
 // Persistence is delegated to backend.Service.
 type EnginesTabModel struct {
-	service   *backend.Service
-	executors []db.Executor
-	cursor    int
-	detected  string
-	path      string
+	service *backend.Service
+	engines []model.InferenceEngine
+	cursor  int
 
-	addingBrowse bool
-	fileBrowser  FileBrowserModel
+	addingBrowse  bool
+	addNameMode   bool
+	renameMode    bool
+	deleteConfirm bool
+	deleteID      string
+	deleteName    string
+	pendingPath   string
+	nameInput     textinput.Model
+	fileBrowser   FileBrowserModel
 
 	errMsg string
 	width  int
 	height int
 }
 
-func NewEnginesTabModel(service *backend.Service, currentPath string, w, h int) EnginesTabModel {
-	executors, _ := service.ListExecutors()
-	detected := ""
-	if p, err := exec.LookPath("llama-server"); err == nil {
-		detected = p
-	}
-	path := currentPath
-	if path == "" && detected != "" {
-		path = detected
-	}
-	curIdx := 0
-	for i, e := range executors {
-		if e.IsDefault {
-			curIdx = i
-			break
-		}
-	}
+func NewEnginesTabModel(service *backend.Service, w, h int) EnginesTabModel {
+	engines, _ := service.ListInferenceEngines()
 	return EnginesTabModel{
-		service:   service,
-		executors: executors,
-		cursor:    curIdx,
-		detected:  detected,
-		path:      path,
-		width:     w,
-		height:    h,
+		service: service,
+		engines: engines,
+		width:   w,
+		height:  h,
 	}
 }
 
@@ -64,11 +51,104 @@ func (m EnginesTabModel) SetSize(w, h int) EnginesTabModel {
 	return m
 }
 
-func (m EnginesTabModel) EffectivePath() string { return m.path }
+func (m EnginesTabModel) selectedEngine() (model.InferenceEngine, bool) {
+	if len(m.engines) == 0 || m.cursor < 0 || m.cursor >= len(m.engines) {
+		return model.InferenceEngine{}, false
+	}
+	return m.engines[m.cursor], true
+}
 
-type enginesTabSavedMsg struct{ Path string }
+type enginesTabSavedMsg struct{}
+type enginesTabChangedMsg struct{}
 
 func (m EnginesTabModel) Update(msg tea.Msg) (EnginesTabModel, tea.Cmd) {
+	if m.deleteConfirm {
+		if key, ok := msg.(tea.KeyMsg); ok {
+			switch key.String() {
+			case "y":
+				if err := m.service.DeleteInferenceEngine(m.deleteID); err != nil {
+					m.errMsg = styleError.Render(err.Error())
+					return m, nil
+				}
+				m.engines, _ = m.service.ListInferenceEngines()
+				if m.cursor >= len(m.engines) {
+					m.cursor = max(len(m.engines)-1, 0)
+				}
+				m.deleteConfirm = false
+				m.deleteID = ""
+				m.deleteName = ""
+				m.errMsg = styleSuccess.Render("✓ inference engine deleted; associated profiles removed")
+				return m, func() tea.Msg { return enginesTabChangedMsg{} }
+			case "n", "esc":
+				m.deleteConfirm = false
+				m.deleteID = ""
+				m.deleteName = ""
+				m.errMsg = ""
+				return m, nil
+			}
+		}
+		return m, nil
+	}
+
+	if m.addNameMode {
+		if key, ok := msg.(tea.KeyMsg); ok {
+			switch key.String() {
+			case "esc":
+				m.addNameMode = false
+				m.pendingPath = ""
+				m.errMsg = ""
+				return m, nil
+			case "enter":
+				name := strings.TrimSpace(m.nameInput.Value())
+				if _, err := m.service.CreateInferenceEngine(name, m.pendingPath); err != nil {
+					m.errMsg = styleError.Render(err.Error())
+					return m, nil
+				}
+				m.engines, _ = m.service.ListInferenceEngines()
+				m.cursor = len(m.engines) - 1
+				m.addNameMode = false
+				m.pendingPath = ""
+				m.errMsg = styleSuccess.Render("✓ inference engine added")
+				return m, func() tea.Msg { return enginesTabChangedMsg{} }
+			}
+		}
+		var cmd tea.Cmd
+		m.nameInput, cmd = m.nameInput.Update(msg)
+		return m, cmd
+	}
+
+	if m.renameMode {
+		if key, ok := msg.(tea.KeyMsg); ok {
+			switch key.String() {
+			case "esc":
+				m.renameMode = false
+				m.errMsg = ""
+				return m, nil
+			case "enter":
+				engine, ok := m.selectedEngine()
+				if !ok {
+					m.renameMode = false
+					return m, nil
+				}
+				name := strings.TrimSpace(m.nameInput.Value())
+				if err := m.service.UpdateInferenceEngineName(engine.ID, name); err != nil {
+					m.errMsg = styleError.Render(err.Error())
+					return m, nil
+				}
+				m.engines, _ = m.service.ListInferenceEngines()
+				if m.cursor >= len(m.engines) {
+					m.cursor = max(len(m.engines)-1, 0)
+				}
+				m.renameMode = false
+				m.errMsg = styleSuccess.Render("✓ inference engine renamed")
+				return m, func() tea.Msg { return enginesTabChangedMsg{} }
+			}
+		}
+		var cmd tea.Cmd
+		m.nameInput, cmd = m.nameInput.Update(msg)
+		return m, cmd
+	}
+
 	if m.addingBrowse {
 		var cmd tea.Cmd
 		m.fileBrowser, cmd = m.fileBrowser.Update(msg)
@@ -89,14 +169,14 @@ func (m EnginesTabModel) Update(msg tea.Msg) (EnginesTabModel, tea.Cmd) {
 				m.errMsg = styleError.Render("bad path: " + err.Error())
 				return m, nil
 			}
-			isDefault := len(m.executors) == 0
-			if err := m.service.SaveExecutor(db.Executor{ID: "llamacpp", Path: absPath, IsDefault: isDefault}); err != nil {
-				m.errMsg = styleError.Render(err.Error())
-				return m, nil
-			}
-			m.executors, _ = m.service.ListExecutors()
-			m.path = absPath
-			m.errMsg = styleSuccess.Render("✓ executor configured")
+			m.pendingPath = absPath
+			m.addNameMode = true
+			m.nameInput = textinput.New()
+			m.nameInput.Placeholder = "e.g. CUDA build"
+			m.nameInput.CharLimit = 80
+			m.nameInput.Focus()
+			m.errMsg = ""
+			return m, textinput.Blink
 		}
 		return m, cmd
 	}
@@ -107,37 +187,37 @@ func (m EnginesTabModel) Update(msg tea.Msg) (EnginesTabModel, tea.Cmd) {
 		case "a":
 			m.addingBrowse = true
 			m.errMsg = ""
-			m.fileBrowser = NewFileBrowserModel().SetSize(m.width, m.height).SetSelectFile(true)
+			m.fileBrowser = NewFileBrowserModel().SetSize(m.width, m.height)
 			return m, nil
-		case "enter":
-			if len(m.executors) > 0 && m.cursor < len(m.executors) {
-				id := m.executors[m.cursor].ID
-				if err := m.service.SetDefaultExecutor(id); err != nil {
-					m.errMsg = styleError.Render(err.Error())
-					return m, nil
-				}
-				m.executors, _ = m.service.ListExecutors()
-				m.path = m.executors[m.cursor].Path
-				m.errMsg = styleSuccess.Render("✓ default set")
+		case "e":
+			engine, ok := m.selectedEngine()
+			if !ok {
+				m.errMsg = styleError.Render("no inference engine selected")
+				return m, nil
 			}
-		case "d":
-			if m.detected != "" {
-				if err := m.service.SaveExecutor(db.Executor{ID: "llamacpp", Path: m.detected, IsDefault: true}); err != nil {
-					m.errMsg = styleError.Render(err.Error())
-					return m, nil
-				}
-				m.executors, _ = m.service.ListExecutors()
-				m.path = m.detected
-				m.errMsg = styleSuccess.Render("✓ using system llama-server")
-			} else {
-				m.errMsg = styleError.Render("llama-server not found in PATH")
+			m.renameMode = true
+			m.nameInput = textinput.New()
+			m.nameInput.CharLimit = 80
+			m.nameInput.SetValue(engine.Name)
+			m.nameInput.Focus()
+			m.errMsg = ""
+			return m, textinput.Blink
+		case "x":
+			engine, ok := m.selectedEngine()
+			if !ok {
+				return m, nil
 			}
+			m.deleteConfirm = true
+			m.deleteID = engine.ID
+			m.deleteName = engine.Name
+			m.errMsg = ""
+			return m, nil
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
 			}
 		case "down", "j":
-			if m.cursor < len(m.executors)-1 {
+			if m.cursor < len(m.engines)-1 {
 				m.cursor++
 			}
 		}
@@ -146,7 +226,7 @@ func (m EnginesTabModel) Update(msg tea.Msg) (EnginesTabModel, tea.Cmd) {
 }
 
 func (m EnginesTabModel) SaveAndExit() (EnginesTabModel, tea.Cmd) {
-	return m, func() tea.Msg { return enginesTabSavedMsg{Path: m.path} }
+	return m, func() tea.Msg { return enginesTabSavedMsg{} }
 }
 
 func (m EnginesTabModel) View() string {
@@ -161,39 +241,47 @@ func (m EnginesTabModel) View() string {
 	selStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
 
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Inference Engine") + "\n\n")
-	sb.WriteString(mutedStyle.Render("  Executor: ") + successStyle.Render(m.path) + "\n")
-	if m.detected != "" && m.path != m.detected {
-		sb.WriteString(mutedStyle.Render("  Detected: ") + mutedStyle.Render(m.detected) + "\n")
-	} else if m.detected == "" && m.path == "" {
-		sb.WriteString(mutedStyle.Render("  Not found in PATH") + "\n")
-	}
-	sb.WriteString("\n")
+	sb.WriteString(titleStyle.Render("Inference Engines") + "\n\n")
 
-	if len(m.executors) > 0 {
-		sb.WriteString(mutedStyle.Render("  Saved executors:") + "\n")
-		for i, e := range m.executors {
+	if m.deleteConfirm {
+		sb.WriteString(styleError.Render("  Delete inference engine?") + "\n\n")
+		sb.WriteString(mutedStyle.Render("  Engine: ") + successStyle.Render(m.deleteName) + "\n")
+		sb.WriteString(mutedStyle.Render("  This will delete all associated profiles.") + "\n\n")
+		sb.WriteString(mutedStyle.Render("  y: confirm  n/esc: cancel") + "\n")
+	} else if m.addNameMode {
+		sb.WriteString(mutedStyle.Render("  Folder: ") + successStyle.Render(m.pendingPath) + "\n")
+		sb.WriteString(mutedStyle.Render("  Name: ") + m.nameInput.View() + "\n\n")
+		sb.WriteString(mutedStyle.Render("  enter: create  esc: cancel") + "\n")
+	} else if m.renameMode {
+		engine, _ := m.selectedEngine()
+		sb.WriteString(mutedStyle.Render("  Rename: ") + successStyle.Render(engine.Path) + "\n")
+		sb.WriteString("  " + m.nameInput.View() + "\n\n")
+		sb.WriteString(mutedStyle.Render("  enter: save  esc: cancel") + "\n")
+	} else if len(m.engines) > 0 {
+		sb.WriteString(mutedStyle.Render("  Saved inference engines:") + "\n")
+		for i, e := range m.engines {
 			prefix := "    "
-			style := mutedStyle
-			def := ""
-			if e.IsDefault {
-				def = successStyle.Render(" (default)")
-			}
+			nameStyle := lipgloss.NewStyle().Foreground(t.Text)
 			if i == m.cursor {
 				prefix = selStyle.Render("  ▶ ")
-				style = selStyle
+				nameStyle = selStyle
 			}
-			sb.WriteString(fmt.Sprintf("%s%s: %s%s\n", prefix, style.Render(e.ID), e.Path, def))
+			sb.WriteString(fmt.Sprintf("%s%s\n      %s\n", prefix, nameStyle.Render(e.Name), mutedStyle.Render(e.Path)))
 		}
 		sb.WriteString("\n")
+		sb.WriteString(mutedStyle.Render("  a: add folder  e: rename  x: delete") + "\n")
+	} else {
+		sb.WriteString(mutedStyle.Render("  No inference engines configured.") + "\n")
+		sb.WriteString(mutedStyle.Render("  Add a folder containing llama-server before creating or launching profiles.") + "\n\n")
+		sb.WriteString(mutedStyle.Render("  a: add inference engine folder") + "\n")
 	}
-	sb.WriteString(mutedStyle.Render("  a: add  d: auto-detect  enter: set default") + "\n")
+
 	if m.errMsg != "" {
 		sb.WriteString("\n" + m.errMsg)
 	}
 
-	boxW := 60
-	if m.width < 64 {
+	boxW := 68
+	if m.width < 72 {
 		boxW = m.width - 8
 	}
 	if boxW < 30 {
