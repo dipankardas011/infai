@@ -296,7 +296,7 @@ func parseUsedTotal(s string) (float64, float64, bool) {
 }
 
 func runsHeaderLine() string {
-	return fmt.Sprintf("%-5s %-11s %-22s %-26s %-7s %-9s %-8s", "RUN", "STATUS", "PROFILE", "MODEL", "PORT", "UPTIME", "TPS")
+	return fmt.Sprintf("%-5s %-11s %-20s %-26s %-16s %-9s %-8s", "RUN", "STATUS", "PROFILE", "MODEL", "ENGINE", "UPTIME", "TPS")
 }
 
 func runRowLine(r RunSnapshot, selected bool) string {
@@ -306,16 +306,20 @@ func runRowLine(r RunSnapshot, selected bool) string {
 	}
 	id := base.Width(5).Render(fmt.Sprintf("#%d", r.ID))
 	status := runStatusStyle(r).Width(11).Render(runStatusText(r))
-	profile := base.Width(22).Render(truncateRunText(r.ProfileName, 22))
+	profile := base.Width(20).Render(truncateRunText(r.ProfileName, 20))
 	model := base.Width(26).Render(truncateRunText(r.ModelName, 26))
-	port := base.Width(7).Render(fmt.Sprintf(":%d", r.ActualPort))
+	engineName := r.EngineName
+	if engineName == "" {
+		engineName = "—"
+	}
+	engine := base.Width(16).Render(truncateRunText(engineName, 16))
 	uptime := base.Width(9).Render(runUptime(r))
 	tps := "—"
 	if r.LiveTPS > 0 {
 		tps = fmt.Sprintf("%.1f", r.LiveTPS)
 	}
 	tpsCell := base.Width(8).Render(tps)
-	return lipgloss.JoinHorizontal(lipgloss.Left, id, " ", status, " ", profile, " ", model, " ", port, " ", uptime, " ", tpsCell)
+	return lipgloss.JoinHorizontal(lipgloss.Left, id, " ", status, " ", profile, " ", model, " ", engine, " ", uptime, " ", tpsCell)
 }
 
 func runStatusText(r RunSnapshot) string {

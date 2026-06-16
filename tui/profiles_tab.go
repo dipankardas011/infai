@@ -427,7 +427,7 @@ func (m ProfilesTabModel) Update(msg tea.Msg) (ProfilesTabModel, tea.Cmd) {
 			entry := m.selectedEntry()
 			if entry != nil {
 				return m, func() tea.Msg {
-					return profilesTabLaunchMsg{entry: db.RecentEntry{Model: entry.Model, Profile: entry.Profile}}
+					return profilesTabLaunchMsg{entry: db.RecentEntry{Model: entry.Model, Profile: entry.Profile, InferenceEngine: entry.InferenceEngine}}
 				}
 			}
 			return m, nil

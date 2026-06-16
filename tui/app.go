@@ -157,7 +157,7 @@ func (a *AppModel) syncRunsToHome() {
 	a.home = a.home.SetRuns(a.runs.Snapshot())
 }
 
-func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, openDetail bool) tea.Cmd {
+func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, engine model.InferenceEngine, openDetail bool) tea.Cmd {
 	a.selectedModel = m
 	a.selectedProfile = p
 	if existingID, ok := a.runs.ActiveProfileRun(p.ID); ok {
@@ -168,6 +168,14 @@ func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, openDetail boo
 		a.screen = screenHome
 		a.setInfo(fmt.Sprintf("%s is already running as run #%d", p.Name, existingID))
 		return nil
+	}
+	if engine.ID == "" && p.InferenceEngineID != "" {
+		var err error
+		engine, err = a.service.GetInferenceEngineByID(p.InferenceEngineID)
+		if err != nil {
+			a.setErr("inference engine: " + err.Error())
+			return nil
+		}
 	}
 	actualPort, err := pickRunPort(p.Host, p.Port, a.runs.OccupiedPorts())
 	if err != nil {
@@ -189,7 +197,9 @@ func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, openDetail boo
 	a.runs.Add(RunRecord{
 		ID: runID, ProfileID: p.ID, ModelID: m.ID,
 		ProfileName: p.Name, ModelName: m.DisplayName, ModelType: m.Type,
+		EngineID: engine.ID, EngineName: engine.Name, EnginePath: engine.Path,
 		Host: p.Host, RequestedPort: p.Port, ActualPort: actualPort,
+		Model: m, Profile: p,
 		Server: sm,
 	})
 	_ = a.service.MarkRecent(m.ID, p.ID)
@@ -247,7 +257,7 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case profilesTabLaunchMsg:
-		cmd := a.launchRun(msg.entry.Model, msg.entry.Profile, false)
+		cmd := a.launchRun(msg.entry.Model, msg.entry.Profile, msg.entry.InferenceEngine, false)
 		return a, cmd
 
 	case profilesTabNewProfileMsg:
@@ -484,20 +494,20 @@ func (a *AppModel) restartRun(id RunID) (tea.Model, tea.Cmd) {
 		a.setErr(err.Error())
 		return a, nil
 	}
-	args := append([]string(nil), run.Server.launchArgs...)
-	for i := 0; i < len(args)-1; i++ {
-		if args[i] == "--port" || args[i] == "--port " || args[i] == "-p" {
-			args[i+1] = fmt.Sprintf("%d", actualPort)
-		}
-	}
-	run.ActualPort = actualPort
-	run.Server.launchArgs = args
-	run.Server.port = actualPort
-	sm, cmd, err := run.Server.Restart()
+	args, err := a.service.BuildLaunchArgsWithPort(run.Model, run.Profile, actualPort)
 	if err != nil {
 		a.setErr(err.Error())
 		return a, nil
 	}
+	nextServer := run.Server
+	nextServer.launchArgs = args
+	nextServer.port = actualPort
+	sm, cmd, err := nextServer.Restart()
+	if err != nil {
+		a.setErr(err.Error())
+		return a, nil
+	}
+	run.ActualPort = actualPort
 	run.Server = sm
 	a.runs.SetActive(id)
 	a.syncRunsToHome()
@@ -731,7 +741,7 @@ func (a *AppModel) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		_ = args // command preview is legacy; launchRun rebuilds args with port conflict handling.
-		cmd := a.launchRun(a.selectedModel, a.selectedProfile, true)
+		cmd := a.launchRun(a.selectedModel, a.selectedProfile, model.InferenceEngine{}, true)
 		return a, cmd
 	}
 	return a, nil
@@ -776,6 +786,7 @@ func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case "esc":
+		a.refreshHome()
 		a.home.activeTab = tabRuns
 		a.screen = screenHome
 		return a, nil
