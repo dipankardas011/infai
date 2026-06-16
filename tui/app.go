@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -79,7 +80,7 @@ type AppModel struct {
 	modelList     ModelListModel
 	profileEdit   ProfileEditModel
 	confirm       ConfirmModel
-	server        ServerModel
+	runs          RunsStore
 	themeSelector ThemeSelectorModel
 
 	// State tracking
@@ -120,6 +121,7 @@ func NewApp(database *db.DB, scanDirs []string, entries []model.ModelEntry, w, h
 		errMsg:        strings.Join(startupErrs, "; "),
 		help:          help.New(),
 		home:          home,
+		runs:          NewRunsStore(),
 		modelList:     NewModelListModel(entries, w, h),
 		themeSelector: NewThemeSelectorModel(w, h),
 	}
@@ -148,6 +150,53 @@ func (a *AppModel) refreshHome() {
 	a.home = a.home.RefreshProfiles(data.Recents, data.Profiles)
 	a.home = a.home.RefreshModels(a.scanDirs)
 	a.home = a.home.RefreshEngines()
+	a.syncRunsToHome()
+}
+
+func (a *AppModel) syncRunsToHome() {
+	a.home = a.home.SetRuns(a.runs.Snapshot())
+}
+
+func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, openDetail bool) tea.Cmd {
+	a.selectedModel = m
+	a.selectedProfile = p
+	actualPort, err := pickRunPort(p.Host, p.Port, a.runs.OccupiedPorts())
+	if err != nil {
+		a.setErr(err.Error())
+		return nil
+	}
+	args, err := a.service.BuildLaunchArgsWithPort(m, p, actualPort)
+	if err != nil {
+		a.setErr(err.Error())
+		return nil
+	}
+	runID := a.runs.NewID()
+	sm, cmd, err := NewServerModel(runID, args, p.Name, m.DisplayName, m.Type, p.ContextSize, p.Host, actualPort, a.width, a.height)
+	if err != nil {
+		a.setErr(err.Error())
+		a.refreshHome()
+		return nil
+	}
+	a.runs.Add(RunRecord{
+		ID: runID, ProfileID: p.ID, ModelID: m.ID,
+		ProfileName: p.Name, ModelName: m.DisplayName, ModelType: m.Type,
+		Host: p.Host, RequestedPort: p.Port, ActualPort: actualPort,
+		Server: sm,
+	})
+	_ = a.service.MarkRecent(m.ID, p.ID)
+	a.refreshHome()
+	if actualPort != p.Port {
+		a.setWarning(fmt.Sprintf("port %d busy; launched %s as run #%d on :%d", p.Port, p.Name, runID, actualPort))
+	} else {
+		a.setSuccess(fmt.Sprintf("launched %s as run #%d on :%d — enter opens details", p.Name, runID, actualPort))
+	}
+	if openDetail {
+		a.screen = screenServerRunning
+	} else {
+		a.home.activeTab = tabRuns
+		a.screen = screenHome
+	}
+	return cmd
 }
 
 func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -184,38 +233,12 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.modelList = a.modelList.SetSize(a.width, a.height)
 		a.profileEdit = a.profileEdit.SetSize(a.width, a.height)
 		a.confirm = a.confirm.SetSize(a.width, a.height)
-		a.server = a.server.SetSize(a.width, a.height)
+		a.runs.SetSize(a.width, a.height)
 		a.themeSelector = a.themeSelector.SetSize(a.width, a.height)
 		return a, nil
 
 	case profilesTabLaunchMsg:
-		a.selectedModel = msg.entry.Model
-		a.selectedProfile = msg.entry.Profile
-		// Launch directly — no confirm screen
-		args, err := a.service.BuildLaunchArgs(msg.entry.Model, msg.entry.Profile)
-		if err != nil {
-			a.setErr(err.Error())
-			return a, nil
-		}
-		_ = a.service.MarkRecent(a.selectedModel.ID, a.selectedProfile.ID)
-		sm, cmd, err := NewServerModel(
-			args,
-			a.selectedProfile.Name,
-			a.selectedModel.DisplayName,
-			a.selectedModel.Type,
-			a.selectedProfile.ContextSize,
-			a.selectedProfile.Host,
-			a.selectedProfile.Port,
-			a.width,
-			a.height,
-		)
-		if err != nil {
-			a.setErr(err.Error())
-			a.refreshHome()
-			return a, nil
-		}
-		a.server = sm
-		a.screen = screenServerRunning
+		cmd := a.launchRun(msg.entry.Model, msg.entry.Profile, false)
 		return a, cmd
 
 	case profilesTabNewProfileMsg:
@@ -240,6 +263,10 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case profilesTabDeleteProfileMsg:
+		if a.runs.HasActiveProfile(msg.id) {
+			a.setWarning("stop active runs before deleting this profile")
+			return a, nil
+		}
 		if err := a.service.DeleteProfile(msg.id); err != nil {
 			a.setErr(err.Error())
 			return a, nil
@@ -296,6 +323,10 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case deleteProfileMsg:
+		if a.runs.HasActiveProfile(msg.id) {
+			a.setWarning("stop active runs before deleting this profile")
+			return a, nil
+		}
 		if err := a.service.DeleteProfile(msg.id); err != nil {
 			a.setErr(err.Error())
 			return a, nil
@@ -303,57 +334,96 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.refreshHome()
 		return a, nil
 
-	// Server log streaming
+	// Run log/process streaming is global so background runs keep updating.
 	case logLineMsg:
-		if a.screen == screenServerRunning {
+		if run, ok := a.runs.Get(msg.runID); ok {
 			var cmd tea.Cmd
-			a.server, cmd = a.server.HandleLogLine(string(msg))
+			run.Server, cmd = run.Server.HandleLogLine(msg.line)
+			a.syncRunsToHome()
 			return a, cmd
 		}
 		return a, nil
 
 	case serverExitMsg:
-		if a.screen == screenServerRunning {
-			a.server = a.server.SetExited(msg.err)
+		if run, ok := a.runs.Get(msg.runID); ok {
+			run.Server = run.Server.SetExited(msg.err)
+			a.syncRunsToHome()
 		}
 		return a, nil
 
 	case stopTimeoutMsg:
-		if !a.server.stopped && a.server.stopping {
-			a.server = a.server.ForceKill()
-			a.setErr("server unresponsive — sent SIGKILL")
+		if run, ok := a.runs.Get(msg.runID); ok && !run.Server.stopped && run.Server.stopping {
+			run.Server = run.Server.ForceKill()
+			a.setErr("run unresponsive — sent SIGKILL")
+			a.syncRunsToHome()
+		}
+		return a, nil
+
+	case systemMetricsMsg, tickMetricsMsg, liveMetricsMsg, tickLiveMetricsMsg:
+		return a.updateRunMessage(msg)
+
+	case runsTabOpenMsg:
+		if a.runs.SetActive(msg.id) {
+			a.screen = screenServerRunning
+		}
+		return a, nil
+
+	case runsTabStopMsg:
+		if run, ok := a.runs.Get(msg.id); ok {
+			var cmd tea.Cmd
+			run.Server, cmd = run.Server.Stop()
+			a.syncRunsToHome()
+			return a, cmd
+		}
+		return a, nil
+
+	case runsTabRestartMsg:
+		return a.restartRun(msg.id)
+
+	case runsTabRemoveMsg:
+		if !a.runs.RemoveStopped(msg.id) {
+			a.setWarning("stop the run before removing it")
+		} else {
+			a.setSuccess("removed stopped run")
+			a.syncRunsToHome()
 		}
 		return a, nil
 
 	case tea.KeyMsg:
 		// Global keys
 		if msg.String() == "ctrl+c" {
-			if a.screen == screenServerRunning {
-				if a.server.stopping || a.server.stopped {
-					a.server = a.server.ForceKill()
-					return a, tea.Quit
-				}
-				var cmd tea.Cmd
-				a.server, cmd = a.server.Stop()
-				a.setWarning("shutting down server (SIGTERM)... ctrl+c again to force quit")
-				return a, cmd
-			}
 			if a.quitArmed {
+				a.forceKillAllRuns()
 				return a, tea.Quit
+			}
+			if a.runs.ActiveCount() > 0 {
+				a.quitArmed = true
+				a.setWarning("shutting down active runs... ctrl+c again to force quit")
+				return a, a.stopAllRuns()
 			}
 			a.quitArmed = true
 			a.setWarning("press ctrl+c again to quit")
 			return a, nil
 		}
+		// Global 'q' quit on home. With active runs, first q sends SIGTERM;
+		// second q force-kills and exits.
+		if a.screen == screenHome && msg.String() == "q" {
+			if a.quitArmed {
+				a.forceKillAllRuns()
+				return a, tea.Quit
+			}
+			if a.runs.ActiveCount() > 0 {
+				a.quitArmed = true
+				a.setWarning("shutting down active runs... q again to force quit")
+				return a, a.stopAllRuns()
+			}
+			return a, tea.Quit
+		}
+
 		if a.quitArmed {
 			a.quitArmed = false
 			a.errMsg = ""
 			a.errKind = toastNone
-		}
-
-		// Global 'q' quit on home
-		if a.screen == screenHome && msg.String() == "q" {
-			return a, tea.Quit
 		}
 
 		// Theme key works everywhere except editor/server
@@ -391,6 +461,91 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a.handleNonKeyMsg(msg)
 }
 
+func (a *AppModel) restartRun(id RunID) (tea.Model, tea.Cmd) {
+	run, ok := a.runs.Get(id)
+	if !ok {
+		return a, nil
+	}
+	if !run.Server.stopped || run.Server.stopping {
+		a.setWarning("only stopped runs can be restarted")
+		return a, nil
+	}
+	actualPort, err := pickRunPort(run.Host, run.RequestedPort, a.runs.OccupiedPorts())
+	if err != nil {
+		a.setErr(err.Error())
+		return a, nil
+	}
+	args := append([]string(nil), run.Server.launchArgs...)
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--port" || args[i] == "--port " || args[i] == "-p" {
+			args[i+1] = fmt.Sprintf("%d", actualPort)
+		}
+	}
+	run.ActualPort = actualPort
+	run.Server.launchArgs = args
+	run.Server.port = actualPort
+	sm, cmd, err := run.Server.Restart()
+	if err != nil {
+		a.setErr(err.Error())
+		return a, nil
+	}
+	run.Server = sm
+	a.runs.SetActive(id)
+	a.syncRunsToHome()
+	a.setSuccess(fmt.Sprintf("restarted %s on :%d", run.ProfileName, actualPort))
+	return a, cmd
+}
+
+func (a *AppModel) stopAllRuns() tea.Cmd {
+	cmds := make([]tea.Cmd, 0)
+	for _, snap := range a.runs.Snapshot() {
+		run, ok := a.runs.Get(snap.ID)
+		if !ok || run.Server.stopped || run.Server.stopping {
+			continue
+		}
+		var cmd tea.Cmd
+		run.Server, cmd = run.Server.Stop()
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	a.syncRunsToHome()
+	return tea.Batch(cmds...)
+}
+
+func (a *AppModel) forceKillAllRuns() {
+	for _, snap := range a.runs.Snapshot() {
+		if run, ok := a.runs.Get(snap.ID); ok && !run.Server.stopped {
+			run.Server = run.Server.ForceKill()
+		}
+	}
+	a.syncRunsToHome()
+}
+
+func (a *AppModel) updateRunMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var id RunID
+	switch m := msg.(type) {
+	case systemMetricsMsg:
+		id = m.runID
+	case tickMetricsMsg:
+		id = m.runID
+	case liveMetricsMsg:
+		id = m.runID
+	case tickLiveMetricsMsg:
+		id = m.runID
+	default:
+		return a, nil
+	}
+	run, ok := a.runs.Get(id)
+	if !ok {
+		return a, nil
+	}
+	var cmd tea.Cmd
+	run.Server, cmd = run.Server.Update(msg)
+	a.syncRunsToHome()
+	return a, cmd
+}
+
 func (a *AppModel) handleNonKeyMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch a.screen {
 	case screenHome:
@@ -410,9 +565,14 @@ func (a *AppModel) handleNonKeyMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.confirm, cmd = a.confirm.Update(msg)
 		return a, cmd
 	case screenServerRunning:
-		var cmd tea.Cmd
-		a.server, cmd = a.server.Update(msg)
-		return a, cmd
+		if run, ok := a.runs.Active(); ok {
+			var cmd tea.Cmd
+			run.Server, cmd = run.Server.Update(msg)
+			a.syncRunsToHome()
+			return a, cmd
+		}
+		a.screen = screenHome
+		return a, nil
 	case screenThemeSelector:
 		var cmd tea.Cmd
 		a.themeSelector, cmd = a.themeSelector.Update(msg)
@@ -561,53 +721,38 @@ func (a *AppModel) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.screen = screenHome
 			return a, nil
 		}
-		_ = a.service.MarkRecent(a.selectedModel.ID, a.selectedProfile.ID)
-		sm, cmd, err := NewServerModel(
-			args,
-			a.selectedProfile.Name,
-			a.selectedModel.DisplayName,
-			a.selectedModel.Type,
-			a.selectedProfile.ContextSize,
-			a.selectedProfile.Host,
-			a.selectedProfile.Port,
-			a.width,
-			a.height,
-		)
-		if err != nil {
-			a.setErr(err.Error())
-			a.screen = screenHome
-			a.refreshHome()
-			return a, nil
-		}
-		a.server = sm
-		a.screen = screenServerRunning
+		_ = args // command preview is legacy; launchRun rebuilds args with port conflict handling.
+		cmd := a.launchRun(a.selectedModel, a.selectedProfile, true)
 		return a, cmd
 	}
 	return a, nil
 }
 
 func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	run, ok := a.runs.Active()
+	if !ok {
+		a.screen = screenHome
+		return a, nil
+	}
 	switch msg.String() {
 	case "s":
-		if a.server.stopped || a.server.stopping {
+		if run.Server.stopped || run.Server.stopping {
 			return a, nil
 		}
 		var cmd tea.Cmd
-		a.server, cmd = a.server.Stop()
+		run.Server, cmd = run.Server.Stop()
+		a.syncRunsToHome()
 		return a, cmd
 	case "r":
-		if !a.server.stopped || a.server.stopping {
-			return a, nil
-		}
-		sm, cmd, err := a.server.Restart()
-		if err != nil {
-			a.setErr(err.Error())
-			return a, nil
-		}
-		a.server = sm
-		return a, cmd
+		return a.restartRun(run.ID)
+	case "[":
+		a.runs.NextActive(-1)
+		return a, nil
+	case "]":
+		a.runs.NextActive(1)
+		return a, nil
 	case "y":
-		logText := strings.Join(a.server.logs, "\n")
+		logText := strings.Join(run.Server.logs, "\n")
 		if strings.TrimSpace(logText) == "" {
 			a.setInfo("no log lines to copy yet")
 			return a, nil
@@ -622,20 +767,13 @@ func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case "esc":
-		if a.server.stopped {
-			a.refreshHome()
-			a.screen = screenHome
-			return a, nil
-		}
-		var cmd tea.Cmd
-		a.server, cmd = a.server.Stop()
-		a.refreshHome()
+		a.home.activeTab = tabRuns
 		a.screen = screenHome
-		return a, cmd
+		return a, nil
 	}
-	// Pass scrolling keys to viewport
 	var cmd tea.Cmd
-	a.server, cmd = a.server.Update(msg)
+	run.Server, cmd = run.Server.Update(msg)
+	a.syncRunsToHome()
 	return a, cmd
 }
 
@@ -700,7 +838,12 @@ func (a *AppModel) View() string {
 	case screenConfirm:
 		body = a.confirm.SetSize(a.width, innerH).View()
 	case screenServerRunning:
-		body = a.server.SetSize(a.width, innerH).View()
+		if run, ok := a.runs.Active(); ok {
+			run.Server = run.Server.SetSize(a.width, innerH)
+			body = run.Server.View()
+		} else {
+			body = styleMuted.Render("no run selected")
+		}
 	case screenThemeSelector:
 		body = a.themeSelector.SetSize(a.width, innerH).View()
 	}
@@ -725,6 +868,8 @@ func (a *AppModel) helpView() string {
 		switch a.home.activeTab {
 		case tabProfiles:
 			helpContent = a.help.View(keys.Profiles)
+		case tabRuns:
+			helpContent = a.help.View(keys.Runs)
 		case tabModels:
 			helpContent = a.help.View(keys.Models)
 		case tabEngines:
@@ -753,14 +898,19 @@ func (a *AppModel) helpView() string {
 }
 
 func (a *AppModel) serverHelpView() string {
+	run, ok := a.runs.Active()
+	if !ok {
+		return a.help.ShortHelpView([]key.Binding{keys.Server.Back, keys.Server.Help})
+	}
+	switchRun := key.NewBinding(key.WithKeys("[", "]"), key.WithHelp("[/]", "switch run"))
 	if a.showFullHelp {
-		if a.server.stopped {
-			return a.help.FullHelpView([][]key.Binding{{keys.Server.Restart, keys.Server.Clear, keys.Server.Copy}, {keys.Server.Back, keys.Server.Help}})
+		if run.Server.stopped {
+			return a.help.FullHelpView([][]key.Binding{{keys.Server.Restart, keys.Server.Clear, keys.Server.Copy}, {switchRun, keys.Server.Back, keys.Server.Help}})
 		}
-		return a.help.FullHelpView([][]key.Binding{{keys.Server.Stop, keys.Server.Clear, keys.Server.Copy}, {keys.Server.BackStop, keys.Server.Help}})
+		return a.help.FullHelpView([][]key.Binding{{keys.Server.Stop, keys.Server.Clear, keys.Server.Copy}, {switchRun, keys.Server.Back, keys.Server.Help}})
 	}
-	if a.server.stopped {
-		return a.help.ShortHelpView([]key.Binding{keys.Server.Restart, keys.Server.Clear, keys.Server.Copy, keys.Server.Back, keys.Server.Help})
+	if run.Server.stopped {
+		return a.help.ShortHelpView([]key.Binding{keys.Server.Restart, keys.Server.Clear, keys.Server.Copy, switchRun, keys.Server.Back, keys.Server.Help})
 	}
-	return a.help.ShortHelpView([]key.Binding{keys.Server.Stop, keys.Server.Clear, keys.Server.Copy, keys.Server.BackStop, keys.Server.Help})
+	return a.help.ShortHelpView([]key.Binding{keys.Server.Stop, keys.Server.Clear, keys.Server.Copy, switchRun, keys.Server.Back, keys.Server.Help})
 }

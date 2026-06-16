@@ -115,6 +115,11 @@ func (s *Service) MarkRecent(modelID, profileID int64) error {
 	return s.db.MarkRecent(modelID, profileID)
 }
 
+func (s *Service) BuildLaunchArgsWithPort(m model.ModelEntry, p model.Profile, port int) ([]string, error) {
+	p.Port = port
+	return s.BuildLaunchArgs(m, p)
+}
+
 func (s *Service) BuildLaunchArgs(m model.ModelEntry, p model.Profile) ([]string, error) {
 	if m.ID <= 0 {
 		return nil, fmt.Errorf("invalid model")

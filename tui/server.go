@@ -19,18 +19,24 @@ const stopGraceTimeout = 5 * time.Second
 var promptProgress = regexp.MustCompile(`prompt processing progress,.*progress = ([0-9.]+)`)
 
 // Tea messages for server I/O.
-type logLineMsg string
-type serverExitMsg struct{ err error }
-type stopTimeoutMsg struct{}
+type logLineMsg struct {
+	runID RunID
+	line  string
+}
+type serverExitMsg struct {
+	runID RunID
+	err   error
+}
+type stopTimeoutMsg struct{ runID RunID }
 
-func listenForLog(ch <-chan string, exitCh <-chan error) tea.Cmd {
+func listenForLog(runID RunID, ch <-chan string, exitCh <-chan error) tea.Cmd {
 	return func() tea.Msg {
 		line, ok := <-ch
 		if !ok {
 			err := <-exitCh
-			return serverExitMsg{err: err}
+			return serverExitMsg{runID: runID, err: err}
 		}
-		return logLineMsg(line)
+		return logLineMsg{runID: runID, line: line}
 	}
 }
 
@@ -38,6 +44,7 @@ const maxLogLines = 10000
 
 // ServerModel is screen 5 — shows live llama-server output.
 type ServerModel struct {
+	runID           RunID
 	process         *runner.ServerProcess
 	launchArgs      []string
 	logCh           <-chan string
@@ -72,7 +79,7 @@ type ServerModel struct {
 }
 
 // NewServerModel starts the server process and returns the model + initial listen cmd.
-func NewServerModel(args []string, profileName, modelName, modelType string, contextSize int, host string, port, w, h int) (ServerModel, tea.Cmd, error) {
+func NewServerModel(runID RunID, args []string, profileName, modelName, modelType string, contextSize int, host string, port, w, h int) (ServerModel, tea.Cmd, error) {
 	process, err := runner.StartServer(args)
 	if err != nil {
 		return ServerModel{}, nil, err
@@ -90,6 +97,7 @@ func NewServerModel(args []string, profileName, modelName, modelType string, con
 		BorderForeground(colorPrimary)
 
 	m := ServerModel{
+		runID:       runID,
 		process:     process,
 		launchArgs:  process.Args(),
 		logCh:       logCh,
@@ -106,13 +114,13 @@ func NewServerModel(args []string, profileName, modelName, modelType string, con
 		height:      h,
 		initialized: true,
 	}
-	return m, tea.Batch(listenForLog(logCh, exitCh), getMetricsCmd(process.PID()), getLiveMetricsCmd(host, port)), nil
+	return m, tea.Batch(listenForLog(runID, logCh, exitCh), getMetricsCmd(runID, process.PID()), getLiveMetricsCmd(runID, host, port)), nil
 }
 
 func (s ServerModel) HandleLogLine(line string) (ServerModel, tea.Cmd) {
 	s = s.appendLogLine(line)
 	s = s.updatePromptProgress(line)
-	return s, listenForLog(s.logCh, s.exitCh)
+	return s, listenForLog(s.runID, s.logCh, s.exitCh)
 }
 
 func (s ServerModel) updatePromptProgress(line string) ServerModel {
@@ -168,7 +176,7 @@ func (s ServerModel) Restart() (ServerModel, tea.Cmd, error) {
 	if len(s.launchArgs) == 0 {
 		return s, nil, fmt.Errorf("missing launch command")
 	}
-	return NewServerModel(s.launchArgs, s.profileName, s.modelName, s.modelType, s.contextSize, s.host, s.port, s.width, s.height)
+	return NewServerModel(s.runID, s.launchArgs, s.profileName, s.modelName, s.modelType, s.contextSize, s.host, s.port, s.width, s.height)
 }
 
 func (s ServerModel) Stop() (ServerModel, tea.Cmd) {
@@ -177,7 +185,7 @@ func (s ServerModel) Stop() (ServerModel, tea.Cmd) {
 	}
 	s.stopping = true
 	_ = s.process.Stop()
-	cmd := tea.Tick(stopGraceTimeout, func(time.Time) tea.Msg { return stopTimeoutMsg{} })
+	cmd := tea.Tick(stopGraceTimeout, func(time.Time) tea.Msg { return stopTimeoutMsg{runID: s.runID} })
 	return s, cmd
 }
 
@@ -237,23 +245,23 @@ func splitMetricParts(metric string, style lipgloss.Style, dot string) string {
 func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case systemMetricsMsg:
-		if s.stopped {
+		if msg.runID != s.runID || s.stopped {
 			return s, nil
 		}
 		s.systemUsage = msg.System
 		s.modelUsage = msg.Model
 		s.vp.Height = s.computeVPH()
-		return s, tickMetrics()
+		return s, tickMetrics(s.runID)
 	case tickMetricsMsg:
-		if s.stopped {
+		if msg.runID != s.runID || s.stopped {
 			return s, nil
 		}
 		if s.process == nil || s.process.PID() == 0 {
 			return s, nil
 		}
-		return s, getMetricsCmd(s.process.PID())
+		return s, getMetricsCmd(s.runID, s.process.PID())
 	case liveMetricsMsg:
-		if s.stopped {
+		if msg.runID != s.runID || s.stopped {
 			return s, nil
 		}
 		if msg.ok {
@@ -269,12 +277,12 @@ func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 			s.liveTotalPrompt = msg.totalPromptTokens
 			s.vp.Height = s.computeVPH()
 		}
-		return s, tickLiveMetrics()
+		return s, tickLiveMetrics(s.runID)
 	case tickLiveMetricsMsg:
-		if s.stopped {
+		if msg.runID != s.runID || s.stopped {
 			return s, nil
 		}
-		return s, getLiveMetricsCmd(s.host, s.port)
+		return s, getLiveMetricsCmd(s.runID, s.host, s.port)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "c":

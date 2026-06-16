@@ -24,6 +24,7 @@ type profileTabItem struct {
 	label    string
 	entry    *db.ProfileEntry
 	recent   *db.RecentEntry
+	runCount int
 	isNew    bool
 	isSep    bool
 	isRecent bool
@@ -91,10 +92,22 @@ func (d profileTabDelegate) Render(w io.Writer, m list.Model, index int, item li
 	} else if i.entry != nil {
 		desc = i.entry.Model.DisplayName
 	}
+	renderedLabel := nameStyle.Render(i.label)
+	if i.runCount > 0 {
+		badgeText := "  ● running"
+		if i.runCount > 1 {
+			badgeText = fmt.Sprintf("  ● %d runs", i.runCount)
+		}
+		badgeStyle := lipgloss.NewStyle().Foreground(ActiveTheme.Success).Bold(true)
+		if sel {
+			badgeStyle = styleSelected
+		}
+		renderedLabel += badgeStyle.Render(badgeText)
+	}
 	if desc != "" {
-		fmt.Fprintf(w, "%s%s\n  %s", prefix, nameStyle.Render(i.label), descStyle.Render(desc))
+		fmt.Fprintf(w, "%s%s\n  %s", prefix, renderedLabel, descStyle.Render(desc))
 	} else {
-		fmt.Fprintf(w, "%s%s", prefix, nameStyle.Render(i.label))
+		fmt.Fprintf(w, "%s%s", prefix, renderedLabel)
 	}
 }
 
@@ -103,6 +116,8 @@ type ProfilesTabModel struct {
 	list     list.Model
 	viewport viewport.Model
 	recents  []db.RecentEntry
+	all      []db.ProfileEntry
+	runs     []RunSnapshot
 
 	deleteConfirm bool
 	deleteID      int64
@@ -127,6 +142,7 @@ func NewProfilesTabModel(recents []db.RecentEntry, all []db.ProfileEntry, w, h i
 		list:     l,
 		viewport: vp,
 		recents:  recents,
+		all:      all,
 		width:    w,
 		height:   h,
 	}
@@ -134,6 +150,10 @@ func NewProfilesTabModel(recents []db.RecentEntry, all []db.ProfileEntry, w, h i
 }
 
 func buildProfileTabItems(recents []db.RecentEntry, all []db.ProfileEntry) []list.Item {
+	return buildProfileTabItemsWithRuns(recents, all, nil)
+}
+
+func buildProfileTabItemsWithRuns(recents []db.RecentEntry, all []db.ProfileEntry, counts map[int64]int) []list.Item {
 	var items []list.Item
 	items = append(items, profileTabItem{isNew: true, label: "+ New Profile"})
 
@@ -143,7 +163,7 @@ func buildProfileTabItems(recents []db.RecentEntry, all []db.ProfileEntry) []lis
 			break
 		}
 		recentIDs[r.Profile.ID] = true
-		items = append(items, profileTabItem{label: r.Profile.Name, recent: &recents[i], isRecent: true})
+		items = append(items, profileTabItem{label: r.Profile.Name, recent: &recents[i], isRecent: true, runCount: counts[r.Profile.ID]})
 	}
 
 	hasMore := false
@@ -161,7 +181,7 @@ func buildProfileTabItems(recents []db.RecentEntry, all []db.ProfileEntry) []lis
 		if recentIDs[all[i].Profile.ID] {
 			continue
 		}
-		items = append(items, profileTabItem{label: all[i].Profile.Name, entry: &all[i]})
+		items = append(items, profileTabItem{label: all[i].Profile.Name, entry: &all[i], runCount: counts[all[i].Profile.ID]})
 	}
 	return items
 }
@@ -209,11 +229,29 @@ func (m ProfilesTabModel) SetSize(w, h int) ProfilesTabModel { return m.resize(w
 
 func (m ProfilesTabModel) SetData(recents []db.RecentEntry, all []db.ProfileEntry) ProfilesTabModel {
 	m.recents = recents
-	items := buildProfileTabItems(recents, all)
+	m.all = all
+	items := buildProfileTabItemsWithRuns(recents, all, profileRunCounts(m.runs))
 	m.list.SetItems(items)
 	m.deleteConfirm = false
 	m.lastPreviewID = 0
 	return m
+}
+
+func (m ProfilesTabModel) SetRuns(runs []RunSnapshot) ProfilesTabModel {
+	m.runs = runs
+	m.list.SetItems(buildProfileTabItemsWithRuns(m.recents, m.all, profileRunCounts(runs)))
+	m.updateViewport()
+	return m
+}
+
+func profileRunCounts(runs []RunSnapshot) map[int64]int {
+	counts := make(map[int64]int)
+	for _, r := range runs {
+		if !r.Stopped {
+			counts[r.ProfileID]++
+		}
+	}
+	return counts
 }
 
 func (m ProfilesTabModel) selectedEntry() *db.ProfileEntry {
@@ -261,6 +299,15 @@ func (m *ProfilesTabModel) updateViewport() {
 	sb.WriteString(sectionStyle.Render("Network") + "\n")
 	sb.WriteString(fieldLabel.Render("Host") + "  " + fieldVal.Render(p.Host) + "\n")
 	sb.WriteString(fieldLabel.Render("Port") + "  " + fieldVal.Render(fmt.Sprintf("%d", p.Port)) + "\n\n")
+
+	if runs := runsForProfile(m.runs, p.ID); len(runs) > 0 {
+		sb.WriteString(sectionStyle.Render("Runs") + "\n")
+		for _, r := range runs {
+			status := profileRunStatus(r)
+			sb.WriteString("  " + status + "  " + styleMuted.Render(fmt.Sprintf("#%d", r.ID)) + "  " + styleKey.Render(runEndpoint(r.Host, r.ActualPort)) + "  " + styleMuted.Render(runUptime(r)) + "\n")
+		}
+		sb.WriteString("\n")
+	}
 
 	sb.WriteString(sectionStyle.Render("Model Config") + "\n")
 	sb.WriteString(fieldLabel.Render("Context") + "  " + fieldVal.Render(fmtInt(p.ContextSize)) + "\n")
@@ -319,6 +366,33 @@ func (m *ProfilesTabModel) updateViewport() {
 	}
 
 	m.viewport.SetContent(sb.String())
+}
+
+func profileRunStatus(r RunSnapshot) string {
+	style := lipgloss.NewStyle().Foreground(ActiveTheme.Success).Bold(true)
+	label := "● running"
+	if r.Stopping {
+		style = lipgloss.NewStyle().Foreground(ActiveTheme.Secondary).Bold(true)
+		label = "◌ stopping"
+	} else if r.Stopped {
+		style = styleMuted
+		label = "■ stopped"
+		if r.ExitErr != nil || r.ForceKilled {
+			style = lipgloss.NewStyle().Foreground(ActiveTheme.Error).Bold(true)
+			label = "■ failed"
+		}
+	}
+	return style.Render(label)
+}
+
+func runsForProfile(runs []RunSnapshot, profileID int64) []RunSnapshot {
+	out := make([]RunSnapshot, 0)
+	for _, r := range runs {
+		if r.ProfileID == profileID {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func (m ProfilesTabModel) Update(msg tea.Msg) (ProfilesTabModel, tea.Cmd) {
