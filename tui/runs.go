@@ -144,13 +144,19 @@ func (s *RunsStore) RunningProfileCounts() map[int64]int {
 }
 
 func (s *RunsStore) HasActiveProfile(profileID int64) bool {
-	for _, id := range s.order {
+	_, ok := s.ActiveProfileRun(profileID)
+	return ok
+}
+
+func (s *RunsStore) ActiveProfileRun(profileID int64) (RunID, bool) {
+	for i := len(s.order) - 1; i >= 0; i-- {
+		id := s.order[i]
 		r, ok := s.Get(id)
 		if ok && r.ProfileID == profileID && !r.Server.stopped {
-			return true
+			return id, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 func (s *RunsStore) OccupiedPorts() map[int]bool {
