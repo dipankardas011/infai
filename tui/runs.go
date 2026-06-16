@@ -3,6 +3,8 @@ package tui
 import (
 	"fmt"
 	"time"
+
+	"github.com/dipankardas011/infai/model"
 )
 
 type RunID int64
@@ -14,6 +16,9 @@ type RunSnapshot struct {
 	ProfileName   string
 	ModelName     string
 	ModelType     string
+	EngineID      string
+	EngineName    string
+	EnginePath    string
 	Host          string
 	RequestedPort int
 	ActualPort    int
@@ -38,9 +43,14 @@ type RunRecord struct {
 	ProfileName   string
 	ModelName     string
 	ModelType     string
+	EngineID      string
+	EngineName    string
+	EnginePath    string
 	Host          string
 	RequestedPort int
 	ActualPort    int
+	Model         model.ModelEntry
+	Profile       model.Profile
 	Server        ServerModel
 }
 
@@ -131,18 +141,6 @@ func (s *RunsStore) Snapshot() []RunSnapshot {
 	return out
 }
 
-func (s *RunsStore) RunningProfileCounts() map[int64]int {
-	counts := make(map[int64]int)
-	for _, id := range s.order {
-		r, ok := s.Get(id)
-		if !ok || r.Server.stopped {
-			continue
-		}
-		counts[r.ProfileID]++
-	}
-	return counts
-}
-
 func (s *RunsStore) HasActiveProfile(profileID int64) bool {
 	_, ok := s.ActiveProfileRun(profileID)
 	return ok
@@ -216,6 +214,7 @@ func (r *RunRecord) Snapshot() RunSnapshot {
 	return RunSnapshot{
 		ID: r.ID, ProfileID: r.ProfileID, ModelID: r.ModelID,
 		ProfileName: r.ProfileName, ModelName: r.ModelName, ModelType: r.ModelType,
+		EngineID: r.EngineID, EngineName: r.EngineName, EnginePath: r.EnginePath,
 		Host: r.Host, RequestedPort: r.RequestedPort, ActualPort: r.ActualPort,
 		PID: pid, StartedAt: s.startedAt, StoppedAt: s.stoppedAt,
 		Stopped: s.stopped, Stopping: s.stopping, ForceKilled: s.forceKilled,
