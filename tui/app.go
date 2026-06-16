@@ -160,6 +160,15 @@ func (a *AppModel) syncRunsToHome() {
 func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, openDetail bool) tea.Cmd {
 	a.selectedModel = m
 	a.selectedProfile = p
+	if existingID, ok := a.runs.ActiveProfileRun(p.ID); ok {
+		a.runs.SetActive(existingID)
+		a.syncRunsToHome()
+		a.home = a.home.SelectRun(existingID)
+		a.home.activeTab = tabRuns
+		a.screen = screenHome
+		a.setInfo(fmt.Sprintf("%s is already running as run #%d", p.Name, existingID))
+		return nil
+	}
 	actualPort, err := pickRunPort(p.Host, p.Port, a.runs.OccupiedPorts())
 	if err != nil {
 		a.setErr(err.Error())

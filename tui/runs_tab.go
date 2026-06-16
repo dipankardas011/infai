@@ -47,6 +47,16 @@ func (m RunsTabModel) SetRuns(runs []RunSnapshot) RunsTabModel {
 	return m
 }
 
+func (m RunsTabModel) SetSelectedRun(id RunID) RunsTabModel {
+	for i, r := range m.runs {
+		if r.ID == id {
+			m.selected = i
+			break
+		}
+	}
+	return m
+}
+
 func (m RunsTabModel) selectedRun() (RunSnapshot, bool) {
 	if len(m.runs) == 0 || m.selected < 0 || m.selected >= len(m.runs) {
 		return RunSnapshot{}, false

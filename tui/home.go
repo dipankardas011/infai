@@ -73,6 +73,11 @@ func (m HomeModel) SetRuns(runs []RunSnapshot) HomeModel {
 	return m
 }
 
+func (m HomeModel) SelectRun(id RunID) HomeModel {
+	m.runsTab = m.runsTab.SetSelectedRun(id)
+	return m
+}
+
 func (m HomeModel) RefreshModels(dirs []string) HomeModel {
 	models, _ := m.service.ListModels()
 	m.modelsTab = NewModelsTabModel(m.service, dirs, m.width, m.height)
