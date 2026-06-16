@@ -94,6 +94,7 @@ type runsTabKeyMap struct {
 	Stop     key.Binding
 	Restart  key.Binding
 	Remove   key.Binding
+	Page     key.Binding
 	TabLeft  key.Binding
 	TabRight key.Binding
 	Theme    key.Binding
@@ -102,10 +103,10 @@ type runsTabKeyMap struct {
 }
 
 func (k runsTabKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Open, k.Stop, k.Restart, k.Remove, k.TabLeft, k.TabRight, k.Help}
+	return []key.Binding{k.Open, k.Stop, k.Restart, k.Remove, k.Page, k.TabLeft, k.TabRight, k.Help}
 }
 func (k runsTabKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Open, k.Stop, k.Restart, k.Remove}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
+	return [][]key.Binding{{k.Open, k.Stop, k.Restart, k.Remove, k.Page}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
 }
 
 type modelsTabKeyMap struct {
@@ -200,6 +201,7 @@ var keys = struct {
 		Stop:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stop")),
 		Restart:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "restart")),
 		Remove:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove")),
+		Page:     key.NewBinding(key.WithKeys("pgup", "pgdown"), key.WithHelp("pg", "page")),
 		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),
 		TabRight: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
 		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),

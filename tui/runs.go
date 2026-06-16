@@ -25,6 +25,7 @@ type RunSnapshot struct {
 	ForceKilled   bool
 	ExitErr       error
 	LogCount      int
+	SystemUsage   string
 	LiveTPS       float64
 	Active        int
 	Deferred      int
@@ -212,7 +213,7 @@ func (r *RunRecord) Snapshot() RunSnapshot {
 		Host: r.Host, RequestedPort: r.RequestedPort, ActualPort: r.ActualPort,
 		PID: pid, StartedAt: s.startedAt, StoppedAt: s.stoppedAt,
 		Stopped: s.stopped, Stopping: s.stopping, ForceKilled: s.forceKilled,
-		ExitErr: s.exitErr, LogCount: len(s.logs), LiveTPS: s.liveTPS,
+		ExitErr: s.exitErr, LogCount: len(s.logs), SystemUsage: s.systemUsage, LiveTPS: s.liveTPS,
 		Active: s.liveActive, Deferred: s.liveDeferred,
 	}
 }
