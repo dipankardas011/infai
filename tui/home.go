@@ -11,18 +11,20 @@ import (
 
 const (
 	tabProfiles = iota
+	tabRuns
 	tabModels
 	tabEngines
 )
 
-var tabNames = []string{"Profiles", "Models", "Engines"}
+var tabNames = []string{"Profiles", "Runs", "Models", "Engines"}
 
-// HomeModel is the tabbed home screen with 3 tabs.
+// HomeModel is the tabbed home screen with 4 tabs.
 type HomeModel struct {
 	activeTab int
 	service   *backend.Service
 
 	profilesTab ProfilesTabModel
+	runsTab     RunsTabModel
 	modelsTab   ModelsTabModel
 	enginesTab  EnginesTabModel
 
@@ -42,6 +44,7 @@ func NewHomeModel(
 		activeTab:   tabProfiles,
 		service:     service,
 		profilesTab: NewProfilesTabModel(recents, allProfiles, w, h),
+		runsTab:     NewRunsTabModel(w, h),
 		modelsTab:   NewModelsTabModel(service, scanDirs, w, h),
 		enginesTab:  NewEnginesTabModel(service, w, h),
 		width:       w,
@@ -53,6 +56,7 @@ func (m HomeModel) SetSize(w, h int) HomeModel {
 	m.width = w
 	m.height = h
 	m.profilesTab = m.profilesTab.SetSize(w, h)
+	m.runsTab = m.runsTab.SetSize(w, h)
 	m.modelsTab = m.modelsTab.SetSize(w, h)
 	m.enginesTab = m.enginesTab.SetSize(w, h)
 	return m
@@ -60,6 +64,12 @@ func (m HomeModel) SetSize(w, h int) HomeModel {
 
 func (m HomeModel) RefreshProfiles(recents []db.RecentEntry, all []db.ProfileEntry) HomeModel {
 	m.profilesTab = m.profilesTab.SetData(recents, all)
+	return m
+}
+
+func (m HomeModel) SetRuns(runs []RunSnapshot) HomeModel {
+	m.runsTab = m.runsTab.SetRuns(runs)
+	m.profilesTab = m.profilesTab.SetRuns(runs)
 	return m
 }
 
@@ -92,10 +102,14 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			return m, nil
 		}
 		if key.String() == "2" {
-			m.activeTab = tabModels
+			m.activeTab = tabRuns
 			return m, nil
 		}
 		if key.String() == "3" {
+			m.activeTab = tabModels
+			return m, nil
+		}
+		if key.String() == "4" {
 			m.activeTab = tabEngines
 			return m, nil
 		}
@@ -106,6 +120,10 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 	case tabProfiles:
 		var cmd tea.Cmd
 		m.profilesTab, cmd = m.profilesTab.Update(msg)
+		return m, cmd
+	case tabRuns:
+		var cmd tea.Cmd
+		m.runsTab, cmd = m.runsTab.Update(msg)
 		return m, cmd
 	case tabModels:
 		var cmd tea.Cmd
@@ -137,6 +155,8 @@ func (m HomeModel) View() string {
 	switch m.activeTab {
 	case tabProfiles:
 		body = m.profilesTab.SetSize(innerW, bodyH).View()
+	case tabRuns:
+		body = m.runsTab.SetSize(innerW, bodyH).View()
 	case tabModels:
 		body = m.modelsTab.SetSize(innerW, bodyH).View()
 	case tabEngines:

@@ -89,6 +89,25 @@ func (k profileTabKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{{k.Launch, k.New, k.Edit, k.Delete}, {k.Filter, k.TabLeft, k.TabRight, k.Theme, k.Quit}}
 }
 
+type runsTabKeyMap struct {
+	Open     key.Binding
+	Stop     key.Binding
+	Restart  key.Binding
+	Remove   key.Binding
+	TabLeft  key.Binding
+	TabRight key.Binding
+	Theme    key.Binding
+	Quit     key.Binding
+	Help     key.Binding
+}
+
+func (k runsTabKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Open, k.Stop, k.Restart, k.Remove, k.TabLeft, k.TabRight, k.Help}
+}
+func (k runsTabKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{{k.Open, k.Stop, k.Restart, k.Remove}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
+}
+
 type modelsTabKeyMap struct {
 	Add      key.Binding
 	Remove   key.Binding
@@ -128,6 +147,7 @@ func (k enginesTabKeyMap) FullHelp() [][]key.Binding {
 var keys = struct {
 	Home      homeKeyMap
 	Profiles  profileTabKeyMap
+	Runs      runsTabKeyMap
 	Models    modelsTabKeyMap
 	Engines   enginesTabKeyMap
 	ModelList modelListKeyMap
@@ -160,7 +180,7 @@ var keys = struct {
 		Clear:    key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "clear logs")),
 		Copy:     key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy logs")),
 		Back:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		BackStop: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "stop & back")),
+		BackStop: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	},
 	Profiles: profileTabKeyMap{
@@ -169,6 +189,17 @@ var keys = struct {
 		Edit:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 		Delete:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")),
 		Filter:   key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),
+		TabRight: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
+		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
+		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	},
+	Runs: runsTabKeyMap{
+		Open:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "view")),
+		Stop:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stop")),
+		Restart:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "restart")),
+		Remove:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove")),
 		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),
 		TabRight: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
 		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),

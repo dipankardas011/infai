@@ -15,11 +15,12 @@ import (
 )
 
 type systemMetricsMsg struct {
+	runID  RunID
 	System string
 	Model  string
 }
 
-type tickMetricsMsg time.Time
+type tickMetricsMsg struct{ runID RunID }
 
 func fetchSystemMetrics(pid int) (string, string) {
 	return buildSystemUsage(), buildModelUsage(pid)
@@ -155,15 +156,15 @@ func readProcessGPUVRAM(pid int) (float64, bool) {
 	return totalMiB / 1024.0, true
 }
 
-func tickMetrics() tea.Cmd {
-	return tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
-		return tickMetricsMsg(t)
+func tickMetrics(runID RunID) tea.Cmd {
+	return tea.Tick(time.Second*2, func(time.Time) tea.Msg {
+		return tickMetricsMsg{runID: runID}
 	})
 }
 
-func getMetricsCmd(pid int) tea.Cmd {
+func getMetricsCmd(runID RunID, pid int) tea.Cmd {
 	return func() tea.Msg {
 		systemLine, modelLine := fetchSystemMetrics(pid)
-		return systemMetricsMsg{System: systemLine, Model: modelLine}
+		return systemMetricsMsg{runID: runID, System: systemLine, Model: modelLine}
 	}
 }

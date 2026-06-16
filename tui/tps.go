@@ -76,6 +76,7 @@ func interpPercentile(sorted []float64, p float64) float64 {
 
 // liveMetricsMsg carries data polled from llama.cpp /metrics endpoint.
 type liveMetricsMsg struct {
+	runID             RunID
 	avgTPS            float64
 	prefillTPS        float64
 	active            int
@@ -85,27 +86,27 @@ type liveMetricsMsg struct {
 	ok                bool
 }
 
-type tickLiveMetricsMsg struct{}
+type tickLiveMetricsMsg struct{ runID RunID }
 
-func tickLiveMetrics() tea.Cmd {
+func tickLiveMetrics(runID RunID) tea.Cmd {
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-		return tickLiveMetricsMsg{}
+		return tickLiveMetricsMsg{runID: runID}
 	})
 }
 
 var metricsHTTPClient = &http.Client{Timeout: 2 * time.Second}
 
-func getLiveMetricsCmd(host string, port int) tea.Cmd {
+func getLiveMetricsCmd(runID RunID, host string, port int) tea.Cmd {
 	return func() tea.Msg {
-		return fetchLiveMetrics(host, port)
+		return fetchLiveMetrics(runID, host, port)
 	}
 }
 
-func fetchLiveMetrics(host string, port int) liveMetricsMsg {
+func fetchLiveMetrics(runID RunID, host string, port int) liveMetricsMsg {
 	url := fmt.Sprintf("http://%s:%d/metrics", host, port)
 	resp, err := metricsHTTPClient.Get(url)
 	if err != nil {
-		return liveMetricsMsg{}
+		return liveMetricsMsg{runID: runID}
 	}
 	defer resp.Body.Close()
 
@@ -158,6 +159,7 @@ func fetchLiveMetrics(host string, port int) liveMetricsMsg {
 		}
 	}
 	return liveMetricsMsg{
+		runID:  runID,
 		avgTPS: avgTPS, prefillTPS: prefillTPS,
 		active: active, deferred: deferred,
 		totalGenTokens: totalGenTokens, totalPromptTokens: totalPromptTokens,
