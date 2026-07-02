@@ -468,7 +468,12 @@
         if (e.isIntersecting) { e.target.classList.add('revealed'); io.unobserve(e.target); }
       });
     }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
-    document.querySelectorAll('.reveal-up, .reveal-line').forEach(el => io.observe(el));
+    document.querySelectorAll('.reveal-up, .reveal-line').forEach(el => {
+      // reveal immediately if already in the initial viewport — observer
+      // delivery is throttled in hidden/background tabs
+      if (el.getBoundingClientRect().top < window.innerHeight) el.classList.add('revealed');
+      else io.observe(el);
+    });
 
     // ── Copy-to-clipboard ──
     document.querySelectorAll('.inst-cmd').forEach(btn => {
