@@ -645,17 +645,17 @@ nav {
 .band-track {
   display: flex;
   align-items: center;
-  gap: 3rem;
+  gap: 4rem;
   padding: 1.1rem 0;
   white-space: nowrap;
   width: max-content;
   font-family: var(--mono);
   font-size: 0.78rem;
   font-weight: 400;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-2);
-  animation: ticker 28s linear infinite;
+  animation: ticker 45s linear infinite;
 }
 .band-track i { color: var(--green); font-style: normal; font-size: 0.6rem; }
 @keyframes ticker { to { transform: translateX(-50%); } }
