@@ -37,25 +37,12 @@ const (
 	screenHome screenKind = iota
 	screenModelList
 	screenProfileEdit
-	screenConfirm
 	screenServerRunning
 	screenThemeSelector
 )
 
-type modelListPurpose int
-
-const (
-	modelListBrowse modelListPurpose = iota
-	modelListPickForProfile
-)
-
 // Cross-screen messages
-type scanDoneMsg struct {
-	entries []model.ModelEntry
-	err     error
-}
 type saveProfileMsg struct{ profile model.Profile }
-type deleteProfileMsg struct{ id int64 }
 type syncDoneMsg struct {
 	removed, updated int
 	err              error
@@ -79,16 +66,12 @@ type AppModel struct {
 	home          HomeModel
 	modelList     ModelListModel
 	profileEdit   ProfileEditModel
-	confirm       ConfirmModel
 	runs          RunsStore
 	themeSelector ThemeSelectorModel
 
 	// State tracking
 	selectedModel     model.ModelEntry
-	selectedProfile   model.Profile
-	modelListPurpose  modelListPurpose
 	profileEditReturn screenKind
-	confirmReturn     screenKind
 }
 
 func NewApp(database *db.DB, scanDirs []string, entries []model.ModelEntry, w, h int) AppModel {
@@ -158,8 +141,6 @@ func (a *AppModel) syncRunsToHome() {
 }
 
 func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, engine model.InferenceEngine, openDetail bool) tea.Cmd {
-	a.selectedModel = m
-	a.selectedProfile = p
 	if existingID, ok := a.runs.ActiveProfileRun(p.ID); ok {
 		a.runs.SetActive(existingID)
 		a.syncRunsToHome()
@@ -251,7 +232,6 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.home = a.home.SetSize(a.width, a.height)
 		a.modelList = a.modelList.SetSize(a.width, a.height)
 		a.profileEdit = a.profileEdit.SetSize(a.width, a.height)
-		a.confirm = a.confirm.SetSize(a.width, a.height)
 		a.runs.SetSize(a.width, a.height)
 		a.themeSelector = a.themeSelector.SetSize(a.width, a.height)
 		return a, nil
@@ -321,16 +301,6 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.refreshHome()
 		return a, nil
 
-	case scanDoneMsg:
-		// Legacy message kept for compatibility with older screens. New scan/sync
-		// workflows should go through backend.Service.
-		if msg.err != nil {
-			a.setErr(msg.err.Error())
-			return a, nil
-		}
-		a.refreshHome()
-		return a, nil
-
 	case saveProfileMsg:
 		p := msg.profile
 		if err := a.service.SaveProfile(&p); err != nil {
@@ -339,18 +309,6 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.refreshHome()
 		a.screen = screenHome
-		return a, nil
-
-	case deleteProfileMsg:
-		if a.runs.HasActiveProfile(msg.id) {
-			a.setWarning("stop active runs before deleting this profile")
-			return a, nil
-		}
-		if err := a.service.DeleteProfile(msg.id); err != nil {
-			a.setErr(err.Error())
-			return a, nil
-		}
-		a.refreshHome()
 		return a, nil
 
 	// Run log/process streaming is global so background runs keep updating.
@@ -424,9 +382,16 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setWarning("press ctrl+c again to quit")
 			return a, nil
 		}
+
+		// While the user is typing (list filters, name inputs, file browser) or a
+		// modal dialog is open, printable keys belong to that input — never treat
+		// them as global shortcuts.
+		typing := (a.screen == screenHome && a.home.InModalInput()) ||
+			(a.screen == screenModelList && a.modelList.IsFiltering())
+
 		// Global 'q' quit on home. With active runs, first q sends SIGTERM;
 		// second q force-kills and exits.
-		if a.screen == screenHome && msg.String() == "q" {
+		if a.screen == screenHome && !typing && msg.String() == "q" {
 			if a.quitArmed {
 				a.forceKillAllRuns()
 				return a, tea.Quit
@@ -446,14 +411,14 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Theme key works everywhere except editor/server
-		if msg.String() == "t" && a.screen != screenProfileEdit && a.screen != screenServerRunning {
+		if msg.String() == "t" && !typing && a.screen != screenProfileEdit && a.screen != screenServerRunning {
 			a.themeSelector = NewThemeSelectorModel(a.width, a.height)
 			a.screen = screenThemeSelector
 			return a, nil
 		}
 
 		// Help toggle
-		if msg.String() == "?" && a.screen != screenProfileEdit {
+		if msg.String() == "?" && !typing && a.screen != screenProfileEdit {
 			a.showFullHelp = !a.showFullHelp
 			a.help.ShowAll = a.showFullHelp
 			return a, nil
@@ -467,8 +432,6 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateModelList(msg)
 		case screenProfileEdit:
 			return a.updateProfileEdit(msg)
-		case screenConfirm:
-			return a.updateConfirm(msg)
 		case screenServerRunning:
 			return a.updateServer(msg)
 		case screenThemeSelector:
@@ -579,10 +542,6 @@ func (a *AppModel) handleNonKeyMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.profileEdit, cmd = a.profileEdit.Update(msg)
 		return a, cmd
-	case screenConfirm:
-		var cmd tea.Cmd
-		a.confirm, cmd = a.confirm.Update(msg)
-		return a, cmd
 	case screenServerRunning:
 		if run, ok := a.runs.Active(); ok {
 			var cmd tea.Cmd
@@ -631,38 +590,36 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "esc":
 		if !a.modelList.IsFiltering() {
-			if a.modelListPurpose == modelListPickForProfile {
-				a.refreshHome()
-				a.screen = screenHome
-				return a, nil
-			}
 			a.refreshHome()
 			a.screen = screenHome
 			return a, nil
 		}
 	case "enter":
+		if a.modelList.IsFiltering() {
+			break // enter accepts the filter; let the list handle it
+		}
 		if entry, ok := a.modelList.Selected(); ok {
 			a.selectedModel = entry
-			if a.modelListPurpose == modelListPickForProfile {
-				engines, err := a.service.ListInferenceEngines()
-				if err != nil {
-					a.setErr(err.Error())
-					return a, nil
-				}
-				if len(engines) == 0 {
-					a.setErr("no inference engines configured - add one in Engines tab")
-					a.screen = screenHome
-					return a, nil
-				}
-				a.profileEdit = NewProfileEditModel(entry, engines, nil, a.width, a.height)
-				a.profileEditReturn = screenHome
-				a.screen = screenProfileEdit
-				a.errMsg = ""
+			engines, err := a.service.ListInferenceEngines()
+			if err != nil {
+				a.setErr(err.Error())
 				return a, nil
 			}
-			// Browsing model list directly
+			if len(engines) == 0 {
+				a.setErr("no inference engines configured - add one in Engines tab")
+				a.screen = screenHome
+				return a, nil
+			}
+			a.profileEdit = NewProfileEditModel(entry, engines, nil, a.width, a.height)
+			a.profileEditReturn = screenHome
+			a.screen = screenProfileEdit
+			a.errMsg = ""
+			return a, nil
 		}
 	case "r":
+		if a.modelList.IsFiltering() {
+			break // 'r' is filter text, not the rescan shortcut
+		}
 		service := a.service
 		folders := append([]string(nil), a.scanDirs...)
 		return a, func() tea.Msg {
@@ -695,7 +652,6 @@ func (a *AppModel) openProfileModelPicker(returnScreen screenKind) (tea.Model, t
 		return a, nil
 	}
 	a.modelList = NewModelListModel(entries, a.width, a.height).SetTitle("Choose model for new profile")
-	a.modelListPurpose = modelListPickForProfile
 	a.profileEditReturn = returnScreen
 	a.screen = screenModelList
 	return a, nil
@@ -718,33 +674,6 @@ func (a *AppModel) updateProfileEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	a.profileEdit, cmd = a.profileEdit.Update(msg)
 	return a, cmd
-}
-
-func (a *AppModel) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		if a.confirmReturn == screenHome {
-			a.refreshHome()
-		}
-		a.screen = screenHome
-		return a, nil
-	case "enter":
-		if a.confirm.command == "" {
-			a.setErr("no executor configured - set one in Engines tab")
-			a.screen = screenHome
-			return a, nil
-		}
-		args := a.confirm.Args()
-		if len(args) == 0 || args[0] == "" {
-			a.setErr("executor path not set - set one in Engines tab")
-			a.screen = screenHome
-			return a, nil
-		}
-		_ = args // command preview is legacy; launchRun rebuilds args with port conflict handling.
-		cmd := a.launchRun(a.selectedModel, a.selectedProfile, model.InferenceEngine{}, true)
-		return a, cmd
-	}
-	return a, nil
 }
 
 func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -855,8 +784,6 @@ func (a *AppModel) View() string {
 		body = a.modelList.SetSize(a.width, innerH).View()
 	case screenProfileEdit:
 		body = a.profileEdit.SetSize(a.width, innerH).View()
-	case screenConfirm:
-		body = a.confirm.SetSize(a.width, innerH).View()
 	case screenServerRunning:
 		if run, ok := a.runs.Active(); ok {
 			run.Server = run.Server.SetSize(a.width, innerH)
@@ -897,8 +824,6 @@ func (a *AppModel) helpView() string {
 		}
 	case screenModelList:
 		helpContent = a.help.View(keys.ModelList)
-	case screenConfirm:
-		helpContent = a.help.View(keys.Confirm)
 	case screenServerRunning:
 		helpContent = a.serverHelpView()
 	case screenThemeSelector:

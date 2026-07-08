@@ -34,16 +34,6 @@ func (k modelListKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{{k.Enter, k.Rescan}, {k.Filter, k.Back}}
 }
 
-// ── Confirm ────────────────────────────────────────────────────────────────
-type confirmKeyMap struct {
-	Launch key.Binding
-	Back   key.Binding
-	Help   key.Binding
-}
-
-func (k confirmKeyMap) ShortHelp() []key.Binding  { return []key.Binding{k.Launch, k.Back, k.Help} }
-func (k confirmKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
-
 // ── Server (logs) ──────────────────────────────────────────────────────────
 type serverKeyMap struct {
 	Stop     key.Binding
@@ -152,7 +142,6 @@ var keys = struct {
 	Models    modelsTabKeyMap
 	Engines   enginesTabKeyMap
 	ModelList modelListKeyMap
-	Confirm   confirmKeyMap
 	Server    serverKeyMap
 	Theme     themeKeyMap
 }{
@@ -167,11 +156,6 @@ var keys = struct {
 		Enter:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
 		Rescan: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rescan")),
 		Filter: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		Help:   key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-	},
-	Confirm: confirmKeyMap{
-		Launch: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "launch")),
 		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		Help:   key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	},
@@ -210,7 +194,7 @@ var keys = struct {
 	},
 	Models: modelsTabKeyMap{
 		Add:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add folder")),
-		Remove:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "remove")),
+		Remove:   key.NewBinding(key.WithKeys("x", "d", "delete"), key.WithHelp("x", "remove folder")),
 		Sync:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sync")),
 		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),
 		TabRight: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
@@ -219,7 +203,7 @@ var keys = struct {
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	},
 	Engines: enginesTabKeyMap{
-		Add:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add folder")),
+		Add:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add engine")),
 		Rename:   key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "rename")),
 		Delete:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")),
 		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),

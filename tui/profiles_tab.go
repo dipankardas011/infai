@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -121,6 +122,7 @@ type ProfilesTabModel struct {
 
 	deleteConfirm bool
 	deleteID      int64
+	deleteName    string
 	lastPreviewID int64
 
 	width  int
@@ -134,7 +136,7 @@ func NewProfilesTabModel(recents []db.RecentEntry, all []db.ProfileEntry, w, h i
 	l.SetFilteringEnabled(true)
 	l.SetShowHelp(false)
 	l.SetShowTitle(false)
-	l.Styles.NoItems = styleMuted.Copy()
+	l.Styles.NoItems = styleMuted
 
 	vp := viewport.New(0, 0)
 
@@ -368,6 +370,16 @@ func (m *ProfilesTabModel) updateViewport() {
 	m.viewport.SetContent(sb.String())
 }
 
+func fmtInt(n int) string {
+	if n >= 1<<20 {
+		return strconv.Itoa(n/1024/1024) + "M"
+	}
+	if n >= 1<<10 {
+		return strconv.Itoa(n/1024) + "K"
+	}
+	return strconv.Itoa(n)
+}
+
 func profileRunStatus(r RunSnapshot) string {
 	style := lipgloss.NewStyle().Foreground(ActiveTheme.Success).Bold(true)
 	label := "● running"
@@ -395,6 +407,16 @@ func runsForProfile(runs []RunSnapshot, profileID int64) []RunSnapshot {
 	return out
 }
 
+// IsFiltering reports whether the profile list filter input is capturing keys.
+func (m ProfilesTabModel) IsFiltering() bool {
+	return m.list.FilterState() == list.Filtering
+}
+
+// InModalInput reports whether keys currently belong to a text input or dialog.
+func (m ProfilesTabModel) InModalInput() bool {
+	return m.IsFiltering() || m.deleteConfirm
+}
+
 func (m ProfilesTabModel) Update(msg tea.Msg) (ProfilesTabModel, tea.Cmd) {
 	if m.deleteConfirm {
 		if key, ok := msg.(tea.KeyMsg); ok {
@@ -403,10 +425,12 @@ func (m ProfilesTabModel) Update(msg tea.Msg) (ProfilesTabModel, tea.Cmd) {
 				id := m.deleteID
 				m.deleteConfirm = false
 				m.deleteID = 0
+				m.deleteName = ""
 				return m, func() tea.Msg { return profilesTabDeleteProfileMsg{id: id} }
 			case "n", "esc":
 				m.deleteConfirm = false
 				m.deleteID = 0
+				m.deleteName = ""
 				m.updateViewport()
 				return m, nil
 			}
@@ -414,7 +438,9 @@ func (m ProfilesTabModel) Update(msg tea.Msg) (ProfilesTabModel, tea.Cmd) {
 		return m, nil
 	}
 
-	if key, ok := msg.(tea.KeyMsg); ok {
+	// While the filter input is active, every key (including enter/e/x) belongs
+	// to the list's filter — skip action shortcuts entirely.
+	if key, ok := msg.(tea.KeyMsg); ok && !m.IsFiltering() {
 		switch key.String() {
 		case "enter":
 			item, ok := m.list.SelectedItem().(profileTabItem)
@@ -442,6 +468,7 @@ func (m ProfilesTabModel) Update(msg tea.Msg) (ProfilesTabModel, tea.Cmd) {
 			if entry != nil {
 				m.deleteConfirm = true
 				m.deleteID = entry.Profile.ID
+				m.deleteName = entry.Profile.Name
 				return m, nil
 			}
 			return m, nil
@@ -506,7 +533,9 @@ func (m ProfilesTabModel) View() string {
 func (m ProfilesTabModel) deleteConfirmView() string {
 	t := ActiveTheme
 	msg := lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Foreground(t.Error).Bold(true).Render("Delete this profile?"),
+		lipgloss.NewStyle().Foreground(t.Error).Bold(true).Render("Delete profile?"),
+		"",
+		styleMuted.Render("Profile: ")+lipgloss.NewStyle().Foreground(t.Text).Bold(true).Render(m.deleteName),
 		"",
 		styleKey.Render("y")+styleMuted.Render(": confirm")+"  "+
 			styleKey.Render("n")+styleMuted.Render(": cancel"),

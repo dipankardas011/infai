@@ -39,6 +39,16 @@ func (m RunsTabModel) SetSize(w, h int) RunsTabModel {
 	return m
 }
 
+func (m RunsTabModel) activeCount() int {
+	n := 0
+	for _, r := range m.runs {
+		if !r.Stopped {
+			n++
+		}
+	}
+	return n
+}
+
 func (m RunsTabModel) SetRuns(runs []RunSnapshot) RunsTabModel {
 	m.runs = runs
 	if m.selected >= len(m.runs) {
@@ -363,11 +373,12 @@ func runUptime(r RunSnapshot) string {
 }
 
 func truncateRunText(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
 	if n <= 1 {
 		return "…"
 	}
-	return s[:n-1] + "…"
+	return string(r[:n-1]) + "…"
 }

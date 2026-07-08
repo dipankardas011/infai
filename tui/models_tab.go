@@ -22,8 +22,9 @@ type ModelsTabModel struct {
 	cursor    int
 	scrollOff int
 
-	addingBrowse bool
-	fileBrowser  FileBrowserModel
+	addingBrowse  bool
+	fileBrowser   FileBrowserModel
+	removeConfirm bool
 
 	syncing bool
 	spinner spinner.Model
@@ -67,7 +68,43 @@ func (m ModelsTabModel) SetSize(w, h int) ModelsTabModel {
 
 func (m *ModelsTabModel) Close() {}
 
+// InModalInput reports whether keys currently belong to the file browser or a
+// confirmation dialog rather than global shortcuts.
+func (m ModelsTabModel) InModalInput() bool {
+	return m.addingBrowse || m.removeConfirm
+}
+
 func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
+	if m.removeConfirm {
+		if key, ok := msg.(tea.KeyMsg); ok {
+			switch key.String() {
+			case "y":
+				m.removeConfirm = false
+				if len(m.dirs) == 0 || m.cursor >= len(m.dirs) {
+					return m, nil
+				}
+				path := m.dirs[m.cursor]
+				if err := m.service.RemoveScanDir(path); err != nil {
+					m.errMsg = styleError.Render(err.Error())
+					return m, nil
+				}
+				m.dirs = append(m.dirs[:m.cursor], m.dirs[m.cursor+1:]...)
+				if m.cursor >= len(m.dirs) && m.cursor > 0 {
+					m.cursor--
+				}
+				models, _ := m.service.ListModels()
+				m.modelCnt = len(models)
+				m.errMsg = styleSuccess.Render("✓ removed")
+				return m, func() tea.Msg { return modelsTabChangedMsg{} }
+			case "n", "esc":
+				m.removeConfirm = false
+				m.errMsg = ""
+				return m, nil
+			}
+		}
+		return m, nil
+	}
+
 	if m.addingBrowse {
 		var cmd tea.Cmd
 		m.fileBrowser, cmd = m.fileBrowser.Update(msg)
@@ -120,23 +157,13 @@ func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 			m.fileBrowser.entries = loadDirEntries(home)
 			m.fileBrowser = m.fileBrowser.SetSize(m.width, m.height)
 			return m, nil
-		case "d", "delete":
+		case "d", "x", "delete":
 			if len(m.dirs) == 0 || m.cursor >= len(m.dirs) {
 				break
 			}
-			path := m.dirs[m.cursor]
-			if err := m.service.RemoveScanDir(path); err != nil {
-				m.errMsg = styleError.Render(err.Error())
-				break
-			}
-			m.dirs = append(m.dirs[:m.cursor], m.dirs[m.cursor+1:]...)
-			if m.cursor >= len(m.dirs) && m.cursor > 0 {
-				m.cursor--
-			}
-			models, _ := m.service.ListModels()
-			m.modelCnt = len(models)
-			m.errMsg = styleSuccess.Render("✓ removed")
-			return m, func() tea.Msg { return modelsTabChangedMsg{} }
+			m.removeConfirm = true
+			m.errMsg = ""
+			return m, nil
 		case "s":
 			if m.syncing || len(m.dirs) == 0 {
 				break
@@ -198,6 +225,23 @@ func (m ModelsTabModel) View() string {
 	successStyle := lipgloss.NewStyle().Foreground(t.Success)
 
 	var sb strings.Builder
+
+	if m.removeConfirm && m.cursor < len(m.dirs) {
+		sb.WriteString(titleStyle.Render("Model Directories") + "\n\n")
+		sb.WriteString(styleError.Render("  Remove this scan folder?") + "\n\n")
+		sb.WriteString(mutedStyle.Render("  Folder: ") + successStyle.Render(m.dirs[m.cursor]) + "\n")
+		sb.WriteString(mutedStyle.Render("  Models under it disappear from the list after the next sync.") + "\n\n")
+		sb.WriteString(mutedStyle.Render("  y: confirm  n/esc: cancel") + "\n")
+		boxW := max(m.width-4, 30)
+		return lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(t.Error).
+			Padding(1, 2).
+			Width(boxW).
+			MaxHeight(max(m.height, 1)).
+			Render(sb.String())
+	}
+
 	sb.WriteString(titleStyle.Render("Model Directories") + "\n")
 	if m.modelCnt > 0 {
 		sb.WriteString(mutedStyle.Render(fmt.Sprintf("  %d models discovered\n", m.modelCnt)))

@@ -58,8 +58,13 @@ func (m EnginesTabModel) selectedEngine() (model.InferenceEngine, bool) {
 	return m.engines[m.cursor], true
 }
 
-type enginesTabSavedMsg struct{}
 type enginesTabChangedMsg struct{}
+
+// InModalInput reports whether keys currently belong to a text input, the file
+// browser, or a confirmation dialog rather than global shortcuts.
+func (m EnginesTabModel) InModalInput() bool {
+	return m.addingBrowse || m.addNameMode || m.renameMode || m.deleteConfirm
+}
 
 func (m EnginesTabModel) Update(msg tea.Msg) (EnginesTabModel, tea.Cmd) {
 	if m.deleteConfirm {
@@ -223,10 +228,6 @@ func (m EnginesTabModel) Update(msg tea.Msg) (EnginesTabModel, tea.Cmd) {
 		}
 	}
 	return m, nil
-}
-
-func (m EnginesTabModel) SaveAndExit() (EnginesTabModel, tea.Cmd) {
-	return m, func() tea.Msg { return enginesTabSavedMsg{} }
 }
 
 func (m EnginesTabModel) View() string {

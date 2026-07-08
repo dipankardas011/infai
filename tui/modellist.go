@@ -148,7 +148,7 @@ func (m ModelListModel) emptyView() string {
 	sb.WriteString("\n\n")
 	sb.WriteString(versionStyle.Render("  " + config.Version()))
 	sb.WriteString("\n\n")
-	sb.WriteString(hintStyle.Render("  no models found — press [f] to add scan folders"))
+	sb.WriteString(hintStyle.Render("  no models found — add scan folders in the Models tab"))
 	sb.WriteString("\n\n")
 	sb.WriteString(hintStyle.Render("  t: theme  q: quit"))
 
@@ -171,5 +171,5 @@ func (m ModelListModel) Selected() (model.ModelEntry, bool) {
 }
 
 func (m ModelListModel) IsFiltering() bool {
-	return strings.Contains(m.list.FilterState().String(), "filtering")
+	return m.list.FilterState() == list.Filtering
 }

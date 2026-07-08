@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -90,9 +92,23 @@ func (m HomeModel) RefreshEngines() HomeModel {
 	return m
 }
 
+// InModalInput reports whether the active tab is capturing raw text input or
+// showing a modal dialog, i.e. keys must not be treated as global shortcuts.
+func (m HomeModel) InModalInput() bool {
+	switch m.activeTab {
+	case tabProfiles:
+		return m.profilesTab.InModalInput()
+	case tabModels:
+		return m.modelsTab.InModalInput()
+	case tabEngines:
+		return m.enginesTab.InModalInput()
+	}
+	return false
+}
+
 func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
-	// Tab switching keys work regardless of tab state
-	if key, ok := msg.(tea.KeyMsg); ok {
+	// Tab switching keys work whenever the active tab isn't capturing input.
+	if key, ok := msg.(tea.KeyMsg); ok && !m.InModalInput() {
 		switch key.String() {
 		case "shift+tab":
 			m.activeTab = (m.activeTab - 1 + len(tabNames)) % len(tabNames)
@@ -100,21 +116,16 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 		case "tab":
 			m.activeTab = (m.activeTab + 1) % len(tabNames)
 			return m, nil
-		}
-		// Number keys for tabs
-		if key.String() == "1" {
+		case "1":
 			m.activeTab = tabProfiles
 			return m, nil
-		}
-		if key.String() == "2" {
+		case "2":
 			m.activeTab = tabRuns
 			return m, nil
-		}
-		if key.String() == "3" {
+		case "3":
 			m.activeTab = tabModels
 			return m, nil
-		}
-		if key.String() == "4" {
+		case "4":
 			m.activeTab = tabEngines
 			return m, nil
 		}
@@ -152,8 +163,16 @@ func (m HomeModel) View() string {
 	bodyH := max(bodyArea.H, 1)
 	innerW := m.width
 
-	// Tabs
-	tabs := RenderTabs(tabNames, m.activeTab, innerW)
+	// Tabs — numbered so the 1-4 jump keys are discoverable; Runs shows a live
+	// count of active servers.
+	labels := make([]string, len(tabNames))
+	for i, name := range tabNames {
+		labels[i] = fmt.Sprintf("%d %s", i+1, name)
+	}
+	if n := m.runsTab.activeCount(); n > 0 {
+		labels[tabRuns] = fmt.Sprintf("%d %s (%d)", tabRuns+1, tabNames[tabRuns], n)
+	}
+	tabs := RenderTabs(labels, m.activeTab, innerW)
 
 	// Tab content
 	var body string
@@ -176,25 +195,4 @@ func (m HomeModel) View() string {
 	divider := divStyle.Render(horizontalLine(innerW))
 
 	return tabs + "\n" + divider + "\n" + body
-}
-
-// Messages the home model can produce for AppModel
-type homeMsgLaunch struct {
-	model   model.ModelEntry
-	profile model.Profile
-}
-type homeMsgNewProfile struct{}
-type homeMsgEditProfile struct {
-	model   model.ModelEntry
-	profile model.Profile
-}
-type homeMsgDeleteProfile struct {
-	id int64
-}
-type homeMsgSyncDone struct {
-	removed, updated int
-	err              error
-}
-type homeMsgExecutorUpdated struct {
-	path string
 }

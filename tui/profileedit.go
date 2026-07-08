@@ -234,40 +234,44 @@ func (em ProfileEditModel) SetSize(w, h int) ProfileEditModel {
 	return em
 }
 
+func (em *ProfileEditModel) moveFocus(delta int) tea.Cmd {
+	f := &em.fields[em.focused]
+	if f.kind != fieldBool && f.kind != fieldSelect {
+		f.input.Blur()
+	}
+	em.focused = (em.focused + delta + len(em.fields)) % len(em.fields)
+	nf := &em.fields[em.focused]
+	if nf.kind != fieldBool && nf.kind != fieldSelect {
+		nf.input.Focus()
+	}
+	em.scrollTo(em.focused)
+	return textinput.Blink
+}
+
 func (em ProfileEditModel) Update(msg tea.Msg) (ProfileEditModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		f := &em.fields[em.focused]
 		switch msg.String() {
-		case "tab":
-			if f.kind != fieldBool && f.kind != fieldSelect {
-				f.input.Blur()
-			}
-			em.focused = (em.focused + 1) % len(em.fields)
-			nf := &em.fields[em.focused]
-			if nf.kind != fieldBool && nf.kind != fieldSelect {
-				nf.input.Focus()
-			}
-			em.scrollTo(em.focused)
-			return em, textinput.Blink
+		case "tab", "down":
+			return em, em.moveFocus(1)
 
-		case "shift+tab":
-			if f.kind != fieldBool && f.kind != fieldSelect {
-				f.input.Blur()
-			}
-			em.focused = (em.focused - 1 + len(em.fields)) % len(em.fields)
-			nf := &em.fields[em.focused]
-			if nf.kind != fieldBool && nf.kind != fieldSelect {
-				nf.input.Focus()
-			}
-			em.scrollTo(em.focused)
-			return em, textinput.Blink
+		case "shift+tab", "up":
+			return em, em.moveFocus(-1)
 
-		case " ", "enter":
+		case " ":
 			if f.kind == fieldBool && !f.disabled {
 				f.boolVal = !f.boolVal
 				return em, nil
 			}
+
+		case "enter":
+			if f.kind == fieldBool && !f.disabled {
+				f.boolVal = !f.boolVal
+				return em, nil
+			}
+			// On any other field, enter moves on to the next one.
+			return em, em.moveFocus(1)
 
 		case "left":
 			if f.kind == fieldSelect && len(f.options) > 0 {
@@ -422,7 +426,7 @@ func (em ProfileEditModel) View() string {
 		errLine = "\n" + styleError.Render("  ✗ "+em.errMsg)
 	}
 
-	help := styleHelp.Render("tab/s-tab: navigate  ←/→: cycle select  space: toggle  ctrl+s: save  esc: discard")
+	help := styleHelp.Render("↑/↓ or tab: navigate  ←/→: cycle select  space: toggle  ctrl+s: save  esc: discard")
 
 	content := title + "\n\n" + strings.Join(rows, "\n") + scrollHint + errLine + "\n\n" + help
 
