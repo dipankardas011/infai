@@ -272,6 +272,10 @@ func (m *ProfilesTabModel) updateViewport() {
 	entry := m.selectedEntry()
 
 	if entry == nil {
+		if len(m.all) == 0 && len(m.recents) == 0 {
+			m.viewport.SetContent(m.quickStartView())
+			return
+		}
 		m.viewport.SetContent(styleMuted.Italic(true).Render("select a profile\nto view configuration"))
 		return
 	}
@@ -368,6 +372,30 @@ func (m *ProfilesTabModel) updateViewport() {
 	}
 
 	m.viewport.SetContent(sb.String())
+}
+
+// quickStartView fills the preview panel with setup steps when no profiles
+// exist yet, so a first run explains itself.
+func (m ProfilesTabModel) quickStartView() string {
+	t := ActiveTheme
+	title := lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
+	step := lipgloss.NewStyle().Foreground(t.Secondary).Bold(true)
+	body := lipgloss.NewStyle().Foreground(t.Text)
+	dim := styleMuted
+
+	var sb strings.Builder
+	sb.WriteString(title.Render("Welcome to infai") + "\n")
+	sb.WriteString(dim.Render("launch templates for llama.cpp") + "\n\n")
+	sb.WriteString(step.Render("1") + body.Render("  Engines tab (4): add the folder") + "\n")
+	sb.WriteString(body.Render("   containing your llama-server binary") + "\n\n")
+	sb.WriteString(step.Render("2") + body.Render("  Models tab (3): add model folders,") + "\n")
+	sb.WriteString(body.Render("   then press s to sync") + "\n\n")
+	sb.WriteString(step.Render("3") + body.Render("  Back here: enter on \"+ New Profile\"") + "\n")
+	sb.WriteString(body.Render("   to configure a launch template") + "\n\n")
+	sb.WriteString(step.Render("4") + body.Render("  enter launches it — logs and metrics") + "\n")
+	sb.WriteString(body.Render("   stream live in the Runs tab (2)") + "\n\n")
+	sb.WriteString(dim.Render("t: theme  ?: help"))
+	return sb.String()
 }
 
 func fmtInt(n int) string {

@@ -50,6 +50,7 @@ type ServerModel struct {
 	logCh           <-chan string
 	exitCh          <-chan error
 	logs            []string
+	styledLogs      []string // logs with error/warn highlighting, kept in lockstep
 	vp              viewport.Model
 	profileName     string
 	modelName       string
@@ -143,16 +144,31 @@ func (s ServerModel) updatePromptProgress(line string) ServerModel {
 	return s
 }
 
+// styleLogLine highlights error and warning lines so problems stand out while
+// logs stream. The raw line is kept separately for clipboard copy.
+func styleLogLine(line string) string {
+	l := strings.ToLower(line)
+	switch {
+	case strings.Contains(l, "error") || strings.Contains(l, "failed") || strings.Contains(l, "fatal"):
+		return styleError.Render(line)
+	case strings.Contains(l, "warn"):
+		return lipgloss.NewStyle().Foreground(ActiveTheme.Secondary).Render(line)
+	}
+	return line
+}
+
 func (s ServerModel) appendLogLine(line string) ServerModel {
 	s.logs = append(s.logs, line)
+	s.styledLogs = append(s.styledLogs, styleLogLine(line))
 	if len(s.logs) > maxLogLines {
 		s.logs = s.logs[len(s.logs)-maxLogLines:]
+		s.styledLogs = s.styledLogs[len(s.styledLogs)-maxLogLines:]
 	}
 	if v, ok := parseGenTPS(line); ok {
 		s.tpsHistory = appendTPS(s.tpsHistory, v)
 	}
 	atBottom := s.vp.AtBottom()
-	s.vp.SetContent(strings.Join(s.logs, "\n"))
+	s.vp.SetContent(strings.Join(s.styledLogs, "\n"))
 	if atBottom {
 		s.vp.GotoBottom()
 	}
@@ -287,6 +303,7 @@ func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 		switch msg.String() {
 		case "c":
 			s.logs = nil
+			s.styledLogs = nil
 			s.vp.SetContent("")
 			return s, nil
 		}
@@ -370,6 +387,9 @@ func (s ServerModel) View() string {
 			genSegs = append(genSegs, hi.Render(fmt.Sprintf("p50 %.1f t/s  p95 %.1f t/s", p50, p95)))
 		} else if n > 0 {
 			genSegs = append(genSegs, hi.Render(fmt.Sprintf("latest %.1f t/s  (warming up)", s.tpsHistory[len(s.tpsHistory)-1])))
+		}
+		if spark := renderSparkline(s.tpsHistory, min(24, max(s.width/5, 8))); spark != "" {
+			genSegs = append(genSegs, lipgloss.NewStyle().Foreground(t.Primary).Render(spark))
 		}
 		if s.liveActive > 0 {
 			genSegs = append(genSegs, lipgloss.NewStyle().Foreground(t.Success).Render(fmt.Sprintf("● %d active", s.liveActive)))

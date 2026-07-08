@@ -131,6 +131,66 @@ func TestProfileEditEscConfirmsDiscard(t *testing.T) {
 	}
 }
 
+func TestSparkline(t *testing.T) {
+	if got := renderSparkline(nil, 10); got != "" {
+		t.Fatalf("empty history should render nothing, got %q", got)
+	}
+	if got := renderSparkline([]float64{5}, 10); got != "" {
+		t.Fatalf("single sample should render nothing, got %q", got)
+	}
+	if got := renderSparkline([]float64{1, 8}, 10); got != "▁█" {
+		t.Fatalf("min/max should map to lowest/highest bars, got %q", got)
+	}
+	if got := renderSparkline([]float64{5, 5, 5}, 10); got != "▅▅▅" {
+		t.Fatalf("constant history should render mid bars, got %q", got)
+	}
+	// More samples than width: only the most recent `width` samples survive.
+	long := make([]float64, 50)
+	for i := range long {
+		long[i] = float64(i)
+	}
+	if got := []rune(renderSparkline(long, 8)); len(got) != 8 {
+		t.Fatalf("sparkline should clamp to width 8, got %d runes", len(got))
+	}
+}
+
+func TestThemeSelectorLivePreviewAndRevert(t *testing.T) {
+	SetTheme("tokyonight")
+	sel := NewThemeSelectorModel(80, 24)
+	sel, _ = sel.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if ActiveTheme.Name == "tokyonight" {
+		t.Fatal("moving the cursor should live-preview the highlighted theme")
+	}
+	sel.Revert()
+	if ActiveTheme.Name != "tokyonight" {
+		t.Fatalf("revert should restore the original theme, got %s", ActiveTheme.Name)
+	}
+}
+
+func TestLastTabPersistsAcrossSessions(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	database, err := db.Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	app := NewApp(database, nil, nil, 80, 24)
+	(&app).Update(keyRune('3'))
+	if app.home.activeTab != tabModels {
+		t.Fatal("'3' should switch to the Models tab")
+	}
+	database.Close()
+
+	database2, err := db.Open()
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer database2.Close()
+	app2 := NewApp(database2, nil, nil, 80, 24)
+	if app2.home.activeTab != tabModels {
+		t.Fatalf("new session should reopen on the Models tab, got tab %d", app2.home.activeTab)
+	}
+}
+
 func TestTabBarShowsNumbersAndRunCount(t *testing.T) {
 	home := HomeModel{
 		activeTab: tabRuns,

@@ -44,6 +44,34 @@ func appendTPS(history []float64, v float64) []float64 {
 	return history
 }
 
+var sparkRunes = []rune("▁▂▃▄▅▆▇█")
+
+// renderSparkline draws the most recent history samples as a mini bar chart,
+// one rune per sample, scaled between the window's min and max.
+func renderSparkline(history []float64, width int) string {
+	if width <= 0 || len(history) < 2 {
+		return ""
+	}
+	s := history
+	if len(s) > width {
+		s = s[len(s)-width:]
+	}
+	lo, hi := s[0], s[0]
+	for _, v := range s {
+		lo = min(lo, v)
+		hi = max(hi, v)
+	}
+	out := make([]rune, len(s))
+	for i, v := range s {
+		idx := len(sparkRunes) / 2
+		if hi > lo {
+			idx = int((v-lo)/(hi-lo)*float64(len(sparkRunes)-1) + 0.5)
+		}
+		out[i] = sparkRunes[idx]
+	}
+	return string(out)
+}
+
 // computeTPSStats returns latest/p50/p95 and sample count from per-request history.
 func computeTPSStats(history []float64) (latest, p50, p95 float64, n int) {
 	n = len(history)

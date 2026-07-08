@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,6 +96,13 @@ func NewApp(database *db.DB, scanDirs []string, entries []model.ModelEntry, w, h
 	}
 
 	home := NewHomeModel(service, scanDirs, entries, data.Recents, data.Profiles, w, h)
+
+	// Reopen on the tab the user was last using.
+	if v, err := service.GetSetting("last_tab"); err == nil && v != "" {
+		if idx, err := strconv.Atoi(v); err == nil && idx >= 0 && idx < len(tabNames) {
+			home.activeTab = idx
+		}
+	}
 
 	return AppModel{
 		service:       service,
@@ -560,14 +568,20 @@ func (a *AppModel) handleNonKeyMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *AppModel) updateHome(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	prevTab := a.home.activeTab
 	var cmd tea.Cmd
 	a.home, cmd = a.home.Update(msg)
+	if a.home.activeTab != prevTab {
+		// Remember the tab across sessions, like the theme.
+		a.service.SetSetting("last_tab", strconv.Itoa(a.home.activeTab))
+	}
 	return a, cmd
 }
 
 func (a *AppModel) updateThemeSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		a.themeSelector.Revert() // undo the live preview
 		a.screen = screenHome
 		return a, nil
 	case "enter":
