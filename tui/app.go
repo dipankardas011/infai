@@ -761,7 +761,7 @@ func (a *AppModel) renderToast() string {
 	case toastSuccess:
 		return styleSuccess.Render("✓ " + a.errMsg)
 	case toastWarning:
-		return lipgloss.NewStyle().Foreground(ActiveTheme.Secondary).Bold(true).Render("! " + a.errMsg)
+		return styleWarning.Bold(true).Render("! " + a.errMsg)
 	case toastInfo:
 		return styleMuted.Render("• " + a.errMsg)
 	case toastError:
@@ -777,12 +777,12 @@ func (a *AppModel) View() string {
 		return RenderMinSizeWarning(a.width, a.height)
 	}
 
+	// The status line is always reserved so toasts never shift the layout.
 	toast := ""
-	toastLines := 0
 	if a.errMsg != "" {
-		toast = a.renderToast() + "\n"
-		toastLines = 2
+		toast = a.renderToast()
 	}
+	toastLines := 1
 
 	helpView := a.helpView()
 	helpLines := 0
@@ -794,7 +794,7 @@ func (a *AppModel) View() string {
 	}
 
 	// Global header is shown on every screen.
-	headerView := RenderHeader(a.width)
+	headerView := RenderHeader(a.width, a.runs.ActiveCount())
 	headerLines := 1
 
 	// Account for the "\n" separator before helpView.
@@ -829,7 +829,7 @@ func (a *AppModel) View() string {
 	// This preserves fixed header/footer regions in all screens.
 	body = ClampHeight(contentArea, body)
 
-	out := headerView + "\n" + toast + body
+	out := headerView + "\n" + toast + "\n" + body
 	if helpView != "" {
 		out += "\n" + helpView
 	}

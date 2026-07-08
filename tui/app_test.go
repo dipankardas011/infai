@@ -154,6 +154,26 @@ func TestSparkline(t *testing.T) {
 	}
 }
 
+func TestThemesHaveCompletePalettes(t *testing.T) {
+	seen := map[string]bool{}
+	for _, th := range ThemeList {
+		if th.Name == "" || seen[th.Name] {
+			t.Fatalf("theme name empty or duplicated: %q", th.Name)
+		}
+		seen[th.Name] = true
+		for name, c := range map[string]string{
+			"Primary": string(th.Primary), "Secondary": string(th.Secondary),
+			"Success": string(th.Success), "Warning": string(th.Warning),
+			"Error": string(th.Error), "Muted": string(th.Muted),
+			"Text": string(th.Text), "Bg": string(th.Bg), "Surface": string(th.Surface),
+		} {
+			if len(c) != 7 || c[0] != '#' {
+				t.Fatalf("theme %s: %s color %q is not a #RRGGBB value", th.Name, name, c)
+			}
+		}
+	}
+}
+
 func TestThemeSelectorLivePreviewAndRevert(t *testing.T) {
 	SetTheme("tokyonight")
 	sel := NewThemeSelectorModel(80, 24)

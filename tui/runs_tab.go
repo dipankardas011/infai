@@ -144,7 +144,7 @@ func (m RunsTabModel) View() string {
 		selected := i == m.selected
 		prefix := "  "
 		if selected {
-			prefix = styleSelected.Render("▶ ")
+			prefix = styleSelRow.Render("▶ ")
 		}
 		rows = append(rows, prefix+runRowLine(r, selected, cols))
 	}
@@ -284,7 +284,7 @@ func renderResourceBar(percent float64, width int, warn bool) string {
 	if warn {
 		fillColor = ActiveTheme.Error
 	} else if percent >= 70 {
-		fillColor = ActiveTheme.Secondary
+		fillColor = ActiveTheme.Warning
 	}
 	fill := lipgloss.NewStyle().Foreground(fillColor).Render(strings.Repeat("█", filled))
 	empty := lipgloss.NewStyle().Foreground(ActiveTheme.Muted).Render(strings.Repeat("░", width-filled))
@@ -396,18 +396,25 @@ func runsHeaderLine(cols []runColumn) string {
 }
 
 func runRowLine(r RunSnapshot, selected bool, cols []runColumn) string {
-	base := lipgloss.NewStyle().Foreground(ActiveTheme.Text)
+	t := ActiveTheme
+	base := lipgloss.NewStyle().Foreground(t.Text)
+	gap := " "
 	if selected {
-		base = styleSelected
+		// Selection bar: background runs through every cell and gap.
+		base = lipgloss.NewStyle().Background(t.Surface).Foreground(t.Primary).Bold(true)
+		gap = lipgloss.NewStyle().Background(t.Surface).Render(" ")
 	}
 	cells := make([]string, 0, len(cols)*2)
 	for i, c := range cols {
 		if i > 0 {
-			cells = append(cells, " ")
+			cells = append(cells, gap)
 		}
 		style := base
 		if c.styled {
 			style = runStatusStyle(r)
+			if selected {
+				style = style.Background(t.Surface)
+			}
 		}
 		cells = append(cells, style.Width(c.width).Render(truncateRunText(c.cell(r), c.width)))
 	}
@@ -432,7 +439,7 @@ func runStatusText(r RunSnapshot) string {
 
 func runStatusStyle(r RunSnapshot) lipgloss.Style {
 	if r.Stopping {
-		return lipgloss.NewStyle().Foreground(ActiveTheme.Secondary).Bold(true)
+		return lipgloss.NewStyle().Foreground(ActiveTheme.Warning).Bold(true)
 	}
 	if r.Stopped {
 		if r.ForceKilled || r.ExitErr != nil {

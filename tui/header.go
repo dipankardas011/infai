@@ -7,8 +7,9 @@ import (
 	"github.com/dipankardas011/infai/config"
 )
 
-// RenderHeader returns the top bar showing "infai" + version + theme/help hints.
-func RenderHeader(width int) string {
+// RenderHeader returns the top bar showing "infai" + version, a live run
+// indicator, and theme/help hints.
+func RenderHeader(width, activeRuns int) string {
 	t := ActiveTheme
 
 	logoStyle := lipgloss.NewStyle().
@@ -24,6 +25,11 @@ func RenderHeader(width int) string {
 
 	left := logoStyle.Render("infai") + " " + versionStyle.Render(config.Version())
 	right := hintStyle.Render("t:theme  ?:help")
+	if activeRuns > 0 {
+		runStyle := lipgloss.NewStyle().Foreground(t.Success).Bold(true)
+		right = runStyle.Render(fmt.Sprintf("● %d running", activeRuns)) +
+			hintStyle.Render("  ·  t:theme  ?:help")
+	}
 
 	if width <= 0 {
 		return left

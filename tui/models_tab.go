@@ -220,7 +220,6 @@ func (m ModelsTabModel) View() string {
 	}
 
 	titleStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
-	selStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
 	mutedStyle := styleMuted
 	successStyle := lipgloss.NewStyle().Foreground(t.Success)
 
@@ -259,18 +258,16 @@ func (m ModelsTabModel) View() string {
 		}
 		for i := m.scrollOff; i < end; i++ {
 			d := m.dirs[i]
-			prefix := "  "
-			style := mutedStyle
-			if i == m.cursor {
-				prefix = selStyle.Render("▶ ")
-				style = successStyle
-			}
-			display := d
 			availW := max(m.width-10, 10)
+			display := d
 			if len(display) > availW {
 				display = "…" + display[len(display)-(availW-3):]
 			}
-			sb.WriteString(prefix + style.Render(display) + "\n")
+			if i == m.cursor {
+				sb.WriteString(styleSelRow.Render(padToWidth("▶ "+display, availW+2)) + "\n")
+			} else {
+				sb.WriteString("  " + mutedStyle.Render(display) + "\n")
+			}
 		}
 	}
 

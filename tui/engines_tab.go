@@ -230,6 +230,17 @@ func (m EnginesTabModel) Update(msg tea.Msg) (EnginesTabModel, tea.Cmd) {
 	return m, nil
 }
 
+func boxWidthForEngines(w int) int {
+	boxW := 68
+	if w < 72 {
+		boxW = w - 8
+	}
+	if boxW < 30 {
+		boxW = 30
+	}
+	return boxW
+}
+
 func (m EnginesTabModel) View() string {
 	t := ActiveTheme
 	if m.addingBrowse {
@@ -239,7 +250,6 @@ func (m EnginesTabModel) View() string {
 	titleStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
 	mutedStyle := styleMuted
 	successStyle := lipgloss.NewStyle().Foreground(t.Success)
-	selStyle := lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
 
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Inference Engines") + "\n\n")
@@ -260,14 +270,15 @@ func (m EnginesTabModel) View() string {
 		sb.WriteString(mutedStyle.Render("  enter: save  esc: cancel") + "\n")
 	} else if len(m.engines) > 0 {
 		sb.WriteString(mutedStyle.Render("  Saved inference engines:") + "\n")
+		rowW := max(boxWidthForEngines(m.width)-6, 20)
 		for i, e := range m.engines {
-			prefix := "    "
-			nameStyle := lipgloss.NewStyle().Foreground(t.Text)
 			if i == m.cursor {
-				prefix = selStyle.Render("  ▶ ")
-				nameStyle = selStyle
+				sb.WriteString("  " + styleSelRow.Render(padToWidth("▶ "+e.Name, rowW-2)) + "\n")
+				sb.WriteString("  " + styleSelRowDim.Render(padToWidth("  "+e.Path, rowW-2)) + "\n")
+			} else {
+				sb.WriteString(fmt.Sprintf("    %s\n      %s\n",
+					lipgloss.NewStyle().Foreground(t.Text).Render(e.Name), mutedStyle.Render(e.Path)))
 			}
-			sb.WriteString(fmt.Sprintf("%s%s\n      %s\n", prefix, nameStyle.Render(e.Name), mutedStyle.Render(e.Path)))
 		}
 		sb.WriteString("\n")
 		sb.WriteString(mutedStyle.Render("  a: add folder  e: rename  x: delete") + "\n")
@@ -281,13 +292,7 @@ func (m EnginesTabModel) View() string {
 		sb.WriteString("\n" + m.errMsg)
 	}
 
-	boxW := 68
-	if m.width < 72 {
-		boxW = m.width - 8
-	}
-	if boxW < 30 {
-		boxW = 30
-	}
+	boxW := boxWidthForEngines(m.width)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
 		lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).

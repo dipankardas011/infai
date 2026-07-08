@@ -69,23 +69,19 @@ func (d profileTabDelegate) Render(w io.Writer, m list.Model, index int, item li
 		return
 	}
 	sel := index == m.Index()
-	prefix := "  "
-	nameStyle := lipgloss.NewStyle().Foreground(colorText)
-	descStyle := styleMuted
+	rowW := m.Width()
 
 	if i.isSep {
-		fmt.Fprintf(w, "  %s\n  ", styleMuted.Render(strings.Repeat("─", m.Width()-4)))
+		fmt.Fprintf(w, "  %s\n  ", styleMuted.Render(strings.Repeat("─", max(rowW-4, 1))))
 		return
 	}
-	if i.isNew {
-		nameStyle = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
-	}
-	if i.isRecent {
-		nameStyle = lipgloss.NewStyle().Foreground(colorSecondary)
-	}
-	if sel {
-		prefix = styleSelected.Render("▶ ")
-		nameStyle = styleSelected
+
+	badge := ""
+	if i.runCount > 0 {
+		badge = "  ● running"
+		if i.runCount > 1 {
+			badge = fmt.Sprintf("  ● %d runs", i.runCount)
+		}
 	}
 	desc := ""
 	if i.recent != nil {
@@ -93,22 +89,34 @@ func (d profileTabDelegate) Render(w io.Writer, m list.Model, index int, item li
 	} else if i.entry != nil {
 		desc = i.entry.Model.DisplayName
 	}
+
+	// Selected rows get a full-width background bar; the whole row is
+	// re-styled in one pass so the bar has no color gaps.
+	if sel {
+		title := styleSelRow.Render(padToWidth("▶ "+i.label+badge, rowW))
+		if desc != "" {
+			fmt.Fprintf(w, "%s\n%s", title, styleSelRowDim.Render(padToWidth("  "+desc, rowW)))
+		} else {
+			fmt.Fprint(w, title)
+		}
+		return
+	}
+
+	nameStyle := lipgloss.NewStyle().Foreground(colorText)
+	if i.isNew {
+		nameStyle = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
+	}
+	if i.isRecent {
+		nameStyle = lipgloss.NewStyle().Foreground(colorSecondary)
+	}
 	renderedLabel := nameStyle.Render(i.label)
-	if i.runCount > 0 {
-		badgeText := "  ● running"
-		if i.runCount > 1 {
-			badgeText = fmt.Sprintf("  ● %d runs", i.runCount)
-		}
-		badgeStyle := lipgloss.NewStyle().Foreground(ActiveTheme.Success).Bold(true)
-		if sel {
-			badgeStyle = styleSelected
-		}
-		renderedLabel += badgeStyle.Render(badgeText)
+	if badge != "" {
+		renderedLabel += lipgloss.NewStyle().Foreground(ActiveTheme.Success).Bold(true).Render(badge)
 	}
 	if desc != "" {
-		fmt.Fprintf(w, "%s%s\n  %s", prefix, renderedLabel, descStyle.Render(desc))
+		fmt.Fprintf(w, "  %s\n  %s", renderedLabel, styleMuted.Render(desc))
 	} else {
-		fmt.Fprintf(w, "%s%s", prefix, renderedLabel)
+		fmt.Fprintf(w, "  %s", renderedLabel)
 	}
 }
 
@@ -412,7 +420,7 @@ func profileRunStatus(r RunSnapshot) string {
 	style := lipgloss.NewStyle().Foreground(ActiveTheme.Success).Bold(true)
 	label := "● running"
 	if r.Stopping {
-		style = lipgloss.NewStyle().Foreground(ActiveTheme.Secondary).Bold(true)
+		style = lipgloss.NewStyle().Foreground(ActiveTheme.Warning).Bold(true)
 		label = "◌ stopping"
 	} else if r.Stopped {
 		style = styleMuted
@@ -537,10 +545,10 @@ func (m ProfilesTabModel) View() string {
 		panelH = 3
 	}
 
-	// Left panel
+	// Left panel — primary border marks the pane that receives arrow keys.
 	leftBox := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Muted).
+		BorderForeground(t.Primary).
 		Width(leftW - 2).
 		Height(panelH - 2).
 		MaxHeight(panelH).

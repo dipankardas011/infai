@@ -76,7 +76,7 @@ func themeSwatch(t Theme) string {
 	dot := func(c lipgloss.Color) string {
 		return lipgloss.NewStyle().Foreground(c).Render("●")
 	}
-	return dot(t.Primary) + " " + dot(t.Secondary) + " " + dot(t.Success) + " " + dot(t.Error)
+	return dot(t.Primary) + " " + dot(t.Secondary) + " " + dot(t.Success) + " " + dot(t.Warning) + " " + dot(t.Error)
 }
 
 func (m ThemeSelectorModel) View() string {

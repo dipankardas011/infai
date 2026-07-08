@@ -152,7 +152,7 @@ func styleLogLine(line string) string {
 	case strings.Contains(l, "error") || strings.Contains(l, "failed") || strings.Contains(l, "fatal"):
 		return styleError.Render(line)
 	case strings.Contains(l, "warn"):
-		return lipgloss.NewStyle().Foreground(ActiveTheme.Secondary).Render(line)
+		return styleWarning.Render(line)
 	}
 	return line
 }
@@ -322,7 +322,7 @@ func (s ServerModel) View() string {
 	// ── line 1: identity + status ──────────────────────────────────────────
 	status := lipgloss.NewStyle().Foreground(t.Success).Bold(true).Render("● running")
 	if s.stopping {
-		status = lipgloss.NewStyle().Foreground(t.Error).Bold(true).Render("◌ shutting down…")
+		status = lipgloss.NewStyle().Foreground(t.Warning).Bold(true).Render("◌ shutting down…")
 	} else if s.stopped {
 		label := "■ stopped"
 		if s.forceKilled {
