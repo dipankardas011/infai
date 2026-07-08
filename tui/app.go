@@ -658,8 +658,24 @@ func (a *AppModel) openProfileModelPicker(returnScreen screenKind) (tea.Model, t
 }
 
 func (a *AppModel) updateProfileEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// "Discard changes?" dialog captures all keys until answered.
+	if a.profileEdit.discardConfirm {
+		switch msg.String() {
+		case "y":
+			a.profileEdit.discardConfirm = false
+			a.profileEdit.errMsg = ""
+			a.screen = a.profileEditReturn
+		case "n", "esc":
+			a.profileEdit.discardConfirm = false
+		}
+		return a, nil
+	}
 	switch msg.String() {
 	case "esc":
+		if a.profileEdit.dirty() {
+			a.profileEdit.discardConfirm = true
+			return a, nil
+		}
 		a.screen = a.profileEditReturn
 		a.profileEdit.errMsg = ""
 		return a, nil

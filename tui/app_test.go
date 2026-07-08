@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/dipankardas011/infai/db"
+	"github.com/dipankardas011/infai/model"
 )
 
 func newTestApp(t *testing.T) *AppModel {
@@ -80,6 +81,53 @@ func TestModalInputStates(t *testing.T) {
 	}
 	if (EnginesTabModel{}).InModalInput() || (ModelsTabModel{}).InModalInput() {
 		t.Fatal("idle tabs must not report modal input")
+	}
+}
+
+func TestProfileEditDirtyCheck(t *testing.T) {
+	engines := []model.InferenceEngine{{ID: "e1", Name: "cpu"}}
+	em := NewProfileEditModel(model.ModelEntry{DisplayName: "m"}, engines, nil, 80, 24)
+	if em.dirty() {
+		t.Fatal("freshly opened editor must not be dirty")
+	}
+	em, _ = em.Update(keyRune('x')) // types into the focused Name field
+	if !em.dirty() {
+		t.Fatal("editor must be dirty after typing")
+	}
+}
+
+// Esc on a dirty editor must prompt instead of silently discarding; 'n' keeps
+// editing, 'y' leaves the screen.
+func TestProfileEditEscConfirmsDiscard(t *testing.T) {
+	app := newTestApp(t)
+	engines := []model.InferenceEngine{{ID: "e1", Name: "cpu"}}
+	app.profileEdit = NewProfileEditModel(model.ModelEntry{DisplayName: "m"}, engines, nil, 80, 24)
+	app.profileEditReturn = screenHome
+	app.screen = screenProfileEdit
+
+	esc := tea.KeyMsg{Type: tea.KeyEsc}
+
+	// Clean editor: esc leaves immediately.
+	app.Update(esc)
+	if app.screen != screenHome {
+		t.Fatal("esc on a clean editor should leave the screen")
+	}
+
+	// Dirty editor: esc prompts, n cancels, y discards.
+	app.screen = screenProfileEdit
+	app.Update(keyRune('x'))
+	app.Update(esc)
+	if app.screen != screenProfileEdit || !app.profileEdit.discardConfirm {
+		t.Fatal("esc on a dirty editor should open the discard prompt")
+	}
+	app.Update(keyRune('n'))
+	if app.screen != screenProfileEdit || app.profileEdit.discardConfirm {
+		t.Fatal("'n' should keep editing")
+	}
+	app.Update(esc)
+	app.Update(keyRune('y'))
+	if app.screen != screenHome {
+		t.Fatal("'y' should discard and leave the editor")
 	}
 }
 

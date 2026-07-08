@@ -51,6 +51,41 @@ type ProfileEditModel struct {
 	width       int
 	height      int
 	initialized bool
+
+	// initial holds the form state at open time so esc can warn about
+	// unsaved edits; discardConfirm is the "discard changes?" prompt.
+	initial        []string
+	discardConfirm bool
+}
+
+// snapshot serializes every field's current value for dirty comparison.
+func (em ProfileEditModel) snapshot() []string {
+	out := make([]string, 0, len(em.fields))
+	for _, f := range em.fields {
+		switch f.kind {
+		case fieldBool:
+			out = append(out, strconv.FormatBool(f.boolVal))
+		case fieldSelect:
+			out = append(out, strconv.Itoa(f.selIdx))
+		default:
+			out = append(out, f.input.Value())
+		}
+	}
+	return out
+}
+
+// dirty reports whether any field changed since the editor was opened.
+func (em ProfileEditModel) dirty() bool {
+	current := em.snapshot()
+	if len(current) != len(em.initial) {
+		return true
+	}
+	for i := range current {
+		if current[i] != em.initial[i] {
+			return true
+		}
+	}
+	return false
 }
 
 func newTextInput(placeholder string) textinput.Model {
@@ -219,6 +254,7 @@ func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p 
 	if em.fields[0].kind != fieldBool && em.fields[0].kind != fieldSelect {
 		em.fields[0].input.Focus()
 	}
+	em.initial = em.snapshot()
 	em.initialized = true
 	return em
 }
@@ -427,12 +463,20 @@ func (em ProfileEditModel) View() string {
 	}
 
 	help := styleHelp.Render("↑/↓ or tab: navigate  ←/→: cycle select  space: toggle  ctrl+s: save  esc: discard")
+	if em.discardConfirm {
+		help = lipgloss.NewStyle().Foreground(t.Error).Bold(true).
+			Render("unsaved changes — y: discard  n/esc: keep editing")
+	}
 
 	content := title + "\n\n" + strings.Join(rows, "\n") + scrollHint + errLine + "\n\n" + help
 
+	borderColor := t.Muted
+	if em.discardConfirm {
+		borderColor = t.Error
+	}
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Muted).
+		BorderForeground(borderColor).
 		Padding(1, 2).
 		Width(boxW).
 		MaxHeight(max(em.height, 1)).

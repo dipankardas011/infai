@@ -133,8 +133,10 @@ func (m RunsTabModel) View() string {
 	listAreaH := max(innerH-resourceLines-1, 3)
 	listLimit := max(listAreaH-3, 1) // header + divider + page line
 
-	headerLine := "  " + runsHeaderLine()
-	rows := []string{styleMuted.Render(headerLine), styleMuted.Render("  " + strings.Repeat("─", min(max(innerW-2, 1), 100)))}
+	cols := visibleRunColumns(max(innerW-2, 20)) // 2-char selection prefix
+	tableW := runColumnsWidth(cols)
+	headerLine := "  " + runsHeaderLine(cols)
+	rows := []string{styleMuted.Render(headerLine), styleMuted.Render("  " + strings.Repeat("─", min(tableW, max(innerW-2, 1))))}
 	start := selectedPageStart(m.selected, listLimit)
 	end := min(start+listLimit, len(m.runs))
 	for i := start; i < end; i++ {
@@ -144,7 +146,7 @@ func (m RunsTabModel) View() string {
 		if selected {
 			prefix = styleSelected.Render("▶ ")
 		}
-		rows = append(rows, prefix+runRowLine(r, selected))
+		rows = append(rows, prefix+runRowLine(r, selected, cols))
 	}
 	rows = append(rows, m.pageIndicator(start, end, listLimit))
 	listSection := strings.Join(rows, "\n")
@@ -305,31 +307,111 @@ func parseUsedTotal(s string) (float64, float64, bool) {
 	return used, total, errUsed == nil && errTotal == nil
 }
 
-func runsHeaderLine() string {
-	return fmt.Sprintf("%-5s %-11s %-20s %-26s %-16s %-9s %-8s", "RUN", "STATUS", "PROFILE", "MODEL", "ENGINE", "UPTIME", "TPS")
+// runColumn describes one runs-table column. Columns with higher prio are
+// dropped first when the terminal is too narrow; flex columns absorb any
+// leftover width. prio 0 columns are never dropped.
+type runColumn struct {
+	title  string
+	width  int
+	flex   bool
+	prio   int
+	cell   func(r RunSnapshot) string
+	styled bool // use the run's status style instead of the row style
 }
 
-func runRowLine(r RunSnapshot, selected bool) string {
+const maxFlexGrowth = 18
+
+func runColumns() []runColumn {
+	return []runColumn{
+		{title: "RUN", width: 5, prio: 0, cell: func(r RunSnapshot) string { return fmt.Sprintf("#%d", r.ID) }},
+		{title: "STATUS", width: 11, prio: 0, styled: true, cell: runStatusText},
+		{title: "PROFILE", width: 14, flex: true, prio: 0, cell: func(r RunSnapshot) string { return r.ProfileName }},
+		{title: "MODEL", width: 18, flex: true, prio: 1, cell: func(r RunSnapshot) string { return r.ModelName }},
+		{title: "ENGINE", width: 12, prio: 4, cell: func(r RunSnapshot) string {
+			if r.EngineName == "" {
+				return "—"
+			}
+			return r.EngineName
+		}},
+		{title: "UPTIME", width: 8, prio: 2, cell: runUptime},
+		{title: "TPS", width: 6, prio: 3, cell: func(r RunSnapshot) string {
+			if r.LiveTPS > 0 {
+				return fmt.Sprintf("%.1f", r.LiveTPS)
+			}
+			return "—"
+		}},
+	}
+}
+
+func runColumnsWidth(cols []runColumn) int {
+	w := 0
+	for i, c := range cols {
+		if i > 0 {
+			w++ // gap
+		}
+		w += c.width
+	}
+	return w
+}
+
+// visibleRunColumns drops low-priority columns until the table fits avail,
+// then hands leftover width to the flex (name) columns.
+func visibleRunColumns(avail int) []runColumn {
+	cols := runColumns()
+	for runColumnsWidth(cols) > avail {
+		drop := -1
+		for i, c := range cols {
+			if c.prio > 0 && (drop == -1 || c.prio > cols[drop].prio) {
+				drop = i
+			}
+		}
+		if drop == -1 {
+			break // only never-drop columns left; accept the overflow
+		}
+		cols = append(cols[:drop], cols[drop+1:]...)
+	}
+	flexCnt := 0
+	for _, c := range cols {
+		if c.flex {
+			flexCnt++
+		}
+	}
+	if extra := avail - runColumnsWidth(cols); extra > 0 && flexCnt > 0 {
+		per := min(extra/flexCnt, maxFlexGrowth)
+		for i := range cols {
+			if cols[i].flex {
+				cols[i].width += per
+			}
+		}
+	}
+	return cols
+}
+
+func runsHeaderLine(cols []runColumn) string {
+	parts := make([]string, len(cols))
+	for i, c := range cols {
+		parts[i] = fmt.Sprintf("%-*s", c.width, c.title)
+	}
+	return strings.Join(parts, " ")
+}
+
+func runRowLine(r RunSnapshot, selected bool, cols []runColumn) string {
 	base := lipgloss.NewStyle().Foreground(ActiveTheme.Text)
 	if selected {
 		base = styleSelected
 	}
-	id := base.Width(5).Render(fmt.Sprintf("#%d", r.ID))
-	status := runStatusStyle(r).Width(11).Render(runStatusText(r))
-	profile := base.Width(20).Render(truncateRunText(r.ProfileName, 20))
-	model := base.Width(26).Render(truncateRunText(r.ModelName, 26))
-	engineName := r.EngineName
-	if engineName == "" {
-		engineName = "—"
+	cells := make([]string, 0, len(cols)*2)
+	for i, c := range cols {
+		if i > 0 {
+			cells = append(cells, " ")
+		}
+		style := base
+		if c.styled {
+			style = runStatusStyle(r)
+		}
+		cells = append(cells, style.Width(c.width).Render(truncateRunText(c.cell(r), c.width)))
 	}
-	engine := base.Width(16).Render(truncateRunText(engineName, 16))
-	uptime := base.Width(9).Render(runUptime(r))
-	tps := "—"
-	if r.LiveTPS > 0 {
-		tps = fmt.Sprintf("%.1f", r.LiveTPS)
-	}
-	tpsCell := base.Width(8).Render(tps)
-	return lipgloss.JoinHorizontal(lipgloss.Left, id, " ", status, " ", profile, " ", model, " ", engine, " ", uptime, " ", tpsCell)
+	return lipgloss.JoinHorizontal(lipgloss.Left, cells...)
 }
 
 func runStatusText(r RunSnapshot) string {
