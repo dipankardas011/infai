@@ -211,6 +211,68 @@ func TestLastTabPersistsAcrossSessions(t *testing.T) {
 	}
 }
 
+func TestIsNewerVersion(t *testing.T) {
+	cases := []struct {
+		current, latest string
+		want            bool
+	}{
+		{"1.0.0", "v1.1.0", true},
+		{"v1.0.0", "v1.1.0", true},
+		{"1.1.0", "v1.1.0", false},
+		{"1.2.0", "v1.1.9", false},
+		{"1.0.0", "v2.0.0", true},
+		{"1.0.0", "v1.0.1-rc1", true},
+		{"dev", "v9.9.9", false},   // dev builds never nag
+		{"", "v1.0.0", false},      // unknown current
+		{"1.0.0", "", false},       // bad latest
+		{"1.0.0", "banana", false}, // bad latest
+	}
+	for _, c := range cases {
+		if got := isNewerVersion(c.current, c.latest); got != c.want {
+			t.Errorf("isNewerVersion(%q, %q) = %v, want %v", c.current, c.latest, got, c.want)
+		}
+	}
+}
+
+func TestUpdateNoticeFlow(t *testing.T) {
+	app := newTestApp(t)
+
+	// Failed/current check: nothing happens.
+	app.Update(updateCheckMsg{})
+	if app.screen != screenHome {
+		t.Fatal("empty update result must not open the notice")
+	}
+
+	// Newer release: popup opens on home, enter dismisses.
+	app.Update(updateCheckMsg{latest: "v99.0.0"})
+	if app.screen != screenUpdateNotice {
+		t.Fatal("update result should open the notice popup")
+	}
+	view := app.View()
+	for _, want := range []string{"Update available", "v99.0.0"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("notice view missing %q", want)
+		}
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if app.screen != screenHome {
+		t.Fatal("enter should dismiss the update notice")
+	}
+
+	// On any other screen the result becomes a toast, not a popup.
+	app.screen = screenThemeSelector
+	app.Update(updateCheckMsg{latest: "v99.0.1"})
+	if app.screen != screenHome && app.screen != screenThemeSelector {
+		t.Fatal("update result must not hijack a non-home screen")
+	}
+	if app.screen == screenUpdateNotice {
+		t.Fatal("popup should not open over another screen")
+	}
+	if !strings.Contains(app.errMsg, "v99.0.1") {
+		t.Fatalf("expected update toast, got %q", app.errMsg)
+	}
+}
+
 func TestTabBarShowsNumbersAndRunCount(t *testing.T) {
 	home := HomeModel{
 		activeTab: tabRuns,

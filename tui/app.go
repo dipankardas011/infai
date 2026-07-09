@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dipankardas011/infai/backend"
+	"github.com/dipankardas011/infai/config"
 	"github.com/dipankardas011/infai/db"
 	"github.com/dipankardas011/infai/model"
 )
@@ -40,6 +41,7 @@ const (
 	screenProfileEdit
 	screenServerRunning
 	screenThemeSelector
+	screenUpdateNotice
 )
 
 // Cross-screen messages
@@ -73,6 +75,7 @@ type AppModel struct {
 	// State tracking
 	selectedModel     model.ModelEntry
 	profileEditReturn screenKind
+	updateLatest      string // newer release tag, set by the async update check
 }
 
 func NewApp(database *db.DB, scanDirs []string, entries []model.ModelEntry, w, h int) AppModel {
@@ -118,7 +121,12 @@ func NewApp(database *db.DB, scanDirs []string, entries []model.ModelEntry, w, h
 	}
 }
 
-func (a *AppModel) Init() tea.Cmd { return toastTick() }
+func (a *AppModel) Init() tea.Cmd {
+	// The update check runs in its own goroutine (Bubble Tea executes each
+	// command concurrently); the UI renders immediately and the result
+	// arrives later as an updateCheckMsg.
+	return tea.Batch(toastTick(), checkForUpdateCmd(config.Version()))
+}
 
 func (a *AppModel) setToast(kind toastKind, msg string) {
 	a.errMsg = msg
@@ -242,6 +250,19 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.profileEdit = a.profileEdit.SetSize(a.width, a.height)
 		a.runs.SetSize(a.width, a.height)
 		a.themeSelector = a.themeSelector.SetSize(a.width, a.height)
+		return a, nil
+
+	case updateCheckMsg:
+		if msg.latest == "" {
+			return a, nil // current, dev build, or check failed — stay quiet
+		}
+		a.updateLatest = msg.latest
+		if a.screen == screenHome {
+			a.screen = screenUpdateNotice
+		} else {
+			// Don't stomp another screen; a toast is enough.
+			a.setWarning(updateToastText(msg.latest))
+		}
 		return a, nil
 
 	case profilesTabLaunchMsg:
@@ -416,6 +437,15 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.quitArmed = false
 			a.errMsg = ""
 			a.errKind = toastNone
+		}
+
+		// The update notice is modal: any of enter/esc/q/space dismisses it.
+		if a.screen == screenUpdateNotice {
+			switch msg.String() {
+			case "enter", "esc", "q", " ":
+				a.screen = screenHome
+			}
+			return a, nil
 		}
 
 		// Theme key works everywhere except editor/server
@@ -823,6 +853,8 @@ func (a *AppModel) View() string {
 		}
 	case screenThemeSelector:
 		body = a.themeSelector.SetSize(a.width, innerH).View()
+	case screenUpdateNotice:
+		body = renderUpdateNotice(config.Version(), a.updateLatest, a.width, innerH)
 	}
 
 	// Final safety: active screen must not exceed the space reserved for it.
