@@ -29,7 +29,7 @@ func buildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Pro
 	if modelPath == "" {
 		return runner.LaunchSpec{}, fmt.Errorf("vLLM model path is empty")
 	}
-	if strings.HasPrefix(m.Type, "gguf") {
+	if m.Type != "safetensors" && m.Type != "hf_quantized" {
 		return runner.LaunchSpec{}, fmt.Errorf("vLLM requires a Hugging Face/safetensors model directory, got %s", m.Type)
 	}
 	cfg, err := p.VLLMConfig()

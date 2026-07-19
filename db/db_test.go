@@ -91,6 +91,19 @@ func TestListAllProfilesLoadsFullProfile(t *testing.T) {
 	}
 }
 
+func TestDecodeEngineRuntimeDefaultsEmptyJSON(t *testing.T) {
+	var engine model.InferenceEngine
+	if err := decodeEngineRuntime(&engine, "", "  "); err != nil {
+		t.Fatalf("decode empty engine runtime: %v", err)
+	}
+	if engine.BaseArgs == nil {
+		t.Fatal("expected empty base args rather than nil")
+	}
+	if engine.Env == nil {
+		t.Fatal("expected empty environment rather than nil")
+	}
+}
+
 func TestDeleteInferenceEngineCascadesProfilesAndRecents(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	d, err := Open()
