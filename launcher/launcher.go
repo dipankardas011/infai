@@ -15,16 +15,20 @@ func BuildSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile
 	}
 	switch engine.Kind {
 	case "", model.EngineLlamaCPP:
-		args := BuildArgs(engine.Path, m, p)
-		return runner.LaunchSpec{Command: args[0], Args: args[1:], Env: engine.Env}, nil
+		return BuildLlamaCPPSpec(engine, m, p)
 	case model.EngineVLLM:
-		return buildVLLMSpec(engine, m, p)
+		return BuildVLLMSpec(engine, m, p)
 	default:
 		return runner.LaunchSpec{}, fmt.Errorf("unsupported inference engine kind %q", engine.Kind)
 	}
 }
 
-func buildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
+func BuildLlamaCPPSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
+	args := BuildArgs(engine.Path, m, p)
+	return runner.LaunchSpec{Command: args[0], Args: args[1:], Env: engine.Env}, nil
+}
+
+func BuildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
 	modelPath := strings.TrimSpace(m.ModelPath())
 	if modelPath == "" {
 		return runner.LaunchSpec{}, fmt.Errorf("vLLM model path is empty")
