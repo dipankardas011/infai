@@ -12,6 +12,7 @@ import (
 	"github.com/dipankardas011/infai/db"
 	"github.com/dipankardas011/infai/launcher"
 	"github.com/dipankardas011/infai/model"
+	"github.com/dipankardas011/infai/runner"
 	"github.com/dipankardas011/infai/scanner"
 )
 
@@ -116,36 +117,53 @@ func (s *Service) MarkRecent(modelID, profileID int64) error {
 }
 
 func (s *Service) BuildLaunchArgsWithPort(m model.ModelEntry, p model.Profile, port int) ([]string, error) {
-	p.Port = port
-	return s.BuildLaunchArgs(m, p)
-}
-
-func (s *Service) BuildLaunchArgs(m model.ModelEntry, p model.Profile) ([]string, error) {
-	if m.ID <= 0 {
-		return nil, fmt.Errorf("invalid model")
-	}
-	if p.ID <= 0 {
-		return nil, fmt.Errorf("invalid profile")
-	}
-	if p.InferenceEngineID == "" {
-		return nil, fmt.Errorf("profile has no inference engine")
-	}
-	engine, err := s.db.GetInferenceEngineByID(p.InferenceEngineID)
-	if err != nil {
-		return nil, fmt.Errorf("inference engine: %w", err)
-	}
-	engineBin, err := resolveInferenceEngineBinary(engine.Path)
+	spec, err := s.BuildLaunchSpecWithPort(m, p, port)
 	if err != nil {
 		return nil, err
 	}
-	args := launcher.BuildArgs(engineBin, m, p)
-	if len(args) == 0 || args[0] == "" {
-		return nil, fmt.Errorf("failed to build launch args")
-	}
-	return args, nil
+	return spec.CommandLine(), nil
 }
 
-func resolveInferenceEngineBinary(path string) (string, error) {
+func (s *Service) BuildLaunchArgs(m model.ModelEntry, p model.Profile) ([]string, error) {
+	spec, err := s.BuildLaunchSpec(m, p)
+	if err != nil {
+		return nil, err
+	}
+	return spec.CommandLine(), nil
+}
+
+func (s *Service) BuildLaunchSpecWithPort(m model.ModelEntry, p model.Profile, port int) (runner.LaunchSpec, error) {
+	p.Port = port
+	return s.BuildLaunchSpec(m, p)
+}
+
+func (s *Service) BuildLaunchSpec(m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
+	if m.ID <= 0 {
+		return runner.LaunchSpec{}, fmt.Errorf("invalid model")
+	}
+	if p.ID <= 0 {
+		return runner.LaunchSpec{}, fmt.Errorf("invalid profile")
+	}
+	if p.InferenceEngineID == "" {
+		return runner.LaunchSpec{}, fmt.Errorf("profile has no inference engine")
+	}
+	engine, err := s.db.GetInferenceEngineByID(p.InferenceEngineID)
+	if err != nil {
+		return runner.LaunchSpec{}, fmt.Errorf("inference engine: %w", err)
+	}
+	engineBin, err := resolveInferenceEngineBinary(engine.Path, engine.Kind)
+	if err != nil {
+		return runner.LaunchSpec{}, err
+	}
+	engine.Path = engineBin
+	spec, err := launcher.BuildSpec(engine, m, p)
+	if err != nil {
+		return runner.LaunchSpec{}, err
+	}
+	return spec, nil
+}
+
+func resolveInferenceEngineBinary(path string, kind model.EngineKind) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", fmt.Errorf("inference engine path is empty")
@@ -158,6 +176,9 @@ func resolveInferenceEngineBinary(path string) (string, error) {
 		return path, nil
 	}
 	bin := "llama-server"
+	if kind == model.EngineVLLM {
+		bin = "vllm"
+	}
 
 	return filepath.Join(path, bin), nil
 }
@@ -207,6 +228,10 @@ func (s *Service) RemoveScanDir(path string) error {
 }
 
 func (s *Service) CreateInferenceEngine(name, path string) (model.InferenceEngine, error) {
+	return s.CreateInferenceEngineConfig(name, path, model.EngineLlamaCPP, nil, nil)
+}
+
+func (s *Service) CreateInferenceEngineConfig(name, path string, kind model.EngineKind, baseArgs []string, env map[string]string) (model.InferenceEngine, error) {
 	name = strings.TrimSpace(name)
 	path = strings.TrimSpace(path)
 	if name == "" {
@@ -215,11 +240,14 @@ func (s *Service) CreateInferenceEngine(name, path string) (model.InferenceEngin
 	if path == "" {
 		return model.InferenceEngine{}, fmt.Errorf("inference engine path is empty")
 	}
+	if kind != model.EngineLlamaCPP && kind != model.EngineVLLM {
+		return model.InferenceEngine{}, fmt.Errorf("unsupported inference engine kind %q", kind)
+	}
 	id, err := uuid.NewV7()
 	if err != nil {
 		return model.InferenceEngine{}, err
 	}
-	engine := model.InferenceEngine{ID: id.String(), Name: name, Path: path}
+	engine := model.InferenceEngine{ID: id.String(), Name: name, Kind: kind, Path: path, BaseArgs: baseArgs, Env: env}
 	if err := s.db.CreateInferenceEngine(engine); err != nil {
 		return model.InferenceEngine{}, err
 	}

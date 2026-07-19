@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -193,11 +194,11 @@ ON CONFLICT(gguf_path) DO UPDATE SET
 func (d *DB) ListRecents(limit int) ([]RecentEntry, error) {
 	rows, err := d.conn.Query(`
 SELECT m.id, m.scan_dir, m.dir_name, m.gguf_path, m.mmproj_path, m.display_name, m.type, m.metadata,
-       ie.id, ie.name, ie.path,
+       ie.id, ie.name, ie.path, ie.kind, ie.base_args, ie.environment,
        p.id, p.model_id, p.inference_engine_id, p.name, p.port, p.host, p.context_size, p.ngl,
        p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
        p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
-       p.no_kv_offload, p.use_mmproj, p.extra_flags
+       p.no_kv_offload, p.use_mmproj, p.extra_flags, p.engine_config
 FROM recents r
 JOIN models m ON r.model_id = m.id
 JOIN profiles p ON r.profile_id = p.id
@@ -214,16 +215,20 @@ LIMIT ?`, limit)
 		var m model.ModelEntry
 		var ie model.InferenceEngine
 		var p model.Profile
+		var baseArgs, environment string
 		var flashAttn, jinja, noKVOffload, useMmproj int
 		err := rows.Scan(
 			&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata,
-			&ie.ID, &ie.Name, &ie.Path,
+			&ie.ID, &ie.Name, &ie.Path, &ie.Kind, &baseArgs, &environment,
 			&p.ID, &p.ModelID, &p.InferenceEngineID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
 			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
 			&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
-			&noKVOffload, &useMmproj, &p.ExtraFlags,
+			&noKVOffload, &useMmproj, &p.ExtraFlags, &p.EngineConfig,
 		)
 		if err != nil {
+			return nil, err
+		}
+		if err := decodeEngineRuntime(&ie, baseArgs, environment); err != nil {
 			return nil, err
 		}
 		p.FlashAttn = flashAttn == 1
@@ -373,7 +378,18 @@ ON CONFLICT(model_id, profile_id) DO UPDATE SET last_used=excluded.last_used
 }
 
 func (d *DB) CreateInferenceEngine(e model.InferenceEngine) error {
-	_, err := d.conn.Exec(`INSERT INTO inference_engine (id, name, path) VALUES (?, ?, ?)`, e.ID, e.Name, e.Path)
+	baseArgs, err := json.Marshal(e.BaseArgs)
+	if err != nil {
+		return err
+	}
+	environment, err := json.Marshal(e.Env)
+	if err != nil {
+		return err
+	}
+	if e.Kind == "" {
+		e.Kind = model.EngineLlamaCPP
+	}
+	_, err = d.conn.Exec(`INSERT INTO inference_engine (id, name, path, kind, base_args, environment) VALUES (?, ?, ?, ?, ?, ?)`, e.ID, e.Name, e.Path, e.Kind, baseArgs, environment)
 	return err
 }
 
@@ -389,12 +405,16 @@ func (d *DB) UpdateInferenceEnginePath(id, path string) error {
 
 func (d *DB) GetInferenceEngineByID(id string) (model.InferenceEngine, error) {
 	var e model.InferenceEngine
-	err := d.conn.QueryRow(`SELECT id, name, path FROM inference_engine WHERE id = ?`, id).Scan(&e.ID, &e.Name, &e.Path)
+	var baseArgs, environment string
+	err := d.conn.QueryRow(`SELECT id, name, path, kind, base_args, environment FROM inference_engine WHERE id = ?`, id).Scan(&e.ID, &e.Name, &e.Path, &e.Kind, &baseArgs, &environment)
+	if err == nil {
+		err = decodeEngineRuntime(&e, baseArgs, environment)
+	}
 	return e, err
 }
 
 func (d *DB) ListInferenceEngines() ([]model.InferenceEngine, error) {
-	rows, err := d.conn.Query(`SELECT id, name, path FROM inference_engine ORDER BY lower(name)`)
+	rows, err := d.conn.Query(`SELECT id, name, path, kind, base_args, environment FROM inference_engine ORDER BY lower(name)`)
 	if err != nil {
 		return nil, err
 	}
@@ -403,12 +423,26 @@ func (d *DB) ListInferenceEngines() ([]model.InferenceEngine, error) {
 	var out []model.InferenceEngine
 	for rows.Next() {
 		var e model.InferenceEngine
-		if err := rows.Scan(&e.ID, &e.Name, &e.Path); err != nil {
+		var baseArgs, environment string
+		if err := rows.Scan(&e.ID, &e.Name, &e.Path, &e.Kind, &baseArgs, &environment); err != nil {
+			return nil, err
+		}
+		if err := decodeEngineRuntime(&e, baseArgs, environment); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+func decodeEngineRuntime(e *model.InferenceEngine, baseArgs, environment string) error {
+	if err := json.Unmarshal([]byte(baseArgs), &e.BaseArgs); err != nil {
+		return fmt.Errorf("decode inference engine base args: %w", err)
+	}
+	if err := json.Unmarshal([]byte(environment), &e.Env); err != nil {
+		return fmt.Errorf("decode inference engine environment: %w", err)
+	}
+	return nil
 }
 
 func (d *DB) DeleteInferenceEngine(id string) (err error) {
@@ -451,11 +485,11 @@ type ProfileEntry struct {
 func (d *DB) ListAllProfiles() ([]ProfileEntry, error) {
 	rows, err := d.conn.Query(`
 SELECT m.id, m.scan_dir, m.dir_name, m.gguf_path, m.mmproj_path, m.display_name, m.type, m.metadata,
-       ie.id, ie.name, ie.path,
+       ie.id, ie.name, ie.path, ie.kind, ie.base_args, ie.environment,
        p.id, p.model_id, p.inference_engine_id, p.name, p.port, p.host, p.context_size, p.ngl,
        p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
        p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
-       p.no_kv_offload, p.use_mmproj, p.extra_flags
+       p.no_kv_offload, p.use_mmproj, p.extra_flags, p.engine_config
 FROM profiles p
 JOIN models m ON p.model_id = m.id
 JOIN inference_engine ie ON p.inference_engine_id = ie.id
@@ -470,16 +504,20 @@ ORDER BY lower(m.display_name), lower(ie.name), lower(p.name)`)
 		var m model.ModelEntry
 		var ie model.InferenceEngine
 		var p model.Profile
+		var baseArgs, environment string
 		var flashAttn, jinja, noKVOffload, useMmproj int
 		err := rows.Scan(
 			&m.ID, &m.ScanDir, &m.DirName, &m.GGUFPath, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata,
-			&ie.ID, &ie.Name, &ie.Path,
+			&ie.ID, &ie.Name, &ie.Path, &ie.Kind, &baseArgs, &environment,
 			&p.ID, &p.ModelID, &p.InferenceEngineID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
 			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
 			&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
-			&noKVOffload, &useMmproj, &p.ExtraFlags,
+			&noKVOffload, &useMmproj, &p.ExtraFlags, &p.EngineConfig,
 		)
 		if err != nil {
+			return nil, err
+		}
+		if err := decodeEngineRuntime(&ie, baseArgs, environment); err != nil {
 			return nil, err
 		}
 		p.FlashAttn = flashAttn == 1
@@ -496,7 +534,7 @@ func (d *DB) ListProfiles(modelID int64) ([]model.Profile, error) {
 SELECT id, model_id, inference_engine_id, name, port, host, context_size, ngl,
        batch_size, ubatch_size, cache_type_k, cache_type_v,
        flash_attn, jinja, temperature, reasoning_budget, top_p, top_k,
-       no_kv_offload, use_mmproj, extra_flags
+       no_kv_offload, use_mmproj, extra_flags, engine_config
 FROM profiles WHERE model_id = ? ORDER BY name`, modelID)
 	if err != nil {
 		return nil, err
@@ -518,7 +556,7 @@ func (d *DB) GetProfile(id int64) (model.Profile, error) {
 SELECT id, model_id, inference_engine_id, name, port, host, context_size, ngl,
        batch_size, ubatch_size, cache_type_k, cache_type_v,
        flash_attn, jinja, temperature, reasoning_budget, top_p, top_k,
-       no_kv_offload, use_mmproj, extra_flags
+       no_kv_offload, use_mmproj, extra_flags, engine_config
 FROM profiles WHERE id = ?`, id)
 	if err != nil {
 		return model.Profile{}, err
@@ -539,8 +577,8 @@ func (d *DB) UpsertProfile(p *model.Profile) error {
 INSERT INTO profiles (model_id, inference_engine_id, name, port, host, context_size, ngl,
     batch_size, ubatch_size, cache_type_k, cache_type_v,
     flash_attn, jinja, temperature, reasoning_budget, top_p, top_k,
-    no_kv_offload, use_mmproj, extra_flags)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    no_kv_offload, use_mmproj, extra_flags, engine_config)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(model_id, name) DO UPDATE SET
     inference_engine_id=excluded.inference_engine_id,
     port=excluded.port, host=excluded.host, context_size=excluded.context_size,
@@ -550,12 +588,12 @@ ON CONFLICT(model_id, name) DO UPDATE SET
     temperature=excluded.temperature, reasoning_budget=excluded.reasoning_budget,
     top_p=excluded.top_p, top_k=excluded.top_k,
     no_kv_offload=excluded.no_kv_offload, use_mmproj=excluded.use_mmproj,
-    extra_flags=excluded.extra_flags
+    extra_flags=excluded.extra_flags, engine_config=excluded.engine_config
 `, p.ModelID, p.InferenceEngineID, p.Name, p.Port, p.Host, p.ContextSize, p.NGL,
 		p.BatchSize, p.UBatchSize, p.CacheTypeK, p.CacheTypeV,
 		boolToInt(p.FlashAttn), boolToInt(p.Jinja),
 		p.Temperature, p.ReasoningBudget, p.TopP, p.TopK,
-		boolToInt(p.NoKVOffload), boolToInt(p.UseMmproj), p.ExtraFlags)
+		boolToInt(p.NoKVOffload), boolToInt(p.UseMmproj), p.ExtraFlags, string(p.EngineConfig))
 	if err != nil {
 		return err
 	}
@@ -580,7 +618,7 @@ func scanProfile(rows *sql.Rows) (model.Profile, error) {
 		&p.ID, &p.ModelID, &p.InferenceEngineID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
 		&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
 		&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
-		&noKVOffload, &useMmproj, &p.ExtraFlags,
+		&noKVOffload, &useMmproj, &p.ExtraFlags, &p.EngineConfig,
 	)
 	p.FlashAttn = flashAttn == 1
 	p.Jinja = jinja == 1

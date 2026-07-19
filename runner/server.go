@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"syscall"
@@ -16,22 +17,38 @@ func stripANSI(s string) string {
 	return ansiEscape.ReplaceAllString(s, "")
 }
 
-// ServerProcess owns llama-server process execution and I/O.
+type LaunchSpec struct {
+	Command    string
+	Args       []string
+	Env        map[string]string
+	WorkingDir string
+}
+
+func (s LaunchSpec) CommandLine() []string {
+	return append([]string{s.Command}, s.Args...)
+}
+
+// ServerProcess owns inference server process execution and I/O.
 // It contains no Bubble Tea/UI code and is safe for TUI or future non-TUI callers.
 type ServerProcess struct {
 	cmd       *exec.Cmd
-	args      []string
+	spec      LaunchSpec
 	logCh     chan string
 	exitCh    chan error
 	startedAt time.Time
 }
 
-func StartServer(args []string) (*ServerProcess, error) {
-	if len(args) == 0 || args[0] == "" {
+func StartServer(spec LaunchSpec) (*ServerProcess, error) {
+	if spec.Command == "" {
 		return nil, fmt.Errorf("missing executable")
 	}
 
-	cmd := exec.Command(args[0], args[1:]...)
+	cmd := exec.Command(spec.Command, spec.Args...)
+	cmd.Dir = spec.WorkingDir
+	cmd.Env = os.Environ()
+	for key, value := range spec.Env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
@@ -45,7 +62,7 @@ func StartServer(args []string) (*ServerProcess, error) {
 
 	p := &ServerProcess{
 		cmd:       cmd,
-		args:      append([]string(nil), args...),
+		spec:      cloneLaunchSpec(spec),
 		logCh:     make(chan string, 256),
 		exitCh:    make(chan error, 1),
 		startedAt: time.Now(),
@@ -72,7 +89,24 @@ func (p *ServerProcess) Args() []string {
 	if p == nil {
 		return nil
 	}
-	return append([]string(nil), p.args...)
+	return p.spec.CommandLine()
+}
+
+func (p *ServerProcess) Spec() LaunchSpec {
+	if p == nil {
+		return LaunchSpec{}
+	}
+	return cloneLaunchSpec(p.spec)
+}
+
+func cloneLaunchSpec(spec LaunchSpec) LaunchSpec {
+	out := spec
+	out.Args = append([]string(nil), spec.Args...)
+	out.Env = make(map[string]string, len(spec.Env))
+	for key, value := range spec.Env {
+		out.Env[key] = value
+	}
+	return out
 }
 
 func (p *ServerProcess) Logs() <-chan string {
