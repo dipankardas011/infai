@@ -96,7 +96,7 @@
         <a href="#install" class="btn-solid"><span class="btn-prompt">$</span>brew install infai</a>
         <a href="https://github.com/dipankardas011/infai" class="btn-line" target="_blank" rel="noopener">Source on GitHub</a>
       </div>
-      <p class="hero-fine reveal-up" style="--d:6">llama.cpp today · vLLM &amp; MLX on the roadmap · one Go binary, zero daemons</p>
+      <p class="hero-fine reveal-up" style="--d:6">llama.cpp · vLLM · one Go binary, zero daemons</p>
     </div>
 
     <!-- LIVE RUNS DASHBOARD MOCK -->
@@ -162,8 +162,8 @@
   <!-- BAND / RIBBON -->
   <section class="band" aria-hidden="true">
     <div class="band-track">
-      <span>0 YAML files to maintain</span><i>◆</i><span>1 SQLite file backs it all</span><i>◆</i><span>1 keypress launches any model</span><i>◆</i><span>∞ relaunches with zero friction</span><i>◆</i><span>llama.cpp today · vLLM & MLX tomorrow</span><i>◆</i><span>one pane of glass for every run</span><i>◆</i>
-      <span>0 YAML files to maintain</span><i>◆</i><span>1 SQLite file backs it all</span><i>◆</i><span>1 keypress launches any model</span><i>◆</i><span>∞ relaunches with zero friction</span><i>◆</i><span>llama.cpp today · vLLM & MLX tomorrow</span><i>◆</i><span>one pane of glass for every run</span><i>◆</i>
+      <span>0 YAML files to maintain</span><i>◆</i><span>1 SQLite file backs it all</span><i>◆</i><span>1 keypress launches any model</span><i>◆</i><span>∞ relaunches with zero friction</span><i>◆</i><span>llama.cpp · vLLM · one pane of glass</span><i>◆</i>
+      <span>0 YAML files to maintain</span><i>◆</i><span>1 SQLite file backs it all</span><i>◆</i><span>1 keypress launches any model</span><i>◆</i><span>∞ relaunches with zero friction</span><i>◆</i><span>llama.cpp · vLLM · one pane of glass</span><i>◆</i>
     </div>
   </section>
 
@@ -190,12 +190,7 @@
     --gpu-memory-utilization 0.92 --max-num-seqs 128 \
     --enable-prefix-caching --port 8000</code></pre>
         </div>
-        <div class="soup-card">
-          <p class="soup-tag">MLX</p>
-          <pre><code><span class="c-dim">$</span> mlx_lm.server --model mlx-community/Qwen3.5-9B-4bit \
-    --max-tokens 4096 --temp 0.6 --port 8080</code></pre>
-        </div>
-        <p class="soup-caption">Same model. Same machine. Three incompatible vocabularies you're expected to memorize.</p>
+        <p class="soup-caption">Same model. Same machine. Two incompatible vocabularies you're expected to memorize.</p>
       </div>
       <div class="soup-arrow reveal-up" aria-hidden="true">
         <span>collapses<br>into</span>
@@ -257,7 +252,7 @@
       </div>
       <div class="eq-point reveal-up" style="--d:1">
         <span class="pt-num">b</span>
-        <div><h3>Engine-agnostic by design</h3><p>The structure doesn't change when the engine does. When vLLM lands, your workflow stays identical.</p></div>
+        <div><h3>Engine-agnostic by design</h3>        <p>The structure doesn't change when the engine does. vLLM landed — your workflow didn't.</p></div>
       </div>
       <div class="eq-point reveal-up" style="--d:2">
         <span class="pt-num">c</span>
@@ -414,19 +409,13 @@
         <h3>Resource telemetry</h3>
         <p>System and per-model CPU, RAM, and GPU/VRAM meters, live in the run screen.</p>
       </div>
-      <div class="rm-node next reveal-up" style="--d:3">
+      <div class="rm-node done reveal-up" style="--d:3">
         <div class="rm-dot"></div>
-        <span class="rm-status">building</span>
+        <span class="rm-status">shipped</span>
         <h3>vLLM backend</h3>
-        <p>Production-grade batched inference under the exact same profile structure. Your workflow doesn't change; the engine does.</p>
+        <p>Production-grade batched inference under the exact same profile structure. Your workflow didn't change; the engine did.</p>
       </div>
-      <div class="rm-node next reveal-up" style="--d:4">
-        <div class="rm-dot"></div>
-        <span class="rm-status">next</span>
-        <h3>SafeTensors &amp; MLX</h3>
-        <p>HuggingFace SafeTensors and Apple MLX as first-class engines.</p>
-      </div>
-      <div class="rm-node explore reveal-up" style="--d:5">
+      <div class="rm-node explore reveal-up" style="--d:4">
         <div class="rm-dot"></div>
         <span class="rm-status">exploring</span>
         <h3>Hardware-aware autoconfig</h3>
@@ -526,7 +515,7 @@
     // ── Profile equation: cycling examples ──
     const EXAMPLES = [
       { name: 'qwen-coder-fast', model: 'Qwen3.5-9B-Q5_K_M.gguf', engine: 'llama.cpp', config: 'ctx 64K · ngl auto · fa on · temp 0.6' },
-      { name: 'gemma-vision', model: 'gemma-4-E4B-it-Q5_K_XL.gguf', engine: 'llama.cpp', config: 'ctx 128K · mmproj on · kv bf16' },
+      { name: 'qwen-coder-vllm', model: 'Qwen/Qwen3.5-9B', engine: 'vLLM', config: 'gpu 0.92 · max-seqs 128 · prefix-cache' },
       { name: 'llama70b-nightly', model: 'Llama-3.3-70B-Q2_K.gguf', engine: 'llama.cpp', config: 'ctx 32K · ngl 48 · batch 2048' }
     ];
     const eq = document.getElementById('eq');

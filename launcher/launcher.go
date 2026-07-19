@@ -24,6 +24,9 @@ func BuildSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile
 }
 
 func BuildLlamaCPPSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
+	if m.Type != "gguf" && m.Type != "gguf_multimodal" {
+		return runner.LaunchSpec{}, fmt.Errorf("llama.cpp requires a GGUF model, got %s", m.Type)
+	}
 	args := BuildArgs(engine.Path, m, p)
 	return runner.LaunchSpec{Command: args[0], Args: args[1:], Env: engine.Env}, nil
 }
