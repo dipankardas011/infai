@@ -2,13 +2,81 @@ package launcher
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/dipankardas011/infai/model"
+	"github.com/dipankardas011/infai/runner"
 )
+
+func BuildSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
+	if engine.Path == "" {
+		return runner.LaunchSpec{}, fmt.Errorf("inference engine executable is empty")
+	}
+	switch engine.Kind {
+	case "", model.EngineLlamaCPP:
+		args := BuildArgs(engine.Path, m, p)
+		return runner.LaunchSpec{Command: args[0], Args: args[1:], Env: engine.Env}, nil
+	case model.EngineVLLM:
+		return buildVLLMSpec(engine, m, p)
+	default:
+		return runner.LaunchSpec{}, fmt.Errorf("unsupported inference engine kind %q", engine.Kind)
+	}
+}
+
+func buildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
+	modelPath := strings.TrimSpace(m.ModelPath())
+	if modelPath == "" {
+		return runner.LaunchSpec{}, fmt.Errorf("vLLM model path is empty")
+	}
+	if strings.HasPrefix(m.Type, "gguf") {
+		return runner.LaunchSpec{}, fmt.Errorf("vLLM requires a Hugging Face/safetensors model directory, got %s", m.Type)
+	}
+	cfg, err := p.VLLMConfig()
+	if err != nil {
+		return runner.LaunchSpec{}, fmt.Errorf("decode vLLM configuration: %w", err)
+	}
+	args := append([]string(nil), engine.BaseArgs...)
+	if len(args) == 0 {
+		args = append(args, "serve")
+	}
+	args = append(args, modelPath,
+		"--host", p.Host,
+		"--port", strconv.Itoa(p.Port),
+		"--max-model-len", strconv.Itoa(p.ContextSize),
+	)
+	if cfg.GPUUtilization != nil {
+		args = append(args, "--gpu-memory-utilization", strconv.FormatFloat(*cfg.GPUUtilization, 'f', -1, 64))
+	}
+	if cfg.MaxNumSeqs != nil {
+		args = append(args, "--max-num-seqs", strconv.Itoa(*cfg.MaxNumSeqs))
+	}
+	if cfg.MaxBatchedTokens != nil {
+		args = append(args, "--max-num-batched-tokens", strconv.Itoa(*cfg.MaxBatchedTokens))
+	}
+	if cfg.DType != "" {
+		args = append(args, "--dtype", cfg.DType)
+	}
+	if cfg.TensorParallelSize != nil {
+		args = append(args, "--tensor-parallel-size", strconv.Itoa(*cfg.TensorParallelSize))
+	}
+	if cfg.PipelineParallelSize != nil {
+		args = append(args, "--pipeline-parallel-size", strconv.Itoa(*cfg.PipelineParallelSize))
+	}
+	if cfg.EnablePrefixCaching {
+		args = append(args, "--enable-prefix-caching")
+	}
+	if cfg.TrustRemoteCode {
+		args = append(args, "--trust-remote-code")
+	}
+	if cfg.ServedModelName != "" {
+		args = append(args, "--served-model-name", cfg.ServedModelName)
+	}
+	if p.ExtraFlags != "" {
+		args = append(args, strings.Fields(p.ExtraFlags)...)
+	}
+	return runner.LaunchSpec{Command: engine.Path, Args: args, Env: engine.Env}, nil
+}
 
 func BuildArgs(serverBin string, m model.ModelEntry, p model.Profile) []string {
 	args := []string{serverBin, "-m", m.GGUFPath}
@@ -81,8 +149,4 @@ func BuildCommand(serverBin string, m model.ModelEntry, p model.Profile) string 
 		}
 	}
 	return strings.Join(quoted, " ")
-}
-
-func Exec(args []string) error {
-	return syscall.Exec(args[0], args, os.Environ())
 }

@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/dipankardas011/infai/model"
 	"github.com/dipankardas011/infai/runner"
 )
 
@@ -46,7 +47,8 @@ const maxLogLines = 10000
 type ServerModel struct {
 	runID           RunID
 	process         *runner.ServerProcess
-	launchArgs      []string
+	launchSpec      runner.LaunchSpec
+	engineKind      model.EngineKind
 	logCh           <-chan string
 	exitCh          <-chan error
 	logs            []string
@@ -74,14 +76,15 @@ type ServerModel struct {
 	liveDeferred    int
 	liveTotalGen    int64
 	liveTotalPrompt int64
+	liveMetricsAt   time.Time
 	width           int
 	height          int
 	initialized     bool
 }
 
 // NewServerModel starts the server process and returns the model + initial listen cmd.
-func NewServerModel(runID RunID, args []string, profileName, modelName, modelType string, contextSize int, host string, port, w, h int) (ServerModel, tea.Cmd, error) {
-	process, err := runner.StartServer(args)
+func NewServerModel(runID RunID, spec runner.LaunchSpec, engineKind model.EngineKind, profileName, modelName, modelType string, contextSize int, host string, port, w, h int) (ServerModel, tea.Cmd, error) {
+	process, err := runner.StartServer(spec)
 	if err != nil {
 		return ServerModel{}, nil, err
 	}
@@ -100,7 +103,8 @@ func NewServerModel(runID RunID, args []string, profileName, modelName, modelTyp
 	m := ServerModel{
 		runID:       runID,
 		process:     process,
-		launchArgs:  process.Args(),
+		launchSpec:  process.Spec(),
+		engineKind:  engineKind,
 		logCh:       logCh,
 		exitCh:      exitCh,
 		vp:          vp,
@@ -115,7 +119,7 @@ func NewServerModel(runID RunID, args []string, profileName, modelName, modelTyp
 		height:      h,
 		initialized: true,
 	}
-	return m, tea.Batch(listenForLog(runID, logCh, exitCh), getMetricsCmd(runID, process.PID()), getLiveMetricsCmd(runID, host, port)), nil
+	return m, tea.Batch(listenForLog(runID, logCh, exitCh), getMetricsCmd(runID, process.PID()), getLiveMetricsCmd(runID, engineKind, host, port)), nil
 }
 
 func (s ServerModel) HandleLogLine(line string) (ServerModel, tea.Cmd) {
@@ -189,10 +193,10 @@ func (s ServerModel) Restart() (ServerModel, tea.Cmd, error) {
 	if !s.stopped || s.stopping {
 		return s, nil, fmt.Errorf("server is not stopped")
 	}
-	if len(s.launchArgs) == 0 {
+	if s.launchSpec.Command == "" {
 		return s, nil, fmt.Errorf("missing launch command")
 	}
-	return NewServerModel(s.runID, s.launchArgs, s.profileName, s.modelName, s.modelType, s.contextSize, s.host, s.port, s.width, s.height)
+	return NewServerModel(s.runID, s.launchSpec, s.engineKind, s.profileName, s.modelName, s.modelType, s.contextSize, s.host, s.port, s.width, s.height)
 }
 
 func (s ServerModel) Stop() (ServerModel, tea.Cmd) {
@@ -281,16 +285,29 @@ func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 			return s, nil
 		}
 		if msg.ok {
+			now := time.Now()
 			// Reset prompt progress once generation starts.
 			if s.liveActive > 0 {
 				s.promptProgress = 0
 			}
 			s.liveTPS = msg.avgTPS
 			s.livePrefillTPS = msg.prefillTPS
+			if s.engineKind == model.EngineVLLM {
+				elapsed := now.Sub(s.liveMetricsAt).Seconds()
+				if !s.liveMetricsAt.IsZero() && elapsed > 0 {
+					if msg.totalGenTokens >= s.liveTotalGen {
+						s.liveTPS = float64(msg.totalGenTokens-s.liveTotalGen) / elapsed
+					}
+					if msg.totalPromptTokens >= s.liveTotalPrompt {
+						s.livePrefillTPS = float64(msg.totalPromptTokens-s.liveTotalPrompt) / elapsed
+					}
+				}
+			}
 			s.liveActive = msg.active
 			s.liveDeferred = msg.deferred
 			s.liveTotalGen = msg.totalGenTokens
 			s.liveTotalPrompt = msg.totalPromptTokens
+			s.liveMetricsAt = now
 			s.vp.Height = s.computeVPH()
 		}
 		return s, tickLiveMetrics(s.runID)
@@ -298,7 +315,7 @@ func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 		if msg.runID != s.runID || s.stopped {
 			return s, nil
 		}
-		return s, getLiveMetricsCmd(s.runID, s.host, s.port)
+		return s, getLiveMetricsCmd(s.runID, s.engineKind, s.host, s.port)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "c":
@@ -343,8 +360,8 @@ func (s ServerModel) View() string {
 		uptime = dim.Render("  up:" + end.Sub(s.startedAt).Truncate(time.Second).String())
 	}
 	executor := ""
-	if len(s.launchArgs) > 0 {
-		executor = dim.Render("  executor:") + styleKey.Render(filepath.Base(s.launchArgs[0]))
+	if s.launchSpec.Command != "" {
+		executor = dim.Render("  executor:") + styleKey.Render(filepath.Base(s.launchSpec.Command))
 	}
 	endpoint := dim.Render("  endpoint:") + styleKey.Render(fmt.Sprintf("http://%s:%d/v1", s.host, s.port))
 	line1 := styleTitle.Render(s.profileName) + "  " + status + pid + uptime + executor + endpoint

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/dipankardas011/infai/model"
@@ -21,7 +22,11 @@ func seedModelEngineProfile(t *testing.T, d *DB) (model.ModelEntry, model.Infere
 		t.Fatalf("upsert model: %v", err)
 	}
 
-	engine := model.InferenceEngine{ID: "01900000-0000-7000-8000-000000000001", Name: "test llama.cpp", Path: "/bin/llama-server"}
+	engine := model.InferenceEngine{
+		ID: "01900000-0000-7000-8000-000000000001", Name: "test llama.cpp",
+		Kind: model.EngineLlamaCPP, Path: "/bin/llama-server",
+		Env: map[string]string{"CUDA_VISIBLE_DEVICES": "0"},
+	}
 	if err := d.CreateInferenceEngine(engine); err != nil {
 		t.Fatalf("create inference engine: %v", err)
 	}
@@ -78,7 +83,7 @@ func TestListAllProfilesLoadsFullProfile(t *testing.T) {
 	if got.Model.Type != m.Type || got.Model.Metadata != m.Metadata || got.Model.DirName != m.DirName {
 		t.Fatalf("model not fully loaded: %#v", got.Model)
 	}
-	if got.InferenceEngine != engine {
+	if !reflect.DeepEqual(got.InferenceEngine, engine) {
 		t.Fatalf("inference engine not loaded: %#v", got.InferenceEngine)
 	}
 	if got.Profile.NGL != "auto" || got.Profile.BatchSize == nil || *got.Profile.BatchSize != *p.BatchSize || got.Profile.CacheTypeK == nil || *got.Profile.CacheTypeK != *p.CacheTypeK || !got.Profile.FlashAttn || !got.Profile.Jinja || got.Profile.Temperature == nil || *got.Profile.Temperature != *p.Temperature || got.Profile.TopK == nil || *got.Profile.TopK != *p.TopK || !got.Profile.UseMmproj || got.Profile.ExtraFlags != p.ExtraFlags {

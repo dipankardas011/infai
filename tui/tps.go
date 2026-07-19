@@ -3,6 +3,7 @@ package tui
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/dipankardas011/infai/model"
 )
 
 const maxTPSHistory = 100
@@ -102,7 +105,7 @@ func interpPercentile(sorted []float64, p float64) float64 {
 	return sorted[lo]*(1-frac) + sorted[hi]*frac
 }
 
-// liveMetricsMsg carries data polled from llama.cpp /metrics endpoint.
+// liveMetricsMsg carries normalized data polled from an engine's /metrics endpoint.
 type liveMetricsMsg struct {
 	runID             RunID
 	avgTPS            float64
@@ -124,19 +127,27 @@ func tickLiveMetrics(runID RunID) tea.Cmd {
 
 var metricsHTTPClient = &http.Client{Timeout: 2 * time.Second}
 
-func getLiveMetricsCmd(runID RunID, host string, port int) tea.Cmd {
+func getLiveMetricsCmd(runID RunID, kind model.EngineKind, host string, port int) tea.Cmd {
 	return func() tea.Msg {
-		return fetchLiveMetrics(runID, host, port)
+		return fetchLiveMetrics(runID, kind, host, port)
 	}
 }
 
-func fetchLiveMetrics(runID RunID, host string, port int) liveMetricsMsg {
-	url := fmt.Sprintf("http://%s:%d/metrics", host, port)
+func fetchLiveMetrics(runID RunID, kind model.EngineKind, host string, port int) liveMetricsMsg {
+	if host == "0.0.0.0" || host == "" {
+		host = "127.0.0.1"
+	} else if host == "::" || host == "[::]" {
+		host = "::1"
+	}
+	url := fmt.Sprintf("http://%s/metrics", net.JoinHostPort(host, strconv.Itoa(port)))
 	resp, err := metricsHTTPClient.Get(url)
 	if err != nil {
 		return liveMetricsMsg{runID: runID}
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return liveMetricsMsg{runID: runID}
+	}
 
 	var avgTPS, prefillTPS float64
 	var active, deferred int
@@ -150,10 +161,14 @@ func fetchLiveMetrics(runID RunID, host string, port int) liveMetricsMsg {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) != 2 {
+		if len(fields) < 2 {
 			continue
 		}
-		switch fields[0] {
+		metricName := fields[0]
+		if idx := strings.IndexByte(metricName, '{'); idx >= 0 {
+			metricName = metricName[:idx]
+		}
+		switch metricName {
 		case "llamacpp:predicted_tokens_seconds":
 			if v, err := strconv.ParseFloat(fields[1], 64); err == nil && v > 0 {
 				avgTPS = v
@@ -184,8 +199,29 @@ func fetchLiveMetrics(runID RunID, host string, port int) liveMetricsMsg {
 				totalPromptTokens = int64(v)
 				found++
 			}
+		case "vllm:num_requests_running":
+			if v, err := strconv.ParseFloat(fields[1], 64); err == nil {
+				active += int(v)
+				found++
+			}
+		case "vllm:num_requests_waiting":
+			if v, err := strconv.ParseFloat(fields[1], 64); err == nil {
+				deferred += int(v)
+				found++
+			}
+		case "vllm:generation_tokens_total":
+			if v, err := strconv.ParseFloat(fields[1], 64); err == nil {
+				totalGenTokens += int64(v)
+				found++
+			}
+		case "vllm:prompt_tokens_total":
+			if v, err := strconv.ParseFloat(fields[1], 64); err == nil {
+				totalPromptTokens += int64(v)
+				found++
+			}
 		}
 	}
+	_ = kind // Kind is part of the collector contract; metric names remain self-describing.
 	return liveMetricsMsg{
 		runID:  runID,
 		avgTPS: avgTPS, prefillTPS: prefillTPS,

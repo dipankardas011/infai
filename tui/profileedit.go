@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -31,6 +32,7 @@ type formField struct {
 	boolVal  bool
 	optional bool
 	disabled bool
+	engine   model.EngineKind
 	// fieldSelect only
 	options      []string
 	optionValues []string
@@ -113,7 +115,7 @@ func newEngineSelectField(engines []model.InferenceEngine, currentID string) for
 	values := make([]string, 0, len(engines))
 	idx := 0
 	for i, e := range engines {
-		options = append(options, e.Name)
+		options = append(options, fmt.Sprintf("%s [%s]", e.Name, e.Kind))
 		values = append(values, e.ID)
 		if e.ID == currentID {
 			idx = i
@@ -157,6 +159,34 @@ func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p 
 		{label: "No KV Offload", kind: fieldBool},
 		{label: "Use Mmproj", kind: fieldBool, disabled: !hasMmproj},
 		{label: "Extra Flags", kind: fieldText, input: newTextInput("(empty=omit)"), optional: true},
+		{label: "Served Model Name", kind: fieldText, input: newTextInput("(empty=model name)"), optional: true},
+		{label: "GPU Memory Util", kind: fieldFloat, input: newTextInput("0.85"), optional: true},
+		{label: "Max Sequences", kind: fieldInt, input: newTextInput("32"), optional: true},
+		{label: "Max Batched Tokens", kind: fieldInt, input: newTextInput("4096"), optional: true},
+		newSelectField("vLLM DType", []string{"auto", "float16", "bfloat16", "float32"}, nil),
+		{label: "Tensor Parallel", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
+		{label: "Pipeline Parallel", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
+		{label: "Prefix Caching", kind: fieldBool},
+		{label: "Trust Remote Code", kind: fieldBool},
+	}
+	llamaFields := map[string]bool{
+		"NGL": true, "Batch Size": true, "UBatch Size": true,
+		"Cache Type K": true, "Cache Type V": true, "Flash Attn": true,
+		"Jinja": true, "Temperature": true, "Reasoning Budget": true,
+		"Top P": true, "Top K": true, "No KV Offload": true, "Use Mmproj": true,
+	}
+	vllmFields := map[string]bool{
+		"Served Model Name": true, "GPU Memory Util": true, "Max Sequences": true,
+		"Max Batched Tokens": true, "vLLM DType": true, "Tensor Parallel": true,
+		"Pipeline Parallel": true, "Prefix Caching": true, "Trust Remote Code": true,
+	}
+	for i := range fields {
+		switch {
+		case llamaFields[fields[i].label]:
+			fields[i].engine = model.EngineLlamaCPP
+		case vllmFields[fields[i].label]:
+			fields[i].engine = model.EngineVLLM
+		}
 	}
 
 	em := ProfileEditModel{
@@ -243,12 +273,38 @@ func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p 
 		setBool("No KV Offload", p.NoKVOffload)
 		setBool("Use Mmproj", p.UseMmproj && hasMmproj)
 		set("Extra Flags", p.ExtraFlags)
+		if cfg, err := p.VLLMConfig(); err == nil {
+			set("Served Model Name", cfg.ServedModelName)
+			if cfg.GPUUtilization != nil {
+				set("GPU Memory Util", strconv.FormatFloat(*cfg.GPUUtilization, 'f', -1, 64))
+			}
+			if cfg.MaxNumSeqs != nil {
+				set("Max Sequences", strconv.Itoa(*cfg.MaxNumSeqs))
+			}
+			if cfg.MaxBatchedTokens != nil {
+				set("Max Batched Tokens", strconv.Itoa(*cfg.MaxBatchedTokens))
+			}
+			if cfg.DType != "" {
+				setSelect("vLLM DType", cfg.DType)
+			}
+			if cfg.TensorParallelSize != nil {
+				set("Tensor Parallel", strconv.Itoa(*cfg.TensorParallelSize))
+			}
+			if cfg.PipelineParallelSize != nil {
+				set("Pipeline Parallel", strconv.Itoa(*cfg.PipelineParallelSize))
+			}
+			setBool("Prefix Caching", cfg.EnablePrefixCaching)
+			setBool("Trust Remote Code", cfg.TrustRemoteCode)
+		}
 	} else {
 		set("Port", "8000")
 		set("Host", "0.0.0.0")
 		set("Context Size", "64")
 		setSelect("Context Unit", "K")
 		set("NGL", "auto")
+		set("GPU Memory Util", "0.85")
+		set("Max Sequences", "32")
+		set("Max Batched Tokens", "4096")
 	}
 
 	if em.fields[0].kind != fieldBool && em.fields[0].kind != fieldSelect {
@@ -275,7 +331,12 @@ func (em *ProfileEditModel) moveFocus(delta int) tea.Cmd {
 	if f.kind != fieldBool && f.kind != fieldSelect {
 		f.input.Blur()
 	}
-	em.focused = (em.focused + delta + len(em.fields)) % len(em.fields)
+	for {
+		em.focused = (em.focused + delta + len(em.fields)) % len(em.fields)
+		if em.fieldVisible(em.fields[em.focused]) {
+			break
+		}
+	}
 	nf := &em.fields[em.focused]
 	if nf.kind != fieldBool && nf.kind != fieldSelect {
 		nf.input.Focus()
@@ -312,12 +373,14 @@ func (em ProfileEditModel) Update(msg tea.Msg) (ProfileEditModel, tea.Cmd) {
 		case "left":
 			if f.kind == fieldSelect && len(f.options) > 0 {
 				f.selIdx = (f.selIdx - 1 + len(f.options)) % len(f.options)
+				em.scrollTo(em.focused)
 				return em, nil
 			}
 
 		case "right":
 			if f.kind == fieldSelect && len(f.options) > 0 {
 				f.selIdx = (f.selIdx + 1) % len(f.options)
+				em.scrollTo(em.focused)
 				return em, nil
 			}
 		}
@@ -345,8 +408,9 @@ func (em ProfileEditModel) computeVisibleRows() int {
 	if rows < 1 {
 		rows = 1
 	}
-	if rows > len(em.fields) {
-		rows = len(em.fields)
+	fieldCount := len(em.visibleFieldIndices())
+	if rows > fieldCount {
+		rows = fieldCount
 	}
 	return rows
 }
@@ -355,21 +419,61 @@ func (em *ProfileEditModel) scrollTo(idx int) {
 	if em.visibleRows <= 0 {
 		em.visibleRows = em.computeVisibleRows()
 	}
-	if idx < em.viewOffset {
-		em.viewOffset = idx
-	} else if idx >= em.viewOffset+em.visibleRows {
-		em.viewOffset = idx - em.visibleRows + 1
+	visible := em.visibleFieldIndices()
+	position := 0
+	for i, fieldIndex := range visible {
+		if fieldIndex == idx {
+			position = i
+			break
+		}
+	}
+	if position < em.viewOffset {
+		em.viewOffset = position
+	} else if position >= em.viewOffset+em.visibleRows {
+		em.viewOffset = position - em.visibleRows + 1
 	}
 	if em.viewOffset < 0 {
 		em.viewOffset = 0
 	}
-	maxOffset := len(em.fields) - em.visibleRows
+	maxOffset := len(visible) - em.visibleRows
 	if maxOffset < 0 {
 		maxOffset = 0
 	}
 	if em.viewOffset > maxOffset {
 		em.viewOffset = maxOffset
 	}
+}
+
+func (em ProfileEditModel) selectedEngineKind() model.EngineKind {
+	for _, field := range em.fields {
+		if field.label != "Inference Engine" || len(field.optionValues) == 0 {
+			continue
+		}
+		id := field.optionValues[field.selIdx]
+		for _, engine := range em.engines {
+			if engine.ID == id {
+				if engine.Kind == "" {
+					return model.EngineLlamaCPP
+				}
+				return engine.Kind
+			}
+		}
+	}
+	return model.EngineLlamaCPP
+}
+
+func (em ProfileEditModel) fieldVisible(field formField) bool {
+	return field.engine == "" || field.engine == em.selectedEngineKind()
+}
+
+func (em ProfileEditModel) visibleFieldIndices() []int {
+	indices := make([]int, 0, len(em.fields))
+	for i, field := range em.fields {
+		if em.fieldVisible(field) {
+			indices = append(indices, i)
+		}
+	}
+	return indices
 }
 
 func (em ProfileEditModel) View() string {
@@ -400,9 +504,11 @@ func (em ProfileEditModel) View() string {
 	title := styleTitle.Render("Edit Profile — " + truncatePath(em.modelEntry.DisplayName, max(innerW-18, 12)))
 	var rows []string
 
-	end := min(em.viewOffset+visibleRows, len(em.fields))
+	visibleFields := em.visibleFieldIndices()
+	end := min(em.viewOffset+visibleRows, len(visibleFields))
 
-	for i := em.viewOffset; i < end; i++ {
+	for position := em.viewOffset; position < end; position++ {
+		i := visibleFields[position]
 		f := em.fields[i]
 		label := lipgloss.NewStyle().Foreground(t.Muted).Width(labelW).Align(lipgloss.Right).Render(f.label)
 		focused := i == em.focused
@@ -453,8 +559,15 @@ func (em ProfileEditModel) View() string {
 	}
 
 	scrollHint := ""
-	if len(em.fields) > visibleRows {
-		scrollHint = " " + styleMuted.Render(fmt.Sprintf("field %d/%d", em.focused+1, len(em.fields)))
+	if len(visibleFields) > visibleRows {
+		focusedPosition := 0
+		for i, fieldIndex := range visibleFields {
+			if fieldIndex == em.focused {
+				focusedPosition = i
+				break
+			}
+		}
+		scrollHint = " " + styleMuted.Render(fmt.Sprintf("field %d/%d", focusedPosition+1, len(visibleFields)))
 	}
 
 	errLine := ""
@@ -560,6 +673,13 @@ func (em ProfileEditModel) ToProfile() (model.Profile, error) {
 	if engineID == "" {
 		return model.Profile{}, fmt.Errorf("Inference Engine is required")
 	}
+	engineKind := model.EngineLlamaCPP
+	for _, engine := range em.engines {
+		if engine.ID == engineID {
+			engineKind = engine.Kind
+			break
+		}
+	}
 	port, err := strconv.Atoi(get("Port"))
 	if err != nil || port < 1 || port > 65535 {
 		return model.Profile{}, fmt.Errorf("Port must be 1-65535")
@@ -609,6 +729,46 @@ func (em ProfileEditModel) ToProfile() (model.Profile, error) {
 	if err != nil {
 		return model.Profile{}, err
 	}
+	var engineConfig string
+	if engineKind == model.EngineVLLM {
+		gpuUtil, err := optFloat("GPU Memory Util")
+		if err != nil {
+			return model.Profile{}, err
+		}
+		if gpuUtil != nil && (*gpuUtil <= 0 || *gpuUtil > 1) {
+			return model.Profile{}, fmt.Errorf("GPU Memory Util must be > 0 and <= 1")
+		}
+		maxSeqs, err := optInt("Max Sequences")
+		if err != nil {
+			return model.Profile{}, err
+		}
+		maxBatched, err := optInt("Max Batched Tokens")
+		if err != nil {
+			return model.Profile{}, err
+		}
+		tp, err := optInt("Tensor Parallel")
+		if err != nil {
+			return model.Profile{}, err
+		}
+		pp, err := optInt("Pipeline Parallel")
+		if err != nil {
+			return model.Profile{}, err
+		}
+		cfg := model.VLLMConfig{
+			ServedModelName: get("Served Model Name"), GPUUtilization: gpuUtil,
+			MaxNumSeqs: maxSeqs, MaxBatchedTokens: maxBatched,
+			TensorParallelSize: tp, PipelineParallelSize: pp,
+			EnablePrefixCaching: getBool("Prefix Caching"), TrustRemoteCode: getBool("Trust Remote Code"),
+		}
+		if dtype := getSelect("vLLM DType"); dtype != nil {
+			cfg.DType = *dtype
+		}
+		raw, err := json.Marshal(cfg)
+		if err != nil {
+			return model.Profile{}, fmt.Errorf("encode vLLM configuration: %w", err)
+		}
+		engineConfig = string(raw)
+	}
 
 	return model.Profile{
 		ID:                em.editingID,
@@ -632,5 +792,6 @@ func (em ProfileEditModel) ToProfile() (model.Profile, error) {
 		NoKVOffload:       getBool("No KV Offload"),
 		UseMmproj:         getBool("Use Mmproj"),
 		ExtraFlags:        get("Extra Flags"),
+		EngineConfig:      engineConfig,
 	}, nil
 }

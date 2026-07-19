@@ -179,13 +179,13 @@ func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, engine model.I
 		a.setErr(err.Error())
 		return nil
 	}
-	args, err := a.service.BuildLaunchArgsWithPort(m, p, actualPort)
+	spec, err := a.service.BuildLaunchSpecWithPort(m, p, actualPort)
 	if err != nil {
 		a.setErr(err.Error())
 		return nil
 	}
 	runID := a.runs.NewID()
-	sm, cmd, err := NewServerModel(runID, args, p.Name, m.DisplayName, m.Type, p.ContextSize, p.Host, actualPort, a.width, a.height)
+	sm, cmd, err := NewServerModel(runID, spec, engine.Kind, p.Name, m.DisplayName, m.Type, p.ContextSize, p.Host, actualPort, a.width, a.height)
 	if err != nil {
 		a.setErr(err.Error())
 		a.refreshHome()
@@ -495,13 +495,13 @@ func (a *AppModel) restartRun(id RunID) (tea.Model, tea.Cmd) {
 		a.setErr(err.Error())
 		return a, nil
 	}
-	args, err := a.service.BuildLaunchArgsWithPort(run.Model, run.Profile, actualPort)
+	spec, err := a.service.BuildLaunchSpecWithPort(run.Model, run.Profile, actualPort)
 	if err != nil {
 		a.setErr(err.Error())
 		return a, nil
 	}
 	nextServer := run.Server
-	nextServer.launchArgs = args
+	nextServer.launchSpec = spec
 	nextServer.port = actualPort
 	sm, cmd, err := nextServer.Restart()
 	if err != nil {

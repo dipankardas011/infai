@@ -105,6 +105,7 @@ func scanDirectory(dir string) ([]model.ModelEntry, error) {
 		entry := model.ModelEntry{
 			ScanDir:     dir,
 			DirName:     filepath.Base(dir),
+			GGUFPath:    dir,
 			DisplayName: filepath.Base(dir),
 			Type:        "mlx",
 		}
@@ -130,6 +131,7 @@ func scanDirectory(dir string) ([]model.ModelEntry, error) {
 		entry := model.ModelEntry{
 			ScanDir:     dir,
 			DirName:     filepath.Base(dir),
+			GGUFPath:    dir,
 			DisplayName: filepath.Base(dir),
 			Type:        modelType,
 			Metadata:    metadata,

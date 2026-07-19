@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dipankardas011/infai/db"
+	"github.com/dipankardas011/infai/model"
 )
 
 // ── Messages ───────────────────────────────────────────────────────────────
@@ -308,6 +309,7 @@ func (m *ProfilesTabModel) updateViewport() {
 	sb.WriteString(titleStyle.Render(p.Name) + "\n")
 	sb.WriteString(fieldLabel.Render("Model") + "  " + fieldVal.Render(m2.DisplayName) + "\n")
 	sb.WriteString(fieldLabel.Render("Engine") + "  " + fieldVal.Render(engine.Name) + "\n")
+	sb.WriteString(fieldLabel.Render("Engine Type") + "  " + fieldVal.Render(string(engine.Kind)) + "\n")
 	sb.WriteString(fieldLabel.Render("Engine Path") + "  " + fieldVal.Render(engine.Path) + "\n\n")
 
 	sb.WriteString(sectionStyle.Render("Network") + "\n")
@@ -325,20 +327,44 @@ func (m *ProfilesTabModel) updateViewport() {
 
 	sb.WriteString(sectionStyle.Render("Model Config") + "\n")
 	sb.WriteString(fieldLabel.Render("Context") + "  " + fieldVal.Render(fmtInt(p.ContextSize)) + "\n")
-	sb.WriteString(fieldLabel.Render("GPU Layers") + "  " + fieldVal.Render(p.NGL) + "\n")
-	if p.BatchSize != nil {
-		sb.WriteString(fieldLabel.Render("Batch Size") + "  " + fieldVal.Render(fmt.Sprintf("%d", *p.BatchSize)) + "\n")
+	if engine.Kind == model.EngineVLLM {
+		if cfg, err := p.VLLMConfig(); err == nil {
+			if cfg.ServedModelName != "" {
+				sb.WriteString(fieldLabel.Render("Served Name") + "  " + fieldVal.Render(cfg.ServedModelName) + "\n")
+			}
+			if cfg.GPUUtilization != nil {
+				sb.WriteString(fieldLabel.Render("GPU Memory") + "  " + fieldVal.Render(fmt.Sprintf("%.2f", *cfg.GPUUtilization)) + "\n")
+			}
+			if cfg.MaxNumSeqs != nil {
+				sb.WriteString(fieldLabel.Render("Max Seqs") + "  " + fieldVal.Render(fmt.Sprintf("%d", *cfg.MaxNumSeqs)) + "\n")
+			}
+			if cfg.MaxBatchedTokens != nil {
+				sb.WriteString(fieldLabel.Render("Batch Tokens") + "  " + fieldVal.Render(fmt.Sprintf("%d", *cfg.MaxBatchedTokens)) + "\n")
+			}
+			if cfg.DType != "" {
+				sb.WriteString(fieldLabel.Render("DType") + "  " + fieldVal.Render(cfg.DType) + "\n")
+			}
+			if cfg.EnablePrefixCaching {
+				sb.WriteString(fieldLabel.Render("Prefix Cache") + "  " + check + "\n")
+			}
+		}
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString(fieldLabel.Render("GPU Layers") + "  " + fieldVal.Render(p.NGL) + "\n")
+		if p.BatchSize != nil {
+			sb.WriteString(fieldLabel.Render("Batch Size") + "  " + fieldVal.Render(fmt.Sprintf("%d", *p.BatchSize)) + "\n")
+		}
+		if p.UBatchSize != nil {
+			sb.WriteString(fieldLabel.Render("UBatch") + "  " + fieldVal.Render(fmt.Sprintf("%d", *p.UBatchSize)) + "\n")
+		}
+		if p.CacheTypeK != nil {
+			sb.WriteString(fieldLabel.Render("Cache K") + "  " + fieldVal.Render(*p.CacheTypeK) + "\n")
+		}
+		if p.CacheTypeV != nil {
+			sb.WriteString(fieldLabel.Render("Cache V") + "  " + fieldVal.Render(*p.CacheTypeV) + "\n")
+		}
+		sb.WriteString("\n")
 	}
-	if p.UBatchSize != nil {
-		sb.WriteString(fieldLabel.Render("UBatch") + "  " + fieldVal.Render(fmt.Sprintf("%d", *p.UBatchSize)) + "\n")
-	}
-	if p.CacheTypeK != nil {
-		sb.WriteString(fieldLabel.Render("Cache K") + "  " + fieldVal.Render(*p.CacheTypeK) + "\n")
-	}
-	if p.CacheTypeV != nil {
-		sb.WriteString(fieldLabel.Render("Cache V") + "  " + fieldVal.Render(*p.CacheTypeV) + "\n")
-	}
-	sb.WriteString("\n")
 
 	if p.FlashAttn || p.Jinja || p.NoKVOffload || p.UseMmproj {
 		sb.WriteString(sectionStyle.Render("Flags") + "\n")
