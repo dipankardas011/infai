@@ -10,9 +10,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/dipankardas011/infai/db"
-	"github.com/dipankardas011/infai/launcher"
+	"github.com/dipankardas011/infai/inference"
 	"github.com/dipankardas011/infai/model"
-	"github.com/dipankardas011/infai/runner"
 	"github.com/dipankardas011/infai/scanner"
 )
 
@@ -116,51 +115,35 @@ func (s *Service) MarkRecent(modelID, profileID int64) error {
 	return s.db.MarkRecent(modelID, profileID)
 }
 
-func (s *Service) BuildLaunchArgsWithPort(m model.ModelEntry, p model.Profile, port int) ([]string, error) {
-	spec, err := s.BuildLaunchSpecWithPort(m, p, port)
-	if err != nil {
-		return nil, err
-	}
-	return spec.CommandLine(), nil
-}
-
-func (s *Service) BuildLaunchArgs(m model.ModelEntry, p model.Profile) ([]string, error) {
-	spec, err := s.BuildLaunchSpec(m, p)
-	if err != nil {
-		return nil, err
-	}
-	return spec.CommandLine(), nil
-}
-
-func (s *Service) BuildLaunchSpecWithPort(m model.ModelEntry, p model.Profile, port int) (runner.LaunchSpec, error) {
-	p.Port = port
-	return s.BuildLaunchSpec(m, p)
-}
-
-func (s *Service) BuildLaunchSpec(m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
+func (s *Service) BuildRunSpec(m model.ModelEntry, p model.Profile, port int) (inference.RunSpec, error) {
 	if m.ID <= 0 {
-		return runner.LaunchSpec{}, fmt.Errorf("invalid model")
+		return inference.RunSpec{}, fmt.Errorf("invalid model")
 	}
 	if p.ID <= 0 {
-		return runner.LaunchSpec{}, fmt.Errorf("invalid profile")
+		return inference.RunSpec{}, fmt.Errorf("invalid profile")
 	}
 	if p.InferenceEngineID == "" {
-		return runner.LaunchSpec{}, fmt.Errorf("profile has no inference engine")
+		return inference.RunSpec{}, fmt.Errorf("profile has no inference engine")
 	}
+	p.Port = port
 	engine, err := s.db.GetInferenceEngineByID(p.InferenceEngineID)
 	if err != nil {
-		return runner.LaunchSpec{}, fmt.Errorf("inference engine: %w", err)
+		return inference.RunSpec{}, fmt.Errorf("inference engine: %w", err)
 	}
 	engineBin, err := resolveInferenceEngineBinary(engine.Path, engine.Kind)
 	if err != nil {
-		return runner.LaunchSpec{}, err
+		return inference.RunSpec{}, err
 	}
 	engine.Path = engineBin
-	spec, err := launcher.BuildSpec(engine, m, p)
+	adapter, err := inference.AdapterFor(engine.Kind)
 	if err != nil {
-		return runner.LaunchSpec{}, err
+		return inference.RunSpec{}, err
 	}
-	return spec, nil
+	launch, err := adapter.BuildLaunchSpec(engine, m, p)
+	if err != nil {
+		return inference.RunSpec{}, err
+	}
+	return inference.RunSpec{Launch: launch, Metrics: adapter.NewMetricsSource(p.Host, p.Port)}, nil
 }
 
 func resolveInferenceEngineBinary(path string, kind model.EngineKind) (string, error) {

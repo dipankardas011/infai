@@ -1,9 +1,9 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -11,13 +11,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/dipankardas011/infai/model"
+	"github.com/dipankardas011/infai/inference"
 	"github.com/dipankardas011/infai/runner"
 )
 
 const stopGraceTimeout = 5 * time.Second
-
-var promptProgress = regexp.MustCompile(`prompt processing progress,.*progress = ([0-9.]+)`)
 
 // Tea messages for server I/O.
 type logLineMsg struct {
@@ -29,6 +27,10 @@ type serverExitMsg struct {
 	err   error
 }
 type stopTimeoutMsg struct{ runID RunID }
+type engineMetricsMsg struct {
+	runID    RunID
+	snapshot inference.MetricsSnapshot
+}
 
 func listenForLog(runID RunID, ch <-chan string, exitCh <-chan error) tea.Cmd {
 	return func() tea.Msg {
@@ -41,14 +43,28 @@ func listenForLog(runID RunID, ch <-chan string, exitCh <-chan error) tea.Cmd {
 	}
 }
 
+func listenForEngineMetrics(runID RunID, ch <-chan inference.MetricsSnapshot) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		snapshot, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return engineMetricsMsg{runID: runID, snapshot: snapshot}
+	}
+}
+
 const maxLogLines = 10000
 
-// ServerModel is screen 5 — shows live llama-server output.
+// ServerModel is screen 5 and presents one running inference server.
 type ServerModel struct {
 	runID           RunID
 	process         *runner.ServerProcess
-	launchSpec      runner.LaunchSpec
-	engineKind      model.EngineKind
+	runSpec         inference.RunSpec
+	metricsCh       <-chan inference.MetricsSnapshot
+	cancelMetrics   context.CancelFunc
 	logCh           <-chan string
 	exitCh          <-chan error
 	logs            []string
@@ -62,7 +78,6 @@ type ServerModel struct {
 	port            int
 	systemUsage     string
 	modelUsage      string
-	promptProgress  int // 0 = none, 1–100 = active
 	startedAt       time.Time
 	stoppedAt       time.Time
 	stopped         bool
@@ -76,20 +91,24 @@ type ServerModel struct {
 	liveDeferred    int
 	liveTotalGen    int64
 	liveTotalPrompt int64
-	liveMetricsAt   time.Time
 	width           int
 	height          int
 	initialized     bool
 }
 
 // NewServerModel starts the server process and returns the model + initial listen cmd.
-func NewServerModel(runID RunID, spec runner.LaunchSpec, engineKind model.EngineKind, profileName, modelName, modelType string, contextSize int, host string, port, w, h int) (ServerModel, tea.Cmd, error) {
-	process, err := runner.StartServer(spec)
+func NewServerModel(runID RunID, spec inference.RunSpec, profileName, modelName, modelType string, contextSize int, host string, port, w, h int) (ServerModel, tea.Cmd, error) {
+	process, err := runner.StartServer(spec.Launch)
 	if err != nil {
 		return ServerModel{}, nil, err
 	}
 	logCh := process.Logs()
 	exitCh := process.Exits()
+	metricsCtx, cancelMetrics := context.WithCancel(context.Background())
+	var metricsCh <-chan inference.MetricsSnapshot
+	if spec.Metrics != nil {
+		metricsCh = spec.Metrics.Stream(metricsCtx)
+	}
 
 	vpH := max(h-7, 1) // initial: 2 header lines; computeVPH() corrects once metrics load
 	vp := viewport.New(w-4, vpH)
@@ -101,51 +120,31 @@ func NewServerModel(runID RunID, spec runner.LaunchSpec, engineKind model.Engine
 		BorderForeground(colorPrimary)
 
 	m := ServerModel{
-		runID:       runID,
-		process:     process,
-		launchSpec:  process.Spec(),
-		engineKind:  engineKind,
-		logCh:       logCh,
-		exitCh:      exitCh,
-		vp:          vp,
-		profileName: profileName,
-		modelName:   modelName,
-		modelType:   modelType,
-		contextSize: contextSize,
-		host:        host,
-		port:        port,
-		startedAt:   process.StartedAt(),
-		width:       w,
-		height:      h,
-		initialized: true,
+		runID:         runID,
+		process:       process,
+		runSpec:       inference.RunSpec{Launch: process.Spec(), Metrics: spec.Metrics},
+		metricsCh:     metricsCh,
+		cancelMetrics: cancelMetrics,
+		logCh:         logCh,
+		exitCh:        exitCh,
+		vp:            vp,
+		profileName:   profileName,
+		modelName:     modelName,
+		modelType:     modelType,
+		contextSize:   contextSize,
+		host:          host,
+		port:          port,
+		startedAt:     process.StartedAt(),
+		width:         w,
+		height:        h,
+		initialized:   true,
 	}
-	return m, tea.Batch(listenForLog(runID, logCh, exitCh), getMetricsCmd(runID, process.PID()), getLiveMetricsCmd(runID, engineKind, host, port)), nil
+	return m, tea.Batch(listenForLog(runID, logCh, exitCh), getMetricsCmd(runID, process.PID()), listenForEngineMetrics(runID, metricsCh)), nil
 }
 
 func (s ServerModel) HandleLogLine(line string) (ServerModel, tea.Cmd) {
 	s = s.appendLogLine(line)
-	s = s.updatePromptProgress(line)
 	return s, listenForLog(s.runID, s.logCh, s.exitCh)
-}
-
-func (s ServerModel) updatePromptProgress(line string) ServerModel {
-	if strings.Contains(line, "prompt processing done") {
-		s.promptProgress = 100
-		return s
-	}
-	if !strings.Contains(line, "prompt processing progress") {
-		return s
-	}
-	matches := promptProgress.FindStringSubmatch(line)
-	if len(matches) < 2 {
-		return s
-	}
-	var progress float64
-	if _, err := fmt.Sscanf(matches[1], "%f", &progress); err != nil {
-		return s
-	}
-	s.promptProgress = int(progress * 100)
-	return s
 }
 
 // styleLogLine highlights error and warning lines so problems stand out while
@@ -168,9 +167,6 @@ func (s ServerModel) appendLogLine(line string) ServerModel {
 		s.logs = s.logs[len(s.logs)-maxLogLines:]
 		s.styledLogs = s.styledLogs[len(s.styledLogs)-maxLogLines:]
 	}
-	if v, ok := parseGenTPS(line); ok {
-		s.tpsHistory = appendTPS(s.tpsHistory, v)
-	}
 	atBottom := s.vp.AtBottom()
 	s.vp.SetContent(strings.Join(s.styledLogs, "\n"))
 	if atBottom {
@@ -180,6 +176,9 @@ func (s ServerModel) appendLogLine(line string) ServerModel {
 }
 
 func (s ServerModel) SetExited(err error) ServerModel {
+	if s.cancelMetrics != nil {
+		s.cancelMetrics()
+	}
 	s.stopped = true
 	s.stopping = false
 	s.exitErr = err
@@ -193,10 +192,10 @@ func (s ServerModel) Restart() (ServerModel, tea.Cmd, error) {
 	if !s.stopped || s.stopping {
 		return s, nil, fmt.Errorf("server is not stopped")
 	}
-	if s.launchSpec.Command == "" {
+	if s.runSpec.Launch.Command == "" {
 		return s, nil, fmt.Errorf("missing launch command")
 	}
-	return NewServerModel(s.runID, s.launchSpec, s.engineKind, s.profileName, s.modelName, s.modelType, s.contextSize, s.host, s.port, s.width, s.height)
+	return NewServerModel(s.runID, s.runSpec, s.profileName, s.modelName, s.modelType, s.contextSize, s.host, s.port, s.width, s.height)
 }
 
 func (s ServerModel) Stop() (ServerModel, tea.Cmd) {
@@ -227,10 +226,10 @@ func (s ServerModel) computeVPH() int {
 		lines++
 	}
 	n := len(s.tpsHistory)
-	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0 || s.promptProgress > 0
+	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0
 	if hasTPS {
 		lines++ // divider
-		if s.liveTPS > 0 || n > 0 || s.promptProgress > 0 {
+		if s.liveTPS > 0 || n > 0 {
 			lines++ // gen line
 		}
 		if s.livePrefillTPS > 0 || s.liveTotalGen > 0 || s.liveTotalPrompt > 0 {
@@ -280,45 +279,23 @@ func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 			return s, nil
 		}
 		return s, getMetricsCmd(s.runID, s.process.PID())
-	case liveMetricsMsg:
+	case engineMetricsMsg:
 		if msg.runID != s.runID || s.stopped {
 			return s, nil
 		}
-		if msg.ok {
-			now := time.Now()
-			// Reset prompt progress once generation starts.
-			if s.liveActive > 0 {
-				s.promptProgress = 0
-			}
-			s.liveTPS = msg.avgTPS
-			s.livePrefillTPS = msg.prefillTPS
-			if s.engineKind == model.EngineVLLM {
-				elapsed := now.Sub(s.liveMetricsAt).Seconds()
-				if !s.liveMetricsAt.IsZero() && elapsed > 0 {
-					if msg.totalGenTokens >= s.liveTotalGen {
-						s.liveTPS = float64(msg.totalGenTokens-s.liveTotalGen) / elapsed
-					}
-					if msg.totalPromptTokens >= s.liveTotalPrompt {
-						s.livePrefillTPS = float64(msg.totalPromptTokens-s.liveTotalPrompt) / elapsed
-					}
-				}
-				if s.liveTPS > 0 {
-					s.tpsHistory = appendTPS(s.tpsHistory, s.liveTPS)
-				}
-			}
-			s.liveActive = msg.active
-			s.liveDeferred = msg.deferred
-			s.liveTotalGen = msg.totalGenTokens
-			s.liveTotalPrompt = msg.totalPromptTokens
-			s.liveMetricsAt = now
-			s.vp.Height = s.computeVPH()
+		if msg.snapshot.GenerationTPS > 0 {
+			s.liveTPS = msg.snapshot.GenerationTPS
+			s.tpsHistory = appendTPS(s.tpsHistory, s.liveTPS)
 		}
-		return s, tickLiveMetrics(s.runID)
-	case tickLiveMetricsMsg:
-		if msg.runID != s.runID || s.stopped {
-			return s, nil
+		if msg.snapshot.PrefillTPS > 0 {
+			s.livePrefillTPS = msg.snapshot.PrefillTPS
 		}
-		return s, getLiveMetricsCmd(s.runID, s.engineKind, s.host, s.port)
+		s.liveActive = msg.snapshot.ActiveRequests
+		s.liveDeferred = msg.snapshot.QueuedRequests
+		s.liveTotalGen = msg.snapshot.GeneratedTokens
+		s.liveTotalPrompt = msg.snapshot.PromptTokens
+		s.vp.Height = s.computeVPH()
+		return s, listenForEngineMetrics(s.runID, s.metricsCh)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "c":
@@ -363,8 +340,8 @@ func (s ServerModel) View() string {
 		uptime = dim.Render("  up:" + end.Sub(s.startedAt).Truncate(time.Second).String())
 	}
 	executor := ""
-	if s.launchSpec.Command != "" {
-		executor = dim.Render("  executor:") + styleKey.Render(filepath.Base(s.launchSpec.Command))
+	if s.runSpec.Launch.Command != "" {
+		executor = dim.Render("  executor:") + styleKey.Render(filepath.Base(s.runSpec.Launch.Command))
 	}
 	endpoint := dim.Render("  endpoint:") + styleKey.Render(fmt.Sprintf("http://%s:%d/v1", s.host, s.port))
 	line1 := styleTitle.Render(s.profileName) + "  " + status + pid + uptime + executor + endpoint
@@ -392,7 +369,7 @@ func (s ServerModel) View() string {
 	// ── throughput section (divider + gen + prefill) ───────────────────────
 	var throughputLines []string
 	_, p50, p95, n := computeTPSStats(s.tpsHistory)
-	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0 || s.promptProgress > 0
+	hasTPS := n > 0 || s.liveTPS > 0 || s.livePrefillTPS > 0
 
 	if hasTPS {
 		divider := dim.Render("  " + strings.Repeat("─", max(s.width-6, 20)))
@@ -426,9 +403,6 @@ func (s ServerModel) View() string {
 		var prefillSegs []string
 		if s.livePrefillTPS > 0 {
 			prefillSegs = append(prefillSegs, val.Render(fmt.Sprintf("%.0f t/s", s.livePrefillTPS)))
-		}
-		if s.promptProgress > 0 {
-			prefillSegs = append(prefillSegs, hi.Render(fmt.Sprintf("%d%% prompt", s.promptProgress)))
 		}
 		var lifetimeSegs []string
 		if s.liveTotalGen > 0 {

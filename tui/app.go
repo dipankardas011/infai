@@ -179,13 +179,13 @@ func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, engine model.I
 		a.setErr(err.Error())
 		return nil
 	}
-	spec, err := a.service.BuildLaunchSpecWithPort(m, p, actualPort)
+	spec, err := a.service.BuildRunSpec(m, p, actualPort)
 	if err != nil {
 		a.setErr(err.Error())
 		return nil
 	}
 	runID := a.runs.NewID()
-	sm, cmd, err := NewServerModel(runID, spec, engine.Kind, p.Name, m.DisplayName, m.Type, p.ContextSize, p.Host, actualPort, a.width, a.height)
+	sm, cmd, err := NewServerModel(runID, spec, p.Name, m.DisplayName, m.Type, p.ContextSize, p.Host, actualPort, a.width, a.height)
 	if err != nil {
 		a.setErr(err.Error())
 		a.refreshHome()
@@ -365,7 +365,7 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
-	case systemMetricsMsg, tickMetricsMsg, liveMetricsMsg, tickLiveMetricsMsg:
+	case systemMetricsMsg, tickMetricsMsg, engineMetricsMsg:
 		return a.updateRunMessage(msg)
 
 	case runsTabOpenMsg:
@@ -495,13 +495,13 @@ func (a *AppModel) restartRun(id RunID) (tea.Model, tea.Cmd) {
 		a.setErr(err.Error())
 		return a, nil
 	}
-	spec, err := a.service.BuildLaunchSpecWithPort(run.Model, run.Profile, actualPort)
+	spec, err := a.service.BuildRunSpec(run.Model, run.Profile, actualPort)
 	if err != nil {
 		a.setErr(err.Error())
 		return a, nil
 	}
 	nextServer := run.Server
-	nextServer.launchSpec = spec
+	nextServer.runSpec = spec
 	nextServer.port = actualPort
 	sm, cmd, err := nextServer.Restart()
 	if err != nil {
@@ -549,9 +549,7 @@ func (a *AppModel) updateRunMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
 		id = m.runID
 	case tickMetricsMsg:
 		id = m.runID
-	case liveMetricsMsg:
-		id = m.runID
-	case tickLiveMetricsMsg:
+	case engineMetricsMsg:
 		id = m.runID
 	default:
 		return a, nil
