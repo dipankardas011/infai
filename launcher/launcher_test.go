@@ -48,13 +48,17 @@ func TestBuildSpecVLLM(t *testing.T) {
 }
 
 func TestBuildSpecRejectsGGUFForVLLM(t *testing.T) {
-	_, err := BuildSpec(
-		model.InferenceEngine{Kind: model.EngineVLLM, Path: "vllm"},
-		model.ModelEntry{GGUFPath: "/models/qwen.gguf", Type: "gguf"},
-		model.Profile{},
-	)
-	if err == nil {
-		t.Fatal("expected incompatible model error")
+	for _, modelType := range []string{"gguf", "gguf_multimodal", "mlx", "mlx_quantized"} {
+		t.Run(modelType, func(t *testing.T) {
+			_, err := BuildSpec(
+				model.InferenceEngine{Kind: model.EngineVLLM, Path: "vllm"},
+				model.ModelEntry{GGUFPath: "/models/qwen", Type: modelType},
+				model.Profile{},
+			)
+			if err == nil {
+				t.Fatalf("expected %s compatibility error", modelType)
+			}
+		})
 	}
 }
 

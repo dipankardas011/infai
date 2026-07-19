@@ -302,6 +302,9 @@ func (s ServerModel) Update(msg tea.Msg) (ServerModel, tea.Cmd) {
 						s.livePrefillTPS = float64(msg.totalPromptTokens-s.liveTotalPrompt) / elapsed
 					}
 				}
+				if s.liveTPS > 0 {
+					s.tpsHistory = appendTPS(s.tpsHistory, s.liveTPS)
+				}
 			}
 			s.liveActive = msg.active
 			s.liveDeferred = msg.deferred

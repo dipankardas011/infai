@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/sqlite3"
@@ -436,6 +437,12 @@ func (d *DB) ListInferenceEngines() ([]model.InferenceEngine, error) {
 }
 
 func decodeEngineRuntime(e *model.InferenceEngine, baseArgs, environment string) error {
+	if strings.TrimSpace(baseArgs) == "" {
+		baseArgs = "[]"
+	}
+	if strings.TrimSpace(environment) == "" {
+		environment = "{}"
+	}
 	if err := json.Unmarshal([]byte(baseArgs), &e.BaseArgs); err != nil {
 		return fmt.Errorf("decode inference engine base args: %w", err)
 	}
