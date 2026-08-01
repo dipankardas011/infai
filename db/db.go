@@ -16,6 +16,7 @@ import (
 
 	"github.com/dipankardas011/infai/migrations"
 	"github.com/dipankardas011/infai/model"
+	"github.com/dipankardas011/infai/patches"
 )
 
 type DB struct {
@@ -81,9 +82,8 @@ func (d *DB) runMigrations() error {
 	if newVersion > currentVersion {
 		fmt.Printf("migrated from version %d to %d\n", currentVersion, newVersion)
 	}
-
-	if err := d.migrateModelArtifacts(); err != nil {
-		return fmt.Errorf("model artifact migration: %w", err)
+	if err := patches.Apply(d.conn, int(currentVersion), int(newVersion)); err != nil {
+		return fmt.Errorf("patches: %w", err)
 	}
 
 	_, err = d.conn.Exec(`
@@ -91,57 +91,6 @@ func (d *DB) runMigrations() error {
 		DELETE FROM settings WHERE key='models_dir';
 	`)
 	return err
-}
-
-func (d *DB) migrateModelArtifacts() error {
-	var hasModelDir bool
-	err := d.conn.QueryRow(`SELECT count(*) > 0 FROM pragma_table_info('models') WHERE name = 'model_dir'`).Scan(&hasModelDir)
-	if err != nil || !hasModelDir {
-		return err
-	}
-	var needsMigration int
-	err = d.conn.QueryRow(`SELECT count(*) FROM models WHERE model_dir != '' AND primary_file = '' AND type IN ('gguf', 'gguf_multimodal') AND model_dir LIKE '%.gguf'`).Scan(&needsMigration)
-	if err != nil || needsMigration == 0 {
-		return err
-	}
-
-	rows, err := d.conn.Query(`SELECT id, model_dir, type FROM models WHERE type IN ('gguf', 'gguf_multimodal') AND model_dir LIKE '%.gguf'`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	type fixup struct {
-		id     int64
-		gDir   string
-		gFile  string
-	}
-	var fixes []fixup
-	for rows.Next() {
-		var id int64
-		var modelDir string
-		var mtype string
-		if err := rows.Scan(&id, &modelDir, &mtype); err != nil {
-			return err
-		}
-		fixes = append(fixes, fixup{id: id, gDir: filepath.Dir(modelDir), gFile: filepath.Base(modelDir)})
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	tx, err := d.conn.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	for _, f := range fixes {
-		if _, err := tx.Exec(`UPDATE models SET model_dir = ?, primary_file = ? WHERE id = ?`, f.gDir, f.gFile, f.id); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
 }
 
 func newMigrate(db *sql.DB) (*migrate.Migrate, error) {
