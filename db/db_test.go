@@ -12,10 +12,11 @@ func seedModelEngineProfile(t *testing.T, d *DB) (model.ModelEntry, model.Infere
 	m := model.ModelEntry{
 		ScanDir:     "/models",
 		DirName:     "qwen",
-		GGUFPath:    "/models/qwen/model.gguf",
+		ModelDir:    "/models/qwen",
+		PrimaryFile: "model.gguf",
 		MmprojPath:  "/models/qwen/mmproj.gguf",
 		DisplayName: "Qwen",
-		Type:        "gguf_multimodal",
+		Type:        model.TypeGGUFMultimodal,
 		Metadata:    "{}",
 	}
 	if err := d.UpsertModel(&m); err != nil {
@@ -82,6 +83,9 @@ func TestListAllProfilesLoadsFullProfile(t *testing.T) {
 	got := entries[0]
 	if got.Model.Type != m.Type || got.Model.Metadata != m.Metadata || got.Model.DirName != m.DirName {
 		t.Fatalf("model not fully loaded: %#v", got.Model)
+	}
+	if got.Model.ModelDir != m.ModelDir || got.Model.PrimaryFile != m.PrimaryFile {
+		t.Fatalf("model dir/file not loaded: %#v", got.Model)
 	}
 	if !reflect.DeepEqual(got.InferenceEngine, engine) {
 		t.Fatalf("inference engine not loaded: %#v", got.InferenceEngine)
@@ -163,6 +167,102 @@ func TestSyncRemovedModelCascadesProfilesAndRecents(t *testing.T) {
 	assertCount(t, d, "models", 0)
 	assertCount(t, d, "profiles", 0)
 	assertCount(t, d, "recents", 0)
+}
+
+func TestModelRoundTripPreservesAllFields(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	d, err := Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+
+	m := model.ModelEntry{
+		ScanDir:     "/home/models",
+		DirName:     "llama-3b",
+		ModelDir:    "/home/models/llama-3b",
+		PrimaryFile: "llama-3b-q4_k_m.gguf",
+		MmprojPath:  "/home/models/llama-3b/mmproj.gguf",
+		DisplayName: "Llama 3B Q4_K_M",
+		Type:        model.TypeGGUFMultimodal,
+		Metadata:    `{"architecture":"llama","parameter_count":3000000000,"context_length":8192}`,
+		SourceRepo:  "meta-llama/Llama-3B",
+		SourceRevision: "abc123def",
+		SourceFiles: `["model.gguf","mmproj.gguf"]`,
+	}
+	if err := d.UpsertModel(&m); err != nil {
+		t.Fatalf("upsert model: %v", err)
+	}
+
+	models, err := d.ListModels()
+	if err != nil {
+		t.Fatalf("list models: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(models))
+	}
+	got := models[0]
+	if got.ModelDir != m.ModelDir || got.PrimaryFile != m.PrimaryFile {
+		t.Fatalf("model dir/file mismatch: dir=%q file=%q", got.ModelDir, got.PrimaryFile)
+	}
+	if got.Type != m.Type {
+		t.Fatalf("type mismatch: %s vs %s", got.Type, m.Type)
+	}
+	if got.MmprojPath != m.MmprojPath {
+		t.Fatalf("mmproj mismatch: %s vs %s", got.MmprojPath, m.MmprojPath)
+	}
+	if got.Metadata != m.Metadata {
+		t.Fatalf("metadata mismatch: %s vs %s", got.Metadata, m.Metadata)
+	}
+	if got.SourceRepo != m.SourceRepo {
+		t.Fatalf("source_repo mismatch: %s vs %s", got.SourceRepo, m.SourceRepo)
+	}
+	if got.SourceRevision != m.SourceRevision {
+		t.Fatalf("source_revision mismatch: %s vs %s", got.SourceRevision, m.SourceRevision)
+	}
+	if got.SourceFiles != m.SourceFiles {
+		t.Fatalf("source_files mismatch: %s vs %s", got.SourceFiles, m.SourceFiles)
+	}
+}
+
+func TestModelRoundTripSafetensors(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	d, err := Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+
+	m := model.ModelEntry{
+		ScanDir:     "/home/models",
+		DirName:     "Qwen2.5-Coder-1.5B",
+		ModelDir:    "/home/models/Qwen2.5-Coder-1.5B",
+		PrimaryFile: "",
+		DisplayName: "Qwen2.5-Coder-1.5B",
+		Type:        model.TypeSafetensors,
+		Metadata:    `{"architecture":"qwen2","parameter_count":1540000000}`,
+	}
+	if err := d.UpsertModel(&m); err != nil {
+		t.Fatalf("upsert safetensors model: %v", err)
+	}
+
+	models, err := d.ListModels()
+	if err != nil {
+		t.Fatalf("list models: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(models))
+	}
+	got := models[0]
+	if got.ModelDir != m.ModelDir {
+		t.Fatalf("model dir mismatch: %q vs %q", got.ModelDir, m.ModelDir)
+	}
+	if got.PrimaryFile != "" {
+		t.Fatalf("expected empty primary file, got %q", got.PrimaryFile)
+	}
+	if got.ModelPath() != m.ModelDir {
+		t.Fatalf("ModelPath mismatch: %q vs %q", got.ModelPath(), m.ModelDir)
+	}
 }
 
 func assertCount(t *testing.T, d *DB, table string, want int) {

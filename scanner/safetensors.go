@@ -26,6 +26,8 @@ func parseSafetensorMetadata(dir string) (*model.ModelMetadata, error) {
 		HeadDim              *int                    `json:"head_dim"`
 		IntermediateSize     *int                    `json:"intermediate_size"`
 		VocabSize            *int                    `json:"vocab_size"`
+		NumLocalExperts      *int                    `json:"num_local_experts"`
+		NumExpertsPerTok     *int                    `json:"num_experts_per_tok"`
 		TorchDType           string                  `json:"torch_dtype"`
 		QuantizationConfig   map[string]interface{}  `json:"quantization_config"`
 	}
@@ -61,6 +63,12 @@ func parseSafetensorMetadata(dir string) (*model.ModelMetadata, error) {
 	}
 	if cfg.VocabSize != nil {
 		meta.VocabSize = uint32(*cfg.VocabSize)
+	}
+	if cfg.NumLocalExperts != nil {
+		meta.NumExperts = uint32(*cfg.NumLocalExperts)
+	}
+	if cfg.NumExpertsPerTok != nil {
+		meta.NumExpertsPerToken = uint32(*cfg.NumExpertsPerTok)
 	}
 	if cfg.TorchDType != "" {
 		meta.Quantization = cfg.TorchDType

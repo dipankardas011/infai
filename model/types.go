@@ -1,16 +1,40 @@
 package model
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"path/filepath"
+)
+
+type ModelType string
+
+const (
+	TypeGGUF           ModelType = "gguf"
+	TypeGGUFMultimodal ModelType = "gguf_multimodal"
+	TypeSafetensors    ModelType = "safetensors"
+	TypeHFQuantized    ModelType = "hf_quantized"
+)
 
 type ModelEntry struct {
 	ID          int64
 	ScanDir     string
 	DirName     string
-	GGUFPath    string
+	ModelDir    string
+	PrimaryFile string
 	MmprojPath  string
 	DisplayName string
-	Type        string
+	Type        ModelType
 	Metadata    string
+
+	SourceRepo     string
+	SourceRevision string
+	SourceFiles    string
+}
+
+func (m ModelEntry) ModelPath() string {
+	if m.PrimaryFile != "" {
+		return filepath.Join(m.ModelDir, m.PrimaryFile)
+	}
+	return m.ModelDir
 }
 
 type ModelMetadata struct {
@@ -30,6 +54,8 @@ type ModelMetadata struct {
 	ChatTemplate         string `json:"chat_template,omitempty"`
 	ParameterCount       uint64 `json:"parameter_count,omitempty"`
 	VocabSize            uint32 `json:"vocab_size,omitempty"`
+	NumExperts           uint32 `json:"num_experts,omitempty"`
+	NumExpertsPerToken   uint32 `json:"num_experts_per_token,omitempty"`
 }
 
 type EngineKind string
@@ -93,7 +119,3 @@ func (p Profile) VLLMConfig() (VLLMConfig, error) {
 	err := json.Unmarshal([]byte(p.EngineConfig), &cfg)
 	return cfg, err
 }
-
-// ModelPath returns the local artifact accepted by an inference engine.
-// Non-GGUF scanners store the model directory in GGUFPath for schema compatibility.
-func (m ModelEntry) ModelPath() string { return m.GGUFPath }

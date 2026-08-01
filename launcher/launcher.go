@@ -24,7 +24,7 @@ func BuildSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile
 }
 
 func BuildLlamaCPPSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
-	if m.Type != "gguf" && m.Type != "gguf_multimodal" {
+	if m.Type != model.TypeGGUF && m.Type != model.TypeGGUFMultimodal {
 		return runner.LaunchSpec{}, fmt.Errorf("llama.cpp requires a GGUF model, got %s", m.Type)
 	}
 	args := BuildArgs(engine.Path, m, p)
@@ -36,7 +36,7 @@ func BuildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Pro
 	if modelPath == "" {
 		return runner.LaunchSpec{}, fmt.Errorf("vLLM model path is empty")
 	}
-	if m.Type != "safetensors" && m.Type != "hf_quantized" {
+	if m.Type != model.TypeSafetensors && m.Type != model.TypeHFQuantized {
 		return runner.LaunchSpec{}, fmt.Errorf("vLLM requires a Hugging Face/safetensors model directory, got %s", m.Type)
 	}
 	cfg, err := p.VLLMConfig()
@@ -86,7 +86,7 @@ func BuildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Pro
 }
 
 func BuildArgs(serverBin string, m model.ModelEntry, p model.Profile) []string {
-	args := []string{serverBin, "-m", m.GGUFPath}
+	args := []string{serverBin, "-m", m.ModelPath()}
 
 	if p.UseMmproj && m.MmprojPath != "" {
 		args = append(args, "--mmproj", m.MmprojPath)
