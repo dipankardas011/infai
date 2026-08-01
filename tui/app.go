@@ -185,7 +185,7 @@ func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, engine model.I
 		return nil
 	}
 	runID := a.runs.NewID()
-	sm, cmd, err := NewServerModel(runID, spec, p.Name, m.DisplayName, m.Type, p.ContextSize, p.Host, actualPort, a.width, a.height)
+	sm, cmd, err := NewServerModel(runID, spec, p.Name, m.DisplayName, string(m.Type), p.ContextSize, p.Host, actualPort, a.width, a.height)
 	if err != nil {
 		a.setErr(err.Error())
 		a.refreshHome()
@@ -193,7 +193,7 @@ func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, engine model.I
 	}
 	a.runs.Add(RunRecord{
 		ID: runID, ProfileID: p.ID, ModelID: m.ID,
-		ProfileName: p.Name, ModelName: m.DisplayName, ModelType: m.Type,
+		ProfileName: p.Name, ModelName: m.DisplayName, ModelType: string(m.Type),
 		EngineID: engine.ID, EngineName: engine.Name, EnginePath: engine.Path,
 		Host: p.Host, RequestedPort: p.Port, ActualPort: actualPort,
 		Model: m, Profile: p,

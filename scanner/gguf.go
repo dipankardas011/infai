@@ -9,49 +9,34 @@ import (
 	"github.com/dipankardas011/infai/model"
 )
 
-const (
-	maxKVCount   = 2000    // safety: real GGUF files have 50–200 keys; 2000 means corrupt header
-	maxKeyLen    = 1024    // safety: GGUF keys are at most ~50 chars; 1024 means corrupt key
-	maxStringLen = 100 << 10 // safety: chat templates max ~10KB; 100KB is generous headroom against OOM
-	maxArrayLen  = 10000   // safety: only for contiguous-alloc arrays (uint32/float32); string arrays bypass this
-)
+// read is a helper that reads a value of type T using the given byte order.
+func read[T any](r io.Reader, order binary.ByteOrder) (T, error) {
+	var v T
+	err := binary.Read(r, order, &v)
+	return v, err
+}
+
+// readCount reads a uint64 count value, using uint32 for GGUF v1 and uint64 for v2+.
+func readCount(r io.Reader, order binary.ByteOrder, version int) (uint64, error) {
+	if version == 1 {
+		v, err := read[uint32](r, order)
+		return uint64(v), err
+	}
+	return read[uint64](r, order)
+}
+
+const GGUF_MAGIC = 0x46554747
 
 var ggufFTypes = map[int32]string{
-	0:  "F32",
-	1:  "F16",
-	2:  "Q4_0",
-	3:  "Q4_1",
-	7:  "Q8_0",
-	8:  "Q5_0",
-	9:  "Q5_1",
-	10: "Q2_K",
-	11: "Q3_K_S",
-	12: "Q3_K_M",
-	13: "Q3_K_L",
-	14: "Q4_K_S",
-	15: "Q4_K_M",
-	16: "Q5_K_S",
-	17: "Q5_K_M",
-	18: "Q6_K",
-	19: "IQ2_XXS",
-	20: "IQ2_XS",
-	21: "Q2_K_S",
-	22: "IQ3_XS",
-	23: "IQ3_XXS",
-	24: "IQ1_S",
-	25: "IQ4_NL",
-	26: "IQ3_S",
-	27: "IQ3_M",
-	28: "IQ2_S",
-	29: "IQ2_M",
-	30: "IQ4_XS",
-	31: "IQ1_M",
-	32: "BF16",
-	33: "Q4_0_4_4",
-	34: "Q4_0_4_8",
-	35: "Q4_0_8_8",
-	36: "TQ1_0",
-	37: "TQ2_0",
+	0:  "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1",
+	7: "Q8_0", 8: "Q5_0", 9: "Q5_1",
+	10: "Q2_K", 11: "Q3_K_S", 12: "Q3_K_M", 13: "Q3_K_L",
+	14: "Q4_K_S", 15: "Q4_K_M", 16: "Q5_K_S", 17: "Q5_K_M", 18: "Q6_K",
+	19: "IQ2_XXS", 20: "IQ2_XS", 21: "Q2_K_S", 22: "IQ3_XS", 23: "IQ3_XXS",
+	24: "IQ1_S", 25: "IQ4_NL", 26: "IQ3_S", 27: "IQ3_M", 28: "IQ2_S", 29: "IQ2_M",
+	30: "IQ4_XS", 31: "IQ1_M", 32: "BF16",
+	33: "Q4_0_4_4", 34: "Q4_0_4_8", 35: "Q4_0_8_8",
+	36: "TQ1_0", 37: "TQ2_0",
 }
 
 func ParseGGUF(path string) (*model.ModelMetadata, error) {
@@ -66,6 +51,7 @@ func ParseGGUF(path string) (*model.ModelMetadata, error) {
 		return nil, fmt.Errorf("stat gguf: %w", err)
 	}
 
+	// Read magic (always little-endian).
 	var magic uint32
 	if err := binary.Read(f, binary.LittleEndian, &magic); err != nil {
 		return nil, fmt.Errorf("read gguf magic: %w", err)
@@ -74,31 +60,48 @@ func ParseGGUF(path string) (*model.ModelMetadata, error) {
 		return nil, fmt.Errorf("invalid gguf magic: 0x%08X", magic)
 	}
 
-	var version uint32
-	if err := binary.Read(f, binary.LittleEndian, &version); err != nil {
-		return nil, fmt.Errorf("read gguf version: %w", err)
+	// Detect endianness. After magic, seek to the last byte of the version
+	// uint32 (byte 7). v3 big-endian files store version as [0,0,0,3],
+	// little-endian as [3,0,0,0]. The last byte (position 7) is 0 for LE,
+	// nonzero for BE.
+	if _, err := f.Seek(3, io.SeekCurrent); err != nil {
+		return nil, fmt.Errorf("seek to endian marker: %w", err)
+	}
+	var marker int8
+	if err := binary.Read(f, binary.LittleEndian, &marker); err != nil {
+		return nil, fmt.Errorf("read endian marker: %w", err)
+	}
+	order := binary.ByteOrder(binary.LittleEndian)
+	if marker != 0 {
+		order = binary.BigEndian
+	}
+
+	// Seek back to just after magic and read the version in native order.
+	if _, err := f.Seek(4, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek to version: %w", err)
+	}
+	version, err := read[uint32](f, order)
+	if err != nil {
+		return nil, fmt.Errorf("read version: %w", err)
 	}
 	if version < 1 || version > 3 {
 		return nil, fmt.Errorf("unsupported gguf version %d", version)
 	}
 
-	var tensorCount uint64
-	if err := binary.Read(f, binary.LittleEndian, &tensorCount); err != nil {
-		return nil, fmt.Errorf("read gguf tensor count: %w", err)
+	tensorCount, err := readCount(f, order, int(version))
+	if err != nil {
+		return nil, fmt.Errorf("read tensor count: %w", err)
 	}
 	_ = tensorCount
 
-	var kvCount uint64
-	if err := binary.Read(f, binary.LittleEndian, &kvCount); err != nil {
-		return nil, fmt.Errorf("read gguf kv count: %w", err)
-	}
-	if kvCount > maxKVCount {
-		return nil, fmt.Errorf("too many metadata keys: %d", kvCount)
+	kvCount, err := readCount(f, order, int(version))
+	if err != nil {
+		return nil, fmt.Errorf("read kv count: %w", err)
 	}
 
-	kv, err := readGGUFMetadata(f, kvCount)
+	kv, err := readGGUFMetadata(f, order, int(version), kvCount)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read metadata: %w", err)
 	}
 
 	meta := &model.ModelMetadata{FileSizeBytes: fi.Size()}
@@ -106,103 +109,11 @@ func ParseGGUF(path string) (*model.ModelMetadata, error) {
 	return meta, nil
 }
 
-func readGGUFMetadata(r io.Reader, count uint64) (map[string]interface{}, error) {
-	kv := make(map[string]interface{}, count)
-	for i := uint64(0); i < count; i++ {
-		key, val, err := readGGUFKeyValue(r)
-		if err != nil {
-			return nil, fmt.Errorf("kv[%d]: %w", i, err)
-		}
-		if len(key) > maxKeyLen {
-			continue
-		}
-		kv[key] = val
-	}
-	return kv, nil
-}
-
-func readGGUFKeyValue(r io.Reader) (string, interface{}, error) {
-	key, err := readGGUFString(r)
+// readGGUFString reads a length-prefixed GGUF string.
+func readGGUFString(r io.Reader, order binary.ByteOrder, version int) (string, error) {
+	n, err := readCount(r, order, version)
 	if err != nil {
-		return "", nil, fmt.Errorf("read key: %w", err)
-	}
-
-	var valType uint32
-	if err := binary.Read(r, binary.LittleEndian, &valType); err != nil {
-		return "", nil, fmt.Errorf("read value type: %w", err)
-	}
-
-	val, err := readGGUFValue(r, valType)
-	if err != nil {
-		return "", nil, err
-	}
-	return key, val, nil
-}
-
-func readGGUFValue(r io.Reader, valType uint32) (interface{}, error) {
-	switch valType {
-	case 0:
-		var v uint8
-		err := binary.Read(r, binary.LittleEndian, &v)
-		return v, err
-	case 1:
-		var v int8
-		err := binary.Read(r, binary.LittleEndian, &v)
-		return v, err
-	case 2:
-		var v uint16
-		err := binary.Read(r, binary.LittleEndian, &v)
-		return v, err
-	case 3:
-		var v int16
-		err := binary.Read(r, binary.LittleEndian, &v)
-		return v, err
-	case 4:
-		var v uint32
-		err := binary.Read(r, binary.LittleEndian, &v)
-		return v, err
-	case 5:
-		var v int32
-		err := binary.Read(r, binary.LittleEndian, &v)
-		return v, err
-	case 6:
-		var v float32
-		err := binary.Read(r, binary.LittleEndian, &v)
-		return v, err
-	case 7:
-		var v uint8
-		if err := binary.Read(r, binary.LittleEndian, &v); err != nil {
-			return nil, err
-		}
-		return v != 0, nil
-	case 8:
-		return readGGUFString(r)
-	case 9:
-		return readGGUFArray(r)
-	case 10:
-		var v uint64
-		err := binary.Read(r, binary.LittleEndian, &v)
-		return v, err
-	case 11:
-		var v int64
-		err := binary.Read(r, binary.LittleEndian, &v)
-		return v, err
-	case 12:
-		var v float64
-		err := binary.Read(r, binary.LittleEndian, &v)
-		return v, err
-	default:
-		return nil, fmt.Errorf("unknown gguf value type: %d", valType)
-	}
-}
-
-func readGGUFString(r io.Reader) (string, error) {
-	var n uint64
-	if err := binary.Read(r, binary.LittleEndian, &n); err != nil {
 		return "", err
-	}
-	if n > maxStringLen {
-		return "", fmt.Errorf("string too long: %d", n)
 	}
 	b := make([]byte, n)
 	if _, err := io.ReadFull(r, b); err != nil {
@@ -211,45 +122,88 @@ func readGGUFString(r io.Reader) (string, error) {
 	return string(b), nil
 }
 
-func readGGUFArray(r io.Reader) (interface{}, error) {
-	var elemType uint32
-	if err := binary.Read(r, binary.LittleEndian, &elemType); err != nil {
+// readGGUFValue reads a single GGUF metadata value (scalar or array).
+func readGGUFValue(r io.Reader, order binary.ByteOrder, version int, valType uint32) (interface{}, error) {
+	switch valType {
+	case 0:
+		return read[uint8](r, order)
+	case 1:
+		return read[int8](r, order)
+	case 2:
+		return read[uint16](r, order)
+	case 3:
+		return read[int16](r, order)
+	case 4:
+		return read[uint32](r, order)
+	case 5:
+		return read[int32](r, order)
+	case 6:
+		return read[float32](r, order)
+	case 7:
+		v, err := read[uint8](r, order)
+		if err != nil {
+			return nil, err
+		}
+		return v != 0, nil
+	case 8:
+		return readGGUFString(r, order, version)
+	case 9:
+		return readGGUFArray(r, order, version)
+	case 10:
+		return read[uint64](r, order)
+	case 11:
+		return read[int64](r, order)
+	case 12:
+		return read[float64](r, order)
+	default:
+		return nil, fmt.Errorf("unknown gguf value type: %d", valType)
+	}
+}
+
+// readGGUFArray reads a GGUF array value.
+func readGGUFArray(r io.Reader, order binary.ByteOrder, version int) (interface{}, error) {
+	elemType, err := read[uint32](r, order)
+	if err != nil {
 		return nil, err
 	}
-	var length uint64
-	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
+	length, err := readCount(r, order, version)
+	if err != nil {
 		return nil, err
 	}
 
 	switch elemType {
 	case 4:
-		if length > maxArrayLen {
-			return nil, fmt.Errorf("array too long: %d", length)
-		}
-		arr := make([]uint32, length)
-		for i := uint64(0); i < length; i++ {
-			if err := binary.Read(r, binary.LittleEndian, &arr[i]); err != nil {
-				return nil, err
-			}
-		}
-		return arr, nil
+		return readArray[uint32](r, order, length)
 	case 6:
-		if length > maxArrayLen {
-			return nil, fmt.Errorf("array too long: %d", length)
-		}
-		arr := make([]float32, length)
+		return readArray[float32](r, order, length)
+	case 8:
+		arr := make([]string, length)
 		for i := uint64(0); i < length; i++ {
-			if err := binary.Read(r, binary.LittleEndian, &arr[i]); err != nil {
+			s, err := readGGUFString(r, order, version)
+			if err != nil {
 				return nil, err
 			}
+			arr[i] = s
 		}
 		return arr, nil
 	default:
-		return skipGGUFArray(r, elemType, length)
+		return discardGGUFArray(r, elemType, length)
 	}
 }
 
-func skipGGUFArray(r io.Reader, elemType uint32, length uint64) (interface{}, error) {
+func readArray[T any](r io.Reader, order binary.ByteOrder, length uint64) ([]T, error) {
+	arr := make([]T, length)
+	for i := uint64(0); i < length; i++ {
+		v, err := read[T](r, order)
+		if err != nil {
+			return nil, err
+		}
+		arr[i] = v
+	}
+	return arr, nil
+}
+
+func discardGGUFArray(r io.Reader, elemType uint32, length uint64) (interface{}, error) {
 	var elemSize uint64
 	switch elemType {
 	case 0, 1, 7:
@@ -258,24 +212,121 @@ func skipGGUFArray(r io.Reader, elemType uint32, length uint64) (interface{}, er
 		elemSize = 2
 	case 4, 5, 6:
 		elemSize = 4
+	case 10, 11, 12:
+		elemSize = 8
+	default:
+		elemSize = 1
+	}
+	if _, err := io.CopyN(io.Discard, r, int64(elemSize*length)); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// interestingPrefix reports whether the key is needed for metadata extraction.
+func interestingPrefix(key string) bool {
+	for _, p := range []string{
+		"general.",
+		"tokenizer.ggml.model",
+		"tokenizer.chat_template",
+	} {
+		if len(key) >= len(p) && key[:len(p)] == p {
+			return true
+		}
+	}
+	// Architecture-specific keys like llama.context_length, llama.embedding_length, etc.
+	// These all have the form {arch}.xxx — check for known suffixes.
+	for _, s := range []string{
+		".context_length", ".embedding_length", ".block_count",
+		".feed_forward_length", ".attention.head_count", ".attention.head_count_kv",
+		".attention.key_length", ".vocab_size",
+		".expert_count", ".expert_used_count",
+	} {
+		if len(key) > len(s) && key[len(key)-len(s):] == s {
+			return true
+		}
+	}
+	return false
+}
+
+func readGGUFMetadata(r io.Reader, order binary.ByteOrder, version int, count uint64) (map[string]interface{}, error) {
+	kv := make(map[string]interface{})
+	for i := uint64(0); i < count; i++ {
+		key, err := readGGUFString(r, order, version)
+		if err != nil {
+			return nil, fmt.Errorf("kv[%d] key: %w", i, err)
+		}
+
+		valType, err := read[uint32](r, order)
+		if err != nil {
+			return nil, fmt.Errorf("kv[%d] value type: %w", i, err)
+		}
+
+		if interestingPrefix(key) {
+			val, err := readGGUFValue(r, order, version, valType)
+			if err != nil {
+				return nil, fmt.Errorf("kv[%d] %q: %w", i, key, err)
+			}
+			kv[key] = val
+		} else {
+			if _, err := skipGGUFValue(r, order, version, valType); err != nil {
+				return nil, fmt.Errorf("kv[%d] skip %q: %w", i, key, err)
+			}
+		}
+	}
+	return kv, nil
+}
+
+func skipGGUFValue(r io.Reader, order binary.ByteOrder, version int, valType uint32) (interface{}, error) {
+	switch valType {
+	case 0, 1, 7:
+		var buf [1]byte
+		_, err := io.ReadFull(r, buf[:])
+		return nil, err
+	case 2, 3:
+		var buf [2]byte
+		_, err := io.ReadFull(r, buf[:])
+		return nil, err
+	case 4, 5, 6:
+		var buf [4]byte
+		_, err := io.ReadFull(r, buf[:])
+		return nil, err
+	case 8:
+		return readGGUFString(r, order, version)
+	case 9:
+		elemType, err := read[uint32](r, order)
+		if err != nil {
+			return nil, err
+		}
+		length, err := readCount(r, order, version)
+		if err != nil {
+			return nil, err
+		}
+		return skipGGUFArray(r, order, version, elemType, length)
+	case 10, 11, 12:
+		var buf [8]byte
+		_, err := io.ReadFull(r, buf[:])
+		return nil, err
+	default:
+		return nil, fmt.Errorf("unknown gguf value type: %d", valType)
+	}
+}
+
+func skipGGUFArray(r io.Reader, order binary.ByteOrder, version int, elemType uint32, length uint64) (interface{}, error) {
+	if length == 0 {
+		return nil, nil
+	}
+	switch elemType {
 	case 8:
 		for i := uint64(0); i < length; i++ {
-			if _, err := readGGUFString(r); err != nil {
+			if _, err := readGGUFString(r, order, version); err != nil {
 				return nil, err
 			}
 		}
 		return nil, nil
-	case 10, 11, 12:
-		elemSize = 8
 	default:
-		elemSize = 4
+		return discardGGUFArray(r, elemType, length)
 	}
-	skip := elemSize * length
-	discard := make([]byte, skip)
-	if _, err := io.ReadFull(r, discard); err != nil {
-		return nil, err
-	}
-	return nil, nil
 }
 
 func hydrateGGUFMeta(meta *model.ModelMetadata, kv map[string]interface{}) {
@@ -344,6 +395,13 @@ func hydrateGGUFMeta(meta *model.ModelMetadata, kv map[string]interface{}) {
 		meta.HeadDimension = v
 	} else if meta.EmbeddingLength > 0 && meta.AttentionHeadCount > 0 {
 		meta.HeadDimension = meta.EmbeddingLength / meta.AttentionHeadCount
+	}
+
+	if v, ok := getUint32(kv, arch+".expert_count"); ok {
+		meta.NumExperts = v
+	}
+	if v, ok := getUint32(kv, arch+".expert_used_count"); ok {
+		meta.NumExpertsPerToken = v
 	}
 
 	if v, ok := kv["tokenizer.ggml.model"]; ok {

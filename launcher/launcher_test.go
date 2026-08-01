@@ -25,7 +25,7 @@ func TestBuildSpecVLLM(t *testing.T) {
 		BaseArgs: []string{"serve"},
 		Env:      map[string]string{"FLASHINFER_EXTRA_CUDAFLAGS": "-allow-unsupported-compiler"},
 	}
-	m := model.ModelEntry{GGUFPath: "/models/Qwen2.5-Coder-1.5B", Type: "safetensors"}
+	m := model.ModelEntry{ModelDir: "/models/Qwen2.5-Coder-1.5B", Type: model.TypeSafetensors}
 	p := model.Profile{Host: "0.0.0.0", Port: 8000, ContextSize: 8192, EngineConfig: string(raw)}
 
 	spec, err := BuildSpec(engine, m, p)
@@ -48,11 +48,11 @@ func TestBuildSpecVLLM(t *testing.T) {
 }
 
 func TestBuildSpecRejectsGGUFForVLLM(t *testing.T) {
-	for _, modelType := range []string{"gguf", "gguf_multimodal", "mlx", "mlx_quantized"} {
-		t.Run(modelType, func(t *testing.T) {
+	for _, modelType := range []model.ModelType{model.TypeGGUF, model.TypeGGUFMultimodal, "mlx", "mlx_quantized"} {
+		t.Run(string(modelType), func(t *testing.T) {
 			_, err := BuildSpec(
 				model.InferenceEngine{Kind: model.EngineVLLM, Path: "vllm"},
-				model.ModelEntry{GGUFPath: "/models/qwen", Type: modelType},
+				model.ModelEntry{ModelDir: "/models/qwen", Type: modelType},
 				model.Profile{},
 			)
 			if err == nil {
@@ -64,7 +64,7 @@ func TestBuildSpecRejectsGGUFForVLLM(t *testing.T) {
 
 func TestBuildSpecLlamaCPP(t *testing.T) {
 	engine := model.InferenceEngine{Kind: model.EngineLlamaCPP, Path: "/bin/llama-server"}
-	m := model.ModelEntry{GGUFPath: "/models/qwen.gguf", Type: "gguf"}
+	m := model.ModelEntry{ModelDir: "/models", PrimaryFile: "qwen.gguf", Type: model.TypeGGUF}
 	p := model.Profile{Host: "127.0.0.1", Port: 8000, ContextSize: 4096, NGL: "auto"}
 	spec, err := BuildSpec(engine, m, p)
 	if err != nil {
@@ -72,5 +72,8 @@ func TestBuildSpecLlamaCPP(t *testing.T) {
 	}
 	if spec.Command != engine.Path || len(spec.Args) == 0 || spec.Args[0] != "-m" {
 		t.Fatalf("unexpected spec: %#v", spec)
+	}
+	if spec.Args[1] != "/models/qwen.gguf" {
+		t.Fatalf("expected model path /models/qwen.gguf, got %s", spec.Args[1])
 	}
 }

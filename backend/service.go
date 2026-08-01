@@ -182,7 +182,7 @@ func (s *Service) SyncModels(folders []string) (SyncResult, error) {
 	}
 	for i := range entries {
 		if err := scanner.LoadModelMetadata(&entries[i]); err != nil {
-			return SyncResult{}, fmt.Errorf("load metadata for %s: %w", entries[i].GGUFPath, err)
+			return SyncResult{}, fmt.Errorf("load metadata for %s: %w", entries[i].ModelPath(), err)
 		}
 	}
 	removed, updated, err := s.db.Sync(entries)

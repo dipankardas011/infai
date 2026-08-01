@@ -9,10 +9,6 @@ import (
 	"github.com/dipankardas011/infai/model"
 )
 
-const (
-	GGUF_MAGIC = 0x46554747
-)
-
 func isMmproj(name string) bool {
 	return strings.Contains(strings.ToLower(name), "mmproj")
 }
@@ -23,8 +19,8 @@ func stem(name string) string {
 
 func LoadModelMetadata(m *model.ModelEntry) error {
 	switch m.Type {
-	case "gguf", "gguf_multimodal":
-		meta, err := ParseGGUF(m.GGUFPath)
+	case model.TypeGGUF, model.TypeGGUFMultimodal:
+		meta, err := ParseGGUF(m.ModelPath())
 		if err != nil {
 			return err
 		}
@@ -33,8 +29,8 @@ func LoadModelMetadata(m *model.ModelEntry) error {
 			return err
 		}
 		m.Metadata = string(b)
-	case "safetensors", "hf_quantized":
-		meta, err := parseSafetensorMetadata(m.GGUFPath)
+	case model.TypeSafetensors, model.TypeHFQuantized:
+		meta, err := parseSafetensorMetadata(m.ModelDir)
 		if err != nil {
 			return err
 		}
@@ -107,32 +103,34 @@ func scanDirectory(dir string) ([]model.ModelEntry, error) {
 			entry := model.ModelEntry{
 				ScanDir:     dir,
 				DirName:     ggufStem,
-				GGUFPath:    path,
+				ModelDir:    filepath.Dir(path),
+				PrimaryFile: filepath.Base(path),
 				MmprojPath:  matchMmproj(ggufStem, mmprojFiles),
 				DisplayName: ggufStem,
-				Type:        "gguf",
+				Type:        model.TypeGGUF,
 			}
 			if entry.MmprojPath != "" {
-				entry.Type = "gguf_multimodal"
+				entry.Type = model.TypeGGUFMultimodal
 			}
 			models = append(models, entry)
 		}
 	}
 
 	if len(safetensorsFiles) > 0 && configJson != "" {
-		modelType := "safetensors"
+		modelType := model.TypeSafetensors
 		if b, err := os.ReadFile(configJson); err == nil {
 			var cfg map[string]any
 			if json.Unmarshal(b, &cfg) == nil {
 				if _, ok := cfg["quantization_config"]; ok {
-					modelType = "hf_quantized"
+					modelType = model.TypeHFQuantized
 				}
 			}
 		}
 		entry := model.ModelEntry{
 			ScanDir:     dir,
 			DirName:     filepath.Base(dir),
-			GGUFPath:    dir,
+			ModelDir:    dir,
+			PrimaryFile: "",
 			DisplayName: filepath.Base(dir),
 			Type:        modelType,
 		}

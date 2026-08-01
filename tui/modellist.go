@@ -30,7 +30,7 @@ func (m modelItem) Title() string       { return m.entry.DisplayName }
 func (m modelItem) Description() string {
 	scanPart := styleMuted.Render("[" + m.entry.ScanDir + "]")
 	if m.entry.Type != "" {
-		return styleBadge.Render(m.entry.Type) + "  " + scanPart
+		return styleBadge.Render(string(m.entry.Type)) + "  " + scanPart
 	}
 	return scanPart
 }
@@ -49,7 +49,7 @@ func (d modelDelegate) Render(w io.Writer, m list.Model, index int, item list.It
 	scanPart := styleMuted.Render("[" + i.entry.ScanDir + "]")
 	desc := scanPart
 	if i.entry.Type != "" {
-		desc = styleBadge.Render(i.entry.Type) + "  " + scanPart
+		desc = styleBadge.Render(string(i.entry.Type)) + "  " + scanPart
 	}
 
 	if index == m.Index() {
