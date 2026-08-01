@@ -9,9 +9,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/dipankardas011/infai/backend"
 	"github.com/dipankardas011/infai/config"
 	"github.com/dipankardas011/infai/db"
-	"github.com/dipankardas011/infai/scanner"
 	"github.com/dipankardas011/infai/tui"
 )
 
@@ -31,32 +31,28 @@ func main() {
 	}
 	defer database.Close()
 
+	service := backend.New(database)
+
 	scanDirs, err := database.ListScanDirs()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "list scan dirs: %v\n", err)
 		os.Exit(1)
 	}
 
-	entries, err := scanner.Scan(scanDirs)
+	syncResult, err := service.SyncModels(scanDirs)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "scan: %v\n", err)
+		fmt.Fprintf(os.Stderr, "sync: %v\n", err)
 		os.Exit(1)
 	}
-	for i := range entries {
-		if err := scanner.LoadModelMetadata(&entries[i]); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: metadata parse for %s: %v\n", entries[i].DisplayName, err)
-		}
-		if err := database.UpsertModel(&entries[i]); err != nil {
-			fmt.Fprintf(os.Stderr, "upsert model: %v\n", err)
-			os.Exit(1)
-		}
+	for _, issue := range syncResult.Issues {
+		fmt.Fprintf(os.Stderr, "warning: %s: %v\n", issue.RootDir, issue.Error)
 	}
 
 	if theme, err := database.GetSetting("theme"); err == nil && theme != "" {
 		tui.SetTheme(theme)
 	}
 
-	app := tui.NewApp(database, scanDirs, entries, 80, 24)
+	app := tui.NewApp(database, scanDirs, syncResult.Models, 80, 24)
 	p := tea.NewProgram(&app, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	sigChan := make(chan os.Signal, 1)

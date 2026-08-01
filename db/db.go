@@ -250,6 +250,26 @@ LIMIT ?`, limit)
 }
 
 func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
+	byRoot := make(map[string][]model.ModelEntry)
+	for _, e := range scanned {
+		byRoot[e.ScanDir] = append(byRoot[e.ScanDir], e)
+	}
+	return d.SyncPerRoot(byRoot)
+}
+
+func (d *DB) SyncPerRoot(scannedByRoot map[string][]model.ModelEntry) (int, int, error) {
+	successfulRoots := make(map[string]bool, len(scannedByRoot))
+	for root := range scannedByRoot {
+		successfulRoots[root] = true
+	}
+
+	scannedSet := make(map[string]bool)
+	for _, entries := range scannedByRoot {
+		for _, m := range entries {
+			scannedSet[key(m.ModelDir, m.PrimaryFile)] = true
+		}
+	}
+
 	var removed, updated int
 
 	tx, err := d.conn.Begin()
@@ -258,20 +278,25 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 	}
 	defer tx.Rollback()
 
-	existing, err := tx.Query(`SELECT id, model_dir, primary_file FROM models`)
+	existing, err := tx.Query(`SELECT id, scan_dir, model_dir, primary_file FROM models`)
 	if err != nil {
 		return 0, 0, err
 	}
 
+	if existing.Err() != nil {
+		return 0, 0, existing.Err()
+	}
+
 	type dbModel struct {
 		id          int64
+		scanDir     string
 		modelDir    string
 		primaryFile string
 	}
 	var dbModels []dbModel
 	for existing.Next() {
 		var dm dbModel
-		if err := existing.Scan(&dm.id, &dm.modelDir, &dm.primaryFile); err != nil {
+		if err := existing.Scan(&dm.id, &dm.scanDir, &dm.modelDir, &dm.primaryFile); err != nil {
 			existing.Close()
 			return 0, 0, err
 		}
@@ -279,17 +304,13 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 	}
 	existing.Close()
 
-	scannedSet := make(map[string]bool, len(scanned))
-	for _, m := range scanned {
-		scannedSet[key(m.ModelDir, m.PrimaryFile)] = true
-	}
-
 	for _, dm := range dbModels {
 		artifactPath := dm.modelDir
 		if dm.primaryFile != "" {
 			artifactPath = filepath.Join(dm.modelDir, dm.primaryFile)
 		}
-		if _, exists := os.Stat(artifactPath); os.IsNotExist(exists) {
+		// Always remove models whose files no longer exist on disk.
+		if _, statErr := os.Stat(artifactPath); os.IsNotExist(statErr) {
 			_, err := tx.Exec(`DELETE FROM models WHERE id = ?`, dm.id)
 			if err != nil {
 				return 0, 0, err
@@ -302,7 +323,10 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 			continue
 		}
 
-		if !scannedSet[key(dm.modelDir, dm.primaryFile)] {
+		// If the model's scan root was scanned successfully but the model
+		// is no longer in the scanned set, remove it. If the root wasn't
+		// scanned (error or not in this sync), preserve the model.
+		if successfulRoots[dm.scanDir] && !scannedSet[key(dm.modelDir, dm.primaryFile)] {
 			_, err := tx.Exec(`DELETE FROM models WHERE id = ?`, dm.id)
 			if err != nil {
 				return 0, 0, err
@@ -316,14 +340,15 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 	}
 
 	seen := make(map[string]bool)
-	for _, m := range scanned {
-		k := key(m.ModelDir, m.PrimaryFile)
-		if seen[k] {
-			continue
-		}
-		seen[k] = true
-		ggufPath := m.ModelPath()
-		_, err := tx.Exec(`
+	for _, entries := range scannedByRoot {
+		for _, m := range entries {
+			k := key(m.ModelDir, m.PrimaryFile)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			ggufPath := m.ModelPath()
+			_, err := tx.Exec(`
 			INSERT INTO models (scan_dir, dir_name, model_dir, primary_file, gguf_path, mmproj_path, display_name, type, metadata, source_repo, source_revision, source_files)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(gguf_path) DO UPDATE SET
@@ -340,10 +365,11 @@ func (d *DB) Sync(scanned []model.ModelEntry) (int, int, error) {
 				source_files=excluded.source_files,
 				last_verified=CURRENT_TIMESTAMP
 		`, m.ScanDir, m.DirName, m.ModelDir, m.PrimaryFile, ggufPath, m.MmprojPath, m.DisplayName, m.Type, m.Metadata, m.SourceRepo, m.SourceRevision, m.SourceFiles)
-		if err != nil {
-			return 0, 0, err
+			if err != nil {
+				return 0, 0, err
+			}
+			updated++
 		}
-		updated++
 	}
 
 	if err := tx.Commit(); err != nil {

@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"os"
@@ -659,4 +660,90 @@ func TestScanInvalidDirectory(t *testing.T) {
 	entries, err := Scan([]string{"/nonexistent/path/that/does/not/exist"})
 	require.NoError(t, err)
 	assert.Empty(t, entries)
+}
+
+func TestScanWithResultsReturnsPerRootIssues(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := "/nonexistent/path/that/does/not/exist"
+	writeMinimalGGUF(t, dir1, "model.gguf")
+
+	results := ScanWithResults([]string{dir1, dir2})
+	require.Len(t, results, 2)
+	assert.NoError(t, results[0].Error)
+	assert.Len(t, results[0].Entries, 1)
+	assert.Error(t, results[1].Error)
+	assert.Empty(t, results[1].Entries)
+}
+
+func TestScanWithResultsMixedSuccessAndFailure(t *testing.T) {
+	dir1 := t.TempDir()
+	writeMinimalGGUF(t, dir1, "model-a.gguf")
+	writeMinimalGGUF(t, dir1, "model-b.gguf")
+	dir2 := t.TempDir()
+	os.RemoveAll(dir2) // Remove after creating to make it unreadable via scan
+
+	results := ScanWithResults([]string{dir1, dir2})
+	require.Len(t, results, 2)
+
+	var successCount, failCount int
+	for _, r := range results {
+		if r.Error == nil {
+			successCount++
+		} else {
+			failCount++
+		}
+	}
+	assert.Equal(t, 1, successCount)
+	assert.Equal(t, 1, failCount)
+}
+
+func TestNormalizePath(t *testing.T) {
+	t.Run("empty path", func(t *testing.T) {
+		_, err := NormalizePath("")
+		assert.Error(t, err)
+	})
+
+	t.Run("whitespace path", func(t *testing.T) {
+		_, err := NormalizePath("   ")
+		assert.Error(t, err)
+	})
+
+	t.Run("nonexistent path", func(t *testing.T) {
+		_, err := NormalizePath("/nonexistent/path/xyz")
+		assert.Error(t, err)
+	})
+
+	t.Run("valid path", func(t *testing.T) {
+		dir := t.TempDir()
+		normalized, err := NormalizePath(dir)
+		assert.NoError(t, err)
+		assert.Equal(t, dir, normalized)
+	})
+}
+
+func TestScanWithProgressCallback(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalGGUF(t, dir, "a.gguf")
+	writeMinimalGGUF(t, dir, "b.gguf")
+
+	var progressCalls []string
+	prog := func(rootDir string, entryCount int) {
+		progressCalls = append(progressCalls, rootDir)
+	}
+
+	results := ScanWithContext(nil, []string{dir}, prog)
+	require.Len(t, results, 1)
+	assert.Len(t, progressCalls, 1)
+	assert.Len(t, results[0].Entries, 2)
+}
+
+func TestScanWithContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	dir := t.TempDir()
+	results := ScanWithContext(ctx, []string{dir}, nil)
+	require.Len(t, results, 1)
+	assert.Error(t, results[0].Error)
+	assert.Contains(t, results[0].Error.Error(), "canceled")
 }
