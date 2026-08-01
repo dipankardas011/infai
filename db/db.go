@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,18 +79,15 @@ func (d *DB) runMigrations() error {
 			}
 			return fmt.Errorf("migration %d: %w", v, err)
 		}
+		slog.Info("migrated", "to", v)
 		if err := patches.Apply(d.conn, v-1, v); err != nil {
 			return fmt.Errorf("patch %d: %w", v, err)
 		}
 	}
 
-	newVersion, _, err := m.Version()
+	_, _, err = m.Version()
 	if err != nil && !errors.Is(err, migrate.ErrNilVersion) {
 		return fmt.Errorf("failed to get new migration version: %w", err)
-	}
-
-	if newVersion > currentVersion {
-		fmt.Printf("migrated from version %d to %d\n", currentVersion, newVersion)
 	}
 
 	_, err = d.conn.Exec(`

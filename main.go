@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -26,7 +27,7 @@ func main() {
 
 	database, err := db.Open()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "db: %v\n", err)
+		slog.Error("open database", "error", err)
 		os.Exit(1)
 	}
 	defer database.Close()
@@ -35,17 +36,17 @@ func main() {
 
 	scanDirs, err := database.ListScanDirs()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "list scan dirs: %v\n", err)
+		slog.Error("list scan dirs", "error", err)
 		os.Exit(1)
 	}
 
 	syncResult, err := service.SyncModels(scanDirs)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "sync: %v\n", err)
+		slog.Error("sync models", "error", err)
 		os.Exit(1)
 	}
 	for _, issue := range syncResult.Issues {
-		fmt.Fprintf(os.Stderr, "warning: %s: %v\n", issue.RootDir, issue.Error)
+		slog.Warn("scan issue", "root", issue.RootDir, "error", issue.Error)
 	}
 
 	if theme, err := database.GetSetting("theme"); err == nil && theme != "" {
@@ -63,7 +64,7 @@ func main() {
 	}()
 
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "tui: %v\n", err)
+		slog.Error("tui", "error", err)
 		os.Exit(1)
 	}
 }
