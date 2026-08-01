@@ -332,9 +332,13 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case saveProfileMsg:
 		p := msg.profile
-		if err := a.service.SaveProfile(&p); err != nil {
+		warns, err := a.service.SaveProfile(&p)
+		if err != nil {
 			a.setErr(err.Error())
 			return a, nil
+		}
+		if len(warns) > 0 {
+			a.setToast(toastWarning, warns.Error())
 		}
 		a.refreshHome()
 		a.screen = screenHome

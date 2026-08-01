@@ -48,10 +48,25 @@ func TestBuildSpecVLLM(t *testing.T) {
 }
 
 func TestBuildSpecRejectsGGUFForVLLM(t *testing.T) {
-	for _, modelType := range []model.ModelType{model.TypeGGUF, model.TypeGGUFMultimodal, model.TypeSafetensors, model.TypeHFQuantized} {
+	for _, modelType := range []model.ModelType{model.TypeGGUF, model.TypeGGUFMultimodal} {
 		t.Run(string(modelType), func(t *testing.T) {
 			_, err := BuildSpec(
 				model.InferenceEngine{Kind: model.EngineVLLM, Path: "vllm"},
+				model.ModelEntry{ModelDir: "/models/qwen", Type: modelType},
+				model.Profile{},
+			)
+			if err == nil {
+				t.Fatalf("expected %s compatibility error", modelType)
+			}
+		})
+	}
+}
+
+func TestBuildSpecRejectsSafetensorsForLlamaCPP(t *testing.T) {
+	for _, modelType := range []model.ModelType{model.TypeSafetensors, model.TypeHFQuantized} {
+		t.Run(string(modelType), func(t *testing.T) {
+			_, err := BuildSpec(
+				model.InferenceEngine{Kind: model.EngineLlamaCPP, Path: "/bin/llama-server"},
 				model.ModelEntry{ModelDir: "/models/qwen", Type: modelType},
 				model.Profile{},
 			)

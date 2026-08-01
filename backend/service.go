@@ -1,8 +1,10 @@
 package backend
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,17 +90,48 @@ func (s *Service) GetProfile(id int64) (model.Profile, error) {
 	return s.db.GetProfile(id)
 }
 
-func (s *Service) SaveProfile(p *model.Profile) error {
+func (s *Service) SaveProfile(p *model.Profile) (ValidationErrors, error) {
 	if p == nil {
-		return fmt.Errorf("profile is nil")
+		return nil, fmt.Errorf("profile is nil")
 	}
-	if p.InferenceEngineID == "" {
-		return fmt.Errorf("inference engine is required")
+
+	var m *model.ModelEntry
+	var engine *model.InferenceEngine
+
+	if p.ModelID > 0 {
+		models, err := s.db.ListModels()
+		if err == nil {
+			for i := range models {
+				if models[i].ID == p.ModelID {
+					m = &models[i]
+					break
+				}
+			}
+		}
 	}
-	if _, err := s.db.GetInferenceEngineByID(p.InferenceEngineID); err != nil {
-		return fmt.Errorf("inference engine: %w", err)
+	if p.InferenceEngineID != "" {
+		e, err := s.db.GetInferenceEngineByID(p.InferenceEngineID)
+		if err == nil {
+			engine = &e
+		}
 	}
-	return s.db.UpsertProfile(p)
+
+	issues := ValidateProfile(p, m, engine)
+	if issues.HasErrors() {
+		slog.Error("profile validation failed", "profile", p.Name, "issues", issues)
+		return issues.Warnings(), fmt.Errorf("validation: %w", issues.Errors())
+	}
+
+	if err := s.db.UpsertProfile(p); err != nil {
+		return nil, err
+	}
+
+	if warnings := issues.Warnings(); len(warnings) > 0 {
+		slog.Warn("profile validation warnings but saved", "profile", p.Name, "warnings", warnings)
+		return warnings, nil
+	}
+
+	return nil, nil
 }
 
 func (s *Service) DeleteProfile(id int64) error {
@@ -170,30 +203,53 @@ type SyncResult struct {
 	Removed int
 	Updated int
 	Models  []model.ModelEntry
+	Issues  []scanner.ScanResult
 }
 
 func (s *Service) SyncModels(folders []string) (SyncResult, error) {
+	return s.SyncModelsWithContext(context.Background(), folders, nil)
+}
+
+func (s *Service) SyncModelsWithContext(ctx context.Context, folders []string, progress scanner.ProgressFunc) (SyncResult, error) {
 	if len(folders) == 0 {
 		return SyncResult{}, fmt.Errorf("no scan folders configured")
 	}
-	entries, err := scanner.Scan(folders)
-	if err != nil {
-		return SyncResult{}, fmt.Errorf("scan: %w", err)
-	}
-	for i := range entries {
-		if err := scanner.LoadModelMetadata(&entries[i]); err != nil {
-			return SyncResult{}, fmt.Errorf("load metadata for %s: %w", entries[i].ModelPath(), err)
+
+	results := scanner.ScanWithContext(ctx, folders, progress)
+	scannedByRoot := make(map[string][]model.ModelEntry)
+	var issues []scanner.ScanResult
+
+	for _, r := range results {
+		if r.Error != nil {
+			issues = append(issues, r)
+			continue
 		}
+		entriesWithMeta := make([]model.ModelEntry, 0, len(r.Entries))
+		for _, entry := range r.Entries {
+			e := entry
+			if err := scanner.LoadModelMetadata(&e); err != nil {
+				issues = append(issues, scanner.ScanResult{
+					RootDir: r.RootDir,
+					Error:   fmt.Errorf("metadata parse for %s: %w", e.DisplayName, err),
+				})
+				continue
+			}
+			entriesWithMeta = append(entriesWithMeta, e)
+		}
+		scannedByRoot[r.RootDir] = entriesWithMeta
 	}
-	removed, updated, err := s.db.Sync(entries)
+
+	removed, updated, err := s.db.SyncPerRoot(scannedByRoot)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("sync: %w", err)
 	}
+
 	models, err := s.db.ListModels()
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("list models after sync: %w", err)
 	}
-	return SyncResult{Removed: removed, Updated: updated, Models: models}, nil
+
+	return SyncResult{Removed: removed, Updated: updated, Models: models, Issues: issues}, nil
 }
 
 func (s *Service) AddScanDir(path string) error {

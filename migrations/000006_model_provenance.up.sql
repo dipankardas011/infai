@@ -1,3 +1,0 @@
-ALTER TABLE models ADD COLUMN source_repo TEXT NOT NULL DEFAULT '';
-ALTER TABLE models ADD COLUMN source_revision TEXT NOT NULL DEFAULT '';
-ALTER TABLE models ADD COLUMN source_files TEXT NOT NULL DEFAULT '[]';

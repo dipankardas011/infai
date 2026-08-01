@@ -1,13 +1,23 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/dipankardas011/infai/model"
 )
+
+type ScanResult struct {
+	RootDir string
+	Entries []model.ModelEntry
+	Error   error
+}
+
+type ProgressFunc func(rootDir string, entryCount int)
 
 func isMmproj(name string) bool {
 	return strings.Contains(strings.ToLower(name), "mmproj")
@@ -44,15 +54,56 @@ func LoadModelMetadata(m *model.ModelEntry) error {
 }
 
 func Scan(dirs []string) ([]model.ModelEntry, error) {
+	results := ScanWithResults(dirs)
 	var out []model.ModelEntry
-	for _, dir := range dirs {
-		models, err := scanDirectory(dir)
-		if err != nil {
-			continue
-		}
-		out = append(out, models...)
+	for _, r := range results {
+		out = append(out, r.Entries...)
 	}
 	return out, nil
+}
+
+func ScanWithResults(dirs []string) []ScanResult {
+	return ScanWithContext(context.Background(), dirs, nil)
+}
+
+func ScanWithContext(ctx context.Context, dirs []string, progress ProgressFunc) []ScanResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var results []ScanResult
+	for _, dir := range dirs {
+		if err := ctx.Err(); err != nil {
+			results = append(results, ScanResult{RootDir: dir, Error: err})
+			continue
+		}
+		normalized, err := NormalizePath(dir)
+		if err != nil {
+			results = append(results, ScanResult{RootDir: dir, Error: err})
+			continue
+		}
+		entries, scanErr := scanDirectory(normalized)
+		result := ScanResult{RootDir: normalized, Entries: entries, Error: scanErr}
+		if progress != nil {
+			progress(normalized, len(entries))
+		}
+		results = append(results, result)
+	}
+	return results
+}
+
+func NormalizePath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return resolved, fmt.Errorf("unable to resolve path: %w", err)
+	}
+	if _, err := os.Stat(resolved); err != nil {
+		return resolved, fmt.Errorf("path is not accessible: %w", err)
+	}
+	return resolved, nil
 }
 
 func scanDirectory(dir string) ([]model.ModelEntry, error) {
@@ -102,7 +153,6 @@ func scanDirectory(dir string) ([]model.ModelEntry, error) {
 			ggufStem := stem(filepath.Base(path))
 			entry := model.ModelEntry{
 				ScanDir:     dir,
-				DirName:     ggufStem,
 				ModelDir:    filepath.Dir(path),
 				PrimaryFile: filepath.Base(path),
 				MmprojPath:  matchMmproj(ggufStem, mmprojFiles),
@@ -128,7 +178,6 @@ func scanDirectory(dir string) ([]model.ModelEntry, error) {
 		}
 		entry := model.ModelEntry{
 			ScanDir:     dir,
-			DirName:     filepath.Base(dir),
 			ModelDir:    dir,
 			PrimaryFile: "",
 			DisplayName: filepath.Base(dir),

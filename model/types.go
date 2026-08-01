@@ -17,7 +17,6 @@ const (
 type ModelEntry struct {
 	ID          int64
 	ScanDir     string
-	DirName     string
 	ModelDir    string
 	PrimaryFile string
 	MmprojPath  string
