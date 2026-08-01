@@ -247,12 +247,12 @@ tabEngines  = 2         // Executor configuration
 type ModelEntry struct {
     ID          int64       // DB primary key
     ScanDir     string      // Parent directory from scan_dirs
-    DirName     string      // Directory/file stem name
-    GGUFPath    string      // Full path to .gguf file
+    ModelDir    string      // Directory containing the model
+    PrimaryFile string      // Filename or empty for dir-based models
     MmprojPath  string      // Optional multimodal projector
     DisplayName string      // Human-readable name
-    Type        string      // "gguf" | "gguf_multimodal" | "mlx" | "safetensors" | "mlx_quantized" | "hf_quantized"
-    Metadata    string      // Additional metadata (reserved)
+    Type        string      // "gguf" | "gguf_multimodal" | "safetensors" | "hf_quantized"
+    Metadata    string      // JSON-serialized ModelMetadata
 }
 ```
 

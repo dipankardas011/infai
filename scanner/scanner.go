@@ -153,7 +153,6 @@ func scanDirectory(dir string) ([]model.ModelEntry, error) {
 			ggufStem := stem(filepath.Base(path))
 			entry := model.ModelEntry{
 				ScanDir:     dir,
-				DirName:     ggufStem,
 				ModelDir:    filepath.Dir(path),
 				PrimaryFile: filepath.Base(path),
 				MmprojPath:  matchMmproj(ggufStem, mmprojFiles),
@@ -179,7 +178,6 @@ func scanDirectory(dir string) ([]model.ModelEntry, error) {
 		}
 		entry := model.ModelEntry{
 			ScanDir:     dir,
-			DirName:     filepath.Base(dir),
 			ModelDir:    dir,
 			PrimaryFile: "",
 			DisplayName: filepath.Base(dir),

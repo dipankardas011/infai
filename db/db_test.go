@@ -11,7 +11,6 @@ func seedModelEngineProfile(t *testing.T, d *DB) (model.ModelEntry, model.Infere
 	t.Helper()
 	m := model.ModelEntry{
 		ScanDir:     "/models",
-		DirName:     "qwen",
 		ModelDir:    "/models/qwen",
 		PrimaryFile: "model.gguf",
 		MmprojPath:  "/models/qwen/mmproj.gguf",
@@ -81,7 +80,7 @@ func TestListAllProfilesLoadsFullProfile(t *testing.T) {
 		t.Fatalf("expected 1 profile, got %d", len(entries))
 	}
 	got := entries[0]
-	if got.Model.Type != m.Type || got.Model.Metadata != m.Metadata || got.Model.DirName != m.DirName {
+	if got.Model.Type != m.Type || got.Model.Metadata != m.Metadata || got.Model.DisplayName != m.DisplayName {
 		t.Fatalf("model not fully loaded: %#v", got.Model)
 	}
 	if got.Model.ModelDir != m.ModelDir || got.Model.PrimaryFile != m.PrimaryFile {
@@ -142,7 +141,7 @@ func TestRemoveScanDirCascadesModelsProfilesAndRecents(t *testing.T) {
 	}
 
 	assertCount(t, d, "scan_dirs", 0)
-	assertCount(t, d, "models", 0)
+	assertCount(t, d, "model_registry", 0)
 	assertCount(t, d, "profiles", 0)
 	assertCount(t, d, "recents", 0)
 }
@@ -164,7 +163,7 @@ func TestSyncRemovedModelCascadesProfilesAndRecents(t *testing.T) {
 		t.Fatalf("expected 1 removed model, got %d", removed)
 	}
 
-	assertCount(t, d, "models", 0)
+	assertCount(t, d, "model_registry", 0)
 	assertCount(t, d, "profiles", 0)
 	assertCount(t, d, "recents", 0)
 }
@@ -179,7 +178,6 @@ func TestModelRoundTripPreservesAllFields(t *testing.T) {
 
 	m := model.ModelEntry{
 		ScanDir:     "/home/models",
-		DirName:     "llama-3b",
 		ModelDir:    "/home/models/llama-3b",
 		PrimaryFile: "llama-3b-q4_k_m.gguf",
 		MmprojPath:  "/home/models/llama-3b/mmproj.gguf",
@@ -235,7 +233,6 @@ func TestModelRoundTripSafetensors(t *testing.T) {
 
 	m := model.ModelEntry{
 		ScanDir:     "/home/models",
-		DirName:     "Qwen2.5-Coder-1.5B",
 		ModelDir:    "/home/models/Qwen2.5-Coder-1.5B",
 		PrimaryFile: "",
 		DisplayName: "Qwen2.5-Coder-1.5B",
@@ -262,6 +259,38 @@ func TestModelRoundTripSafetensors(t *testing.T) {
 	}
 	if got.ModelPath() != m.ModelDir {
 		t.Fatalf("ModelPath mismatch: %q vs %q", got.ModelPath(), m.ModelDir)
+	}
+}
+
+func TestModelRegistryPreservesProfiles(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	d, err := Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+
+	m, engine, p := seedModelEngineProfile(t, d)
+	assertCount(t, d, "profiles", 1)
+	assertCount(t, d, "recents", 1)
+	assertCount(t, d, "model_registry", 1)
+
+	entries, err := d.ListAllProfiles()
+	if err != nil {
+		t.Fatalf("list profiles after v8: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(entries))
+	}
+	got := entries[0]
+	if got.Profile.ID != p.ID || got.Profile.Name != p.Name {
+		t.Fatalf("profile mismatch: %#v", got.Profile)
+	}
+	if got.Model.ID != m.ID || got.Model.DisplayName != m.DisplayName {
+		t.Fatalf("model mismatch: %#v", got.Model)
+	}
+	if got.InferenceEngine.ID != engine.ID {
+		t.Fatalf("engine mismatch: %#v", got.InferenceEngine)
 	}
 }
 

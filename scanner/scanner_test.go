@@ -386,7 +386,7 @@ func TestScanGGUFValidatesMagic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, entries, 1)
 	assert.Equal(t, model.TypeGGUF, entries[0].Type)
-	assert.Equal(t, "valid", entries[0].DirName)
+	assert.Equal(t, "valid", entries[0].DisplayName)
 }
 
 func writeMinimalGGUF(t *testing.T, dir, name string) string {
@@ -426,7 +426,7 @@ func TestScanGGUFMultimodalDetection(t *testing.T) {
 	require.Len(t, entries, 1)
 	assert.Equal(t, model.TypeGGUFMultimodal, entries[0].Type)
 	assert.Contains(t, entries[0].MmprojPath, "mmproj")
-	assert.Equal(t, "model", entries[0].DirName)
+	assert.Equal(t, "model", entries[0].DisplayName)
 }
 
 func TestScanGGUFSingleMmprojPaired(t *testing.T) {

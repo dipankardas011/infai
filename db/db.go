@@ -65,13 +65,22 @@ func (d *DB) runMigrations() error {
 		return fmt.Errorf("database is in dirty state at version %d - manual intervention required", currentVersion)
 	}
 
-	err = m.Up()
-	if err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		if dirty {
-			_ = m.Down()
-			return fmt.Errorf("migration failed and rolled back: %w", err)
+	for v := int(currentVersion) + 1; ; v++ {
+		if err := m.Migrate(uint(v)); err != nil {
+			if errors.Is(err, migrate.ErrNoChange) {
+				break
+			}
+			if errors.Is(err, migrate.ErrNilVersion) {
+				break
+			}
+			if strings.Contains(err.Error(), "no migration") {
+				break
+			}
+			return fmt.Errorf("migration %d: %w", v, err)
 		}
-		return fmt.Errorf("failed to apply migrations: %w", err)
+		if err := patches.Apply(d.conn, v-1, v); err != nil {
+			return fmt.Errorf("patch %d: %w", v, err)
+		}
 	}
 
 	newVersion, _, err := m.Version()
@@ -81,9 +90,6 @@ func (d *DB) runMigrations() error {
 
 	if newVersion > currentVersion {
 		fmt.Printf("migrated from version %d to %d\n", currentVersion, newVersion)
-	}
-	if err := patches.Apply(d.conn, int(currentVersion), int(newVersion)); err != nil {
-		return fmt.Errorf("patches: %w", err)
 	}
 
 	_, err = d.conn.Exec(`
@@ -157,7 +163,7 @@ func (d *DB) RemoveScanDir(path string) (err error) {
 		}
 	}()
 
-	if _, err = tx.Exec(`DELETE FROM models WHERE scan_dir = ?`, path); err != nil {
+	if _, err = tx.Exec(`DELETE FROM model_registry WHERE scan_dir = ?`, path); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`DELETE FROM scan_dirs WHERE path = ?`, path); err != nil {
@@ -171,15 +177,11 @@ func (d *DB) RemoveScanDir(path string) (err error) {
 }
 
 func (d *DB) UpsertModel(m *model.ModelEntry) error {
-	ggufPath := m.ModelPath()
 	res, err := d.conn.Exec(`
-INSERT INTO models (scan_dir, dir_name, model_dir, primary_file, gguf_path, mmproj_path, display_name, type, metadata, source_repo, source_revision, source_files)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(gguf_path) DO UPDATE SET
+INSERT INTO model_registry (scan_dir, model_dir, primary_file, mmproj_path, display_name, type, metadata, source_repo, source_revision, source_files)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(model_dir, primary_file) DO UPDATE SET
     scan_dir=excluded.scan_dir,
-    dir_name=excluded.dir_name,
-    model_dir=excluded.model_dir,
-    primary_file=excluded.primary_file,
     mmproj_path=excluded.mmproj_path,
     display_name=excluded.display_name,
     type=excluded.type,
@@ -187,7 +189,7 @@ ON CONFLICT(gguf_path) DO UPDATE SET
     source_repo=excluded.source_repo,
     source_revision=excluded.source_revision,
     source_files=excluded.source_files
-`, m.ScanDir, m.DirName, m.ModelDir, m.PrimaryFile, ggufPath, m.MmprojPath, m.DisplayName, m.Type, m.Metadata, m.SourceRepo, m.SourceRevision, m.SourceFiles)
+`, m.ScanDir, m.ModelDir, m.PrimaryFile, m.MmprojPath, m.DisplayName, m.Type, m.Metadata, m.SourceRepo, m.SourceRevision, m.SourceFiles)
 	if err != nil {
 		return err
 	}
@@ -195,21 +197,21 @@ ON CONFLICT(gguf_path) DO UPDATE SET
 	if err == nil && id > 0 {
 		m.ID = id
 	} else {
-		err = d.conn.QueryRow(`SELECT id FROM models WHERE gguf_path = ?`, ggufPath).Scan(&m.ID)
+		err = d.conn.QueryRow(`SELECT id FROM model_registry WHERE model_dir = ? AND primary_file = ?`, m.ModelDir, m.PrimaryFile).Scan(&m.ID)
 	}
 	return err
 }
 
 func (d *DB) ListRecents(limit int) ([]RecentEntry, error) {
 	rows, err := d.conn.Query(`
-SELECT m.id, m.scan_dir, m.dir_name, m.model_dir, m.primary_file, m.mmproj_path, m.display_name, m.type, m.metadata, m.source_repo, m.source_revision, m.source_files,
+SELECT m.id, m.scan_dir, m.model_dir, m.primary_file, m.mmproj_path, m.display_name, m.type, m.metadata, m.source_repo, m.source_revision, m.source_files,
        ie.id, ie.name, ie.path, ie.kind, ie.base_args, ie.environment,
        p.id, p.model_id, p.inference_engine_id, p.name, p.port, p.host, p.context_size, p.ngl,
        p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
        p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
        p.no_kv_offload, p.use_mmproj, p.extra_flags, p.engine_config
 FROM recents r
-JOIN models m ON r.model_id = m.id
+JOIN model_registry m ON r.model_id = m.id
 JOIN profiles p ON r.profile_id = p.id
 JOIN inference_engine ie ON p.inference_engine_id = ie.id
 ORDER BY r.last_used DESC
@@ -227,7 +229,7 @@ LIMIT ?`, limit)
 		var baseArgs, environment string
 		var flashAttn, jinja, noKVOffload, useMmproj int
 		err := rows.Scan(
-			&m.ID, &m.ScanDir, &m.DirName, &m.ModelDir, &m.PrimaryFile, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata, &m.SourceRepo, &m.SourceRevision, &m.SourceFiles,
+			&m.ID, &m.ScanDir, &m.ModelDir, &m.PrimaryFile, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata, &m.SourceRepo, &m.SourceRevision, &m.SourceFiles,
 			&ie.ID, &ie.Name, &ie.Path, &ie.Kind, &baseArgs, &environment,
 			&p.ID, &p.ModelID, &p.InferenceEngineID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
 			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
@@ -278,7 +280,7 @@ func (d *DB) SyncPerRoot(scannedByRoot map[string][]model.ModelEntry) (int, int,
 	}
 	defer tx.Rollback()
 
-	existing, err := tx.Query(`SELECT id, scan_dir, model_dir, primary_file FROM models`)
+	existing, err := tx.Query(`SELECT id, scan_dir, model_dir, primary_file FROM model_registry`)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -311,7 +313,7 @@ func (d *DB) SyncPerRoot(scannedByRoot map[string][]model.ModelEntry) (int, int,
 		}
 		// Always remove models whose files no longer exist on disk.
 		if _, statErr := os.Stat(artifactPath); os.IsNotExist(statErr) {
-			_, err := tx.Exec(`DELETE FROM models WHERE id = ?`, dm.id)
+			_, err := tx.Exec(`DELETE FROM model_registry WHERE id = ?`, dm.id)
 			if err != nil {
 				return 0, 0, err
 			}
@@ -327,7 +329,7 @@ func (d *DB) SyncPerRoot(scannedByRoot map[string][]model.ModelEntry) (int, int,
 		// is no longer in the scanned set, remove it. If the root wasn't
 		// scanned (error or not in this sync), preserve the model.
 		if successfulRoots[dm.scanDir] && !scannedSet[key(dm.modelDir, dm.primaryFile)] {
-			_, err := tx.Exec(`DELETE FROM models WHERE id = ?`, dm.id)
+			_, err := tx.Exec(`DELETE FROM model_registry WHERE id = ?`, dm.id)
 			if err != nil {
 				return 0, 0, err
 			}
@@ -347,15 +349,11 @@ func (d *DB) SyncPerRoot(scannedByRoot map[string][]model.ModelEntry) (int, int,
 				continue
 			}
 			seen[k] = true
-			ggufPath := m.ModelPath()
 			_, err := tx.Exec(`
-			INSERT INTO models (scan_dir, dir_name, model_dir, primary_file, gguf_path, mmproj_path, display_name, type, metadata, source_repo, source_revision, source_files)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(gguf_path) DO UPDATE SET
+			INSERT INTO model_registry (scan_dir, model_dir, primary_file, mmproj_path, display_name, type, metadata, source_repo, source_revision, source_files)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(model_dir, primary_file) DO UPDATE SET
 				scan_dir=excluded.scan_dir,
-				dir_name=excluded.dir_name,
-				model_dir=excluded.model_dir,
-				primary_file=excluded.primary_file,
 				mmproj_path=excluded.mmproj_path,
 				display_name=excluded.display_name,
 				type=excluded.type,
@@ -364,7 +362,7 @@ func (d *DB) SyncPerRoot(scannedByRoot map[string][]model.ModelEntry) (int, int,
 				source_revision=excluded.source_revision,
 				source_files=excluded.source_files,
 				last_verified=CURRENT_TIMESTAMP
-		`, m.ScanDir, m.DirName, m.ModelDir, m.PrimaryFile, ggufPath, m.MmprojPath, m.DisplayName, m.Type, m.Metadata, m.SourceRepo, m.SourceRevision, m.SourceFiles)
+`, m.ScanDir, m.ModelDir, m.PrimaryFile, m.MmprojPath, m.DisplayName, m.Type, m.Metadata, m.SourceRepo, m.SourceRevision, m.SourceFiles)
 			if err != nil {
 				return 0, 0, err
 			}
@@ -384,7 +382,7 @@ func key(modelDir, primaryFile string) string {
 }
 
 func (d *DB) ListModels() ([]model.ModelEntry, error) {
-	rows, err := d.conn.Query(`SELECT id, scan_dir, dir_name, model_dir, primary_file, mmproj_path, display_name, type, metadata, source_repo, source_revision, source_files FROM models ORDER BY display_name`)
+	rows, err := d.conn.Query(`SELECT id, scan_dir, model_dir, primary_file, mmproj_path, display_name, type, metadata, source_repo, source_revision, source_files FROM model_registry ORDER BY display_name`)
 	if err != nil {
 		return nil, err
 	}
@@ -392,7 +390,7 @@ func (d *DB) ListModels() ([]model.ModelEntry, error) {
 	var out []model.ModelEntry
 	for rows.Next() {
 		var m model.ModelEntry
-		if err := rows.Scan(&m.ID, &m.ScanDir, &m.DirName, &m.ModelDir, &m.PrimaryFile, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata, &m.SourceRepo, &m.SourceRevision, &m.SourceFiles); err != nil {
+		if err := rows.Scan(&m.ID, &m.ScanDir, &m.ModelDir, &m.PrimaryFile, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata, &m.SourceRepo, &m.SourceRevision, &m.SourceFiles); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -401,7 +399,7 @@ func (d *DB) ListModels() ([]model.ModelEntry, error) {
 }
 
 func (d *DB) ListRecentModels(limit int) ([]model.ModelEntry, error) {
-	rows, err := d.conn.Query(`SELECT id, scan_dir, dir_name, model_dir, primary_file, mmproj_path, display_name, type, metadata, source_repo, source_revision, source_files FROM models ORDER BY last_used DESC LIMIT ?`, limit)
+	rows, err := d.conn.Query(`SELECT id, scan_dir, model_dir, primary_file, mmproj_path, display_name, type, metadata, source_repo, source_revision, source_files FROM model_registry ORDER BY last_used DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -409,7 +407,7 @@ func (d *DB) ListRecentModels(limit int) ([]model.ModelEntry, error) {
 	var out []model.ModelEntry
 	for rows.Next() {
 		var m model.ModelEntry
-		if err := rows.Scan(&m.ID, &m.ScanDir, &m.DirName, &m.ModelDir, &m.PrimaryFile, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata, &m.SourceRepo, &m.SourceRevision, &m.SourceFiles); err != nil {
+		if err := rows.Scan(&m.ID, &m.ScanDir, &m.ModelDir, &m.PrimaryFile, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata, &m.SourceRepo, &m.SourceRevision, &m.SourceFiles); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -418,7 +416,7 @@ func (d *DB) ListRecentModels(limit int) ([]model.ModelEntry, error) {
 }
 
 func (d *DB) MarkModelUsed(id int64) error {
-	_, err := d.conn.Exec(`UPDATE models SET last_used = CURRENT_TIMESTAMP WHERE id = ?`, id)
+	_, err := d.conn.Exec(`UPDATE model_registry SET last_used = CURRENT_TIMESTAMP WHERE id = ?`, id)
 	return err
 }
 
@@ -544,14 +542,14 @@ type ProfileEntry struct {
 
 func (d *DB) ListAllProfiles() ([]ProfileEntry, error) {
 	rows, err := d.conn.Query(`
-SELECT m.id, m.scan_dir, m.dir_name, m.model_dir, m.primary_file, m.mmproj_path, m.display_name, m.type, m.metadata, m.source_repo, m.source_revision, m.source_files,
+SELECT m.id, m.scan_dir, m.model_dir, m.primary_file, m.mmproj_path, m.display_name, m.type, m.metadata, m.source_repo, m.source_revision, m.source_files,
        ie.id, ie.name, ie.path, ie.kind, ie.base_args, ie.environment,
        p.id, p.model_id, p.inference_engine_id, p.name, p.port, p.host, p.context_size, p.ngl,
        p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
        p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
        p.no_kv_offload, p.use_mmproj, p.extra_flags, p.engine_config
 FROM profiles p
-JOIN models m ON p.model_id = m.id
+JOIN model_registry m ON p.model_id = m.id
 JOIN inference_engine ie ON p.inference_engine_id = ie.id
 ORDER BY lower(m.display_name), lower(ie.name), lower(p.name)`)
 	if err != nil {
@@ -567,7 +565,7 @@ ORDER BY lower(m.display_name), lower(ie.name), lower(p.name)`)
 		var baseArgs, environment string
 		var flashAttn, jinja, noKVOffload, useMmproj int
 		err := rows.Scan(
-			&m.ID, &m.ScanDir, &m.DirName, &m.ModelDir, &m.PrimaryFile, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata, &m.SourceRepo, &m.SourceRevision, &m.SourceFiles,
+			&m.ID, &m.ScanDir, &m.ModelDir, &m.PrimaryFile, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata, &m.SourceRepo, &m.SourceRevision, &m.SourceFiles,
 			&ie.ID, &ie.Name, &ie.Path, &ie.Kind, &baseArgs, &environment,
 			&p.ID, &p.ModelID, &p.InferenceEngineID, &p.Name, &p.Port, &p.Host, &p.ContextSize, &p.NGL,
 			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
