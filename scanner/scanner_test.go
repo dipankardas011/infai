@@ -28,9 +28,9 @@ func newGGUFWriter() *ggufWriter {
 
 func (w *ggufWriter) writeHeader(kvCount int) {
 	binary.Write(&w.buf, binary.LittleEndian, uint32(GGUF_MAGIC))
-	binary.Write(&w.buf, binary.LittleEndian, uint32(3))        // version
-	binary.Write(&w.buf, binary.LittleEndian, uint64(0))        // tensor count
-	binary.Write(&w.buf, binary.LittleEndian, uint64(kvCount))  // kv count
+	binary.Write(&w.buf, binary.LittleEndian, uint32(3))       // version
+	binary.Write(&w.buf, binary.LittleEndian, uint64(0))       // tensor count
+	binary.Write(&w.buf, binary.LittleEndian, uint64(kvCount)) // kv count
 }
 
 func (w *ggufWriter) writeString(s string) {
@@ -167,9 +167,9 @@ func TestParseGGUFBigEndianV3(t *testing.T) {
 	// Magic is always LE "GGUF" → bytes 0x47 0x47 0x55 0x46
 	binary.Write(&gw.buf, binary.LittleEndian, uint32(GGUF_MAGIC))
 	// Everything else in big-endian.
-	writeBE(gw, uint32(3))        // version = 3
-	writeBE(gw, uint64(0))        // tensor count
-	writeBE(gw, uint64(2))        // kv count
+	writeBE(gw, uint32(3)) // version = 3
+	writeBE(gw, uint64(0)) // tensor count
+	writeBE(gw, uint64(2)) // kv count
 	// KV 1: architecture
 	writeBE(gw, uint64(len("general.architecture")))
 	gw.buf.WriteString("general.architecture")
@@ -275,16 +275,16 @@ func TestParseSafetensorMetadata(t *testing.T) {
 	// Prevents: config.json fields not mapped to ModelMetadata correctly.
 	dir := t.TempDir()
 	cfg := map[string]interface{}{
-		"architectures":            []string{"Qwen2ForCausalLM"},
-		"max_position_embeddings":  32768,
-		"hidden_size":              1536,
-		"num_hidden_layers":        28,
-		"num_attention_heads":      12,
-		"num_key_value_heads":      2,
-		"head_dim":                 128,
-		"intermediate_size":        8960,
-		"vocab_size":               151936,
-		"torch_dtype":              "bfloat16",
+		"architectures":           []string{"Qwen2ForCausalLM"},
+		"max_position_embeddings": 32768,
+		"hidden_size":             1536,
+		"num_hidden_layers":       28,
+		"num_attention_heads":     12,
+		"num_key_value_heads":     2,
+		"head_dim":                128,
+		"intermediate_size":       8960,
+		"vocab_size":              151936,
+		"torch_dtype":             "bfloat16",
 		"quantization_config": map[string]interface{}{
 			"quant_method": "gptq",
 			"bits":         float64(4),
@@ -388,6 +388,156 @@ func TestScanGGUFValidatesMagic(t *testing.T) {
 	assert.Equal(t, "valid", entries[0].DirName)
 }
 
+func writeMinimalGGUF(t *testing.T, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	data := make([]byte, 24)
+	binary.LittleEndian.PutUint32(data[0:], GGUF_MAGIC)
+	binary.LittleEndian.PutUint32(data[4:], 3)
+	binary.LittleEndian.PutUint64(data[8:], 0)
+	binary.LittleEndian.PutUint64(data[16:], 0)
+	require.NoError(t, os.WriteFile(path, data, 0644))
+	return path
+}
+
+func writeMinimalConfigJSON(t *testing.T, dir string, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, "config.json")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+	return path
+}
+
+func writeDummySafetensor(t *testing.T, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, []byte{0}, 0644))
+	return path
+}
+
+func TestScanGGUFMultimodalDetection(t *testing.T) {
+	// Prevents: GGUF + mmproj file not being classified as gguf_multimodal.
+	dir := t.TempDir()
+	writeMinimalGGUF(t, dir, "model.gguf")
+	writeMinimalGGUF(t, dir, "mmproj-model-F16.gguf")
+
+	entries, err := Scan([]string{dir})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, model.TypeGGUFMultimodal, entries[0].Type)
+	assert.Contains(t, entries[0].MmprojPath, "mmproj")
+	assert.Equal(t, "model", entries[0].DirName)
+}
+
+func TestScanGGUFSingleMmprojPaired(t *testing.T) {
+	// Prevents: single mmproj not being assigned to the lone GGUF.
+	dir := t.TempDir()
+	writeMinimalGGUF(t, dir, "llama.gguf")
+	writeMinimalGGUF(t, dir, "llama-mmproj-F16.gguf")
+
+	entries, err := Scan([]string{dir})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, model.TypeGGUFMultimodal, entries[0].Type)
+}
+
+func TestScanGGUFWithoutMmproj(t *testing.T) {
+	// Prevents: GGUF without mmproj being misclassified as multimodal.
+	dir := t.TempDir()
+	writeMinimalGGUF(t, dir, "model.gguf")
+
+	entries, err := Scan([]string{dir})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, model.TypeGGUF, entries[0].Type)
+	assert.Empty(t, entries[0].MmprojPath)
+}
+
+func TestScanGGUFMultipleMmprojStemMatch(t *testing.T) {
+	// Prevents: multiple mmproj files not being correctly paired by stem overlap.
+	dir := t.TempDir()
+	writeMinimalGGUF(t, dir, "qwen-7b.gguf")
+	writeMinimalGGUF(t, dir, "qwen-7b-mmproj-F16.gguf")
+	writeMinimalGGUF(t, dir, "mixtral-mmproj-F16.gguf")
+
+	entries, err := Scan([]string{dir})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, model.TypeGGUFMultimodal, entries[0].Type)
+	assert.Contains(t, entries[0].MmprojPath, "qwen")
+}
+
+func TestScanSafetensorsClassification(t *testing.T) {
+	// Prevents: safetensors dir without quantization_config being misclassified.
+	dir := t.TempDir()
+	writeMinimalConfigJSON(t, dir, `{"architectures":["LlamaForCausalLM"]}`)
+	writeDummySafetensor(t, dir, "model.safetensors")
+
+	entries, err := Scan([]string{dir})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, model.TypeSafetensors, entries[0].Type)
+	assert.Equal(t, dir, entries[0].ModelDir)
+	assert.Empty(t, entries[0].PrimaryFile)
+}
+
+func TestScanHFQuantizedClassification(t *testing.T) {
+	// Prevents: safetensors dir with quantization_config not being classified as hf_quantized.
+	dir := t.TempDir()
+	writeMinimalConfigJSON(t, dir, `{"architectures":["LlamaForCausalLM"],"quantization_config":{"quant_method":"gptq","bits":4}}`)
+	writeDummySafetensor(t, dir, "model.safetensors")
+
+	entries, err := Scan([]string{dir})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, model.TypeHFQuantized, entries[0].Type)
+}
+
+func TestScanSafetensorsRequiresConfigJson(t *testing.T) {
+	// Prevents: .safetensors files without config.json being detected (they shouldn't be).
+	dir := t.TempDir()
+	writeDummySafetensor(t, dir, "model.safetensors")
+
+	entries, err := Scan([]string{dir})
+	require.NoError(t, err)
+	assert.Empty(t, entries, "safetensors without config.json must not produce entries")
+}
+
+func TestScanMixedGGUFSafetensors(t *testing.T) {
+	// Prevents: mixed GGUF and safetensors in same directory confusing the scanner.
+	dir := t.TempDir()
+	writeMinimalGGUF(t, dir, "model.gguf")
+	writeDummySafetensor(t, dir, "model.safetensors")
+	writeMinimalConfigJSON(t, dir, `{"architectures":["LlamaForCausalLM"]}`)
+
+	entries, err := Scan([]string{dir})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+
+	var ggufCount, sfCount int
+	for _, e := range entries {
+		switch e.Type {
+		case model.TypeGGUF:
+			ggufCount++
+		case model.TypeSafetensors:
+			sfCount++
+		}
+	}
+	assert.Equal(t, 1, ggufCount)
+	assert.Equal(t, 1, sfCount)
+}
+
+func TestScanGGUFIgnoresMmprojOnlyFile(t *testing.T) {
+	// Prevents: mmproj file without a paired GGUF being incorrectly registered.
+	dir := t.TempDir()
+	// Write an mmproj file named so isMmproj returns true — it must also be valid GGUF
+	// to pass magic validation. A non-GGUF file named with "mmproj" should be ignored.
+	os.WriteFile(filepath.Join(dir, "mmproj.gguf"), []byte("not gguf"), 0644)
+
+	entries, err := Scan([]string{dir})
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
 func TestParseGGUFFailureTruncatedHeader(t *testing.T) {
 	// Prevents: truncated GGUF header causing panic instead of error.
 	// 4 bytes — only magic, no version or counts.
@@ -410,9 +560,9 @@ func TestParseGGUFFailureUnsupportedVersion(t *testing.T) {
 	// Prevents: future GGUF versions being silently parsed with wrong assumptions.
 	buf := new(bytes.Buffer)
 	binary.Write(buf, binary.LittleEndian, uint32(GGUF_MAGIC))
-	binary.Write(buf, binary.LittleEndian, uint32(99))   // unsupported version
-	binary.Write(buf, binary.LittleEndian, uint64(0))     // tensor count
-	binary.Write(buf, binary.LittleEndian, uint64(0))     // kv count
+	binary.Write(buf, binary.LittleEndian, uint32(99)) // unsupported version
+	binary.Write(buf, binary.LittleEndian, uint64(0))  // tensor count
+	binary.Write(buf, binary.LittleEndian, uint64(0))  // kv count
 
 	_, err := ParseGGUFReader(bytes.NewReader(buf.Bytes()), GGUF_MAGIC, int64(buf.Len()))
 	require.Error(t, err)
@@ -429,7 +579,7 @@ func TestParseGGUFFailureVersionZero(t *testing.T) {
 	// Prevents: version=0 (pre-GGUF format) being treated as valid.
 	buf := new(bytes.Buffer)
 	binary.Write(buf, binary.LittleEndian, uint32(GGUF_MAGIC))
-	binary.Write(buf, binary.LittleEndian, uint32(0))      // version 0
+	binary.Write(buf, binary.LittleEndian, uint32(0)) // version 0
 	binary.Write(buf, binary.LittleEndian, uint64(0))
 	binary.Write(buf, binary.LittleEndian, uint64(0))
 
