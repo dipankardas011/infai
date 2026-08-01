@@ -51,12 +51,19 @@ func ParseGGUF(path string) (*model.ModelMetadata, error) {
 		return nil, fmt.Errorf("stat gguf: %w", err)
 	}
 
+	return ParseGGUFReader(f, GGUF_MAGIC, fi.Size())
+}
+
+// ParseGGUFReader reads GGUF metadata from an io.ReadSeeker positioned at the
+// start of the file. expectedMagic is typically GGUF_MAGIC; fileSize is used
+// for the FileSizeBytes field.
+func ParseGGUFReader(r io.ReadSeeker, expectedMagic uint32, fileSize int64) (*model.ModelMetadata, error) {
 	// Read magic (always little-endian).
 	var magic uint32
-	if err := binary.Read(f, binary.LittleEndian, &magic); err != nil {
+	if err := binary.Read(r, binary.LittleEndian, &magic); err != nil {
 		return nil, fmt.Errorf("read gguf magic: %w", err)
 	}
-	if magic != GGUF_MAGIC {
+	if magic != expectedMagic {
 		return nil, fmt.Errorf("invalid gguf magic: 0x%08X", magic)
 	}
 
@@ -64,11 +71,11 @@ func ParseGGUF(path string) (*model.ModelMetadata, error) {
 	// uint32 (byte 7). v3 big-endian files store version as [0,0,0,3],
 	// little-endian as [3,0,0,0]. The last byte (position 7) is 0 for LE,
 	// nonzero for BE.
-	if _, err := f.Seek(3, io.SeekCurrent); err != nil {
+	if _, err := r.Seek(3, io.SeekCurrent); err != nil {
 		return nil, fmt.Errorf("seek to endian marker: %w", err)
 	}
 	var marker int8
-	if err := binary.Read(f, binary.LittleEndian, &marker); err != nil {
+	if err := binary.Read(r, binary.LittleEndian, &marker); err != nil {
 		return nil, fmt.Errorf("read endian marker: %w", err)
 	}
 	order := binary.ByteOrder(binary.LittleEndian)
@@ -77,10 +84,10 @@ func ParseGGUF(path string) (*model.ModelMetadata, error) {
 	}
 
 	// Seek back to just after magic and read the version in native order.
-	if _, err := f.Seek(4, io.SeekStart); err != nil {
+	if _, err := r.Seek(4, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("seek to version: %w", err)
 	}
-	version, err := read[uint32](f, order)
+	version, err := read[uint32](r, order)
 	if err != nil {
 		return nil, fmt.Errorf("read version: %w", err)
 	}
@@ -88,23 +95,23 @@ func ParseGGUF(path string) (*model.ModelMetadata, error) {
 		return nil, fmt.Errorf("unsupported gguf version %d", version)
 	}
 
-	tensorCount, err := readCount(f, order, int(version))
+	tensorCount, err := readCount(r, order, int(version))
 	if err != nil {
 		return nil, fmt.Errorf("read tensor count: %w", err)
 	}
 	_ = tensorCount
 
-	kvCount, err := readCount(f, order, int(version))
+	kvCount, err := readCount(r, order, int(version))
 	if err != nil {
 		return nil, fmt.Errorf("read kv count: %w", err)
 	}
 
-	kv, err := readGGUFMetadata(f, order, int(version), kvCount)
+	kv, err := readGGUFMetadata(r, order, int(version), kvCount)
 	if err != nil {
 		return nil, fmt.Errorf("read metadata: %w", err)
 	}
 
-	meta := &model.ModelMetadata{FileSizeBytes: fi.Size()}
+	meta := &model.ModelMetadata{FileSizeBytes: fileSize}
 	hydrateGGUFMeta(meta, kv)
 	return meta, nil
 }
