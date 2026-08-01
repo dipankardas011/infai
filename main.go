@@ -43,6 +43,9 @@ func main() {
 		os.Exit(1)
 	}
 	for i := range entries {
+		if err := scanner.LoadModelMetadata(&entries[i]); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: metadata parse for %s: %v\n", entries[i].DisplayName, err)
+		}
 		if err := database.UpsertModel(&entries[i]); err != nil {
 			fmt.Fprintf(os.Stderr, "upsert model: %v\n", err)
 			os.Exit(1)

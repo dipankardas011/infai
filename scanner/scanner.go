@@ -1,13 +1,11 @@
 package scanner
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/dipankardas011/infai/db"
 	"github.com/dipankardas011/infai/model"
 )
 
@@ -23,8 +21,30 @@ func stem(name string) string {
 	return strings.TrimSuffix(name, filepath.Ext(name))
 }
 
-func LoadModelMetadata(dbInstance *db.DB, m *model.ModelEntry) error {
-	return dbInstance.UpsertModel(m)
+func LoadModelMetadata(m *model.ModelEntry) error {
+	switch m.Type {
+	case "gguf", "gguf_multimodal":
+		meta, err := ParseGGUF(m.GGUFPath)
+		if err != nil {
+			return err
+		}
+		b, err := json.Marshal(meta)
+		if err != nil {
+			return err
+		}
+		m.Metadata = string(b)
+	case "safetensors", "hf_quantized":
+		meta, err := parseSafetensorMetadata(m.GGUFPath)
+		if err != nil {
+			return err
+		}
+		b, err := json.Marshal(meta)
+		if err != nil {
+			return err
+		}
+		m.Metadata = string(b)
+	}
+	return nil
 }
 
 func Scan(dirs []string) ([]model.ModelEntry, error) {
@@ -46,8 +66,7 @@ func scanDirectory(dir string) ([]model.ModelEntry, error) {
 	}
 
 	var ggufFiles []string
-	var mmproj string
-	var npzFiles []string
+	var mmprojFiles []string
 	var safetensorsFiles []string
 	var configJson string
 
@@ -62,12 +81,10 @@ func scanDirectory(dir string) ([]model.ModelEntry, error) {
 		switch {
 		case ext == ".gguf":
 			if isMmproj(name) {
-				mmproj = path
+				mmprojFiles = append(mmprojFiles, path)
 			} else {
 				ggufFiles = append(ggufFiles, path)
 			}
-		case ext == ".npz":
-			npzFiles = append(npzFiles, path)
 		case ext == ".safetensors":
 			safetensorsFiles = append(safetensorsFiles, path)
 		case name == "config.json":
@@ -77,67 +94,92 @@ func scanDirectory(dir string) ([]model.ModelEntry, error) {
 
 	var models []model.ModelEntry
 
-	// GGUF: Allow multiple .gguf files
 	for _, path := range ggufFiles {
 		f, err := os.Open(path)
-		if err == nil {
-			var magic uint32
-			if err := binary.Read(f, binary.LittleEndian, &magic); err == nil && magic == GGUF_MAGIC {
-				entry := model.ModelEntry{
-					ScanDir:     dir,
-					DirName:     stem(filepath.Base(path)),
-					GGUFPath:    path,
-					MmprojPath:  mmproj,
-					DisplayName: stem(filepath.Base(path)),
-					Type:        "gguf",
-				}
-				if mmproj != "" {
-					entry.Type = "gguf_multimodal"
-				}
-				models = append(models, entry)
+		if err != nil {
+			continue
+		}
+		var magic uint32
+		magicErr := binaryReadUint32(f, &magic)
+		f.Close()
+		if magicErr == nil && magic == GGUF_MAGIC {
+			ggufStem := stem(filepath.Base(path))
+			entry := model.ModelEntry{
+				ScanDir:     dir,
+				DirName:     ggufStem,
+				GGUFPath:    path,
+				MmprojPath:  matchMmproj(ggufStem, mmprojFiles),
+				DisplayName: ggufStem,
+				Type:        "gguf",
 			}
-			f.Close()
+			if entry.MmprojPath != "" {
+				entry.Type = "gguf_multimodal"
+			}
+			models = append(models, entry)
 		}
 	}
 
-	// MLX (Old)
-	if len(npzFiles) > 0 && configJson != "" {
-		entry := model.ModelEntry{
-			ScanDir:     dir,
-			DirName:     filepath.Base(dir),
-			GGUFPath:    dir,
-			DisplayName: filepath.Base(dir),
-			Type:        "mlx",
-		}
-		models = append(models, entry)
-	}
-
-	// Safetensors
 	if len(safetensorsFiles) > 0 && configJson != "" {
 		modelType := "safetensors"
-		metadata := ""
-
 		if b, err := os.ReadFile(configJson); err == nil {
 			var cfg map[string]any
-			if err := json.Unmarshal(b, &cfg); err == nil {
-				if _, ok := cfg["quantization"]; ok {
-					modelType = "mlx_quantized"
-				} else if _, ok := cfg["quantization_config"]; ok {
+			if json.Unmarshal(b, &cfg) == nil {
+				if _, ok := cfg["quantization_config"]; ok {
 					modelType = "hf_quantized"
 				}
 			}
 		}
-
 		entry := model.ModelEntry{
 			ScanDir:     dir,
 			DirName:     filepath.Base(dir),
 			GGUFPath:    dir,
 			DisplayName: filepath.Base(dir),
 			Type:        modelType,
-			Metadata:    metadata,
 		}
 		models = append(models, entry)
 	}
 
 	return models, nil
+}
+
+func matchMmproj(ggufStem string, mmprojFiles []string) string {
+	if len(mmprojFiles) == 0 {
+		return ""
+	}
+	if len(mmprojFiles) == 1 {
+		return mmprojFiles[0]
+	}
+
+	ggufLower := strings.ToLower(ggufStem)
+	bestMatch := ""
+	bestScore := 0
+
+	for _, mmproj := range mmprojFiles {
+		mmStem := stem(filepath.Base(mmproj))
+		clean := strings.ToLower(strings.ReplaceAll(mmStem, "mmproj", ""))
+		clean = strings.Trim(clean, "-_.")
+
+		if strings.Contains(clean, ggufLower) || strings.Contains(ggufLower, clean) {
+			score := len(clean)
+			if score > bestScore {
+				bestScore = score
+				bestMatch = mmproj
+			}
+		}
+	}
+
+	return bestMatch
+}
+
+func binaryReadUint32(f *os.File, v *uint32) error {
+	b := make([]byte, 4)
+	n, err := f.Read(b)
+	if err != nil {
+		return err
+	}
+	if n < 4 {
+		return err
+	}
+	*v = uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+	return nil
 }

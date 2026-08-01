@@ -13,9 +13,23 @@ type ModelEntry struct {
 	Metadata    string
 }
 
-type GGUFMetadata struct {
-	Architecture string
-	ModelName    string
+type ModelMetadata struct {
+	Architecture         string `json:"architecture"`
+	ModelName            string `json:"model_name,omitempty"`
+	ContextLength        uint32 `json:"context_length,omitempty"`
+	EmbeddingLength      uint32 `json:"embedding_length,omitempty"`
+	BlockCount           uint32 `json:"block_count,omitempty"`
+	FeedForwardLength    uint32 `json:"feed_forward_length,omitempty"`
+	AttentionHeadCount   uint32 `json:"attention_head_count,omitempty"`
+	AttentionHeadCountKV uint32 `json:"attention_head_count_kv,omitempty"`
+	HeadDimension        uint32 `json:"head_dimension,omitempty"`
+	FileType             int32  `json:"file_type,omitempty"`
+	Quantization         string `json:"quantization,omitempty"`
+	FileSizeBytes        int64  `json:"file_size_bytes,omitempty"`
+	TokenizerModel       string `json:"tokenizer_model,omitempty"`
+	ChatTemplate         string `json:"chat_template,omitempty"`
+	ParameterCount       uint64 `json:"parameter_count,omitempty"`
+	VocabSize            uint32 `json:"vocab_size,omitempty"`
 }
 
 type EngineKind string
