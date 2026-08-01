@@ -282,10 +282,7 @@ func (d *DB) SyncPerRoot(scannedByRoot map[string][]model.ModelEntry) (int, int,
 	if err != nil {
 		return 0, 0, err
 	}
-
-	if existing.Err() != nil {
-		return 0, 0, existing.Err()
-	}
+	defer existing.Close()
 
 	type dbModel struct {
 		id          int64
@@ -297,12 +294,13 @@ func (d *DB) SyncPerRoot(scannedByRoot map[string][]model.ModelEntry) (int, int,
 	for existing.Next() {
 		var dm dbModel
 		if err := existing.Scan(&dm.id, &dm.scanDir, &dm.modelDir, &dm.primaryFile); err != nil {
-			existing.Close()
 			return 0, 0, err
 		}
 		dbModels = append(dbModels, dm)
 	}
-	existing.Close()
+	if err := existing.Err(); err != nil {
+		return 0, 0, err
+	}
 
 	for _, dm := range dbModels {
 		artifactPath := dm.modelDir

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,9 +90,9 @@ func (s *Service) GetProfile(id int64) (model.Profile, error) {
 	return s.db.GetProfile(id)
 }
 
-func (s *Service) SaveProfile(p *model.Profile) error {
+func (s *Service) SaveProfile(p *model.Profile) (ValidationErrors, error) {
 	if p == nil {
-		return fmt.Errorf("profile is nil")
+		return nil, fmt.Errorf("profile is nil")
 	}
 
 	var m *model.ModelEntry
@@ -117,10 +118,20 @@ func (s *Service) SaveProfile(p *model.Profile) error {
 
 	issues := ValidateProfile(p, m, engine)
 	if issues.HasErrors() {
-		return fmt.Errorf("validation: %w", issues)
+		slog.Error("profile validation failed", "profile", p.Name, "issues", issues)
+		return issues.Warnings(), fmt.Errorf("validation: %w", issues.Errors())
 	}
 
-	return s.db.UpsertProfile(p)
+	if err := s.db.UpsertProfile(p); err != nil {
+		return nil, err
+	}
+
+	if warnings := issues.Warnings(); len(warnings) > 0 {
+		slog.Warn("profile validation warnings but saved", "profile", p.Name, "warnings", warnings)
+		return warnings, nil
+	}
+
+	return nil, nil
 }
 
 func (s *Service) DeleteProfile(id int64) error {

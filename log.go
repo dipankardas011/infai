@@ -14,6 +14,8 @@ import (
 type coloredHandler struct {
 	w     io.Writer
 	level slog.Leveler
+	attrs []slog.Attr
+	group string
 }
 
 func newColoredHandler(w io.Writer, level slog.Leveler) *coloredHandler {
@@ -43,8 +45,13 @@ func (h *coloredHandler) Handle(_ context.Context, r slog.Record) error {
 	levelColor(r.Level).Fprintf(h.w, "%-5s", r.Level)
 	fmt.Fprintf(h.w, " %s", r.Message)
 
+	for _, a := range h.attrs {
+		fmt.Fprintf(h.w, " %s%s=", h.group, a.Key)
+		levelColor(r.Level).Fprintf(h.w, "%v", a.Value)
+	}
+
 	r.Attrs(func(a slog.Attr) bool {
-		fmt.Fprintf(h.w, " %s=", a.Key)
+		fmt.Fprintf(h.w, " %s%s=", h.group, a.Key)
 		levelColor(r.Level).Fprintf(h.w, "%v", a.Value)
 		return true
 	})
@@ -54,11 +61,21 @@ func (h *coloredHandler) Handle(_ context.Context, r slog.Record) error {
 }
 
 func (h *coloredHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return h
+	if len(attrs) == 0 {
+		return h
+	}
+	newAttrs := make([]slog.Attr, len(h.attrs)+len(attrs))
+	copy(newAttrs, h.attrs)
+	copy(newAttrs[len(h.attrs):], attrs)
+	return &coloredHandler{w: h.w, level: h.level, attrs: newAttrs, group: h.group}
 }
 
 func (h *coloredHandler) WithGroup(name string) slog.Handler {
-	return h
+	if name == "" {
+		return h
+	}
+	group := h.group + name + "."
+	return &coloredHandler{w: h.w, level: h.level, attrs: h.attrs, group: group}
 }
 
 func init() {

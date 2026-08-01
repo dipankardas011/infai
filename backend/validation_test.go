@@ -373,7 +373,7 @@ func TestValidationErrorsMethods(t *testing.T) {
 	ve = append(ve, ValidationError{Field: "b", Issue: "warning", Severity: SeverityWarning})
 
 	assert.True(t, ve.HasErrors())
-	assert.Len(t, ve.Errors(), 1)
+	assert.NotNil(t, ve.Errors())
 	assert.Len(t, ve.Warnings(), 1)
 	assert.Contains(t, ve.Error(), "a: error")
 	assert.Contains(t, ve.Error(), "b: warning")

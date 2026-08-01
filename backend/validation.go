@@ -2,6 +2,7 @@ package backend
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -62,14 +63,14 @@ func (ve ValidationErrors) HasErrors() bool {
 	return false
 }
 
-func (ve ValidationErrors) Errors() []ValidationError {
-	var out []ValidationError
+func (ve ValidationErrors) Errors() error {
+	var errs []error
 	for _, e := range ve {
 		if e.Severity == SeverityError {
-			out = append(out, e)
+			errs = append(errs, e)
 		}
 	}
-	return out
+	return errors.Join(errs...)
 }
 
 func (ve ValidationErrors) Warnings() []ValidationError {
