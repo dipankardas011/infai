@@ -48,7 +48,7 @@ func TestBuildSpecVLLM(t *testing.T) {
 }
 
 func TestBuildSpecRejectsGGUFForVLLM(t *testing.T) {
-	for _, modelType := range []model.ModelType{model.TypeGGUF, model.TypeGGUFMultimodal, "mlx", "mlx_quantized"} {
+	for _, modelType := range []model.ModelType{model.TypeGGUF, model.TypeGGUFMultimodal, model.TypeSafetensors, model.TypeHFQuantized} {
 		t.Run(string(modelType), func(t *testing.T) {
 			_, err := BuildSpec(
 				model.InferenceEngine{Kind: model.EngineVLLM, Path: "vllm"},
