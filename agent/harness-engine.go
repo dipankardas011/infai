@@ -1,9 +1,13 @@
 package agent
 
-import "github.com/dipankardas011/infai/agent/models"
+import (
+	"github.com/dipankardas011/infai/agent/contracts"
+	_ "go.uber.org/automaxprocs"
+)
 
 type HarnessEngine struct {
-	modelProvider models.InfaiModelAdaptor
+	modelProvider contracts.InfaiModelAdaptor
 }
 
 func (*HarnessEngine) Start() {}
+func (*HarnessEngine) Stop()  {}
