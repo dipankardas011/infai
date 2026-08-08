@@ -148,6 +148,24 @@ func (d *Downloader) Download(ctx context.Context, plan *DownloadPlan, dest stri
 	return ch, nil
 }
 
+type progressReporter struct {
+	progress *OverallProgress
+	ch       chan<- OverallProgress
+	fileIdx  int
+	baseBytes int64
+	lastSend time.Time
+	interval time.Duration
+}
+
+func (r *progressReporter) onBytes(n int64) {
+	r.progress.Files[r.fileIdx].Downloaded = n
+	r.progress.DoneBytes = r.baseBytes + n
+	if now := time.Now(); now.Sub(r.lastSend) >= r.interval {
+		r.lastSend = now
+		r.ch <- *r.progress
+	}
+}
+
 func (d *Downloader) downloadAll(ctx context.Context, plan *DownloadPlan, dest string, ch chan<- OverallProgress) {
 	progress := OverallProgress{
 		Files: make([]FileProgress, 0, len(plan.Files)),
@@ -183,6 +201,7 @@ func (d *Downloader) downloadAll(ctx context.Context, plan *DownloadPlan, dest s
 		return
 	}
 
+	var completedBytes int64
 	var downloaded []stagedFile
 	failed := false
 
@@ -199,7 +218,15 @@ func (d *Downloader) downloadAll(ctx context.Context, plan *DownloadPlan, dest s
 		progress.Files[i].State = FileDownloading
 		ch <- progress
 
-		staged, err := d.downloadFileWithRetry(ctx, plan, pf, stagingRoot)
+		reporter := &progressReporter{
+			progress:  &progress,
+			ch:        ch,
+			fileIdx:   i,
+			baseBytes: completedBytes,
+			interval:  200 * time.Millisecond,
+		}
+
+		staged, err := d.downloadFileWithRetry(ctx, plan, pf, stagingRoot, reporter)
 		if err != nil {
 			failed = true
 			progress.Files[i].State = FileFailed
@@ -223,7 +250,8 @@ func (d *Downloader) downloadAll(ctx context.Context, plan *DownloadPlan, dest s
 
 		progress.Files[i].State = FileCompleted
 		progress.Files[i].Downloaded = pf.Size
-		progress.DoneBytes += pf.Size
+		completedBytes += pf.Size
+		progress.DoneBytes = completedBytes
 		downloaded = append(downloaded, staged)
 		ch <- progress
 	}
@@ -258,7 +286,7 @@ type stagedFile struct {
 	tmpPath  string
 }
 
-func (d *Downloader) downloadFileWithRetry(ctx context.Context, plan *DownloadPlan, pf PlanFile, stagingRoot string) (stagedFile, error) {
+func (d *Downloader) downloadFileWithRetry(ctx context.Context, plan *DownloadPlan, pf PlanFile, stagingRoot string, reporter *progressReporter) (stagedFile, error) {
 	var lastErr error
 	for attempt := 0; attempt < d.maxRetries; attempt++ {
 		if attempt > 0 {
@@ -269,7 +297,7 @@ func (d *Downloader) downloadFileWithRetry(ctx context.Context, plan *DownloadPl
 			}
 		}
 
-		sf, err := d.downloadFile(ctx, plan, pf, stagingRoot)
+		sf, err := d.downloadFile(ctx, plan, pf, stagingRoot, reporter)
 		if err == nil {
 			return sf, nil
 		}
@@ -286,19 +314,19 @@ func (d *Downloader) downloadFileWithRetry(ctx context.Context, plan *DownloadPl
 	return stagedFile{}, fmt.Errorf("download %s failed after %d attempts: %w", pf.Path, d.maxRetries, lastErr)
 }
 
-func (d *Downloader) downloadFile(ctx context.Context, plan *DownloadPlan, pf PlanFile, stagingRoot string) (stagedFile, error) {
+func (d *Downloader) downloadFile(ctx context.Context, plan *DownloadPlan, pf PlanFile, stagingRoot string, reporter *progressReporter) (stagedFile, error) {
 	destName := filepath.Base(pf.Path)
 	tmpPath := filepath.Join(stagingRoot, destName+".partial")
 
 	existing, err := os.Stat(tmpPath)
 	if err == nil && existing.Size() > 0 && existing.Size() < pf.Size {
-		return d.resumeDownload(ctx, plan, pf, tmpPath, existing.Size())
+		return d.resumeDownload(ctx, plan, pf, tmpPath, existing.Size(), reporter)
 	}
 
-	return d.freshDownload(ctx, plan, pf, tmpPath)
+	return d.freshDownload(ctx, plan, pf, tmpPath, reporter)
 }
 
-func (d *Downloader) freshDownload(ctx context.Context, plan *DownloadPlan, pf PlanFile, tmpPath string) (stagedFile, error) {
+func (d *Downloader) freshDownload(ctx context.Context, plan *DownloadPlan, pf PlanFile, tmpPath string, reporter *progressReporter) (stagedFile, error) {
 	url := d.buildDownloadURL(plan.RepoID, plan.Revision, pf.Path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -326,14 +354,15 @@ func (d *Downloader) freshDownload(ctx context.Context, plan *DownloadPlan, pf P
 	}
 	defer f.Close()
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	cr := &countingReader{r: resp.Body, reporter: reporter}
+	if _, err := io.Copy(f, cr); err != nil {
 		return stagedFile{}, fmt.Errorf("stream download: %w", err)
 	}
 
 	return stagedFile{origPath: pf.Path, tmpPath: tmpPath}, nil
 }
 
-func (d *Downloader) resumeDownload(ctx context.Context, plan *DownloadPlan, pf PlanFile, tmpPath string, existingSize int64) (stagedFile, error) {
+func (d *Downloader) resumeDownload(ctx context.Context, plan *DownloadPlan, pf PlanFile, tmpPath string, existingSize int64, reporter *progressReporter) (stagedFile, error) {
 	url := d.buildDownloadURL(plan.RepoID, plan.Revision, pf.Path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -349,7 +378,7 @@ func (d *Downloader) resumeDownload(ctx context.Context, plan *DownloadPlan, pf 
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
-		return d.freshDownload(ctx, plan, pf, tmpPath)
+		return d.freshDownload(ctx, plan, pf, tmpPath, reporter)
 	}
 	if resp.StatusCode != http.StatusPartialContent {
 		return stagedFile{}, fmt.Errorf("unexpected resume status %d", resp.StatusCode)
@@ -361,7 +390,8 @@ func (d *Downloader) resumeDownload(ctx context.Context, plan *DownloadPlan, pf 
 	}
 	defer f.Close()
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	cr := &countingReader{r: resp.Body, base: existingSize, reporter: reporter}
+	if _, err := io.Copy(f, cr); err != nil {
 		return stagedFile{}, fmt.Errorf("resume stream: %w", err)
 	}
 
@@ -374,6 +404,22 @@ func (d *Downloader) resumeDownload(ctx context.Context, plan *DownloadPlan, pf 
 	}
 
 	return stagedFile{origPath: pf.Path, tmpPath: tmpPath}, nil
+}
+
+type countingReader struct {
+	r        io.Reader
+	n        int64
+	base     int64
+	reporter *progressReporter
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	cr.n += int64(n)
+	if cr.reporter != nil {
+		cr.reporter.onBytes(cr.base + cr.n)
+	}
+	return n, err
 }
 
 func (d *Downloader) setAuth(req *http.Request) {
