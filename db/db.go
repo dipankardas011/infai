@@ -184,9 +184,9 @@ ON CONFLICT(model_dir, primary_file) DO UPDATE SET
     display_name=excluded.display_name,
     type=excluded.type,
     metadata=excluded.metadata,
-    source_repo=excluded.source_repo,
-    source_revision=excluded.source_revision,
-    source_files=excluded.source_files
+    source_repo=CASE WHEN excluded.source_repo != '' THEN excluded.source_repo ELSE model_registry.source_repo END,
+    source_revision=CASE WHEN excluded.source_revision != '' THEN excluded.source_revision ELSE model_registry.source_revision END,
+    source_files=CASE WHEN excluded.source_files != '' THEN excluded.source_files ELSE model_registry.source_files END
 `, m.ScanDir, m.ModelDir, m.PrimaryFile, m.MmprojPath, m.DisplayName, m.Type, m.Metadata, m.SourceRepo, m.SourceRevision, m.SourceFiles)
 	if err != nil {
 		return err
@@ -354,9 +354,9 @@ func (d *DB) SyncPerRoot(scannedByRoot map[string][]model.ModelEntry) (int, int,
 				display_name=excluded.display_name,
 				type=excluded.type,
 				metadata=excluded.metadata,
-				source_repo=excluded.source_repo,
-				source_revision=excluded.source_revision,
-				source_files=excluded.source_files,
+				source_repo=CASE WHEN excluded.source_repo != '' THEN excluded.source_repo ELSE model_registry.source_repo END,
+				source_revision=CASE WHEN excluded.source_revision != '' THEN excluded.source_revision ELSE model_registry.source_revision END,
+				source_files=CASE WHEN excluded.source_files != '' THEN excluded.source_files ELSE model_registry.source_files END,
 				last_verified=CURRENT_TIMESTAMP
 `, m.ScanDir, m.ModelDir, m.PrimaryFile, m.MmprojPath, m.DisplayName, m.Type, m.Metadata, m.SourceRepo, m.SourceRevision, m.SourceFiles)
 			if err != nil {
