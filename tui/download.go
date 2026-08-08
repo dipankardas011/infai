@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -68,9 +69,10 @@ type DownloadModel struct {
 	width   int
 	height  int
 
-	searchInput textinput.Model
-	searching   bool
-	spinner     spinner.Model
+	searchInput  textinput.Model
+	searching    bool
+	searchCancel context.CancelFunc
+	spinner      spinner.Model
 
 	results     []hub.ModelInfo
 	repoCursor  int
@@ -131,6 +133,20 @@ func NewDownloadModel(service *backend.Service, w, h int) DownloadModel {
 	}
 }
 
+func (m *DownloadModel) cancelSearch() {
+	if m.searchCancel != nil {
+		m.searchCancel()
+		m.searchCancel = nil
+	}
+}
+
+func (m *DownloadModel) cancelDownload() {
+	if m.cancelFunc != nil {
+		m.cancelFunc()
+		m.cancelFunc = nil
+	}
+}
+
 func (m DownloadModel) InModalInput() bool {
 	return m.browsingDest || m.step == stepSearch
 }
@@ -162,8 +178,11 @@ func (m DownloadModel) updateSearch(msg tea.Msg) (DownloadModel, tea.Cmd) {
 		switch msg := msg.(type) {
 		case downloadSearchDoneMsg:
 			m.searching = false
+			m.cancelSearch()
 			if msg.err != nil {
-				m.errMsg = msg.err.Error()
+				if !errors.Is(msg.err, context.Canceled) {
+					m.errMsg = msg.err.Error()
+				}
 				return m, nil
 			}
 			if len(msg.results) == 0 && len(m.results) == 0 {
@@ -202,11 +221,13 @@ func (m DownloadModel) updateSearch(msg tea.Msg) (DownloadModel, tea.Cmd) {
 			m.searchQuery = query
 			m.results = nil
 			m.errMsg = ""
+			ctx, cancel := context.WithCancel(context.Background())
+			m.searchCancel = cancel
 			hubClient := m.hub
 			return m, tea.Batch(
 				m.spinner.Tick,
 				func() tea.Msg {
-					results, err := hubClient.Search(context.Background(), hub.SearchParams{
+					results, err := hubClient.Search(ctx, hub.SearchParams{
 						Query:     query,
 						Limit:     searchPageSize,
 						Sort:      "downloads",
@@ -216,6 +237,7 @@ func (m DownloadModel) updateSearch(msg tea.Msg) (DownloadModel, tea.Cmd) {
 				},
 			)
 		case "esc":
+			m.cancelSearch()
 			return m, func() tea.Msg { return downloadDoneMsg{} }
 		}
 	}
@@ -262,7 +284,9 @@ func (m DownloadModel) updateSelectRepo(msg tea.Msg) (DownloadModel, tea.Cmd) {
 		case "o":
 			if m.repoCursor < len(m.results) {
 				url := "https://huggingface.co/" + m.results[m.repoCursor].ID
-				_ = exec.Command("xdg-open", url).Start()
+				if err := exec.Command("xdg-open", url).Start(); err != nil {
+					m.errMsg = "could not open browser: " + err.Error()
+				}
 			}
 		case "esc":
 			m.step = stepSearch
@@ -285,8 +309,11 @@ func (m DownloadModel) updateSelectEngine(msg tea.Msg) (DownloadModel, tea.Cmd) 
 		switch msg := msg.(type) {
 		case downloadFilesDoneMsg:
 			m.searching = false
+			m.cancelSearch()
 			if msg.err != nil {
-				m.errMsg = msg.err.Error()
+				if !errors.Is(msg.err, context.Canceled) {
+					m.errMsg = msg.err.Error()
+				}
 				return m, nil
 			}
 			m.files = msg.files
@@ -331,12 +358,14 @@ func (m DownloadModel) updateSelectEngine(msg tea.Msg) (DownloadModel, tea.Cmd) 
 			}
 			m.searching = true
 			m.errMsg = ""
+			ctx, cancel := context.WithCancel(context.Background())
+			m.searchCancel = cancel
 			hubClient := m.hub
 			repoID := m.selectedRepo.ID
 			return m, tea.Batch(
 				m.spinner.Tick,
 				func() tea.Msg {
-					files, err := hubClient.ListFiles(context.Background(), repoID, "main")
+					files, err := hubClient.ListFiles(ctx, repoID, "main")
 					if err != nil {
 						return downloadFilesDoneMsg{err: err}
 					}
@@ -355,6 +384,7 @@ func (m DownloadModel) updateSelectEngine(msg tea.Msg) (DownloadModel, tea.Cmd) 
 				},
 			)
 		case "esc":
+			m.cancelSearch()
 			m.step = stepSelectRepo
 			m.errMsg = ""
 		}
@@ -419,7 +449,10 @@ func (m DownloadModel) updateReviewPlan(msg tea.Msg) (DownloadModel, tea.Cmd) {
 		case "enter":
 			m.browsingDest = true
 			m.errMsg = ""
-			home, _ := os.UserHomeDir()
+			home, err := os.UserHomeDir()
+			if err != nil {
+				home = "/"
+			}
 			m.fileBrowser = NewFileBrowserModel()
 			m.fileBrowser.currentDir = home
 			m.fileBrowser.entries = loadDirEntries(home)
@@ -439,13 +472,15 @@ func (m DownloadModel) updateReviewPlan(msg tea.Msg) (DownloadModel, tea.Cmd) {
 func (m DownloadModel) loadMore() (DownloadModel, tea.Cmd) {
 	m.loadingMore = true
 	m.searching = true
+	ctx, cancel := context.WithCancel(context.Background())
+	m.searchCancel = cancel
 	offset := len(m.results)
 	query := m.searchQuery
 	hubClient := m.hub
 	return m, tea.Batch(
 		m.spinner.Tick,
 		func() tea.Msg {
-			results, err := hubClient.Search(context.Background(), hub.SearchParams{
+			results, err := hubClient.Search(ctx, hub.SearchParams{
 				Query:     query,
 				Limit:     searchPageSize,
 				Offset:    offset,
@@ -548,9 +583,7 @@ func (m DownloadModel) updateDownloading(msg tea.Msg) (DownloadModel, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if msg.String() == "esc" || msg.String() == "ctrl+c" {
-			if m.cancelFunc != nil {
-				m.cancelFunc()
-			}
+			m.cancelDownload()
 			m.errMsg = "cancelled"
 			m.step = stepDone
 			return m, nil
@@ -563,6 +596,8 @@ func (m DownloadModel) updateDone(msg tea.Msg) (DownloadModel, tea.Cmd) {
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.String() {
 		case "enter", "esc":
+			m.cancelDownload()
+			m.cancelSearch()
 			return m, func() tea.Msg { return downloadDoneMsg{} }
 		}
 	}

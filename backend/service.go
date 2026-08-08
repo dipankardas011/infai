@@ -356,9 +356,12 @@ func (s *Service) ImportPath(path string) (ImportResult, error) {
 	}
 
 	var result ImportResult
-	info, _ := os.Stat(normalized)
+	info, err := os.Stat(normalized)
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("stat: %w", err)
+	}
 	scanDir := normalized
-	if info != nil && !info.IsDir() {
+	if !info.IsDir() {
 		scanDir = filepath.Dir(normalized)
 	}
 
@@ -369,10 +372,12 @@ func (s *Service) ImportPath(path string) (ImportResult, error) {
 	for _, e := range entries {
 		entry := e
 		if err := scanner.LoadModelMetadata(&entry); err != nil {
+			slog.Warn("import: metadata load failed", "model", entry.DisplayName, "error", err)
 			result.Issues = append(result.Issues, fmt.Sprintf("%s: %v", entry.DisplayName, err))
 			continue
 		}
 		if err := s.db.UpsertModel(&entry); err != nil {
+			slog.Error("import: model persist failed", "model", entry.DisplayName, "error", err)
 			result.Issues = append(result.Issues, fmt.Sprintf("%s: %v", entry.DisplayName, err))
 			continue
 		}
@@ -392,13 +397,18 @@ func (s *Service) ImportDownloaded(destDir string, plan *downloader.DownloadPlan
 	for i, f := range plan.Files {
 		sourceFiles[i] = f.Path
 	}
-	filesJSON, _ := json.Marshal(sourceFiles)
+	filesJSON, err := json.Marshal(sourceFiles)
+	if err != nil {
+		slog.Error("import: failed to marshal source files", "error", err)
+		return result, fmt.Errorf("marshal provenance: %w", err)
+	}
 
 	for i := range result.Models {
 		result.Models[i].SourceRepo = plan.RepoID
 		result.Models[i].SourceRevision = plan.Revision
 		result.Models[i].SourceFiles = string(filesJSON)
 		if err := s.db.UpsertModel(&result.Models[i]); err != nil {
+			slog.Error("import: provenance persist failed", "model", result.Models[i].DisplayName, "error", err)
 			result.Issues = append(result.Issues, fmt.Sprintf("provenance for %s: %v", result.Models[i].DisplayName, err))
 		}
 	}

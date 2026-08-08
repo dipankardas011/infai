@@ -204,8 +204,11 @@ func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 			for _, mdl := range m.models {
 				if mdl.ScanDir == dir && mdl.SourceRepo != "" {
 					url := "https://huggingface.co/" + mdl.SourceRepo
-					_ = exec.Command("xdg-open", url).Start()
-					m.errMsg = styleSuccess.Render("✓ opened in browser")
+					if err := exec.Command("xdg-open", url).Start(); err != nil {
+						m.errMsg = styleError.Render("could not open browser: " + err.Error())
+					} else {
+						m.errMsg = styleSuccess.Render("✓ opened in browser")
+					}
 					return m, nil
 				}
 			}
