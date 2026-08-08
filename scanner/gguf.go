@@ -235,7 +235,6 @@ func interestingPrefix(key string) bool {
 	for _, p := range []string{
 		"general.",
 		"tokenizer.ggml.model",
-		"tokenizer.chat_template",
 	} {
 		if len(key) >= len(p) && key[:len(p)] == p {
 			return true
@@ -414,11 +413,6 @@ func hydrateGGUFMeta(meta *model.ModelMetadata, kv map[string]interface{}) {
 	if v, ok := kv["tokenizer.ggml.model"]; ok {
 		if s, ok := v.(string); ok {
 			meta.TokenizerModel = s
-		}
-	}
-	if v, ok := kv["tokenizer.chat_template"]; ok {
-		if s, ok := v.(string); ok {
-			meta.ChatTemplate = s
 		}
 	}
 }

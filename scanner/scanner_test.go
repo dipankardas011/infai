@@ -189,18 +189,6 @@ func TestParseGGUFBigEndianV3(t *testing.T) {
 	assert.Equal(t, uint32(2048), meta.ContextLength)
 }
 
-func TestParseGGUFChatTemplate(t *testing.T) {
-	// Prevents: chat template not extracted.
-	tmpl := "{% for message in messages %}{{ message.content }}{% endfor %}"
-	gw := newGGUFWriter()
-	gw.writeHeader(1)
-	gw.writeKVString("tokenizer.chat_template", tmpl)
-
-	meta, err := ParseGGUFReader(gw.reader(), GGUF_MAGIC, gw.byteCount())
-	require.NoError(t, err)
-	assert.Equal(t, tmpl, meta.ChatTemplate)
-}
-
 func TestParseGGUFWrongMagic(t *testing.T) {
 	// Prevents: corrupted file with wrong magic being silently accepted.
 	gw := newGGUFWriter()
