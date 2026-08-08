@@ -21,6 +21,56 @@ type ggufCandidate struct {
 	Total   int
 }
 
+type GGUFVariant struct {
+	Name       string
+	Files      []hub.FileEntry
+	Sharded    bool
+	ShardCount int
+	TotalBytes int64
+}
+
+func ListGGUFVariants(files []hub.FileEntry) []GGUFVariant {
+	ggufFiles := filterByExt(files, ".gguf")
+	candidates := groupGGUFCandidates(ggufFiles)
+
+	variants := make([]GGUFVariant, 0, len(candidates))
+	for _, c := range candidates {
+		var total int64
+		for _, f := range c.Shards {
+			total += f.Size
+		}
+		variants = append(variants, GGUFVariant{
+			Name:       c.Prefix,
+			Files:      c.Shards,
+			Sharded:    c.IsMulti,
+			ShardCount: c.Total,
+			TotalBytes: total,
+		})
+	}
+	return variants
+}
+
+func PlanGGUFVariant(repoID, revision string, variant GGUFVariant, allFiles []hub.FileEntry) *DownloadPlan {
+	var mmprojFiles []hub.FileEntry
+	for _, f := range allFiles {
+		if strings.HasSuffix(strings.ToLower(f.Path), ".gguf") && isMmprojFile(f.Path) {
+			mmprojFiles = append(mmprojFiles, f)
+		}
+	}
+
+	plan := &DownloadPlan{
+		RepoID:     repoID,
+		Revision:   revision,
+		EngineKind: model.EngineLlamaCPP,
+		Files:      ToPlanFiles(variant.Files),
+	}
+	if len(mmprojFiles) > 0 {
+		plan.OptionalFiles = ToPlanFiles(mmprojFiles)
+	}
+	plan.TotalBytes = sumBytes(plan.Files)
+	return plan
+}
+
 func PlanFiles(repoID, revision string, files []hub.FileEntry, engine model.EngineKind) (*DownloadPlan, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("no files to plan")

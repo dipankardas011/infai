@@ -100,9 +100,12 @@ func (k runsTabKeyMap) FullHelp() [][]key.Binding {
 }
 
 type modelsTabKeyMap struct {
-	Add      key.Binding
+	Info     key.Binding
+	Import   key.Binding
+	Download key.Binding
 	Remove   key.Binding
 	Sync     key.Binding
+	OpenHF   key.Binding
 	TabLeft  key.Binding
 	TabRight key.Binding
 	Theme    key.Binding
@@ -111,10 +114,26 @@ type modelsTabKeyMap struct {
 }
 
 func (k modelsTabKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Add, k.Remove, k.Sync, k.TabLeft, k.TabRight, k.Help}
+	return []key.Binding{k.Info, k.Import, k.Download, k.Remove, k.Sync, k.OpenHF, k.TabLeft, k.TabRight, k.Help}
 }
 func (k modelsTabKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Add, k.Remove, k.Sync}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
+	return [][]key.Binding{{k.Info, k.Import, k.Download, k.Remove, k.Sync, k.OpenHF}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
+}
+
+type fileBrowserKeyMap struct {
+	Select key.Binding
+	Open   key.Binding
+	Back   key.Binding
+	Filter key.Binding
+	Home   key.Binding
+	Cancel key.Binding
+}
+
+func (k fileBrowserKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Select, k.Open, k.Back, k.Filter, k.Home, k.Cancel}
+}
+func (k fileBrowserKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{{k.Select, k.Open, k.Back}, {k.Filter, k.Home, k.Cancel}}
 }
 
 type enginesTabKeyMap struct {
@@ -136,13 +155,14 @@ func (k enginesTabKeyMap) FullHelp() [][]key.Binding {
 }
 
 var keys = struct {
-	Home      homeKeyMap
-	Profiles  profileTabKeyMap
-	Runs      runsTabKeyMap
-	Models    modelsTabKeyMap
-	Engines   enginesTabKeyMap
-	ModelList modelListKeyMap
-	Server    serverKeyMap
+	Home        homeKeyMap
+	Profiles    profileTabKeyMap
+	Runs        runsTabKeyMap
+	Models      modelsTabKeyMap
+	Engines     enginesTabKeyMap
+	ModelList   modelListKeyMap
+	FileBrowser fileBrowserKeyMap
+	Server      serverKeyMap
 	Theme     themeKeyMap
 }{
 	Home: homeKeyMap{
@@ -193,9 +213,12 @@ var keys = struct {
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	},
 	Models: modelsTabKeyMap{
-		Add:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add folder")),
-		Remove:   key.NewBinding(key.WithKeys("x", "d", "delete"), key.WithHelp("x", "remove folder")),
+		Info:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "info")),
+		Import:   key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "import")),
+		Download: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "download")),
+		Remove:   key.NewBinding(key.WithKeys("x", "d", "delete"), key.WithHelp("x", "remove")),
 		Sync:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sync")),
+		OpenHF:   key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open on HF")),
 		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),
 		TabRight: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
 		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
@@ -211,6 +234,14 @@ var keys = struct {
 		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
 		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	},
+	FileBrowser: fileBrowserKeyMap{
+		Select: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
+		Open:   key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "open")),
+		Back:   key.NewBinding(key.WithKeys("left", "backspace", "b"), key.WithHelp("←", "back")),
+		Filter: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+		Home:   key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "~")),
+		Cancel: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel")),
 	},
 	Theme: themeKeyMap{
 		Select: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),

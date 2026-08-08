@@ -81,7 +81,7 @@ func ScanWithContext(ctx context.Context, dirs []string, progress ProgressFunc) 
 			results = append(results, ScanResult{RootDir: dir, Error: err})
 			continue
 		}
-		entries, scanErr := scanDirectory(normalized)
+		entries, scanErr := ScanDirectory(normalized)
 		result := ScanResult{RootDir: normalized, Entries: entries, Error: scanErr}
 		if progress != nil {
 			progress(normalized, len(entries))
@@ -106,7 +106,56 @@ func NormalizePath(path string) (string, error) {
 	return resolved, nil
 }
 
-func scanDirectory(dir string) ([]model.ModelEntry, error) {
+func InspectPath(path string) ([]model.ModelEntry, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("path not accessible: %w", err)
+	}
+	if info.IsDir() {
+		return ScanDirectory(path)
+	}
+	if filepath.Ext(path) != ".gguf" {
+		return nil, fmt.Errorf("unsupported path: expected .gguf file or directory containing model artifacts")
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var magic uint32
+	if err := binaryReadUint32(f, &magic); err != nil || magic != GGUF_MAGIC {
+		return nil, fmt.Errorf("not a valid GGUF file")
+	}
+
+	dir := filepath.Dir(path)
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var mmprojFiles []string
+	for _, e := range dirEntries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".gguf" && isMmproj(e.Name()) {
+			mmprojFiles = append(mmprojFiles, filepath.Join(dir, e.Name()))
+		}
+	}
+
+	ggufStem := stem(filepath.Base(path))
+	entry := model.ModelEntry{
+		ScanDir:     dir,
+		ModelDir:    dir,
+		PrimaryFile: filepath.Base(path),
+		MmprojPath:  matchMmproj(ggufStem, mmprojFiles),
+		DisplayName: ggufStem,
+		Type:        model.TypeGGUF,
+	}
+	if entry.MmprojPath != "" {
+		entry.Type = model.TypeGGUFMultimodal
+	}
+	return []model.ModelEntry{entry}, nil
+}
+
+func ScanDirectory(dir string) ([]model.ModelEntry, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err

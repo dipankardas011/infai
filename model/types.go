@@ -50,7 +50,6 @@ type ModelMetadata struct {
 	Quantization         string `json:"quantization,omitempty"`
 	FileSizeBytes        int64  `json:"file_size_bytes,omitempty"`
 	TokenizerModel       string `json:"tokenizer_model,omitempty"`
-	ChatTemplate         string `json:"chat_template,omitempty"`
 	ParameterCount       uint64 `json:"parameter_count,omitempty"`
 	VocabSize            uint32 `json:"vocab_size,omitempty"`
 	NumExperts           uint32 `json:"num_experts,omitempty"`
