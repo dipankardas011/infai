@@ -798,14 +798,14 @@ func (m DownloadModel) View() string {
 			if m.progress.TotalBytes > 0 {
 				pct = int(m.progress.DoneBytes * 100 / m.progress.TotalBytes)
 			}
-			barW := max(m.width-30, 10)
+			stats := fmt.Sprintf(" %d%%  %s / %s", pct,
+				dlFormatBytes(m.progress.DoneBytes),
+				dlFormatBytes(m.progress.TotalBytes))
+			// box border(2) + box padding(4) + indent(2) + brackets(2) + stats
+			barW := max(m.width-10-len(stats), 10)
 			filled := barW * pct / 100
 			bar := strings.Repeat("█", filled) + strings.Repeat("░", barW-filled)
-			sb.WriteString(fmt.Sprintf("  [%s] %d%%  %s / %s\n\n",
-				bar, pct,
-				dlFormatBytes(m.progress.DoneBytes),
-				dlFormatBytes(m.progress.TotalBytes),
-			))
+			sb.WriteString(fmt.Sprintf("  [%s]%s\n", bar, stats))
 			for _, f := range m.progress.Files {
 				icon := "  "
 				switch f.State {
