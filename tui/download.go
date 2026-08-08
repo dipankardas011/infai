@@ -24,6 +24,7 @@ const (
 	stepSearch downloadStep = iota
 	stepSelectRepo
 	stepSelectEngine
+	stepSelectVariant
 	stepReviewPlan
 	stepChooseDest
 	stepDownloading
@@ -38,10 +39,12 @@ type downloadSearchDoneMsg struct {
 	append  bool
 }
 
-type downloadPlanDoneMsg struct {
-	files []hub.FileEntry
-	plan  *downloader.DownloadPlan
-	err   error
+type downloadFilesDoneMsg struct {
+	files    []hub.FileEntry
+	variants []downloader.GGUFVariant
+	plan     *downloader.DownloadPlan
+	engine   model.EngineKind
+	err      error
 }
 
 type downloadProgressMsg struct {
@@ -77,6 +80,11 @@ type DownloadModel struct {
 
 	selectedRepo *hub.ModelInfo
 	engineCursor int
+	engineKind   model.EngineKind
+
+	variants      []downloader.GGUFVariant
+	variantCursor int
+	variantScroll int
 
 	files      []hub.FileEntry
 	plan       *downloader.DownloadPlan
@@ -134,6 +142,8 @@ func (m DownloadModel) Update(msg tea.Msg) (DownloadModel, tea.Cmd) {
 		return m.updateSelectRepo(msg)
 	case stepSelectEngine:
 		return m.updateSelectEngine(msg)
+	case stepSelectVariant:
+		return m.updateSelectVariant(msg)
 	case stepReviewPlan:
 		return m.updateReviewPlan(msg)
 	case stepChooseDest:
@@ -272,16 +282,26 @@ func (m DownloadModel) repoMaxVisible() int {
 func (m DownloadModel) updateSelectEngine(msg tea.Msg) (DownloadModel, tea.Cmd) {
 	if m.searching {
 		switch msg := msg.(type) {
-		case downloadPlanDoneMsg:
+		case downloadFilesDoneMsg:
 			m.searching = false
 			if msg.err != nil {
 				m.errMsg = msg.err.Error()
-				m.step = stepSelectEngine
 				return m, nil
 			}
 			m.files = msg.files
-			m.plan = msg.plan
-			m.step = stepReviewPlan
+			m.engineKind = msg.engine
+			if msg.engine == model.EngineLlamaCPP && len(msg.variants) > 1 {
+				m.variants = msg.variants
+				m.variantCursor = 0
+				m.variantScroll = 0
+				m.step = stepSelectVariant
+			} else if msg.plan != nil {
+				m.plan = msg.plan
+				m.step = stepReviewPlan
+			} else if msg.engine == model.EngineLlamaCPP && len(msg.variants) == 1 {
+				m.plan = downloader.PlanGGUFVariant(m.selectedRepo.ID, "main", msg.variants[0], msg.files)
+				m.step = stepReviewPlan
+			}
 			m.errMsg = ""
 			return m, nil
 		case spinner.TickMsg:
@@ -317,13 +337,20 @@ func (m DownloadModel) updateSelectEngine(msg tea.Msg) (DownloadModel, tea.Cmd) 
 				func() tea.Msg {
 					files, err := hubClient.ListFiles(context.Background(), repoID, "main")
 					if err != nil {
-						return downloadPlanDoneMsg{err: err}
+						return downloadFilesDoneMsg{err: err}
+					}
+					if engineKind == model.EngineLlamaCPP {
+						variants := downloader.ListGGUFVariants(files)
+						if len(variants) == 0 {
+							return downloadFilesDoneMsg{err: fmt.Errorf("no GGUF files found in repository")}
+						}
+						return downloadFilesDoneMsg{files: files, variants: variants, engine: engineKind}
 					}
 					plan, err := downloader.PlanFiles(repoID, "main", files, engineKind)
 					if err != nil {
-						return downloadPlanDoneMsg{err: err}
+						return downloadFilesDoneMsg{err: err}
 					}
-					return downloadPlanDoneMsg{files: files, plan: plan}
+					return downloadFilesDoneMsg{files: files, plan: plan, engine: engineKind}
 				},
 			)
 		case "esc":
@@ -332,6 +359,46 @@ func (m DownloadModel) updateSelectEngine(msg tea.Msg) (DownloadModel, tea.Cmd) 
 		}
 	}
 	return m, nil
+}
+
+func (m DownloadModel) updateSelectVariant(msg tea.Msg) (DownloadModel, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "up", "k":
+			if m.variantCursor > 0 {
+				m.variantCursor--
+			}
+		case "down", "j":
+			if m.variantCursor < len(m.variants)-1 {
+				m.variantCursor++
+			}
+		case "enter":
+			selected := m.variants[m.variantCursor]
+			m.plan = downloader.PlanGGUFVariant(m.selectedRepo.ID, "main", selected, m.files)
+			m.planScroll = 0
+			m.step = stepReviewPlan
+			m.errMsg = ""
+		case "esc":
+			m.step = stepSelectEngine
+			m.errMsg = ""
+		}
+	}
+
+	maxVisible := m.variantMaxVisible()
+	if m.variantCursor < m.variantScroll {
+		m.variantScroll = m.variantCursor
+	} else if m.variantCursor >= m.variantScroll+maxVisible {
+		m.variantScroll = m.variantCursor - maxVisible + 1
+	}
+
+	return m, nil
+}
+
+func (m DownloadModel) variantMaxVisible() int {
+	// box: border(2) + padding(2) = 4
+	// inner chrome: title(1) + repo(1) + hint(1) = 3
+	return max(m.height-4-3, 3)
 }
 
 func (m DownloadModel) updateReviewPlan(msg tea.Msg) (DownloadModel, tea.Cmd) {
@@ -588,6 +655,40 @@ func (m DownloadModel) View() string {
 			sb.WriteString("\n  " + styleError.Render(m.errMsg) + "\n")
 		}
 		sb.WriteString("\n" + mutedStyle.Render("  enter: select  esc: back"))
+
+	case stepSelectVariant:
+		sb.WriteString(titleStyle.Render("Select Quantization") + "\n")
+		sb.WriteString(mutedStyle.Render("  "+m.selectedRepo.ID) + "\n")
+		maxVisible := m.variantMaxVisible()
+		end := m.variantScroll + maxVisible
+		if end > len(m.variants) {
+			end = len(m.variants)
+		}
+		if m.variantScroll > 0 {
+			sb.WriteString(mutedStyle.Render(fmt.Sprintf("  ↑ %d more", m.variantScroll)) + "\n")
+		}
+		for i := m.variantScroll; i < end; i++ {
+			v := m.variants[i]
+			sizeStr := dlFormatBytes(v.TotalBytes)
+			label := v.Name
+			if v.Sharded {
+				label += fmt.Sprintf(" (%d shards)", v.ShardCount)
+			}
+			line := fmt.Sprintf("%-50s %s", label, sizeStr)
+			availW := max(m.width-10, 20)
+			if len(line) > availW {
+				line = line[:availW-1] + "…"
+			}
+			if i == m.variantCursor {
+				sb.WriteString(styleSelRow.Render(padToWidth("▶ "+line, availW+2)) + "\n")
+			} else {
+				sb.WriteString("  " + mutedStyle.Render(line) + "\n")
+			}
+		}
+		if end < len(m.variants) {
+			sb.WriteString(mutedStyle.Render(fmt.Sprintf("  ↓ %d more", len(m.variants)-end)) + "\n")
+		}
+		sb.WriteString(mutedStyle.Render("  enter: select  esc: back"))
 
 	case stepReviewPlan:
 		sb.WriteString(titleStyle.Render("Download Plan") + "\n")
