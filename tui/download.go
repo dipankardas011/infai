@@ -481,7 +481,19 @@ func (m DownloadModel) updateChooseDest(msg tea.Msg) (DownloadModel, tea.Cmd) {
 			m.step = stepReviewPlan
 			return m, nil
 		}
-		m.destPath = fm.Path
+
+		repoName := m.plan.RepoID
+		if parts := strings.SplitN(repoName, "/", 2); len(parts) == 2 {
+			repoName = parts[1]
+		}
+		m.destPath = filepath.Join(fm.Path, repoName)
+
+		if err := os.MkdirAll(m.destPath, 0755); err != nil {
+			m.errMsg = err.Error()
+			m.step = stepReviewPlan
+			return m, nil
+		}
+
 		ctx, cancel := context.WithCancel(context.Background())
 		m.cancelFunc = cancel
 
@@ -692,8 +704,12 @@ func (m DownloadModel) View() string {
 		sb.WriteString(mutedStyle.Render("  enter: select  esc: back"))
 
 	case stepReviewPlan:
+		repoName := m.plan.RepoID
+		if parts := strings.SplitN(repoName, "/", 2); len(parts) == 2 {
+			repoName = parts[1]
+		}
 		sb.WriteString(titleStyle.Render("Download Plan") + "\n")
-		sb.WriteString(mutedStyle.Render("  "+m.plan.RepoID) + "\n")
+		sb.WriteString(mutedStyle.Render("  "+m.plan.RepoID+" → ")+lipgloss.NewStyle().Foreground(t.Secondary).Render(repoName+"/") + "\n")
 
 		allFiles := make([]downloader.PlanFile, 0, len(m.plan.Files)+len(m.plan.OptionalFiles))
 		allFiles = append(allFiles, m.plan.Files...)
