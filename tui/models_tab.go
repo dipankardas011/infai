@@ -83,6 +83,10 @@ func (m ModelsTabModel) InModalInput() bool {
 	return m.addingBrowse || m.removeConfirm || m.downloading
 }
 
+func (m ModelsTabModel) InFileBrowser() bool {
+	return m.addingBrowse || (m.downloading && m.downloadModel.browsingDest)
+}
+
 func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 	if m.downloading {
 		if _, ok := msg.(downloadDoneMsg); ok {

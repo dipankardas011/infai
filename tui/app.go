@@ -882,7 +882,11 @@ func (a *AppModel) helpView() string {
 		case tabRuns:
 			helpContent = a.help.View(keys.Runs)
 		case tabModels:
-			helpContent = a.help.View(keys.Models)
+			if a.home.modelsTab.InFileBrowser() {
+				helpContent = a.help.View(keys.FileBrowser)
+			} else {
+				helpContent = a.help.View(keys.Models)
+			}
 		case tabEngines:
 			helpContent = a.help.View(keys.Engines)
 		}

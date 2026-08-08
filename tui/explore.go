@@ -256,7 +256,7 @@ func (m FileBrowserModel) View() string {
 		sb.WriteString(m.filterInput.View() + "\n")
 	}
 
-	maxEntries := m.height - 6
+	maxEntries := m.height - 7
 	if m.filtering || m.filterInput.Value() != "" {
 		maxEntries--
 	}
@@ -309,5 +309,5 @@ func (m FileBrowserModel) View() string {
 		Width(boxWidth).
 		MaxHeight(max(m.height, 1))
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(strings.TrimRight(sb.String(), "\n")))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Top, boxStyle.Render(strings.TrimRight(sb.String(), "\n")))
 }

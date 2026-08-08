@@ -119,6 +119,22 @@ func (k modelsTabKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{{k.Import, k.Download, k.Remove, k.Sync, k.OpenHF}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
 }
 
+type fileBrowserKeyMap struct {
+	Select key.Binding
+	Open   key.Binding
+	Back   key.Binding
+	Filter key.Binding
+	Home   key.Binding
+	Cancel key.Binding
+}
+
+func (k fileBrowserKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Select, k.Open, k.Back, k.Filter, k.Home, k.Cancel}
+}
+func (k fileBrowserKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{{k.Select, k.Open, k.Back}, {k.Filter, k.Home, k.Cancel}}
+}
+
 type enginesTabKeyMap struct {
 	Add      key.Binding
 	Rename   key.Binding
@@ -138,13 +154,14 @@ func (k enginesTabKeyMap) FullHelp() [][]key.Binding {
 }
 
 var keys = struct {
-	Home      homeKeyMap
-	Profiles  profileTabKeyMap
-	Runs      runsTabKeyMap
-	Models    modelsTabKeyMap
-	Engines   enginesTabKeyMap
-	ModelList modelListKeyMap
-	Server    serverKeyMap
+	Home        homeKeyMap
+	Profiles    profileTabKeyMap
+	Runs        runsTabKeyMap
+	Models      modelsTabKeyMap
+	Engines     enginesTabKeyMap
+	ModelList   modelListKeyMap
+	FileBrowser fileBrowserKeyMap
+	Server      serverKeyMap
 	Theme     themeKeyMap
 }{
 	Home: homeKeyMap{
@@ -215,6 +232,14 @@ var keys = struct {
 		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
 		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	},
+	FileBrowser: fileBrowserKeyMap{
+		Select: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
+		Open:   key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "open")),
+		Back:   key.NewBinding(key.WithKeys("left", "backspace", "b"), key.WithHelp("←", "back")),
+		Filter: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+		Home:   key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "~")),
+		Cancel: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel")),
 	},
 	Theme: themeKeyMap{
 		Select: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
