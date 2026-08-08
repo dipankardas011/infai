@@ -122,10 +122,9 @@ func InspectPath(path string) ([]model.ModelEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
 	var magic uint32
-	magicErr := binaryReadUint32(f, &magic)
-	_ = f.Close()
-	if magicErr != nil || magic != GGUF_MAGIC {
+	if err := binaryReadUint32(f, &magic); err != nil || magic != GGUF_MAGIC {
 		return nil, fmt.Errorf("not a valid GGUF file")
 	}
 
