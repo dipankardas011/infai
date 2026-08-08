@@ -100,6 +100,7 @@ func (k runsTabKeyMap) FullHelp() [][]key.Binding {
 }
 
 type modelsTabKeyMap struct {
+	Info     key.Binding
 	Import   key.Binding
 	Download key.Binding
 	Remove   key.Binding
@@ -113,10 +114,10 @@ type modelsTabKeyMap struct {
 }
 
 func (k modelsTabKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Import, k.Download, k.Remove, k.Sync, k.OpenHF, k.TabLeft, k.TabRight, k.Help}
+	return []key.Binding{k.Info, k.Import, k.Download, k.Remove, k.Sync, k.OpenHF, k.TabLeft, k.TabRight, k.Help}
 }
 func (k modelsTabKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Import, k.Download, k.Remove, k.Sync, k.OpenHF}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
+	return [][]key.Binding{{k.Info, k.Import, k.Download, k.Remove, k.Sync, k.OpenHF}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
 }
 
 type fileBrowserKeyMap struct {
@@ -212,6 +213,7 @@ var keys = struct {
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	},
 	Models: modelsTabKeyMap{
+		Info:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "info")),
 		Import:   key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "import")),
 		Download: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "download")),
 		Remove:   key.NewBinding(key.WithKeys("x", "d", "delete"), key.WithHelp("x", "remove")),

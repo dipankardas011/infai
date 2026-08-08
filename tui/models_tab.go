@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,6 +25,8 @@ type ModelsTabModel struct {
 	modelCnt  int
 	cursor    int
 	scrollOff int
+
+	showInfo bool
 
 	addingBrowse  bool
 	fileBrowser   FileBrowserModel
@@ -182,6 +185,10 @@ func (m ModelsTabModel) Update(msg tea.Msg) (ModelsTabModel, tea.Cmd) {
 			if m.cursor < len(m.dirs)-1 {
 				m.cursor++
 			}
+		case "enter":
+			if len(m.dirs) > 0 && m.cursor < len(m.dirs) {
+				m.showInfo = !m.showInfo
+			}
 		case "i":
 			m.addingBrowse = true
 			m.errMsg = ""
@@ -302,6 +309,10 @@ func (m ModelsTabModel) View() string {
 			Render(sb.String())
 	}
 
+	if m.showInfo && len(m.dirs) > 0 && m.cursor < len(m.dirs) {
+		return m.splitView(t, titleStyle, mutedStyle)
+	}
+
 	sb.WriteString(titleStyle.Render("Model Directories") + "\n")
 	if m.modelCnt > 0 {
 		sb.WriteString(mutedStyle.Render(fmt.Sprintf("  %d models discovered\n", m.modelCnt)))
@@ -347,4 +358,148 @@ func (m ModelsTabModel) View() string {
 		Width(boxW).
 		MaxHeight(max(m.height, 1)).
 		Render(sb.String())
+}
+
+func (m ModelsTabModel) splitView(t Theme, titleStyle, mutedStyle lipgloss.Style) string {
+	leftW := m.width * 2 / 5
+	if leftW < 25 {
+		leftW = 25
+	}
+	if leftW > m.width-30 {
+		leftW = m.width - 30
+	}
+	rightW := m.width - leftW - 1
+	panelH := max(m.height, 3)
+
+	var left strings.Builder
+	left.WriteString(titleStyle.Render("Directories") + "\n")
+	innerH := panelH - 6
+	if innerH < 1 {
+		innerH = 1
+	}
+	end := m.scrollOff + innerH
+	if end > len(m.dirs) {
+		end = len(m.dirs)
+	}
+	innerLeftW := max(leftW-6, 10)
+	for i := m.scrollOff; i < end; i++ {
+		d := m.dirs[i]
+		display := d
+		if len(display) > innerLeftW {
+			display = "…" + display[len(display)-(innerLeftW-3):]
+		}
+		if i == m.cursor {
+			left.WriteString(styleSelRow.Render(padToWidth("▶ "+display, innerLeftW+2)) + "\n")
+		} else {
+			left.WriteString("  " + mutedStyle.Render(display) + "\n")
+		}
+	}
+	if m.syncing {
+		left.WriteString(styleSelected.Render(m.spinner.View()+" syncing...") + "\n")
+	} else if m.errMsg != "" {
+		left.WriteString(m.errMsg + "\n")
+	}
+
+	var right strings.Builder
+	selectedDir := m.dirs[m.cursor]
+	var dirModels []model.ModelEntry
+	for _, mdl := range m.models {
+		if mdl.ScanDir == selectedDir {
+			dirModels = append(dirModels, mdl)
+		}
+	}
+
+	right.WriteString(titleStyle.Render(fmt.Sprintf("Models (%d)", len(dirModels))) + "\n")
+
+	if len(dirModels) == 0 {
+		right.WriteString(mutedStyle.Render("  No models in this folder.") + "\n")
+	} else {
+		labelStyle := lipgloss.NewStyle().Foreground(t.Secondary).Bold(true)
+		valStyle := lipgloss.NewStyle().Foreground(t.Text)
+		innerRightW := max(rightW-6, 20)
+		maxModels := max((panelH-6)/6, 1)
+
+		for idx, mdl := range dirModels {
+			if idx >= maxModels {
+				right.WriteString(mutedStyle.Render(fmt.Sprintf("\n  +%d more...", len(dirModels)-maxModels)) + "\n")
+				break
+			}
+			if idx > 0 {
+				right.WriteString(mutedStyle.Render("  "+strings.Repeat("─", min(innerRightW-2, 40))) + "\n")
+			}
+
+			right.WriteString(lipgloss.NewStyle().Foreground(t.Primary).Bold(true).Render("  "+mdl.DisplayName) + "\n")
+
+			typeBadge := string(mdl.Type)
+			right.WriteString(labelStyle.Render("  Type: ") + valStyle.Render(typeBadge) + "\n")
+
+			var meta model.ModelMetadata
+			if mdl.Metadata != "" {
+				_ = json.Unmarshal([]byte(mdl.Metadata), &meta)
+			}
+
+			if meta.Architecture != "" {
+				right.WriteString(labelStyle.Render("  Arch: ") + valStyle.Render(meta.Architecture) + "\n")
+			}
+			if meta.ParameterCount > 0 {
+				right.WriteString(labelStyle.Render("  Params: ") + valStyle.Render(formatParams(meta.ParameterCount)) + "\n")
+			}
+			if meta.Quantization != "" {
+				right.WriteString(labelStyle.Render("  Quant: ") + valStyle.Render(meta.Quantization) + "\n")
+			}
+			if meta.ContextLength > 0 {
+				right.WriteString(labelStyle.Render("  Context: ") + valStyle.Render(fmt.Sprintf("%d", meta.ContextLength)) + "\n")
+			}
+			if meta.FileSizeBytes > 0 {
+				right.WriteString(labelStyle.Render("  Size: ") + valStyle.Render(formatFileSize(meta.FileSizeBytes)) + "\n")
+			}
+			if mdl.SourceRepo != "" {
+				right.WriteString(labelStyle.Render("  Source: ") + valStyle.Render(mdl.SourceRepo) + "\n")
+			}
+		}
+	}
+
+	leftBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Primary).
+		Padding(0, 1).
+		Width(leftW - 2).
+		Height(panelH - 2).
+		MaxHeight(panelH).
+		Render(left.String())
+
+	rightBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Muted).
+		Padding(0, 1).
+		Width(rightW - 2).
+		Height(panelH - 2).
+		MaxHeight(panelH).
+		Render(right.String())
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftBox, rightBox)
+}
+
+func formatParams(n uint64) string {
+	switch {
+	case n >= 1_000_000_000:
+		return fmt.Sprintf("%.1fB", float64(n)/1e9)
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+func formatFileSize(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
