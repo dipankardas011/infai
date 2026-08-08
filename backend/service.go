@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/dipankardas011/infai/db"
+	"github.com/dipankardas011/infai/downloader"
 	"github.com/dipankardas011/infai/inference"
 	"github.com/dipankardas011/infai/model"
 	"github.com/dipankardas011/infai/scanner"
@@ -335,4 +337,71 @@ func (s *Service) DeleteInferenceEngine(id string) error {
 		return fmt.Errorf("inference engine id is empty")
 	}
 	return s.db.DeleteInferenceEngine(id)
+}
+
+type ImportResult struct {
+	Models []model.ModelEntry
+	Issues []string
+}
+
+func (s *Service) ImportPath(path string) (ImportResult, error) {
+	normalized, err := scanner.NormalizePath(path)
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("invalid path: %w", err)
+	}
+
+	entries, err := scanner.InspectPath(normalized)
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("inspect: %w", err)
+	}
+
+	var result ImportResult
+	info, _ := os.Stat(normalized)
+	scanDir := normalized
+	if info != nil && !info.IsDir() {
+		scanDir = filepath.Dir(normalized)
+	}
+
+	if err := s.db.AddScanDir(scanDir); err != nil {
+		return ImportResult{}, fmt.Errorf("register scan dir: %w", err)
+	}
+
+	for _, e := range entries {
+		entry := e
+		if err := scanner.LoadModelMetadata(&entry); err != nil {
+			result.Issues = append(result.Issues, fmt.Sprintf("%s: %v", entry.DisplayName, err))
+			continue
+		}
+		if err := s.db.UpsertModel(&entry); err != nil {
+			result.Issues = append(result.Issues, fmt.Sprintf("%s: %v", entry.DisplayName, err))
+			continue
+		}
+		result.Models = append(result.Models, entry)
+	}
+
+	return result, nil
+}
+
+func (s *Service) ImportDownloaded(destDir string, plan *downloader.DownloadPlan) (ImportResult, error) {
+	result, err := s.ImportPath(destDir)
+	if err != nil {
+		return result, err
+	}
+
+	sourceFiles := make([]string, len(plan.Files))
+	for i, f := range plan.Files {
+		sourceFiles[i] = f.Path
+	}
+	filesJSON, _ := json.Marshal(sourceFiles)
+
+	for i := range result.Models {
+		result.Models[i].SourceRepo = plan.RepoID
+		result.Models[i].SourceRevision = plan.Revision
+		result.Models[i].SourceFiles = string(filesJSON)
+		if err := s.db.UpsertModel(&result.Models[i]); err != nil {
+			result.Issues = append(result.Issues, fmt.Sprintf("provenance for %s: %v", result.Models[i].DisplayName, err))
+		}
+	}
+
+	return result, nil
 }

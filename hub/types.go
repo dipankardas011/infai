@@ -66,6 +66,7 @@ type SearchParams struct {
 	Sort      string
 	Direction string
 	Limit     int
+	Offset    int
 	Full      bool
 }
 
@@ -85,6 +86,9 @@ func (p SearchParams) values() map[string]string {
 	}
 	if p.Limit > 0 {
 		v["limit"] = fmt.Sprintf("%d", p.Limit)
+	}
+	if p.Offset > 0 {
+		v["offset"] = fmt.Sprintf("%d", p.Offset)
 	}
 	if p.Full {
 		v["full"] = "true"

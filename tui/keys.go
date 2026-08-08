@@ -100,9 +100,11 @@ func (k runsTabKeyMap) FullHelp() [][]key.Binding {
 }
 
 type modelsTabKeyMap struct {
-	Add      key.Binding
+	Import   key.Binding
+	Download key.Binding
 	Remove   key.Binding
 	Sync     key.Binding
+	OpenHF   key.Binding
 	TabLeft  key.Binding
 	TabRight key.Binding
 	Theme    key.Binding
@@ -111,10 +113,10 @@ type modelsTabKeyMap struct {
 }
 
 func (k modelsTabKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Add, k.Remove, k.Sync, k.TabLeft, k.TabRight, k.Help}
+	return []key.Binding{k.Import, k.Download, k.Remove, k.Sync, k.OpenHF, k.TabLeft, k.TabRight, k.Help}
 }
 func (k modelsTabKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Add, k.Remove, k.Sync}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
+	return [][]key.Binding{{k.Import, k.Download, k.Remove, k.Sync, k.OpenHF}, {k.TabLeft, k.TabRight, k.Theme, k.Quit}}
 }
 
 type enginesTabKeyMap struct {
@@ -193,9 +195,11 @@ var keys = struct {
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	},
 	Models: modelsTabKeyMap{
-		Add:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add folder")),
-		Remove:   key.NewBinding(key.WithKeys("x", "d", "delete"), key.WithHelp("x", "remove folder")),
+		Import:   key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "import")),
+		Download: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "download")),
+		Remove:   key.NewBinding(key.WithKeys("x", "d", "delete"), key.WithHelp("x", "remove")),
 		Sync:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sync")),
+		OpenHF:   key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open on HF")),
 		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),
 		TabRight: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
 		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
