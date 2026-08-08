@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -418,7 +419,7 @@ func (m DownloadModel) updateReviewPlan(msg tea.Msg) (DownloadModel, tea.Cmd) {
 		case "enter":
 			m.browsingDest = true
 			m.errMsg = ""
-			home, _ := filepath.Abs(".")
+			home, _ := os.UserHomeDir()
 			m.fileBrowser = NewFileBrowserModel()
 			m.fileBrowser.currentDir = home
 			m.fileBrowser.entries = loadDirEntries(home)
@@ -734,7 +735,8 @@ func (m DownloadModel) View() string {
 
 	case stepChooseDest:
 		if m.browsingDest {
-			return m.fileBrowser.View()
+			fb := m.fileBrowser.SetSize(m.width, m.height)
+			return fb.View()
 		}
 
 	case stepDownloading:
