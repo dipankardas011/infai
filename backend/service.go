@@ -214,7 +214,7 @@ func (s *Service) SyncModels(folders []string) (SyncResult, error) {
 
 func (s *Service) SyncModelsWithContext(ctx context.Context, folders []string, progress scanner.ProgressFunc) (SyncResult, error) {
 	if len(folders) == 0 {
-		return SyncResult{}, fmt.Errorf("no scan folders configured")
+		return SyncResult{}, nil
 	}
 
 	results := scanner.ScanWithContext(ctx, folders, progress)
