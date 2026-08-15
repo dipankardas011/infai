@@ -77,11 +77,13 @@ func SuggestProfile(req SuggestionRequest) (ProfileSuggestion, error) {
 	for _, contextSize := range contexts[1:] {
 		draft, err := suggestionDraft(req, engineKind, contextSize)
 		if err != nil {
-			return ProfileSuggestion{}, err
+			result.Warnings = append(result.Warnings, fmt.Sprintf("could not build %d-token alternative: %v", contextSize, err))
+			continue
 		}
 		alternative, err := evaluateSuggestion(req, draft, engine, engineKind, contextSize)
 		if err != nil {
-			return ProfileSuggestion{}, err
+			result.Warnings = append(result.Warnings, fmt.Sprintf("could not estimate %d-token alternative: %v", contextSize, err))
+			continue
 		}
 		result.Alternatives = append(result.Alternatives, ProfileAlternative{
 			Draft:    alternative.Draft,
@@ -120,6 +122,11 @@ func evaluateSuggestion(req SuggestionRequest, draft model.Profile, engine model
 	warnings := append([]string(nil), fit.Warnings...)
 	for _, issue := range issues.Warnings() {
 		warnings = append(warnings, issue.Error())
+	}
+	if engineKind == model.EngineLlamaCPP {
+		warnings = append(warnings, "exact batch workspace is backend/build dependent and is not included in the static memory estimate")
+	} else {
+		warnings = append(warnings, "exact vLLM scheduler workspace depends on the installed engine and is represented by the engine budget")
 	}
 	reasons := suggestionReasons(engineKind, contextSize, req.Model.MmprojPath != "")
 	if fit.Fit == memoryfit.FitDoesNotFit {
@@ -174,16 +181,16 @@ func suggestionContexts(entry model.ModelEntry) ([]int, error) {
 	if meta.ContextLength == 0 {
 		return nil, fmt.Errorf("%w: model context length is missing", memoryfit.ErrCannotEstimate)
 	}
-	maxContext := min(int(meta.ContextLength), SuggestionContextCap)
-	candidates := []int{maxContext, 16 * 1024, 8 * 1024, 4 * 1024, 2 * 1024}
-	seen := make(map[int]bool, len(candidates))
+	maxContext := min(uint64(meta.ContextLength), uint64(SuggestionContextCap))
+	candidates := []uint64{maxContext, 16 * 1024, 8 * 1024, 4 * 1024, 2 * 1024}
+	seen := make(map[uint64]bool, len(candidates))
 	result := make([]int, 0, len(candidates))
 	for _, candidate := range candidates {
 		if candidate > maxContext || candidate <= 0 || seen[candidate] {
 			continue
 		}
 		seen[candidate] = true
-		result = append(result, candidate)
+		result = append(result, int(candidate))
 	}
 	return result, nil
 }
@@ -195,6 +202,7 @@ func suggestionReasons(engine model.EngineKind, contextSize int, hasMmproj bool)
 			"GPU layers set to auto so llama.cpp can choose a safe offload level",
 			"f16 KV cache selected as the quality-preserving default",
 			"batch 512 and ubatch 128 selected as conservative prompt-processing defaults",
+			"exact batch workspace is backend/build dependent and is surfaced as a fit warning rather than estimated precisely",
 		)
 		if hasMmproj {
 			reasons = append(reasons, "multimodal projector remains disabled by default and can be enabled by the user")
@@ -205,6 +213,7 @@ func suggestionReasons(engine model.EngineKind, contextSize int, hasMmproj bool)
 			"maximum sequences set to 8 for a local-hardware concurrency default",
 			"maximum batched tokens set to 4096 for a conservative vLLM profile",
 			"tensor and pipeline parallelism omitted because multi-GPU placement is not supported",
+			"vLLM engine budget covers its runtime allocation policy; exact scheduler workspace remains engine dependent",
 		)
 	}
 	return reasons
