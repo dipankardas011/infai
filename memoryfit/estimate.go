@@ -272,7 +272,7 @@ func kvCacheBytes(meta model.ModelMetadata, req Request) (uint64, string, error)
 		if err != nil {
 			return 0, "", err
 		}
-		bpe = math.Max(k, v)
+		bpe = max(k, v)
 		if req.Profile.CacheTypeK != nil || req.Profile.CacheTypeV != nil {
 			assumption = fmt.Sprintf("KV cache uses %.1f bytes per element based on the larger configured K/V type", bpe)
 		}
