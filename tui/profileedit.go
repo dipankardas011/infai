@@ -439,23 +439,20 @@ func (em ProfileEditModel) Update(msg tea.Msg) (ProfileEditModel, tea.Cmd) {
 
 func (em ProfileEditModel) computeVisibleRows() int {
 	// AppModel has already reserved global header/footer/help. Reserve the
-	// editor's fixed title, separators, help, and outer box chrome here; only
+	// editor's fixed title, separators, and outer box chrome here; only
 	// the remaining rows belong to the scrollable field list.
 	recommendationHeight := 0
 	if em.suggestionLoading {
 		recommendationHeight = 3
 	} else if len(em.recommendation) > 0 {
-		recommendationHeight = len(em.recommendation) + 2
+		recommendationHeight = min(len(em.recommendation), 3) + 2
 	}
-	overhead := 14 + recommendationHeight
+	overhead := 9 + recommendationHeight
 	if em.errMsg != "" {
 		overhead++
 	}
-	if option, ok := em.focusedOption(); ok {
-		overhead += 2 // focused option description box
-		if option.SecurityCaution != "" {
-			overhead++
-		}
+	if _, ok := em.focusedOption(); ok {
+		overhead += 7 // focused option description box, including wrapped caution
 	}
 	rows := em.height - overhead
 	if rows < 1 {
@@ -593,15 +590,17 @@ func (em ProfileEditModel) View() string {
 			Render(styleMuted.Render("Preparing hardware-aware recommendation..."))
 	} else {
 		var recommendationRows []string
-		for i, line := range em.recommendation {
+		summaryCount := min(len(em.recommendation), 3)
+		for i, line := range em.recommendation[:summaryCount] {
 			lineStyle := styleMuted
 			if i == 0 {
+				status := strings.ToLower(line)
 				switch {
-				case strings.Contains(line, "does_not_fit") || strings.Contains(line, "no fitting context"):
+				case strings.Contains(status, "does_not_fit") || strings.Contains(status, "does not fit"):
 					lineStyle = styleError
-				case strings.Contains(line, "tight"):
+				case strings.Contains(status, "tight"):
 					lineStyle = styleWarning
-				case strings.Contains(line, "fits"):
+				case strings.Contains(status, "fits"):
 					lineStyle = styleSuccess
 				}
 			}
@@ -704,9 +703,10 @@ func (em ProfileEditModel) View() string {
 
 	infoBlock := ""
 	if option, ok := em.focusedOption(); ok {
-		infoLines := []string{styleMuted.Render("[i] " + truncateLine(option.Description, innerW-4))}
+		infoW := max(innerW-4, 10)
+		infoLines := []string{lipgloss.NewStyle().Width(infoW).Render(styleMuted.Render("[i] " + option.Description))}
 		if option.SecurityCaution != "" {
-			infoLines = append(infoLines, styleWarning.Render("Caution: "+truncateLine(option.SecurityCaution, innerW-9)))
+			infoLines = append(infoLines, lipgloss.NewStyle().Width(infoW).Render(styleWarning.Render("Caution: "+option.SecurityCaution)))
 		}
 		infoBlock = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -719,7 +719,9 @@ func (em ProfileEditModel) View() string {
 	if infoBlock != "" {
 		content += "\n\n" + infoBlock
 	}
-	content += "\n\n" + help
+	if em.discardConfirm {
+		content += "\n\n" + help
+	}
 
 	borderColor := t.Muted
 	if em.discardConfirm {
@@ -730,10 +732,11 @@ func (em ProfileEditModel) View() string {
 		BorderForeground(borderColor).
 		Padding(1, 2).
 		Width(boxW).
+		Height(max(em.height-8, 1)).
 		MaxHeight(max(em.height, 1)).
 		Render(content)
 
-	return lipgloss.Place(em.width, em.height, lipgloss.Center, lipgloss.Center, box)
+	return lipgloss.Place(em.width, em.height, lipgloss.Center, lipgloss.Top, box)
 }
 
 // ToProfile extracts and validates form state into a Profile.

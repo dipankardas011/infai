@@ -808,18 +808,27 @@ func suggestionLines(suggestion backend.ProfileSuggestion) []string {
 	fit := suggestion.Fit
 	fitLabel := string(fit.Fit)
 	if fit.Fit == memoryfit.FitDoesNotFit {
-		fitLabel = "no fitting context"
+		fitLabel = "DOES NOT FIT"
+	} else {
+		fitLabel = strings.ToUpper(fitLabel)
 	}
+	confidence := strings.ToUpper(string(fit.Confidence))
 	lines := []string{
-		fmt.Sprintf("recommended %d  |  model max %d  |  %s  |  %s confidence", suggestion.Draft.ContextSize, suggestion.NativeContext, fitLabel, fit.Confidence),
-		fmt.Sprintf("required %s  |  available %s", formatMemory(fit.Breakdown.RequiredBytes), formatMemory(fit.PoolAvailableBytes)),
-		fmt.Sprintf("weights %s  |  KV %s  |  runtime %s  |  headroom %s", formatMemory(fit.Breakdown.WeightsBytes), formatMemory(fit.Breakdown.KVCacheBytes), formatMemory(fit.Breakdown.RuntimeOverheadBytes), formatMemory(fit.Breakdown.SafetyHeadroomBytes)),
+		fmt.Sprintf("Context: %d  |  Model max: %d  |  Fit: %s  |  Confidence: %s", suggestion.Draft.ContextSize, suggestion.NativeContext, fitLabel, confidence),
+		fmt.Sprintf("Required: %s  |  Available: %s", formatMemory(fit.Breakdown.RequiredBytes), formatMemory(fit.PoolAvailableBytes)),
+		fmt.Sprintf("Weights: %s  |  KV cache: %s  |  Runtime: %s  |  Headroom: %s", formatMemory(fit.Breakdown.WeightsBytes), formatMemory(fit.Breakdown.KVCacheBytes), formatMemory(fit.Breakdown.RuntimeOverheadBytes), formatMemory(fit.Breakdown.SafetyHeadroomBytes)),
 	}
 	if len(suggestion.Reasons) > 0 {
-		lines = append(lines, fmt.Sprintf("reasons (%d): %s", len(suggestion.Reasons), strings.Join(suggestion.Reasons, "; ")))
+		lines = append(lines, fmt.Sprintf("reasons (%d):", len(suggestion.Reasons)))
+		for _, reason := range suggestion.Reasons {
+			lines = append(lines, "  • "+reason)
+		}
 	}
 	if len(suggestion.Warnings) > 0 {
-		lines = append(lines, fmt.Sprintf("warnings (%d): %s", len(suggestion.Warnings), strings.Join(suggestion.Warnings, "; ")))
+		lines = append(lines, fmt.Sprintf("warnings (%d):", len(suggestion.Warnings)))
+		for _, warning := range suggestion.Warnings {
+			lines = append(lines, "  ! "+warning)
+		}
 	}
 	return lines
 }
@@ -990,6 +999,8 @@ func (a *AppModel) helpView() string {
 		helpContent = a.serverHelpView()
 	case screenThemeSelector:
 		helpContent = a.help.View(keys.Theme)
+	case screenProfileEdit:
+		helpContent = a.help.View(keys.ProfileEdit)
 	default:
 		return ""
 	}
