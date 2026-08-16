@@ -417,7 +417,7 @@ func (m ModelsTabModel) splitView(t Theme, titleStyle, mutedStyle lipgloss.Style
 		labelStyle := lipgloss.NewStyle().Foreground(t.Secondary).Bold(true)
 		valStyle := lipgloss.NewStyle().Foreground(t.Text)
 		innerRightW := max(rightW-6, 20)
-		maxModels := max((panelH-6)/6, 1)
+		maxModels := max((panelH-6)/11, 1)
 
 		for idx, mdl := range dirModels {
 			if idx >= maxModels {
@@ -450,11 +450,33 @@ func (m ModelsTabModel) splitView(t Theme, titleStyle, mutedStyle lipgloss.Style
 			if meta.ContextLength > 0 {
 				right.WriteString(labelStyle.Render("  Context: ") + valStyle.Render(fmt.Sprintf("%d", meta.ContextLength)) + "\n")
 			}
+			if meta.BlockCount > 0 {
+				right.WriteString(labelStyle.Render("  Layers: ") + valStyle.Render(fmt.Sprintf("%d", meta.BlockCount)) + "\n")
+			}
+			if attention := formatAttentionMetadata(meta); attention != "" {
+				right.WriteString(labelStyle.Render("  Attention: ") + valStyle.Render(attention) + "\n")
+			}
+			if meta.NumExperts > 0 {
+				moe := fmt.Sprintf("%d experts, %d active/token", meta.NumExperts, meta.NumExpertsPerToken)
+				if meta.MoEExpertBytes > 0 {
+					moe += ", " + formatFileSize(int64(meta.MoEExpertBytes)) + " expert tensors"
+				}
+				right.WriteString(labelStyle.Render("  MoE: ") + valStyle.Render(moe) + "\n")
+			}
+			if meta.MTPNumLayers > 0 {
+				right.WriteString(labelStyle.Render("  MTP: ") + valStyle.Render(fmt.Sprintf("%d layer(s)", meta.MTPNumLayers)) + "\n")
+			}
 			if meta.FileSizeBytes > 0 {
 				right.WriteString(labelStyle.Render("  Size: ") + valStyle.Render(formatFileSize(meta.FileSizeBytes)) + "\n")
 			}
 			if mdl.SourceRepo != "" {
-				right.WriteString(labelStyle.Render("  Source: ") + valStyle.Render(mdl.SourceRepo) + "\n")
+				right.WriteString(labelStyle.Render("  HF Repo: ") + valStyle.Render(mdl.SourceRepo) + "\n")
+				if mdl.SourceRevision != "" {
+					right.WriteString(labelStyle.Render("  Revision: ") + valStyle.Render(truncateRunText(mdl.SourceRevision, max(innerRightW-14, 12))) + "\n")
+				}
+				if files := formatSourceFiles(mdl.SourceFiles); files != "" {
+					right.WriteString(labelStyle.Render("  Files: ") + valStyle.Render(truncateRunText(files, max(innerRightW-10, 12))) + "\n")
+				}
 			}
 		}
 	}
@@ -478,6 +500,41 @@ func (m ModelsTabModel) splitView(t Theme, titleStyle, mutedStyle lipgloss.Style
 		Render(right.String())
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftBox, rightBox)
+}
+
+func formatAttentionMetadata(meta model.ModelMetadata) string {
+	if len(meta.AttentionLayerTypes) > 0 {
+		full, sliding := 0, 0
+		for _, layerType := range meta.AttentionLayerTypes {
+			switch layerType {
+			case "full_attention":
+				full++
+			case "sliding_attention":
+				sliding++
+			}
+		}
+		if full > 0 || sliding > 0 {
+			return fmt.Sprintf("%d full, %d sliding", full, sliding)
+		}
+	}
+	if meta.SlidingWindow > 0 {
+		return fmt.Sprintf("sliding window %d", meta.SlidingWindow)
+	}
+	if meta.BlockCount > 0 {
+		return "full-context"
+	}
+	return ""
+}
+
+func formatSourceFiles(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var files []string
+	if json.Unmarshal([]byte(raw), &files) != nil {
+		return raw
+	}
+	return strings.Join(files, ", ")
 }
 
 func formatParams(n uint64) string {
