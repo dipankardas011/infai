@@ -96,6 +96,22 @@ func TestProfileEditDirtyCheck(t *testing.T) {
 	}
 }
 
+func TestProfileEditViewFitsShortTerminalWithRecommendation(t *testing.T) {
+	engines := []model.InferenceEngine{{ID: "e1", Name: "llama", Kind: model.EngineLlamaCPP}}
+	em := NewProfileEditModel(model.ModelEntry{DisplayName: "m"}, engines, nil, 80, 20)
+	em.SetRecommendation([]string{
+		"131072 tokens | fits fit | high confidence",
+		"required 4.8 GiB | available 7.5 GiB",
+		"weights 2.9 GiB | KV 780 MiB | runtime 512 MiB | headroom 638 MiB",
+		"reasons (5): context and hardware",
+		"warnings (1): batch workspace is backend dependent",
+	}, false)
+	view := em.View()
+	if lines := strings.Count(view, "\n") + 1; lines > 20 {
+		t.Fatalf("profile editor exceeds terminal height: %d lines", lines)
+	}
+}
+
 // Esc on a dirty editor must prompt instead of silently discarding; 'n' keeps
 // editing, 'y' leaves the screen.
 func TestProfileEditEscConfirmsDiscard(t *testing.T) {

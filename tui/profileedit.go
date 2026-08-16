@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/dipankardas011/infai/backend"
 	"github.com/dipankardas011/infai/model"
 )
 
@@ -41,23 +42,61 @@ type formField struct {
 
 // ProfileEditModel is screen 3.
 type ProfileEditModel struct {
-	fields      []formField
-	focused     int
-	modelEntry  model.ModelEntry
-	engines     []model.InferenceEngine
-	editingID   int64
-	modelID     int64
-	errMsg      string
-	viewOffset  int
-	visibleRows int
-	width       int
-	height      int
-	initialized bool
+	fields                  []formField
+	focused                 int
+	modelEntry              model.ModelEntry
+	engines                 []model.InferenceEngine
+	editingID               int64
+	modelID                 int64
+	errMsg                  string
+	viewOffset              int
+	visibleRows             int
+	width                   int
+	height                  int
+	initialized             bool
+	suggestionLoading       bool
+	recommendation          []string
+	requiresAcknowledgement bool
+	acknowledged            bool
+	fieldErrors             map[string]string
 
 	// initial holds the form state at open time so esc can warn about
 	// unsaved edits; discardConfirm is the "discard changes?" prompt.
 	initial        []string
 	discardConfirm bool
+}
+
+func (em ProfileEditModel) selectedEngineID() string {
+	for _, field := range em.fields {
+		if field.label == "Inference Engine" && len(field.optionValues) > 0 && field.selIdx < len(field.optionValues) {
+			return field.optionValues[field.selIdx]
+		}
+	}
+	return ""
+}
+
+func (em *ProfileEditModel) SetRecommendation(lines []string, requiresAcknowledgement bool) {
+	em.suggestionLoading = false
+	em.recommendation = append([]string(nil), lines...)
+	em.requiresAcknowledgement = requiresAcknowledgement
+	em.acknowledged = false
+}
+
+func (em *ProfileEditModel) SetFieldErrors(issues []backend.ValidationError) {
+	em.fieldErrors = make(map[string]string, len(issues))
+	for _, issue := range issues {
+		label := map[string]string{
+			"name": "Name", "model_id": "Model", "inference_engine_id": "Inference Engine", "inference_engine": "Inference Engine",
+			"port": "Port", "host": "Host", "context_size": "Context Size", "ngl": "NGL", "batch_size": "Batch Size", "ubatch_size": "UBatch Size",
+			"temperature": "Temperature", "top_p": "Top P", "top_k": "Top K", "reasoning_budget": "Reasoning Budget",
+			"gpu_memory_utilization": "GPU Memory Util", "max_num_seqs": "Max Sequences", "max_batched_tokens": "Max Batched Tokens",
+			"pipeline_parallel_size": "Pipeline Parallel", "tensor_parallel_size": "Tensor Parallel", "dtype": "vLLM DType", "extra_flags": "Extra Flags",
+		}[issue.Field]
+		if label == "" {
+			label = issue.Field
+		}
+		em.fieldErrors[label] = issue.Issue
+	}
 }
 
 // snapshot serializes every field's current value for dirty comparison.
@@ -396,11 +435,16 @@ func (em ProfileEditModel) Update(msg tea.Msg) (ProfileEditModel, tea.Cmd) {
 }
 
 func (em ProfileEditModel) computeVisibleRows() int {
-	// AppModel has already reserved global header/footer/help. This screen owns
-	// em.height lines. Border+padding consume 4 lines. Inside the box we keep:
-	// title+blank (2), blank+help (2), optional error (1). Everything else is
-	// the scrollable field list.
-	overhead := 8
+	// AppModel has already reserved global header/footer/help. Reserve the
+	// editor's fixed title, separators, help, and outer box chrome here; only
+	// the remaining rows belong to the scrollable field list.
+	recommendationHeight := 0
+	if em.suggestionLoading {
+		recommendationHeight = 3
+	} else if len(em.recommendation) > 0 {
+		recommendationHeight = len(em.recommendation) + 2
+	}
+	overhead := 14 + recommendationHeight
 	if em.errMsg != "" {
 		overhead++
 	}
@@ -503,6 +547,39 @@ func (em ProfileEditModel) View() string {
 
 	title := styleTitle.Render("Edit Profile — " + truncatePath(em.modelEntry.DisplayName, max(innerW-18, 12)))
 	var rows []string
+	recommendationBlock := ""
+	if em.suggestionLoading {
+		recommendationBlock = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(t.Primary).
+			Padding(0, 1).
+			Width(innerW).
+			Render(styleMuted.Render("Preparing hardware-aware recommendation..."))
+	} else {
+		var recommendationRows []string
+		for i, line := range em.recommendation {
+			lineStyle := styleMuted
+			if i == 0 {
+				switch {
+				case strings.Contains(line, "does_not_fit") || strings.Contains(line, "no fitting context"):
+					lineStyle = styleError
+				case strings.Contains(line, "tight"):
+					lineStyle = styleWarning
+				case strings.Contains(line, "fits"):
+					lineStyle = styleSuccess
+				}
+			}
+			recommendationRows = append(recommendationRows, lineStyle.Render(truncateLine(line, innerW-2)))
+		}
+		if len(recommendationRows) > 0 {
+			recommendationBlock = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(t.Primary).
+				Padding(0, 1).
+				Width(innerW).
+				Render(strings.Join(recommendationRows, "\n"))
+		}
+	}
 
 	visibleFields := em.visibleFieldIndices()
 	end := min(em.viewOffset+visibleRows, len(visibleFields))
@@ -550,6 +627,9 @@ func (em ProfileEditModel) View() string {
 			f.input.Width = valueW
 			value = f.input.View()
 		}
+		if issue, ok := em.fieldErrors[f.label]; ok {
+			value += " " + styleError.Render("("+issue+")")
+		}
 
 		prefix := "  "
 		if focused {
@@ -581,7 +661,11 @@ func (em ProfileEditModel) View() string {
 			Render("unsaved changes — y: discard  n/esc: keep editing")
 	}
 
-	content := title + "\n\n" + strings.Join(rows, "\n") + scrollHint + errLine + "\n\n" + help
+	content := title
+	if recommendationBlock != "" {
+		content += "\n\n" + recommendationBlock
+	}
+	content += "\n\n" + strings.Join(rows, "\n") + scrollHint + errLine + "\n\n" + help
 
 	borderColor := t.Muted
 	if em.discardConfirm {
@@ -794,4 +878,14 @@ func (em ProfileEditModel) ToProfile() (model.Profile, error) {
 		ExtraFlags:        get("Extra Flags"),
 		EngineConfig:      engineConfig,
 	}, nil
+}
+
+func truncateLine(value string, width int) string {
+	if width <= 3 || len(value) <= width {
+		if width <= 0 {
+			return ""
+		}
+		return value[:min(len(value), width)]
+	}
+	return value[:width-3] + "..."
 }

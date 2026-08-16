@@ -82,6 +82,28 @@ func TestKVCacheBytesSlidingWindowWithoutPattern(t *testing.T) {
 	}
 }
 
+func TestWeightBytesUsesActiveMoEWorkingSet(t *testing.T) {
+	meta := model.ModelMetadata{
+		FileSizeBytes:      1000,
+		NumExperts:         4,
+		NumExpertsPerToken: 1,
+		MoEExpertBytes:     800,
+	}
+	weights, confidence, assumptions, err := weightBytes(meta, Request{
+		Engine:  model.EngineLlamaCPP,
+		Profile: model.Profile{NGL: "auto"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if weights != 400 || confidence != ConfidenceHigh {
+		t.Fatalf("weights: got %d/%s", weights, confidence)
+	}
+	if len(assumptions) != 1 || !strings.Contains(assumptions[0], "1/4 expert tensors active") {
+		t.Fatalf("assumptions: %#v", assumptions)
+	}
+}
+
 func TestEstimateCapsContextAtModelLimit(t *testing.T) {
 	req := baseRequest()
 	req.Profile.ContextSize = 32768

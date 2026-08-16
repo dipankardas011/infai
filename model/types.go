@@ -59,6 +59,7 @@ type ModelMetadata struct {
 	GlobalAttentionLayers uint32   `json:"global_attention_layers,omitempty"`
 	KVCacheSharedLayers   uint32   `json:"kv_cache_shared_layers,omitempty"`
 	MTPNumLayers          uint32   `json:"mtp_num_layers,omitempty"`
+	MoEExpertBytes        uint64   `json:"moe_expert_bytes,omitempty"`
 }
 
 type EngineKind string

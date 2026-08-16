@@ -107,17 +107,22 @@ func Estimate(req Request) (Result, error) {
 		return Result{}, cannotEstimate("model KV-cache architecture metadata is incomplete")
 	}
 
-	weights, confidence, assumptions, err := weightBytes(meta)
+	weights, confidence, weightAssumptions, err := weightBytes(meta, req)
 	if err != nil {
 		return Result{}, err
 	}
+	assumptions := append([]string(nil), weightAssumptions...)
 	kvBytes, kvAssumption, err := kvCacheBytes(meta, req)
 	if err != nil {
 		return Result{}, err
 	}
 	assumptions = append(assumptions, kvAssumption)
 	if meta.NumExperts > 0 {
-		assumptions = append(assumptions, "MoE weights are treated as fully resident; expert offload is not estimated")
+		if req.Engine == model.EngineLlamaCPP && strings.EqualFold(strings.TrimSpace(req.Profile.NGL), "auto") && len(req.Hardware.Accelerators) == 1 {
+			assumptions = append(assumptions, "MoE weights may be split between VRAM and RAM by llama.cpp NGL=auto; exact expert residency is runtime dependent")
+		} else {
+			assumptions = append(assumptions, "MoE weights are treated as fully resident; expert offload is not estimated")
+		}
 	}
 	if pool.assumption != "" {
 		assumptions = append(assumptions, pool.assumption)
@@ -203,6 +208,13 @@ func selectPool(req Request) (selectedPool, error) {
 		}
 		available := gpu.FreeVRAMBytes
 		assumption := "available memory is based on currently free VRAM"
+		if req.Engine == model.EngineLlamaCPP && strings.EqualFold(strings.TrimSpace(req.Profile.NGL), "auto") && req.Hardware.RAM.AvailableBytes > 0 {
+			return selectedPool{
+				total:      gpu.TotalVRAMBytes + req.Hardware.RAM.TotalBytes,
+				available:  available + req.Hardware.RAM.AvailableBytes,
+				assumption: "llama.cpp NGL=auto is modeled as a combined VRAM and available RAM pool for CPU-offloaded weights",
+			}, nil
+		}
 		if req.Engine == model.EngineVLLM {
 			utilization := DefaultVLLMUtilization
 			cfg, err := req.Profile.VLLMConfig()
@@ -246,9 +258,18 @@ func contextSize(meta model.ModelMetadata, requested int) (uint32, []string) {
 	return uint32(requested), nil
 }
 
-func weightBytes(meta model.ModelMetadata) (uint64, Confidence, []string, error) {
+func weightBytes(meta model.ModelMetadata, req Request) (uint64, Confidence, []string, error) {
 	if meta.FileSizeBytes > 0 {
-		return uint64(meta.FileSizeBytes), ConfidenceHigh, []string{"artifact size is used as the resident weight-memory estimate"}, nil
+		weights := uint64(meta.FileSizeBytes)
+		assumptions := []string{"artifact size is used as the resident weight-memory estimate"}
+		if req.Engine == model.EngineLlamaCPP && strings.EqualFold(strings.TrimSpace(req.Profile.NGL), "auto") && meta.NumExperts > 0 && meta.MoEExpertBytes > 0 && meta.MoEExpertBytes < weights && meta.NumExpertsPerToken > 0 && meta.NumExpertsPerToken < meta.NumExperts {
+			activeExpertBytes := meta.MoEExpertBytes * uint64(meta.NumExpertsPerToken) / uint64(meta.NumExperts)
+			if activeExpertBytes < meta.MoEExpertBytes {
+				weights -= meta.MoEExpertBytes - activeExpertBytes
+				assumptions = []string{fmt.Sprintf("resident MoE weight estimate keeps %d/%d expert tensors active; %d MiB of inactive experts are CPU-offloaded", meta.NumExpertsPerToken, meta.NumExperts, (meta.MoEExpertBytes-activeExpertBytes)/(1024*1024))}
+			}
+		}
+		return weights, ConfidenceHigh, assumptions, nil
 	}
 	if meta.ParameterCount == 0 || meta.Quantization == "" {
 		return 0, "", nil, cannotEstimate("model weight size and quantization metadata are missing")

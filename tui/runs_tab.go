@@ -127,7 +127,7 @@ func (m RunsTabModel) View() string {
 	innerW := max(m.width-4, 20)
 	innerH := max(m.height-2, 1)
 	resourceView := m.resourcesView(innerW)
-	divider := styleMuted.Render("  " + strings.Repeat("─", min(max(innerW-2, 1), 100)))
+	divider := styleMuted.Render("  " + strings.Repeat("─", max(innerW-2, 1)))
 	resourceBlock := divider + "\n" + resourceView
 	resourceLines := lipgloss.Height(resourceBlock)
 	listAreaH := max(innerH-resourceLines-1, 3)
@@ -201,17 +201,19 @@ func (m RunsTabModel) resourcesView(width int) string {
 		return title + "\n" + styleMuted.Render("  "+system)
 	}
 
-	barW := max(min((width-34)/2, 24), 8)
 	var lines []string
 	lines = append(lines, title)
 	for i := 0; i < len(metrics); i += 2 {
-		left := renderResourceMetric(metrics[i], barW)
+		left := renderResourceMetric(metrics[i])
 		right := ""
 		if i+1 < len(metrics) {
-			right = renderResourceMetric(metrics[i+1], barW)
+			right = renderResourceMetric(metrics[i+1])
 		}
 		if right != "" && width >= 72 {
-			lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Left, "  ", left, "    ", right))
+			columnWidth := max((width-4)/2, 20)
+			left = lipgloss.NewStyle().Width(columnWidth).Render(left)
+			right = lipgloss.NewStyle().Width(columnWidth).Render(right)
+			lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Left, "  ", left, "  ", right))
 		} else {
 			lines = append(lines, "  "+left)
 			if right != "" {
@@ -262,33 +264,20 @@ func parseResourceMetrics(system string) []resourceMetric {
 	return metrics
 }
 
-func renderResourceMetric(m resourceMetric, barW int) string {
+func renderResourceMetric(m resourceMetric) string {
 	label := lipgloss.NewStyle().Foreground(ActiveTheme.Muted).Width(9).Render(m.label)
-	bar := renderResourceBar(m.percent, barW, m.warn)
-	detail := lipgloss.NewStyle().Foreground(ActiveTheme.Text).Width(15).Render(truncateRunText(m.detail, 15))
-	return lipgloss.JoinHorizontal(lipgloss.Left, label, " ", bar, " ", detail)
-}
-
-func renderResourceBar(percent float64, width int, warn bool) string {
-	if percent < 0 {
-		percent = 0
+	detail := m.detail
+	if !strings.Contains(detail, "%") {
+		detail = fmt.Sprintf("%s %.0f%%", detail, m.percent)
 	}
-	if percent > 100 {
-		percent = 100
+	valueStyle := lipgloss.NewStyle().Foreground(ActiveTheme.Text)
+	if m.warn {
+		valueStyle = valueStyle.Foreground(ActiveTheme.Error)
+	} else if m.percent >= 70 {
+		valueStyle = valueStyle.Foreground(ActiveTheme.Warning)
 	}
-	filled := int((percent/100)*float64(width) + 0.5)
-	if filled > width {
-		filled = width
-	}
-	fillColor := ActiveTheme.Success
-	if warn {
-		fillColor = ActiveTheme.Error
-	} else if percent >= 70 {
-		fillColor = ActiveTheme.Warning
-	}
-	fill := lipgloss.NewStyle().Foreground(fillColor).Render(strings.Repeat("█", filled))
-	empty := lipgloss.NewStyle().Foreground(ActiveTheme.Muted).Render(strings.Repeat("░", width-filled))
-	return fill + empty
+	dot := valueStyle.Render("●")
+	return lipgloss.JoinHorizontal(lipgloss.Left, label, " ", dot, " ", valueStyle.Render(detail))
 }
 
 func parsePercent(s string) (float64, bool) {
@@ -318,8 +307,6 @@ type runColumn struct {
 	cell   func(r RunSnapshot) string
 	styled bool // use the run's status style instead of the row style
 }
-
-const maxFlexGrowth = 18
 
 func runColumns() []runColumn {
 	return []runColumn{
@@ -377,7 +364,7 @@ func visibleRunColumns(avail int) []runColumn {
 		}
 	}
 	if extra := avail - runColumnsWidth(cols); extra > 0 && flexCnt > 0 {
-		per := min(extra/flexCnt, maxFlexGrowth)
+		per := extra / flexCnt
 		for i := range cols {
 			if cols[i].flex {
 				cols[i].width += per

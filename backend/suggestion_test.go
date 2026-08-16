@@ -49,21 +49,21 @@ func TestSuggestProfileVLLM(t *testing.T) {
 	}
 }
 
-func TestSuggestProfileKeepsDoesNotFitDraft(t *testing.T) {
+func TestSuggestProfileUsesCombinedMemoryForAutoOffload(t *testing.T) {
 	req := suggestionRequest(model.EngineLlamaCPP, model.TypeGGUF)
 	req.Hardware.Accelerators[0].FreeVRAMBytes = 1 * 1024 * 1024 * 1024
 	suggestion, err := SuggestProfile(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if suggestion.Fit.Fit != memoryfit.FitDoesNotFit {
+	if suggestion.Fit.Fit == memoryfit.FitDoesNotFit {
 		t.Fatalf("fit: got %s", suggestion.Fit.Fit)
 	}
-	if !strings.Contains(strings.Join(suggestion.Warnings, " "), "evaluated configuration does not fit") {
-		t.Fatalf("missing does-not-fit warning: %#v", suggestion.Warnings)
+	if !strings.Contains(strings.Join(suggestion.Fit.Assumptions, " "), "combined VRAM and available RAM") {
+		t.Fatalf("missing combined-memory assumption: %#v", suggestion.Fit.Assumptions)
 	}
 	if suggestion.Draft.ContextSize != 65536 {
-		t.Fatalf("draft context changed unexpectedly: %d", suggestion.Draft.ContextSize)
+		t.Fatalf("unexpected suggested context: %d", suggestion.Draft.ContextSize)
 	}
 }
 
@@ -128,6 +128,21 @@ func TestSuggestProfileUsesHybridKVMetadata(t *testing.T) {
 	assumptions := strings.Join(suggestion.Fit.Assumptions, " ")
 	if !strings.Contains(assumptions, "3 full-attention layers") || !strings.Contains(assumptions, "12 sliding-window layers") {
 		t.Fatalf("suggestion did not use hybrid KV metadata: %q", assumptions)
+	}
+}
+
+func TestCompatibleInferenceEngines(t *testing.T) {
+	engines := []model.InferenceEngine{
+		{ID: "llama", Kind: model.EngineLlamaCPP},
+		{ID: "vllm", Kind: model.EngineVLLM},
+	}
+	gguf := CompatibleInferenceEngines(model.ModelEntry{Type: model.TypeGGUF}, engines)
+	if len(gguf) != 1 || gguf[0].ID != "llama" {
+		t.Fatalf("GGUF engines: %#v", gguf)
+	}
+	safetensors := CompatibleInferenceEngines(model.ModelEntry{Type: model.TypeSafetensors}, engines)
+	if len(safetensors) != 1 || safetensors[0].ID != "vllm" {
+		t.Fatalf("SafeTensors engines: %#v", safetensors)
 	}
 }
 

@@ -28,10 +28,14 @@ func newGGUFWriter() *ggufWriter {
 }
 
 func (w *ggufWriter) writeHeader(kvCount int) {
+	w.writeHeaderCounts(0, uint64(kvCount))
+}
+
+func (w *ggufWriter) writeHeaderCounts(tensorCount, kvCount uint64) {
 	binary.Write(&w.buf, binary.LittleEndian, uint32(GGUF_MAGIC))
-	binary.Write(&w.buf, binary.LittleEndian, uint32(3))       // version
-	binary.Write(&w.buf, binary.LittleEndian, uint64(0))       // tensor count
-	binary.Write(&w.buf, binary.LittleEndian, uint64(kvCount)) // kv count
+	binary.Write(&w.buf, binary.LittleEndian, uint32(3)) // version
+	binary.Write(&w.buf, binary.LittleEndian, tensorCount)
+	binary.Write(&w.buf, binary.LittleEndian, kvCount)
 }
 
 func (w *ggufWriter) writeString(s string) {
@@ -87,6 +91,16 @@ func (w *ggufWriter) writeKVBoolArray(key string, values []bool) {
 	}
 }
 
+func (w *ggufWriter) writeTensorInfo(name string, dims []uint64, typ uint32, offset uint64) {
+	w.writeString(name)
+	binary.Write(&w.buf, binary.LittleEndian, uint32(len(dims)))
+	for _, dim := range dims {
+		binary.Write(&w.buf, binary.LittleEndian, dim)
+	}
+	binary.Write(&w.buf, binary.LittleEndian, typ)
+	binary.Write(&w.buf, binary.LittleEndian, offset)
+}
+
 func (w *ggufWriter) byteCount() int64 { return int64(w.buf.Len()) }
 
 func (w *ggufWriter) reader() *bytes.Reader { return bytes.NewReader(w.buf.Bytes()) }
@@ -119,6 +133,24 @@ func TestParseGGUFHybridAttentionMetadata(t *testing.T) {
 	assert.Equal(t, uint32(1), meta.KVCacheSharedLayers)
 	assert.Equal(t, uint32(1), meta.GlobalAttentionLayers)
 	assert.Equal(t, []string{"full_attention", "sliding_attention", "sliding_attention"}, meta.AttentionLayerTypes)
+}
+
+func TestParseGGUFExpertTensorBytes(t *testing.T) {
+	gw := newGGUFWriter()
+	gw.writeHeaderCounts(2, 3)
+	gw.writeKVString("general.architecture", "qwen35moe")
+	gw.writeKVUint32("qwen35moe.expert_count", 4)
+	gw.writeKVUint32("qwen35moe.expert_used_count", 2)
+	gw.writeTensorInfo("blk.0.ffn_up_exps.weight", []uint64{8, 8}, 0, 0)
+	gw.writeTensorInfo("blk.0.attention_norm.weight", []uint64{8}, 0, 64)
+	for gw.buf.Len()%32 != 0 {
+		gw.buf.WriteByte(0)
+	}
+	gw.buf.Write(make([]byte, 128))
+
+	meta, err := ParseGGUFReader(gw.reader(), GGUF_MAGIC, gw.byteCount())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(64), meta.MoEExpertBytes)
 }
 
 func TestParseGGUFMTPMetadata(t *testing.T) {

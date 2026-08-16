@@ -40,6 +40,32 @@ func (ve ValidationError) Error() string {
 
 type ValidationErrors []ValidationError
 
+// ValidationIssues extracts structured validation issues from wrapped errors.
+func ValidationIssues(err error) []ValidationError {
+	var out []ValidationError
+	var visit func(error)
+	visit = func(current error) {
+		if current == nil {
+			return
+		}
+		if issue, ok := current.(ValidationError); ok {
+			out = append(out, issue)
+			return
+		}
+		if many, ok := current.(interface{ Unwrap() []error }); ok {
+			for _, child := range many.Unwrap() {
+				visit(child)
+			}
+			return
+		}
+		if one, ok := current.(interface{ Unwrap() error }); ok {
+			visit(one.Unwrap())
+		}
+	}
+	visit(err)
+	return out
+}
+
 func (ve ValidationErrors) Error() string {
 	if len(ve) == 0 {
 		return ""
