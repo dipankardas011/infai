@@ -4,26 +4,28 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>infai — The control plane for local LLM inference</title>
-  <meta name="description" content="infai replaces inference-engine flag soup with one predictable structure: a profile = model + engine + config. Launch in one keypress, run multiple models at once, and watch them all from a single pane of glass.">
+  <meta name="description" content="infai is a terminal control plane for local LLM inference. Discover GGUF and SafeTensors models, download from Hugging Face, configure llama.cpp or vLLM profiles, and monitor every run from one pane of glass.">
   <meta name="keywords" content="llama.cpp, GGUF, local LLM, local inference, inference engine, vLLM, terminal UI, model launcher, launch profiles, macOS, Linux">
   <meta name="robots" content="index,follow,max-image-preview:large">
   <meta name="author" content="Dipankar Das">
   <link rel="canonical" href="https://infai.dipankar-das.com/">
   <meta property="og:title" content="infai — The control plane for local LLM inference">
-  <meta property="og:description" content="One predictable structure for every inference engine: profile = model + engine + config. Launch in one keypress, run many models at once, single pane of glass.">
+  <meta property="og:description" content="Discover GGUF and SafeTensors models, download from Hugging Face, configure llama.cpp or vLLM profiles, and monitor every local inference run from one pane of glass.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://infai.dipankar-das.com/">
   <meta property="og:image" content="https://infai.dipankar-das.com/runningmodel.webp">
   <meta property="og:image:alt" content="infai run screen with live logs and system/model metrics">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="infai — The control plane for local LLM inference">
-  <meta name="twitter:description" content="Stop memorizing engine flags. Define profiles, launch in one keypress, and monitor every running model from a single pane of glass.">
+  <meta name="twitter:description" content="Discover models, download from Hugging Face, get hardware-fit recommendations, and launch llama.cpp or vLLM profiles from one local control plane.">
   <meta name="twitter:image" content="https://infai.dipankar-das.com/runningmodel.webp">
   <meta name="theme-color" content="#11171a">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,500;12..96,700;12..96,800&family=Martian+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lite-youtube-embed@0.3.3/src/lite-yt-embed.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/lite-youtube-embed@0.3.3/src/lite-yt-embed.js"></script>
   <script type="application/ld+json">
     {
       "@context": "https://schema.org",
@@ -65,6 +67,7 @@
       <div class="nav-links">
         <a href="#profiles">profiles</a>
         <a href="#glass">runs</a>
+        <a href="#demo">demo</a>
         <a href="#features">features</a>
         <a href="#install">install</a>
         <a href="#roadmap">roadmap</a>
@@ -89,8 +92,8 @@
       <p class="hero-sub reveal-up" style="--d:4">
         Every inference engine speaks its own dialect of flag soup. infai gives them all
         one predictable structure — a <strong>profile</strong>: model&nbsp;+&nbsp;engine&nbsp;+&nbsp;config.
-        Pick one, press <kbd>enter</kbd>. Run several models at once and watch every one of
-        them from a single pane of glass.
+        Discover or download a model, get a hardware-fit recommendation, press <kbd>enter</kbd>,
+        and watch every run from a single pane of glass.
       </p>
       <div class="hero-actions reveal-up" style="--d:5">
         <a href="#install" class="btn-solid"><span class="btn-prompt">$</span>brew install infai</a>
@@ -164,6 +167,18 @@
     <div class="band-track">
       <span>0 YAML files to maintain</span><i>◆</i><span>1 SQLite file backs it all</span><i>◆</i><span>1 keypress launches any model</span><i>◆</i><span>∞ relaunches with zero friction</span><i>◆</i><span>llama.cpp · vLLM · one pane of glass</span><i>◆</i>
       <span>0 YAML files to maintain</span><i>◆</i><span>1 SQLite file backs it all</span><i>◆</i><span>1 keypress launches any model</span><i>◆</i><span>∞ relaunches with zero friction</span><i>◆</i><span>llama.cpp · vLLM · one pane of glass</span><i>◆</i>
+    </div>
+  </section>
+
+  <!-- DEMO -->
+  <section class="demo" id="demo">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ watch it in action ]</p>
+      <h2 class="reveal-up">See infai take<br>the wheel.</h2>
+      <p class="sec-sub reveal-up">A quick tour of the control plane for local inference.</p>
+    </div>
+    <div class="demo-frame reveal-up">
+      <lite-youtube videoid="Jl94kSYvOlU" playlabel="Play the infai demo"></lite-youtube>
     </div>
   </section>
 
@@ -277,7 +292,7 @@
         <p class="show-keys"><kbd>tab</kbd> navigate · <kbd>space</kbd> toggle · <kbd>ctrl+s</kbd> save</p>
       </div>
       <figure class="show-img">
-        <img src="profile-config.webp" alt="infai profile editor with context size, GPU layers, cache types, flash attention and sampling fields" loading="lazy" width="2055" height="1687">
+        <img src="profile-create.webp" alt="infai profile editor with context size, GPU layers, cache types, flash attention and sampling fields" loading="lazy" width="2055" height="1687">
       </figure>
     </div>
 
@@ -291,6 +306,24 @@
       <figure class="show-img">
         <img src="runningmodel.webp" alt="infai run screen streaming llama.cpp server logs with live system and model resource metrics" loading="lazy" width="2181" height="1527">
       </figure>
+    </div>
+
+    <div class="glass-features">
+      <div class="glass-feature reveal-up" style="--d:0">
+        <span class="show-num">3.3</span>
+        <h3>Find and import<br>the right model</h3>
+        <p>Search Hugging Face, choose a quantization, or scan local GGUF and SafeTensors files. Provenance and metadata stay attached.</p>
+      </div>
+      <div class="glass-feature reveal-up" style="--d:1">
+        <span class="show-num">3.4</span>
+        <h3>Know the fit<br>before launch</h3>
+        <p>infai reads your hardware and estimates memory fit, context limits, and engine requirements before starting a server.</p>
+      </div>
+      <div class="glass-feature reveal-up" style="--d:2">
+        <span class="show-num">3.5</span>
+        <h3>One profile,<br>any engine</h3>
+        <p>Engine-aware options keep llama.cpp and vLLM settings in the same workflow, without memorizing a new flag dialect.</p>
+      </div>
     </div>
   </section>
 
@@ -308,8 +341,8 @@
       </div>
       <div class="feat reveal-up" style="--d:1">
         <span class="feat-id">F-02</span>
-        <h3>Model auto-discovery</h3>
-        <p>Point infai at your directories. GGUF files are indexed, sized, and ready to bind to a profile instantly.</p>
+        <h3>Model intelligence</h3>
+        <p>GGUF and SafeTensors files are indexed with metadata, quantization, architecture, context limits, and multimodal projector detection.</p>
       </div>
       <div class="feat reveal-up" style="--d:2">
         <span class="feat-id">F-03</span>
@@ -323,8 +356,8 @@
       </div>
       <div class="feat reveal-up" style="--d:4">
         <span class="feat-id">F-05</span>
-        <h3>Smart editors</h3>
-        <p>Pickers for quantization and context units, checkboxes for toggles, sane empty-means-omit defaults everywhere.</p>
+        <h3>Engine-aware editors</h3>
+        <p>Each profile exposes the right options for llama.cpp or vLLM, with hardware-fit recommendations before launch and explainable warnings.</p>
       </div>
       <div class="feat reveal-up" style="--d:5">
         <span class="feat-id">F-06</span>
@@ -340,6 +373,16 @@
         <span class="feat-id">F-08</span>
         <h3>Single Go binary</h3>
         <p>No runtime, no daemon, no Docker. Install it, type <code>infai</code>, and you're looking at your models.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:8">
+        <span class="feat-id">F-09</span>
+        <h3>Hugging Face imports</h3>
+        <p>Search the Hub, choose a GGUF quantization, and download models directly into your library with resumable, atomic transfers.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:9">
+        <span class="feat-id">F-10</span>
+        <h3>Explainable fit checks</h3>
+        <p>Typed hardware inventory and memory estimates show whether a model fits, why, and which launch settings will work best.</p>
       </div>
     </div>
   </section>
@@ -385,9 +428,9 @@
   <!-- ROADMAP -->
   <section class="roadmap" id="roadmap">
     <div class="sec-head">
-      <p class="kicker reveal-up">[ 06 / trajectory ]</p>
-      <h2 class="reveal-up">llama.cpp today.<br>Every engine tomorrow.</h2>
-      <p class="sec-sub reveal-up">The profile structure was built to outlive any single runtime. Here's where the control plane is headed.</p>
+      <p class="kicker reveal-up">[ 06 / shipped ]</p>
+      <h2 class="reveal-up">The whole local workflow.<br>Already on board.</h2>
+      <p class="sec-sub reveal-up">From finding a model to launching a fit-checked profile, infai keeps the work in one predictable control plane.</p>
     </div>
     <div class="rm-timeline">
       <div class="rm-line" aria-hidden="true"></div>
@@ -415,11 +458,23 @@
         <h3>vLLM backend</h3>
         <p>Production-grade batched inference under the exact same profile structure. Your workflow didn't change; the engine did.</p>
       </div>
-      <div class="rm-node explore reveal-up" style="--d:4">
+      <div class="rm-node done reveal-up" style="--d:4">
         <div class="rm-dot"></div>
-        <span class="rm-status">exploring</span>
-        <h3>Hardware-aware autoconfig</h3>
-        <p>infai reads a model's <code>config.json</code> and your hardware, then proposes the optimal launch configuration. You shouldn't need to know what <code>ubatch</code> means to get good tokens-per-second.</p>
+        <span class="rm-status">shipped</span>
+        <h3>Hugging Face model imports</h3>
+        <p>Search repositories, select quantizations, and download GGUF or SafeTensors models with resumable and atomic transfers.</p>
+      </div>
+      <div class="rm-node done reveal-up" style="--d:5">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>Typed model intelligence</h3>
+        <p>Model metadata, provenance, architecture details, and hardware-fit estimates turn a file on disk into a launch-ready profile.</p>
+      </div>
+      <div class="rm-node done reveal-up" style="--d:6">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>Hardware-fit recommendations</h3>
+        <p>infai reads model metadata and your hardware, estimates memory fit, and proposes a launch configuration with context and engine guidance before you start.</p>
       </div>
     </div>
   </section>
