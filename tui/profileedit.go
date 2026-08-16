@@ -452,7 +452,7 @@ func (em ProfileEditModel) computeVisibleRows() int {
 		overhead++
 	}
 	if option, ok := em.focusedOption(); ok {
-		overhead++ // focused option description
+		overhead += 2 // focused option description box
 		if option.SecurityCaution != "" {
 			overhead++
 		}
@@ -698,16 +698,28 @@ func (em ProfileEditModel) View() string {
 	}
 
 	content := title
-	if option, ok := em.focusedOption(); ok {
-		content += "\n" + styleMuted.Render(option.Description)
-		if option.SecurityCaution != "" {
-			content += "\n" + styleWarning.Render("Caution: "+option.SecurityCaution)
-		}
-	}
 	if recommendationBlock != "" {
 		content += "\n\n" + recommendationBlock
 	}
-	content += "\n\n" + strings.Join(rows, "\n") + "\n" + scrollHint + errLine + "\n\n" + help
+
+	infoBlock := ""
+	if option, ok := em.focusedOption(); ok {
+		infoLines := []string{styleMuted.Render("[i] " + truncateLine(option.Description, innerW-4))}
+		if option.SecurityCaution != "" {
+			infoLines = append(infoLines, styleWarning.Render("Caution: "+truncateLine(option.SecurityCaution, innerW-9)))
+		}
+		infoBlock = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(t.Primary).
+			Padding(0, 1).
+			Width(innerW).
+			Render(strings.Join(infoLines, "\n"))
+	}
+	content += "\n\n" + strings.Join(rows, "\n") + "\n" + scrollHint + errLine
+	if infoBlock != "" {
+		content += "\n\n" + infoBlock
+	}
+	content += "\n\n" + help
 
 	borderColor := t.Muted
 	if em.discardConfirm {
