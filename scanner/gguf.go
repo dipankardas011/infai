@@ -28,7 +28,7 @@ func readCount(r io.Reader, order binary.ByteOrder, version int) (uint64, error)
 const GGUF_MAGIC = 0x46554747
 
 var ggufFTypes = map[int32]string{
-	0:  "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1",
+	0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1",
 	7: "Q8_0", 8: "Q5_0", 9: "Q5_1",
 	10: "Q2_K", 11: "Q3_K_S", 12: "Q3_K_M", 13: "Q3_K_L",
 	14: "Q4_K_S", 15: "Q4_K_M", 16: "Q5_K_S", 17: "Q5_K_M", 18: "Q6_K",
@@ -183,6 +183,8 @@ func readGGUFArray(r io.Reader, order binary.ByteOrder, version int) (interface{
 		return readArray[uint32](r, order, length)
 	case 6:
 		return readArray[float32](r, order, length)
+	case 7:
+		return readArray[bool](r, order, length)
 	case 8:
 		arr := make([]string, length)
 		for i := uint64(0); i < length; i++ {
@@ -245,7 +247,8 @@ func interestingPrefix(key string) bool {
 	for _, s := range []string{
 		".context_length", ".embedding_length", ".block_count",
 		".feed_forward_length", ".attention.head_count", ".attention.head_count_kv",
-		".attention.key_length", ".vocab_size",
+		".attention.key_length", ".attention.sliding_window", ".attention.sliding_window_pattern",
+		".attention.shared_kv_layers", ".nextn_predict_layers", ".vocab_size",
 		".expert_count", ".expert_used_count",
 	} {
 		if len(key) > len(s) && key[len(key)-len(s):] == s {
@@ -408,6 +411,26 @@ func hydrateGGUFMeta(meta *model.ModelMetadata, kv map[string]interface{}) {
 	}
 	if v, ok := getUint32(kv, arch+".expert_used_count"); ok {
 		meta.NumExpertsPerToken = v
+	}
+	if v, ok := getUint32(kv, arch+".attention.sliding_window"); ok {
+		meta.SlidingWindow = v
+	}
+	if v, ok := getUint32(kv, arch+".attention.shared_kv_layers"); ok {
+		meta.KVCacheSharedLayers = v
+	}
+	if v, ok := getUint32(kv, arch+".nextn_predict_layers"); ok {
+		meta.MTPNumLayers = v
+	}
+	if pattern, ok := kv[arch+".attention.sliding_window_pattern"].([]bool); ok {
+		meta.AttentionLayerTypes = make([]string, len(pattern))
+		for i, isSliding := range pattern {
+			if isSliding {
+				meta.AttentionLayerTypes[i] = "sliding_attention"
+			} else {
+				meta.AttentionLayerTypes[i] = "full_attention"
+				meta.GlobalAttentionLayers++
+			}
+		}
 	}
 
 	if v, ok := kv["tokenizer.ggml.model"]; ok {

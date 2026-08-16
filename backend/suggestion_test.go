@@ -17,7 +17,7 @@ func TestSuggestProfileLlamaCPP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if suggestion.Draft.ContextSize != 32768 || suggestion.Fit.Fit == memoryfit.FitUnknown {
+	if suggestion.Draft.ContextSize != 65536 || suggestion.Fit.Fit == memoryfit.FitUnknown {
 		t.Fatalf("unexpected suggestion: %#v", suggestion)
 	}
 	if suggestion.Draft.NGL != "auto" || suggestion.Draft.BatchSize == nil || *suggestion.Draft.BatchSize != 512 || suggestion.Draft.UBatchSize == nil || *suggestion.Draft.UBatchSize != 128 {
@@ -62,7 +62,7 @@ func TestSuggestProfileKeepsDoesNotFitDraft(t *testing.T) {
 	if !strings.Contains(strings.Join(suggestion.Warnings, " "), "evaluated configuration does not fit") {
 		t.Fatalf("missing does-not-fit warning: %#v", suggestion.Warnings)
 	}
-	if suggestion.Draft.ContextSize != 32768 {
+	if suggestion.Draft.ContextSize != 65536 {
 		t.Fatalf("draft context changed unexpectedly: %d", suggestion.Draft.ContextSize)
 	}
 }
@@ -96,6 +96,38 @@ func TestSuggestProfileIsDeterministic(t *testing.T) {
 	}
 	if string(firstJSON) != string(secondJSON) {
 		t.Fatalf("suggestions differ:\n%s\n%s", firstJSON, secondJSON)
+	}
+}
+
+func TestSuggestProfileUsesHybridKVMetadata(t *testing.T) {
+	req := suggestionRequest(model.EngineLlamaCPP, model.TypeGGUF)
+	var meta model.ModelMetadata
+	if err := json.Unmarshal([]byte(req.Model.Metadata), &meta); err != nil {
+		t.Fatal(err)
+	}
+	meta.ContextLength = 131072
+	meta.BlockCount = 35
+	meta.AttentionHeadCountKV = 1
+	meta.HeadDimension = 512
+	meta.SlidingWindow = 512
+	meta.GlobalAttentionLayers = 7
+	meta.KVCacheSharedLayers = 20
+	meta.AttentionLayerTypes = make([]string, 35)
+	for i := range meta.AttentionLayerTypes {
+		meta.AttentionLayerTypes[i] = "sliding_attention"
+	}
+	for i := 0; i < 3; i++ {
+		meta.AttentionLayerTypes[i] = "full_attention"
+	}
+	req.Model.Metadata = marshalSuggestion(meta)
+
+	suggestion, err := SuggestProfile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assumptions := strings.Join(suggestion.Fit.Assumptions, " ")
+	if !strings.Contains(assumptions, "3 full-attention layers") || !strings.Contains(assumptions, "12 sliding-window layers") {
+		t.Fatalf("suggestion did not use hybrid KV metadata: %q", assumptions)
 	}
 }
 

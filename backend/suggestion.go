@@ -11,14 +11,13 @@ import (
 )
 
 const (
-	SuggestionContextCap = 32 * 1024
-	SuggestionPort       = 8000
-	SuggestionHost       = "0.0.0.0"
-	SuggestionBatch      = 512
-	SuggestionUBatch     = 128
-	SuggestionVLLMUtil   = 0.85
-	SuggestionVLLMSeqs   = 8
-	SuggestionVLLMBatch  = 4096
+	SuggestionPort      = 8000
+	SuggestionHost      = "0.0.0.0"
+	SuggestionBatch     = 512
+	SuggestionUBatch    = 128
+	SuggestionVLLMUtil  = 0.85
+	SuggestionVLLMSeqs  = 8
+	SuggestionVLLMBatch = 4096
 )
 
 type SuggestionRequest struct {
@@ -59,37 +58,48 @@ func SuggestProfile(req SuggestionRequest) (ProfileSuggestion, error) {
 		return ProfileSuggestion{}, err
 	}
 
-	base, err := suggestionDraft(req, engineKind, contexts[0])
-	if err != nil {
-		return ProfileSuggestion{}, err
-	}
-	first, err := evaluateSuggestion(req, base, engine, engineKind, contexts[0])
-	if err != nil {
-		return ProfileSuggestion{}, err
-	}
-	result := ProfileSuggestion{
-		Draft:    first.Draft,
-		Fit:      first.Fit,
-		Reasons:  first.Reasons,
-		Warnings: first.Warnings,
-	}
-
-	for _, contextSize := range contexts[1:] {
+	evaluated := make([]evaluatedSuggestion, 0, len(contexts))
+	var warnings []string
+	for _, contextSize := range contexts {
 		draft, err := suggestionDraft(req, engineKind, contextSize)
 		if err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("could not build %d-token alternative: %v", contextSize, err))
+			warnings = append(warnings, fmt.Sprintf("could not build %d-token alternative: %v", contextSize, err))
 			continue
 		}
 		alternative, err := evaluateSuggestion(req, draft, engine, engineKind, contextSize)
 		if err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("could not estimate %d-token alternative: %v", contextSize, err))
+			warnings = append(warnings, fmt.Sprintf("could not estimate %d-token alternative: %v", contextSize, err))
+			continue
+		}
+		evaluated = append(evaluated, alternative)
+	}
+	if len(evaluated) == 0 {
+		return ProfileSuggestion{}, fmt.Errorf("%w: no context candidates could be evaluated", memoryfit.ErrCannotEstimate)
+	}
+	selected := -1
+	for i := range evaluated {
+		if evaluated[i].Fit.Fit != memoryfit.FitDoesNotFit && (selected < 0 || evaluated[i].Draft.ContextSize > evaluated[selected].Draft.ContextSize) {
+			selected = i
+		}
+	}
+	if selected < 0 {
+		selected = 0
+	}
+	result := ProfileSuggestion{
+		Draft:    evaluated[selected].Draft,
+		Fit:      evaluated[selected].Fit,
+		Reasons:  evaluated[selected].Reasons,
+		Warnings: append(append([]string(nil), evaluated[selected].Warnings...), warnings...),
+	}
+	for i, candidate := range evaluated {
+		if i == selected {
 			continue
 		}
 		result.Alternatives = append(result.Alternatives, ProfileAlternative{
-			Draft:    alternative.Draft,
-			Fit:      alternative.Fit,
-			Reasons:  alternative.Reasons,
-			Warnings: alternative.Warnings,
+			Draft:    candidate.Draft,
+			Fit:      candidate.Fit,
+			Reasons:  candidate.Reasons,
+			Warnings: candidate.Warnings,
 		})
 	}
 
@@ -181,8 +191,19 @@ func suggestionContexts(entry model.ModelEntry) ([]int, error) {
 	if meta.ContextLength == 0 {
 		return nil, fmt.Errorf("%w: model context length is missing", memoryfit.ErrCannotEstimate)
 	}
-	maxContext := min(uint64(meta.ContextLength), uint64(SuggestionContextCap))
-	candidates := []uint64{maxContext, 16 * 1024, 8 * 1024, 4 * 1024, 2 * 1024}
+	maxContext := uint64(meta.ContextLength)
+	candidates := []uint64{maxContext}
+	power := uint64(1)
+	for power <= maxContext/2 {
+		power <<= 1
+	}
+	for power >= 2*1024 {
+		candidates = append(candidates, power)
+		if power == 2*1024 {
+			break
+		}
+		power >>= 1
+	}
 	seen := make(map[uint64]bool, len(candidates))
 	result := make([]int, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -196,7 +217,7 @@ func suggestionContexts(entry model.ModelEntry) ([]int, error) {
 }
 
 func suggestionReasons(engine model.EngineKind, contextSize int, hasMmproj bool) []string {
-	reasons := []string{fmt.Sprintf("context set to %d tokens, capped at 32K to preserve the largest practical local context", contextSize)}
+	reasons := []string{fmt.Sprintf("context set to %d tokens based on model capacity and available hardware", contextSize)}
 	if engine == model.EngineLlamaCPP {
 		reasons = append(reasons,
 			"GPU layers set to auto so llama.cpp can choose a safe offload level",
