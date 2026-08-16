@@ -28,11 +28,12 @@ type SuggestionRequest struct {
 }
 
 type ProfileSuggestion struct {
-	Draft        model.Profile
-	Fit          memoryfit.Result
-	Reasons      []string
-	Warnings     []string
-	Alternatives []ProfileAlternative
+	Draft         model.Profile
+	NativeContext int
+	Fit           memoryfit.Result
+	Reasons       []string
+	Warnings      []string
+	Alternatives  []ProfileAlternative
 }
 
 type ProfileAlternative struct {
@@ -40,6 +41,30 @@ type ProfileAlternative struct {
 	Fit      memoryfit.Result
 	Reasons  []string
 	Warnings []string
+}
+
+// CompatibleInferenceEngines filters engines that can serve the model type.
+func CompatibleInferenceEngines(entry model.ModelEntry, engines []model.InferenceEngine) []model.InferenceEngine {
+	want := model.EngineKind("")
+	switch entry.Type {
+	case model.TypeGGUF, model.TypeGGUFMultimodal:
+		want = model.EngineLlamaCPP
+	case model.TypeSafetensors, model.TypeHFQuantized:
+		want = model.EngineVLLM
+	default:
+		return nil
+	}
+	compatible := make([]model.InferenceEngine, 0, len(engines))
+	for _, engine := range engines {
+		kind := engine.Kind
+		if kind == "" {
+			kind = model.EngineLlamaCPP
+		}
+		if kind == want {
+			compatible = append(compatible, engine)
+		}
+	}
+	return compatible
 }
 
 func SuggestProfile(req SuggestionRequest) (ProfileSuggestion, error) {
@@ -83,13 +108,16 @@ func SuggestProfile(req SuggestionRequest) (ProfileSuggestion, error) {
 		}
 	}
 	if selected < 0 {
-		selected = 0
+		// Nothing fits. Keep the least demanding candidate as the draft rather
+		// than opening the editor with the model's maximum context.
+		selected = len(evaluated) - 1
 	}
 	result := ProfileSuggestion{
-		Draft:    evaluated[selected].Draft,
-		Fit:      evaluated[selected].Fit,
-		Reasons:  evaluated[selected].Reasons,
-		Warnings: append(append([]string(nil), evaluated[selected].Warnings...), warnings...),
+		Draft:         evaluated[selected].Draft,
+		NativeContext: contexts[0],
+		Fit:           evaluated[selected].Fit,
+		Reasons:       evaluated[selected].Reasons,
+		Warnings:      append(append([]string(nil), evaluated[selected].Warnings...), warnings...),
 	}
 	for i, candidate := range evaluated {
 		if i == selected {

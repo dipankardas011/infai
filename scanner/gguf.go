@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/dipankardas011/infai/model"
 )
@@ -113,7 +115,75 @@ func ParseGGUFReader(r io.ReadSeeker, expectedMagic uint32, fileSize int64) (*mo
 
 	meta := &model.ModelMetadata{FileSizeBytes: fileSize}
 	hydrateGGUFMeta(meta, kv)
+	if meta.NumExperts > 0 && tensorCount > 0 {
+		alignment := uint64(32)
+		if value, ok := getUint32(kv, "general.alignment"); ok && value > 0 {
+			alignment = uint64(value)
+		}
+		meta.MoEExpertBytes = readGGUFExpertBytes(r, order, int(version), tensorCount, fileSize, alignment)
+	}
 	return meta, nil
+}
+
+type ggufTensorOffset struct {
+	name   string
+	offset uint64
+}
+
+func readGGUFExpertBytes(r io.ReadSeeker, order binary.ByteOrder, version int, count uint64, fileSize int64, alignment uint64) uint64 {
+	tensors := make([]ggufTensorOffset, 0, count)
+	for i := uint64(0); i < count; i++ {
+		name, err := readGGUFString(r, order, version)
+		if err != nil {
+			return 0
+		}
+		dims, err := read[uint32](r, order)
+		if err != nil {
+			return 0
+		}
+		for j := uint32(0); j < dims; j++ {
+			if _, err := read[uint64](r, order); err != nil {
+				return 0
+			}
+		}
+		if _, err := read[uint32](r, order); err != nil {
+			return 0
+		}
+		offset, err := read[uint64](r, order)
+		if err != nil {
+			return 0
+		}
+		tensors = append(tensors, ggufTensorOffset{name: name, offset: offset})
+	}
+	current, err := r.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0
+	}
+	if alignment == 0 {
+		alignment = 32
+	}
+	dataStart := (uint64(current) + alignment - 1) &^ (alignment - 1)
+	if dataStart >= uint64(fileSize) {
+		return 0
+	}
+	dataEnd := uint64(fileSize) - dataStart
+	sort.Slice(tensors, func(i, j int) bool { return tensors[i].offset < tensors[j].offset })
+	var expertBytes uint64
+	for i, tensor := range tensors {
+		end := dataEnd
+		if i+1 < len(tensors) {
+			end = tensors[i+1].offset
+		}
+		if end <= tensor.offset || !isGGUFExpertTensor(tensor.name) {
+			continue
+		}
+		expertBytes += end - tensor.offset
+	}
+	return expertBytes
+}
+
+func isGGUFExpertTensor(name string) bool {
+	return strings.Contains(name, "_exps") || strings.Contains(name, ".experts.")
 }
 
 // readGGUFString reads a length-prefixed GGUF string.

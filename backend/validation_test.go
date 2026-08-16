@@ -2,6 +2,7 @@ package backend
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -377,4 +378,15 @@ func TestValidationErrorsMethods(t *testing.T) {
 	assert.Len(t, ve.Warnings(), 1)
 	assert.Contains(t, ve.Error(), "a: error")
 	assert.Contains(t, ve.Error(), "b: warning")
+}
+
+func TestValidationIssuesUnwrapsJoinedErrors(t *testing.T) {
+	err := errors.Join(
+		ValidationError{Field: "name", Issue: "required", Severity: SeverityError},
+		ValidationError{Field: "port", Issue: "invalid", Severity: SeverityError},
+	)
+	issues := ValidationIssues(err)
+	assert.Len(t, issues, 2)
+	assert.Equal(t, "name", issues[0].Field)
+	assert.Equal(t, "port", issues[1].Field)
 }

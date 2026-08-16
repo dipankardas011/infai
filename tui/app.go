@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"github.com/dipankardas011/infai/backend"
 	"github.com/dipankardas011/infai/config"
 	"github.com/dipankardas011/infai/db"
+	"github.com/dipankardas011/infai/hardware"
+	"github.com/dipankardas011/infai/memoryfit"
 	"github.com/dipankardas011/infai/model"
 )
 
@@ -46,6 +49,13 @@ const (
 
 // Cross-screen messages
 type saveProfileMsg struct{ profile model.Profile }
+type profileSuggestionMsg struct {
+	entry      model.ModelEntry
+	engines    []model.InferenceEngine
+	engineID   string
+	suggestion backend.ProfileSuggestion
+	err        error
+}
 type syncDoneMsg struct {
 	removed, updated int
 	err              error
@@ -272,6 +282,19 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case profilesTabNewProfileMsg:
 		return a.openProfileModelPicker(screenHome)
 
+	case profileSuggestionMsg:
+		if a.screen != screenProfileEdit || a.selectedModel.ID != msg.entry.ID || a.profileEdit.selectedEngineID() != msg.engineID {
+			return a, nil
+		}
+		if msg.err != nil {
+			a.profileEdit.suggestionLoading = false
+			a.profileEdit.errMsg = "recommendation unavailable; manual defaults are active: " + msg.err.Error()
+			return a, nil
+		}
+		a.profileEdit = NewProfileEditModel(msg.entry, msg.engines, &msg.suggestion.Draft, a.width, a.height)
+		a.profileEdit.SetRecommendation(suggestionLines(msg.suggestion), msg.suggestion.Fit.Confidence == memoryfit.ConfidenceMedium || msg.suggestion.Fit.Fit == memoryfit.FitTight || msg.suggestion.Fit.Fit == memoryfit.FitDoesNotFit)
+		return a, nil
+
 	case profilesTabEditProfileMsg:
 		profile, err := a.service.GetProfile(msg.entry.Profile.ID)
 		if err != nil {
@@ -281,6 +304,11 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		engines, err := a.service.ListInferenceEngines()
 		if err != nil {
 			a.setErr(err.Error())
+			return a, nil
+		}
+		engines = backend.CompatibleInferenceEngines(msg.entry.Model, engines)
+		if len(engines) == 0 {
+			a.setErr("no compatible inference engine configured for this model")
 			return a, nil
 		}
 		a.selectedModel = msg.entry.Model
@@ -334,6 +362,8 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		p := msg.profile
 		warns, err := a.service.SaveProfile(&p)
 		if err != nil {
+			a.profileEdit.SetFieldErrors(backend.ValidationIssues(err))
+			a.profileEdit.errMsg = err.Error()
 			a.setErr(err.Error())
 			return a, nil
 		}
@@ -645,22 +675,24 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break // enter accepts the filter; let the list handle it
 		}
 		if entry, ok := a.modelList.Selected(); ok {
-			a.selectedModel = entry
 			engines, err := a.service.ListInferenceEngines()
 			if err != nil {
 				a.setErr(err.Error())
 				return a, nil
 			}
+			engines = backend.CompatibleInferenceEngines(entry, engines)
 			if len(engines) == 0 {
 				a.setErr("no inference engines configured - add one in Engines tab")
 				a.screen = screenHome
 				return a, nil
 			}
+			a.selectedModel = entry
 			a.profileEdit = NewProfileEditModel(entry, engines, nil, a.width, a.height)
+			a.profileEdit.suggestionLoading = true
 			a.profileEditReturn = screenHome
 			a.screen = screenProfileEdit
 			a.errMsg = ""
-			return a, nil
+			return a, a.requestProfileSuggestion(entry, engines, engines[0].ID)
 		}
 	case "r":
 		if a.modelList.IsFiltering() {
@@ -726,16 +758,78 @@ func (a *AppModel) updateProfileEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.profileEdit.errMsg = ""
 		return a, nil
 	case "ctrl+s":
+		if a.profileEdit.suggestionLoading {
+			a.profileEdit.errMsg = "wait for the recommendation to finish before saving"
+			return a, nil
+		}
+		if a.profileEdit.requiresAcknowledgement && !a.profileEdit.acknowledged {
+			a.profileEdit.acknowledged = true
+			a.profileEdit.errMsg = "review the recommendation and press ctrl+s again to acknowledge it"
+			return a, nil
+		}
 		p, err := a.profileEdit.ToProfile()
 		if err != nil {
 			a.profileEdit.errMsg = err.Error()
 			return a, nil
 		}
+		a.profileEdit.SetFieldErrors(nil)
 		return a, func() tea.Msg { return saveProfileMsg{profile: p} }
 	}
+	previousEngineID := a.profileEdit.selectedEngineID()
 	var cmd tea.Cmd
 	a.profileEdit, cmd = a.profileEdit.Update(msg)
+	if a.profileEdit.editingID == 0 && previousEngineID != a.profileEdit.selectedEngineID() {
+		a.profileEdit.suggestionLoading = true
+		return a, tea.Batch(cmd, a.requestProfileSuggestion(a.selectedModel, a.profileEdit.engines, a.profileEdit.selectedEngineID()))
+	}
 	return a, cmd
+}
+
+func (a *AppModel) requestProfileSuggestion(entry model.ModelEntry, engines []model.InferenceEngine, engineID string) tea.Cmd {
+	var engine model.InferenceEngine
+	for _, candidate := range engines {
+		if candidate.ID == engineID {
+			engine = candidate
+			break
+		}
+	}
+	return func() tea.Msg {
+		suggestion, err := backend.SuggestProfile(backend.SuggestionRequest{
+			Model:    entry,
+			Engine:   engine,
+			Hardware: hardware.Collect(context.Background()),
+			Policy:   memoryfit.DefaultPolicy(),
+		})
+		return profileSuggestionMsg{entry: entry, engines: engines, engineID: engineID, suggestion: suggestion, err: err}
+	}
+}
+
+func suggestionLines(suggestion backend.ProfileSuggestion) []string {
+	fit := suggestion.Fit
+	fitLabel := string(fit.Fit)
+	if fit.Fit == memoryfit.FitDoesNotFit {
+		fitLabel = "no fitting context"
+	}
+	lines := []string{
+		fmt.Sprintf("recommended %d  |  model max %d  |  %s  |  %s confidence", suggestion.Draft.ContextSize, suggestion.NativeContext, fitLabel, fit.Confidence),
+		fmt.Sprintf("required %s  |  available %s", formatMemory(fit.Breakdown.RequiredBytes), formatMemory(fit.PoolAvailableBytes)),
+		fmt.Sprintf("weights %s  |  KV %s  |  runtime %s  |  headroom %s", formatMemory(fit.Breakdown.WeightsBytes), formatMemory(fit.Breakdown.KVCacheBytes), formatMemory(fit.Breakdown.RuntimeOverheadBytes), formatMemory(fit.Breakdown.SafetyHeadroomBytes)),
+	}
+	if len(suggestion.Reasons) > 0 {
+		lines = append(lines, fmt.Sprintf("reasons (%d): %s", len(suggestion.Reasons), strings.Join(suggestion.Reasons, "; ")))
+	}
+	if len(suggestion.Warnings) > 0 {
+		lines = append(lines, fmt.Sprintf("warnings (%d): %s", len(suggestion.Warnings), strings.Join(suggestion.Warnings, "; ")))
+	}
+	return lines
+}
+
+func formatMemory(bytes uint64) string {
+	const gib = 1024 * 1024 * 1024
+	if bytes >= gib {
+		return fmt.Sprintf("%.1f GiB", float64(bytes)/gib)
+	}
+	return fmt.Sprintf("%.0f MiB", float64(bytes)/(1024*1024))
 }
 
 func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
