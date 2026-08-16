@@ -277,7 +277,53 @@ func kvCacheBytes(meta model.ModelMetadata, req Request) (uint64, string, error)
 			assumption = fmt.Sprintf("KV cache uses %.1f bytes per element based on the larger configured K/V type", bpe)
 		}
 	}
-	bytes := 2 * uint64(meta.BlockCount) * uint64(meta.AttentionHeadCountKV) * uint64(meta.HeadDimension) * uint64(contextFor(req, meta))
+	contextSize := contextFor(req, meta)
+	bytes := 2 * uint64(meta.BlockCount) * uint64(meta.AttentionHeadCountKV) * uint64(meta.HeadDimension) * uint64(contextSize)
+	if meta.SlidingWindow > 0 {
+		fullLayers := min(meta.GlobalAttentionLayers, meta.BlockCount)
+		localLayers := meta.BlockCount - fullLayers
+		if meta.KVCacheSharedLayers > 0 {
+			uniqueLayers := meta.BlockCount
+			if meta.KVCacheSharedLayers > uniqueLayers {
+				uniqueLayers = 0
+			} else {
+				uniqueLayers -= meta.KVCacheSharedLayers
+			}
+			if fullLayers > uniqueLayers {
+				fullLayers = uniqueLayers
+			}
+			localLayers = uniqueLayers - fullLayers
+		}
+		patternKnown := uint32(len(meta.AttentionLayerTypes)) == meta.BlockCount
+		if patternKnown {
+			patternLayers := meta.BlockCount
+			if meta.KVCacheSharedLayers < patternLayers {
+				patternLayers -= meta.KVCacheSharedLayers
+			} else {
+				patternLayers = 0
+			}
+			fullLayers = 0
+			for _, layerType := range meta.AttentionLayerTypes[:patternLayers] {
+				if layerType == "full_attention" {
+					fullLayers++
+				}
+			}
+			localLayers = patternLayers
+			if fullLayers > localLayers {
+				fullLayers = localLayers
+			}
+			localLayers -= fullLayers
+		}
+		localContext := min(contextSize, meta.SlidingWindow)
+		bytes = 2 * uint64(meta.AttentionHeadCountKV) * uint64(meta.HeadDimension) * (uint64(fullLayers)*uint64(contextSize) + uint64(localLayers)*uint64(localContext))
+		assumption = fmt.Sprintf("KV cache models %d full-attention layers and %d sliding-window layers", fullLayers, localLayers)
+		if !patternKnown && meta.GlobalAttentionLayers == 0 {
+			assumption += "; all layers are assumed to use the configured sliding window because no full-attention pattern was provided"
+		}
+		if meta.KVCacheSharedLayers > 0 {
+			assumption += fmt.Sprintf("; %d shared KV layers are not allocated independently", meta.KVCacheSharedLayers)
+		}
+	}
 	return uint64(math.Ceil(float64(bytes) * bpe)), assumption, nil
 }
 

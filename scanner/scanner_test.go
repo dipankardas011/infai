@@ -73,6 +73,20 @@ func (w *ggufWriter) writeKVBool(key string, value bool) {
 	}
 }
 
+func (w *ggufWriter) writeKVBoolArray(key string, values []bool) {
+	w.writeString(key)
+	binary.Write(&w.buf, binary.LittleEndian, uint32(9)) // array type
+	binary.Write(&w.buf, binary.LittleEndian, uint32(7)) // bool element type
+	binary.Write(&w.buf, binary.LittleEndian, uint64(len(values)))
+	for _, value := range values {
+		if value {
+			w.buf.WriteByte(1)
+		} else {
+			w.buf.WriteByte(0)
+		}
+	}
+}
+
 func (w *ggufWriter) byteCount() int64 { return int64(w.buf.Len()) }
 
 func (w *ggufWriter) reader() *bytes.Reader { return bytes.NewReader(w.buf.Bytes()) }
@@ -88,6 +102,23 @@ func TestParseGGUFMinimal(t *testing.T) {
 	assert.Empty(t, meta.Architecture)
 	assert.Empty(t, meta.Quantization)
 	assert.Empty(t, meta.ModelName)
+}
+
+func TestParseGGUFHybridAttentionMetadata(t *testing.T) {
+	gw := newGGUFWriter()
+	pattern := []bool{false, true, true}
+	gw.writeHeader(4)
+	gw.writeKVString("general.architecture", "gemma4")
+	gw.writeKVUint32("gemma4.attention.sliding_window", 512)
+	gw.writeKVUint32("gemma4.attention.shared_kv_layers", 1)
+	gw.writeKVBoolArray("gemma4.attention.sliding_window_pattern", pattern)
+
+	meta, err := ParseGGUFReader(gw.reader(), GGUF_MAGIC, gw.byteCount())
+	require.NoError(t, err)
+	assert.Equal(t, uint32(512), meta.SlidingWindow)
+	assert.Equal(t, uint32(1), meta.KVCacheSharedLayers)
+	assert.Equal(t, uint32(1), meta.GlobalAttentionLayers)
+	assert.Equal(t, []string{"full_attention", "sliding_attention", "sliding_attention"}, meta.AttentionLayerTypes)
 }
 
 func TestParseGGUFFullModel(t *testing.T) {

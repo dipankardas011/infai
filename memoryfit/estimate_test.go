@@ -34,6 +34,54 @@ func TestEstimateDenseGGUFOnGPU(t *testing.T) {
 	}
 }
 
+func TestKVCacheBytesHybridAttention(t *testing.T) {
+	meta := model.ModelMetadata{
+		BlockCount:            35,
+		AttentionHeadCountKV:  1,
+		HeadDimension:         512,
+		ContextLength:         131072,
+		SlidingWindow:         512,
+		GlobalAttentionLayers: 7,
+		KVCacheSharedLayers:   20,
+		AttentionLayerTypes:   make([]string, 35),
+	}
+	for i := range meta.AttentionLayerTypes {
+		meta.AttentionLayerTypes[i] = "sliding_attention"
+	}
+	for i := 0; i < 3; i++ {
+		meta.AttentionLayerTypes[i] = "full_attention"
+	}
+	got, _, err := kvCacheBytes(meta, Request{Engine: model.EngineLlamaCPP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := uint64(2 * 512 * (3*131072 + 12*512) * 2)
+	if got != want {
+		t.Fatalf("hybrid KV cache: got %d want %d", got, want)
+	}
+}
+
+func TestKVCacheBytesSlidingWindowWithoutPattern(t *testing.T) {
+	meta := model.ModelMetadata{
+		BlockCount:           4,
+		AttentionHeadCountKV: 1,
+		HeadDimension:        8,
+		ContextLength:        1024,
+		SlidingWindow:        128,
+	}
+	got, assumption, err := kvCacheBytes(meta, Request{Engine: model.EngineLlamaCPP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := uint64(2 * 4 * 8 * 128 * 2)
+	if got != want {
+		t.Fatalf("sliding-only KV cache: got %d want %d", got, want)
+	}
+	if !strings.Contains(assumption, "assumed to use") {
+		t.Fatalf("expected explicit assumption, got %q", assumption)
+	}
+}
+
 func TestEstimateCapsContextAtModelLimit(t *testing.T) {
 	req := baseRequest()
 	req.Profile.ContextSize = 32768
