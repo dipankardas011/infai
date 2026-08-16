@@ -323,6 +323,8 @@ func kvCacheBytes(meta model.ModelMetadata, req Request) (uint64, string, error)
 		if meta.KVCacheSharedLayers > 0 {
 			assumption += fmt.Sprintf("; %d shared KV layers are not allocated independently", meta.KVCacheSharedLayers)
 		}
+	} else {
+		assumption += "; KV cache assumes full-context attention because no sliding-window metadata was provided"
 	}
 	return uint64(math.Ceil(float64(bytes) * bpe)), assumption, nil
 }

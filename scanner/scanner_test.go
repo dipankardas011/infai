@@ -121,6 +121,33 @@ func TestParseGGUFHybridAttentionMetadata(t *testing.T) {
 	assert.Equal(t, []string{"full_attention", "sliding_attention", "sliding_attention"}, meta.AttentionLayerTypes)
 }
 
+func TestParseGGUFMTPMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		write func(*ggufWriter)
+		want  uint32
+	}{
+		{name: "positive", write: func(gw *ggufWriter) { gw.writeKVUint32("qwen35.nextn_predict_layers", 2) }, want: 2},
+		{name: "zero", write: func(gw *ggufWriter) { gw.writeKVUint32("qwen35.nextn_predict_layers", 0) }, want: 0},
+		{name: "absent", write: func(*ggufWriter) {}, want: 0},
+		{name: "malformed", write: func(gw *ggufWriter) { gw.writeKVString("qwen35.nextn_predict_layers", "two") }, want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gw := newGGUFWriter()
+			kvCount := 2
+			if test.name == "absent" {
+				kvCount = 1
+			}
+			gw.writeHeader(kvCount)
+			gw.writeKVString("general.architecture", "qwen35")
+			test.write(gw)
+			meta, err := ParseGGUFReader(gw.reader(), GGUF_MAGIC, gw.byteCount())
+			require.NoError(t, err)
+			assert.Equal(t, test.want, meta.MTPNumLayers)
+		})
+	}
+}
+
 func TestParseGGUFFullModel(t *testing.T) {
 	// Prevents: missing fields when all standard GGUF keys are present.
 	gw := newGGUFWriter()
@@ -346,6 +373,32 @@ func TestParseSafetensorMetadataMoE(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(8), meta.NumExperts)
 	assert.Equal(t, uint32(2), meta.NumExpertsPerToken)
+}
+
+func TestParseSafetensorMTPMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		config string
+		index  string
+		want   uint32
+	}{
+		{name: "positive", config: `{"num_nextn_predict_layers":2}`, want: 2},
+		{name: "zero", config: `{"num_nextn_predict_layers":0}`, want: 0},
+		{name: "absent", config: `{}`, want: 0},
+		{name: "index fallback", config: `{}`, index: `{"weight_map":{"model.mtp.0":"model.safetensors"}}`, want: 1},
+		{name: "malformed", config: `{`, want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte(test.config), 0644))
+			if test.index != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "model.safetensors.index.json"), []byte(test.index), 0644))
+			}
+			meta, err := parseSafetensorMetadata(dir)
+			require.NoError(t, err)
+			assert.Equal(t, test.want, meta.MTPNumLayers)
+		})
+	}
 }
 
 func TestParseSafetensorMetadataMinimal(t *testing.T) {
