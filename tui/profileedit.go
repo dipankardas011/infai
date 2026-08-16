@@ -61,7 +61,6 @@ type ProfileEditModel struct {
 	acknowledged            bool
 	fieldErrors             map[string]string
 	showAdvanced            bool
-	showHelp                bool
 
 	// initial holds the form state at open time so esc can warn about
 	// unsaved edits; discardConfirm is the "discard changes?" prompt.
@@ -393,9 +392,6 @@ func (em ProfileEditModel) Update(msg tea.Msg) (ProfileEditModel, tea.Cmd) {
 			em.visibleRows = em.computeVisibleRows()
 			em.scrollTo(em.focused)
 			return em, nil
-		case "ctrl+h":
-			em.showHelp = !em.showHelp
-			return em, nil
 		case "tab", "down":
 			return em, em.moveFocus(1)
 
@@ -454,6 +450,12 @@ func (em ProfileEditModel) computeVisibleRows() int {
 	overhead := 14 + recommendationHeight
 	if em.errMsg != "" {
 		overhead++
+	}
+	if option, ok := em.focusedOption(); ok {
+		overhead++ // focused option description
+		if option.SecurityCaution != "" {
+			overhead++
+		}
 	}
 	rows := em.height - overhead
 	if rows < 1 {
@@ -526,6 +528,22 @@ func (em ProfileEditModel) fieldVisible(field formField) bool {
 		}
 	}
 	return true
+}
+
+func (em ProfileEditModel) focusedOption() (backend.Option, bool) {
+	if em.focused < 0 || em.focused >= len(em.fields) {
+		return backend.Option{}, false
+	}
+	key := em.fields[em.focused].optionKey
+	if key == "" {
+		return backend.Option{}, false
+	}
+	for _, option := range backend.OptionCatalog() {
+		if option.Key == key {
+			return option, true
+		}
+	}
+	return backend.Option{}, false
 }
 
 func (em ProfileEditModel) visibleFieldIndices() []int {
@@ -673,32 +691,23 @@ func (em ProfileEditModel) View() string {
 		errLine = "\n" + styleError.Render("  ✗ "+em.errMsg)
 	}
 
-	help := styleHelp.Render("↑/↓ or tab: navigate  ←/→: cycle select  space: toggle  ctrl+a: advanced  ctrl+h: help  ctrl+s: save  esc: discard")
+	help := styleHelp.Render("↑/↓ or tab: navigate  ←/→: cycle select  space: toggle  ctrl+a: advanced  ctrl+s: save  esc: discard")
 	if em.discardConfirm {
 		help = lipgloss.NewStyle().Foreground(t.Error).Bold(true).
 			Render("unsaved changes — y: discard  n/esc: keep editing")
 	}
 
 	content := title
-	if em.showHelp {
-		for _, option := range backend.OptionCatalog() {
-			if option.Key != em.fields[em.focused].optionKey {
-				continue
-			}
-			content += "\n" + styleMuted.Render(option.Description)
-			if option.MemoryImpact != "" {
-				content += "\n" + styleMuted.Render("Memory: "+option.MemoryImpact)
-			}
-			if option.SecurityCaution != "" {
-				content += "\n" + styleWarning.Render("Caution: "+option.SecurityCaution)
-			}
-			break
+	if option, ok := em.focusedOption(); ok {
+		content += "\n" + styleMuted.Render(option.Description)
+		if option.SecurityCaution != "" {
+			content += "\n" + styleWarning.Render("Caution: "+option.SecurityCaution)
 		}
 	}
 	if recommendationBlock != "" {
 		content += "\n\n" + recommendationBlock
 	}
-	content += "\n\n" + strings.Join(rows, "\n") + scrollHint + errLine + "\n\n" + help
+	content += "\n\n" + strings.Join(rows, "\n") + "\n" + scrollHint + errLine + "\n\n" + help
 
 	borderColor := t.Muted
 	if em.discardConfirm {
