@@ -27,13 +27,14 @@ const (
 var cacheTypeOptions = []string{"(omit)", "f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"}
 
 type formField struct {
-	label    string
-	kind     fieldKind
-	input    textinput.Model
-	boolVal  bool
-	optional bool
-	disabled bool
-	engine   model.EngineKind
+	label     string
+	optionKey string
+	kind      fieldKind
+	input     textinput.Model
+	boolVal   bool
+	optional  bool
+	disabled  bool
+	engine    model.EngineKind
 	// fieldSelect only
 	options      []string
 	optionValues []string
@@ -59,6 +60,7 @@ type ProfileEditModel struct {
 	requiresAcknowledgement bool
 	acknowledged            bool
 	fieldErrors             map[string]string
+	showAdvanced            bool
 
 	// initial holds the form state at open time so esc can warn about
 	// unsaved edits; discardConfirm is the "discard changes?" prompt.
@@ -180,51 +182,47 @@ func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p 
 	fields := []formField{
 		{label: "Name", kind: fieldText, input: newTextInput("e.g. text-only")},
 		newEngineSelectField(engines, currentEngineID),
-		{label: "Port", kind: fieldInt, input: newTextInput("8000")},
-		{label: "Host", kind: fieldText, input: newTextInput("0.0.0.0")},
-		{label: "Context Size", kind: fieldInt, input: newTextInput("64")},
+		{label: "Port", optionKey: "port", kind: fieldInt, input: newTextInput("8000")},
+		{label: "Host", optionKey: "host", kind: fieldText, input: newTextInput("0.0.0.0")},
+		{label: "Context Size", optionKey: "context", kind: fieldInt, input: newTextInput("64")},
 		newSelectField("Context Unit", []string{"None", "K", "M"}, nil),
-		{label: "NGL", kind: fieldText, input: newTextInput("auto")},
-		{label: "Batch Size", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
-		{label: "UBatch Size", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
+		{label: "NGL", optionKey: "gpu_layers", kind: fieldText, input: newTextInput("auto")},
+		{label: "Batch Size", optionKey: "batch", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
+		{label: "UBatch Size", optionKey: "ubatch", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
 		newSelectField("Cache Type K", cacheTypeOptions, cacheKVal),
 		newSelectField("Cache Type V", cacheTypeOptions, cacheVVal),
-		{label: "Flash Attn", kind: fieldBool},
-		{label: "Jinja", kind: fieldBool},
-		{label: "Temperature", kind: fieldFloat, input: newTextInput("(empty=omit)"), optional: true},
-		{label: "Reasoning Budget", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
-		{label: "Top P", kind: fieldFloat, input: newTextInput("(empty=omit)"), optional: true},
-		{label: "Top K", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
-		{label: "No KV Offload", kind: fieldBool},
-		{label: "Use Mmproj", kind: fieldBool, disabled: !hasMmproj},
+		{label: "Flash Attn", optionKey: "flash_attention", kind: fieldBool},
+		{label: "Jinja", optionKey: "jinja", kind: fieldBool},
+		{label: "Temperature", optionKey: "temperature", kind: fieldFloat, input: newTextInput("(empty=omit)"), optional: true},
+		{label: "Reasoning Budget", optionKey: "reasoning_budget", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
+		{label: "Top P", optionKey: "top_p", kind: fieldFloat, input: newTextInput("(empty=omit)"), optional: true},
+		{label: "Top K", optionKey: "top_k", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
+		{label: "No KV Offload", optionKey: "kv_offload", kind: fieldBool},
+		{label: "Use Mmproj", optionKey: "mmproj", kind: fieldBool, disabled: !hasMmproj},
 		{label: "Extra Flags", kind: fieldText, input: newTextInput("(empty=omit)"), optional: true},
-		{label: "Served Model Name", kind: fieldText, input: newTextInput("(empty=model name)"), optional: true},
-		{label: "GPU Memory Util", kind: fieldFloat, input: newTextInput("0.85"), optional: true},
-		{label: "Max Sequences", kind: fieldInt, input: newTextInput("32"), optional: true},
-		{label: "Max Batched Tokens", kind: fieldInt, input: newTextInput("4096"), optional: true},
+		{label: "Served Model Name", optionKey: "served_model_name", kind: fieldText, input: newTextInput("(empty=model name)"), optional: true},
+		{label: "GPU Memory Util", optionKey: "gpu_memory_utilization", kind: fieldFloat, input: newTextInput("0.85"), optional: true},
+		{label: "Max Sequences", optionKey: "max_num_seqs", kind: fieldInt, input: newTextInput("32"), optional: true},
+		{label: "Max Batched Tokens", optionKey: "max_num_batched_tokens", kind: fieldInt, input: newTextInput("4096"), optional: true},
 		newSelectField("vLLM DType", []string{"auto", "float16", "bfloat16", "float32"}, nil),
-		{label: "Tensor Parallel", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
-		{label: "Pipeline Parallel", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
-		{label: "Prefix Caching", kind: fieldBool},
-		{label: "Trust Remote Code", kind: fieldBool},
+		{label: "Tensor Parallel", optionKey: "tensor_parallel_size", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
+		{label: "Pipeline Parallel", optionKey: "pipeline_parallel_size", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
+		{label: "Prefix Caching", optionKey: "prefix_caching", kind: fieldBool},
+		{label: "Trust Remote Code", optionKey: "trust_remote_code", kind: fieldBool},
 	}
-	llamaFields := map[string]bool{
-		"NGL": true, "Batch Size": true, "UBatch Size": true,
-		"Cache Type K": true, "Cache Type V": true, "Flash Attn": true,
-		"Jinja": true, "Temperature": true, "Reasoning Budget": true,
-		"Top P": true, "Top K": true, "No KV Offload": true, "Use Mmproj": true,
-	}
-	vllmFields := map[string]bool{
-		"Served Model Name": true, "GPU Memory Util": true, "Max Sequences": true,
-		"Max Batched Tokens": true, "vLLM DType": true, "Tensor Parallel": true,
-		"Pipeline Parallel": true, "Prefix Caching": true, "Trust Remote Code": true,
+	optionKeys := map[string]string{
+		"Cache Type K": "cache_type_k", "Cache Type V": "cache_type_v",
+		"Extra Flags": "extra_flags", "vLLM DType": "dtype",
 	}
 	for i := range fields {
-		switch {
-		case llamaFields[fields[i].label]:
-			fields[i].engine = model.EngineLlamaCPP
-		case vllmFields[fields[i].label]:
-			fields[i].engine = model.EngineVLLM
+		if fields[i].optionKey == "" {
+			fields[i].optionKey = optionKeys[fields[i].label]
+		}
+		for _, option := range backend.OptionCatalog() {
+			if option.Key == fields[i].optionKey {
+				fields[i].engine = option.Engine
+				break
+			}
 		}
 	}
 
@@ -389,6 +387,11 @@ func (em ProfileEditModel) Update(msg tea.Msg) (ProfileEditModel, tea.Cmd) {
 	case tea.KeyMsg:
 		f := &em.fields[em.focused]
 		switch msg.String() {
+		case "ctrl+a":
+			em.showAdvanced = !em.showAdvanced
+			em.visibleRows = em.computeVisibleRows()
+			em.scrollTo(em.focused)
+			return em, nil
 		case "tab", "down":
 			return em, em.moveFocus(1)
 
@@ -436,17 +439,20 @@ func (em ProfileEditModel) Update(msg tea.Msg) (ProfileEditModel, tea.Cmd) {
 
 func (em ProfileEditModel) computeVisibleRows() int {
 	// AppModel has already reserved global header/footer/help. Reserve the
-	// editor's fixed title, separators, help, and outer box chrome here; only
+	// editor's fixed title, separators, and outer box chrome here; only
 	// the remaining rows belong to the scrollable field list.
 	recommendationHeight := 0
 	if em.suggestionLoading {
 		recommendationHeight = 3
 	} else if len(em.recommendation) > 0 {
-		recommendationHeight = len(em.recommendation) + 2
+		recommendationHeight = min(len(em.recommendation), 3) + 2
 	}
-	overhead := 14 + recommendationHeight
+	overhead := 9 + recommendationHeight
 	if em.errMsg != "" {
 		overhead++
+	}
+	if _, ok := em.focusedOption(); ok {
+		overhead += 7 // focused option description box, including wrapped caution
 	}
 	rows := em.height - overhead
 	if rows < 1 {
@@ -507,7 +513,34 @@ func (em ProfileEditModel) selectedEngineKind() model.EngineKind {
 }
 
 func (em ProfileEditModel) fieldVisible(field formField) bool {
-	return field.engine == "" || field.engine == em.selectedEngineKind()
+	if field.engine != "" && field.engine != em.selectedEngineKind() {
+		return false
+	}
+	if field.optionKey == "" || em.showAdvanced {
+		return true
+	}
+	for _, option := range backend.OptionCatalog() {
+		if option.Key == field.optionKey {
+			return option.Category == backend.CategoryCommon
+		}
+	}
+	return true
+}
+
+func (em ProfileEditModel) focusedOption() (backend.Option, bool) {
+	if em.focused < 0 || em.focused >= len(em.fields) {
+		return backend.Option{}, false
+	}
+	key := em.fields[em.focused].optionKey
+	if key == "" {
+		return backend.Option{}, false
+	}
+	for _, option := range backend.OptionCatalog() {
+		if option.Key == key {
+			return option, true
+		}
+	}
+	return backend.Option{}, false
 }
 
 func (em ProfileEditModel) visibleFieldIndices() []int {
@@ -557,15 +590,17 @@ func (em ProfileEditModel) View() string {
 			Render(styleMuted.Render("Preparing hardware-aware recommendation..."))
 	} else {
 		var recommendationRows []string
-		for i, line := range em.recommendation {
+		summaryCount := min(len(em.recommendation), 3)
+		for i, line := range em.recommendation[:summaryCount] {
 			lineStyle := styleMuted
 			if i == 0 {
+				status := strings.ToLower(line)
 				switch {
-				case strings.Contains(line, "does_not_fit") || strings.Contains(line, "no fitting context"):
+				case strings.Contains(status, "does_not_fit") || strings.Contains(status, "does not fit"):
 					lineStyle = styleError
-				case strings.Contains(line, "tight"):
+				case strings.Contains(status, "tight"):
 					lineStyle = styleWarning
-				case strings.Contains(line, "fits"):
+				case strings.Contains(status, "fits"):
 					lineStyle = styleSuccess
 				}
 			}
@@ -655,7 +690,7 @@ func (em ProfileEditModel) View() string {
 		errLine = "\n" + styleError.Render("  ✗ "+em.errMsg)
 	}
 
-	help := styleHelp.Render("↑/↓ or tab: navigate  ←/→: cycle select  space: toggle  ctrl+s: save  esc: discard")
+	help := styleHelp.Render("↑/↓ or tab: navigate  ←/→: cycle select  space: toggle  ctrl+a: advanced  ctrl+s: save  esc: discard")
 	if em.discardConfirm {
 		help = lipgloss.NewStyle().Foreground(t.Error).Bold(true).
 			Render("unsaved changes — y: discard  n/esc: keep editing")
@@ -665,7 +700,28 @@ func (em ProfileEditModel) View() string {
 	if recommendationBlock != "" {
 		content += "\n\n" + recommendationBlock
 	}
-	content += "\n\n" + strings.Join(rows, "\n") + scrollHint + errLine + "\n\n" + help
+
+	infoBlock := ""
+	if option, ok := em.focusedOption(); ok {
+		infoW := max(innerW-4, 10)
+		infoLines := []string{lipgloss.NewStyle().Width(infoW).Render(styleMuted.Render("[i] " + option.Description))}
+		if option.SecurityCaution != "" {
+			infoLines = append(infoLines, lipgloss.NewStyle().Width(infoW).Render(styleWarning.Render("Caution: "+option.SecurityCaution)))
+		}
+		infoBlock = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(t.Primary).
+			Padding(0, 1).
+			Width(innerW).
+			Render(strings.Join(infoLines, "\n"))
+	}
+	content += "\n\n" + strings.Join(rows, "\n") + "\n" + scrollHint + errLine
+	if infoBlock != "" {
+		content += "\n\n" + infoBlock
+	}
+	if em.discardConfirm {
+		content += "\n\n" + help
+	}
 
 	borderColor := t.Muted
 	if em.discardConfirm {
@@ -676,10 +732,11 @@ func (em ProfileEditModel) View() string {
 		BorderForeground(borderColor).
 		Padding(1, 2).
 		Width(boxW).
+		Height(max(em.height-8, 1)).
 		MaxHeight(max(em.height, 1)).
 		Render(content)
 
-	return lipgloss.Place(em.width, em.height, lipgloss.Center, lipgloss.Center, box)
+	return lipgloss.Place(em.width, em.height, lipgloss.Center, lipgloss.Top, box)
 }
 
 // ToProfile extracts and validates form state into a Profile.

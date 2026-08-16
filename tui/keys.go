@@ -147,6 +147,18 @@ type enginesTabKeyMap struct {
 	Help     key.Binding
 }
 
+type profileEditKeyMap struct {
+	Advanced key.Binding
+	Save     key.Binding
+	Back     key.Binding
+}
+
+func (k profileEditKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Advanced, k.Save, k.Back}
+}
+
+func (k profileEditKeyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
+
 func (k enginesTabKeyMap) ShortHelp() []key.Binding {
 	return []key.Binding{k.Add, k.Rename, k.Delete, k.TabLeft, k.TabRight, k.Help}
 }
@@ -160,10 +172,11 @@ var keys = struct {
 	Runs        runsTabKeyMap
 	Models      modelsTabKeyMap
 	Engines     enginesTabKeyMap
+	ProfileEdit profileEditKeyMap
 	ModelList   modelListKeyMap
 	FileBrowser fileBrowserKeyMap
 	Server      serverKeyMap
-	Theme     themeKeyMap
+	Theme       themeKeyMap
 }{
 	Home: homeKeyMap{
 		TabLeft:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("s-tab", "prev tab")),
@@ -234,6 +247,11 @@ var keys = struct {
 		Theme:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
 		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	},
+	ProfileEdit: profileEditKeyMap{
+		Advanced: key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("ctrl+a", "advanced")),
+		Save:     key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save")),
+		Back:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "discard")),
 	},
 	FileBrowser: fileBrowserKeyMap{
 		Select: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),

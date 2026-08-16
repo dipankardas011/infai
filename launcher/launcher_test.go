@@ -3,6 +3,7 @@ package launcher
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/dipankardas011/infai/model"
@@ -78,17 +79,42 @@ func TestBuildSpecRejectsSafetensorsForLlamaCPP(t *testing.T) {
 }
 
 func TestBuildSpecLlamaCPP(t *testing.T) {
-	engine := model.InferenceEngine{Kind: model.EngineLlamaCPP, Path: "/bin/llama-server"}
+	engine := model.InferenceEngine{Kind: model.EngineLlamaCPP, Path: "/bin/llama-server", BaseArgs: []string{"--no-mmap"}}
 	m := model.ModelEntry{ModelDir: "/models", PrimaryFile: "qwen.gguf", Type: model.TypeGGUF}
 	p := model.Profile{Host: "127.0.0.1", Port: 8000, ContextSize: 4096, NGL: "auto"}
 	spec, err := BuildSpec(engine, m, p)
 	if err != nil {
 		t.Fatalf("build llama.cpp spec: %v", err)
 	}
-	if spec.Command != engine.Path || len(spec.Args) == 0 || spec.Args[0] != "-m" {
+	if spec.Command != engine.Path || len(spec.Args) < 3 {
 		t.Fatalf("unexpected spec: %#v", spec)
 	}
-	if spec.Args[1] != "/models/qwen.gguf" {
-		t.Fatalf("expected model path /models/qwen.gguf, got %s", spec.Args[1])
+	if spec.Args[0] != "--no-mmap" || spec.Args[1] != "-m" {
+		t.Fatalf("base arguments were not preserved: %#v", spec.Args)
+	}
+	if spec.Args[2] != "/models/qwen.gguf" {
+		t.Fatalf("expected model path /models/qwen.gguf, got %s", spec.Args[2])
+	}
+}
+
+func TestParseExtraFlagsPreservesQuotedValues(t *testing.T) {
+	args, err := ParseExtraFlags(`--foo "hello world" --bar='two words'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--foo", "hello world", "--bar=two words"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("got %#v, want %#v", args, want)
+	}
+}
+
+func TestBuildSpecRejectsManagedExtraFlags(t *testing.T) {
+	_, err := BuildSpec(
+		model.InferenceEngine{Kind: model.EngineLlamaCPP, Path: "/bin/llama-server"},
+		model.ModelEntry{ModelDir: "/models", PrimaryFile: "qwen.gguf", Type: model.TypeGGUF},
+		model.Profile{Host: "127.0.0.1", Port: 8000, ContextSize: 4096, NGL: "auto", ExtraFlags: `--host "0.0.0.0"`},
+	)
+	if err == nil || !strings.Contains(err.Error(), "managed option") {
+		t.Fatalf("expected managed flag conflict, got %v", err)
 	}
 }

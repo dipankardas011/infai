@@ -27,8 +27,12 @@ func BuildLlamaCPPSpec(engine model.InferenceEngine, m model.ModelEntry, p model
 	if m.Type != model.TypeGGUF && m.Type != model.TypeGGUFMultimodal {
 		return runner.LaunchSpec{}, fmt.Errorf("llama.cpp requires a GGUF model, got %s", m.Type)
 	}
-	args := BuildArgs(engine.Path, m, p)
-	return runner.LaunchSpec{Command: args[0], Args: args[1:], Env: engine.Env}, nil
+	args, err := buildArgs(engine.Path, m, p)
+	if err != nil {
+		return runner.LaunchSpec{}, err
+	}
+	launchArgs := append(append([]string(nil), engine.BaseArgs...), args[1:]...)
+	return runner.LaunchSpec{Command: args[0], Args: launchArgs, Env: engine.Env}, nil
 }
 
 func BuildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
@@ -80,12 +84,24 @@ func BuildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Pro
 		args = append(args, "--served-model-name", cfg.ServedModelName)
 	}
 	if p.ExtraFlags != "" {
-		args = append(args, strings.Fields(p.ExtraFlags)...)
+		extra, err := ParseExtraFlags(p.ExtraFlags)
+		if err != nil {
+			return runner.LaunchSpec{}, fmt.Errorf("parse extra flags: %w", err)
+		}
+		if err := rejectManagedFlags(extra, vllmManagedFlags); err != nil {
+			return runner.LaunchSpec{}, err
+		}
+		args = append(args, extra...)
 	}
 	return runner.LaunchSpec{Command: engine.Path, Args: args, Env: engine.Env}, nil
 }
 
 func BuildArgs(serverBin string, m model.ModelEntry, p model.Profile) []string {
+	args, _ := buildArgs(serverBin, m, p)
+	return args
+}
+
+func buildArgs(serverBin string, m model.ModelEntry, p model.Profile) ([]string, error) {
 	args := []string{serverBin, "-m", m.ModelPath()}
 
 	if p.UseMmproj && m.MmprojPath != "" {
@@ -134,19 +150,24 @@ func BuildArgs(serverBin string, m model.ModelEntry, p model.Profile) []string {
 		args = append(args, "--no-kv-offload")
 	}
 	if p.ExtraFlags != "" {
-		for _, f := range strings.Fields(p.ExtraFlags) {
-			if f == "--metrics" {
-				continue
-			}
-			args = append(args, f)
+		extra, err := ParseExtraFlags(p.ExtraFlags)
+		if err != nil {
+			return nil, fmt.Errorf("parse extra flags: %w", err)
 		}
+		if err := rejectManagedFlags(extra, llamaManagedFlags); err != nil {
+			return nil, err
+		}
+		args = append(args, extra...)
 	}
 
-	return args
+	return args, nil
 }
 
 func BuildCommand(serverBin string, m model.ModelEntry, p model.Profile) string {
-	args := BuildArgs(serverBin, m, p)
+	args, err := buildArgs(serverBin, m, p)
+	if err != nil {
+		return ""
+	}
 	quoted := make([]string, len(args))
 	for i, a := range args {
 		if strings.ContainsAny(a, " \t") {
@@ -156,4 +177,88 @@ func BuildCommand(serverBin string, m model.ModelEntry, p model.Profile) string 
 		}
 	}
 	return strings.Join(quoted, " ")
+}
+
+var llamaManagedFlags = map[string]bool{
+	"-m": true, "--mmproj": true, "--port": true, "--host": true, "-c": true, "-ngl": true,
+	"-b": true, "-ub": true, "--cache-type-k": true, "--cache-type-v": true, "--flash-attn": true,
+	"--jinja": true, "--temperature": true, "--temp": true, "--reasoning-budget": true,
+	"--top_p": true, "--top-p": true, "--top_k": true, "--top-k": true, "--no-kv-offload": true, "--metrics": true,
+}
+
+var vllmManagedFlags = map[string]bool{
+	"--host": true, "--port": true, "--max-model-len": true, "--gpu-memory-utilization": true,
+	"--max-num-seqs": true, "--max-num-batched-tokens": true, "--dtype": true,
+	"--tensor-parallel-size": true, "--pipeline-parallel-size": true, "--enable-prefix-caching": true,
+	"--trust-remote-code": true, "--served-model-name": true,
+}
+
+func rejectManagedFlags(args []string, managed map[string]bool) error {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		flag := arg
+		if i := strings.IndexByte(flag, '='); i >= 0 {
+			flag = flag[:i]
+		}
+		if managed[flag] {
+			return fmt.Errorf("extra flags contain managed option %q; edit the profile option instead", flag)
+		}
+	}
+	return nil
+}
+
+// ParseExtraFlags preserves quoted values and is intentionally shell-free.
+func ParseExtraFlags(value string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	var quote byte
+	escaped := false
+	inToken := false
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if escaped {
+			current.WriteByte(c)
+			escaped = false
+			inToken = true
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			inToken = true
+			continue
+		}
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			} else {
+				current.WriteByte(c)
+			}
+			inToken = true
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+			inToken = true
+			continue
+		}
+		if c == ' ' || c == '\t' || c == '\n' {
+			if inToken {
+				args = append(args, current.String())
+				current.Reset()
+				inToken = false
+			}
+			continue
+		}
+		current.WriteByte(c)
+		inToken = true
+	}
+	if escaped || quote != 0 {
+		return nil, fmt.Errorf("unterminated quote or escape")
+	}
+	if inToken {
+		args = append(args, current.String())
+	}
+	return args, nil
 }
