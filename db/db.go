@@ -207,11 +207,14 @@ SELECT m.id, m.scan_dir, m.model_dir, m.primary_file, m.mmproj_path, m.display_n
        p.id, p.model_id, p.inference_engine_id, p.name, p.port, p.host, p.context_size, p.ngl,
        p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
        p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
-       p.no_kv_offload, p.use_mmproj, p.extra_flags, p.engine_config
+       p.no_kv_offload, p.use_mmproj, p.extra_flags, p.engine_config,
+       p.speculative_mode, p.draft_model_id, p.speculative_tokens,
+       COALESCE(dm.display_name, '')
 FROM recents r
 JOIN model_registry m ON r.model_id = m.id
 JOIN profiles p ON r.profile_id = p.id
 JOIN inference_engine ie ON p.inference_engine_id = ie.id
+LEFT JOIN model_registry dm ON p.draft_model_id = dm.id
 ORDER BY r.last_used DESC
 LIMIT ?`, limit)
 	if err != nil {
@@ -225,6 +228,7 @@ LIMIT ?`, limit)
 		var ie model.InferenceEngine
 		var p model.Profile
 		var baseArgs, environment string
+		var draftModelName string
 		var flashAttn, jinja, noKVOffload, useMmproj int
 		err := rows.Scan(
 			&m.ID, &m.ScanDir, &m.ModelDir, &m.PrimaryFile, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata, &m.SourceRepo, &m.SourceRevision, &m.SourceFiles,
@@ -233,6 +237,8 @@ LIMIT ?`, limit)
 			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
 			&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
 			&noKVOffload, &useMmproj, &p.ExtraFlags, &p.EngineConfig,
+			&p.SpeculativeMode, &p.DraftModelID, &p.SpeculativeTokens,
+			&draftModelName,
 		)
 		if err != nil {
 			return nil, err
@@ -244,7 +250,7 @@ LIMIT ?`, limit)
 		p.Jinja = jinja == 1
 		p.NoKVOffload = noKVOffload == 1
 		p.UseMmproj = useMmproj == 1
-		out = append(out, RecentEntry{Model: m, InferenceEngine: ie, Profile: p})
+		out = append(out, RecentEntry{Model: m, InferenceEngine: ie, Profile: p, DraftModelName: draftModelName})
 	}
 	return out, rows.Err()
 }
@@ -528,12 +534,14 @@ type RecentEntry struct {
 	Model           model.ModelEntry
 	InferenceEngine model.InferenceEngine
 	Profile         model.Profile
+	DraftModelName  string
 }
 
 type ProfileEntry struct {
 	Model           model.ModelEntry
 	InferenceEngine model.InferenceEngine
 	Profile         model.Profile
+	DraftModelName  string
 }
 
 func (d *DB) ListAllProfiles() ([]ProfileEntry, error) {
@@ -543,10 +551,13 @@ SELECT m.id, m.scan_dir, m.model_dir, m.primary_file, m.mmproj_path, m.display_n
        p.id, p.model_id, p.inference_engine_id, p.name, p.port, p.host, p.context_size, p.ngl,
        p.batch_size, p.ubatch_size, p.cache_type_k, p.cache_type_v,
        p.flash_attn, p.jinja, p.temperature, p.reasoning_budget, p.top_p, p.top_k,
-       p.no_kv_offload, p.use_mmproj, p.extra_flags, p.engine_config
+       p.no_kv_offload, p.use_mmproj, p.extra_flags, p.engine_config,
+       p.speculative_mode, p.draft_model_id, p.speculative_tokens,
+       COALESCE(dm.display_name, '')
 FROM profiles p
 JOIN model_registry m ON p.model_id = m.id
 JOIN inference_engine ie ON p.inference_engine_id = ie.id
+LEFT JOIN model_registry dm ON p.draft_model_id = dm.id
 ORDER BY lower(m.display_name), lower(ie.name), lower(p.name)`)
 	if err != nil {
 		return nil, err
@@ -559,6 +570,7 @@ ORDER BY lower(m.display_name), lower(ie.name), lower(p.name)`)
 		var ie model.InferenceEngine
 		var p model.Profile
 		var baseArgs, environment string
+		var draftModelName string
 		var flashAttn, jinja, noKVOffload, useMmproj int
 		err := rows.Scan(
 			&m.ID, &m.ScanDir, &m.ModelDir, &m.PrimaryFile, &m.MmprojPath, &m.DisplayName, &m.Type, &m.Metadata, &m.SourceRepo, &m.SourceRevision, &m.SourceFiles,
@@ -567,6 +579,8 @@ ORDER BY lower(m.display_name), lower(ie.name), lower(p.name)`)
 			&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
 			&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
 			&noKVOffload, &useMmproj, &p.ExtraFlags, &p.EngineConfig,
+			&p.SpeculativeMode, &p.DraftModelID, &p.SpeculativeTokens,
+			&draftModelName,
 		)
 		if err != nil {
 			return nil, err
@@ -578,7 +592,7 @@ ORDER BY lower(m.display_name), lower(ie.name), lower(p.name)`)
 		p.Jinja = jinja == 1
 		p.NoKVOffload = noKVOffload == 1
 		p.UseMmproj = useMmproj == 1
-		out = append(out, ProfileEntry{Model: m, InferenceEngine: ie, Profile: p})
+		out = append(out, ProfileEntry{Model: m, InferenceEngine: ie, Profile: p, DraftModelName: draftModelName})
 	}
 	return out, rows.Err()
 }
@@ -588,7 +602,8 @@ func (d *DB) ListProfiles(modelID int64) ([]model.Profile, error) {
 SELECT id, model_id, inference_engine_id, name, port, host, context_size, ngl,
        batch_size, ubatch_size, cache_type_k, cache_type_v,
        flash_attn, jinja, temperature, reasoning_budget, top_p, top_k,
-       no_kv_offload, use_mmproj, extra_flags, engine_config
+       no_kv_offload, use_mmproj, extra_flags, engine_config,
+       speculative_mode, draft_model_id, speculative_tokens
 FROM profiles WHERE model_id = ? ORDER BY name`, modelID)
 	if err != nil {
 		return nil, err
@@ -610,7 +625,8 @@ func (d *DB) GetProfile(id int64) (model.Profile, error) {
 SELECT id, model_id, inference_engine_id, name, port, host, context_size, ngl,
        batch_size, ubatch_size, cache_type_k, cache_type_v,
        flash_attn, jinja, temperature, reasoning_budget, top_p, top_k,
-       no_kv_offload, use_mmproj, extra_flags, engine_config
+       no_kv_offload, use_mmproj, extra_flags, engine_config,
+       speculative_mode, draft_model_id, speculative_tokens
 FROM profiles WHERE id = ?`, id)
 	if err != nil {
 		return model.Profile{}, err
@@ -631,8 +647,9 @@ func (d *DB) UpsertProfile(p *model.Profile) error {
 INSERT INTO profiles (model_id, inference_engine_id, name, port, host, context_size, ngl,
     batch_size, ubatch_size, cache_type_k, cache_type_v,
     flash_attn, jinja, temperature, reasoning_budget, top_p, top_k,
-    no_kv_offload, use_mmproj, extra_flags, engine_config)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    no_kv_offload, use_mmproj, extra_flags, engine_config,
+    speculative_mode, draft_model_id, speculative_tokens)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(model_id, name) DO UPDATE SET
     inference_engine_id=excluded.inference_engine_id,
     port=excluded.port, host=excluded.host, context_size=excluded.context_size,
@@ -642,12 +659,15 @@ ON CONFLICT(model_id, name) DO UPDATE SET
     temperature=excluded.temperature, reasoning_budget=excluded.reasoning_budget,
     top_p=excluded.top_p, top_k=excluded.top_k,
     no_kv_offload=excluded.no_kv_offload, use_mmproj=excluded.use_mmproj,
-    extra_flags=excluded.extra_flags, engine_config=excluded.engine_config
+    extra_flags=excluded.extra_flags, engine_config=excluded.engine_config,
+    speculative_mode=excluded.speculative_mode, draft_model_id=excluded.draft_model_id,
+    speculative_tokens=excluded.speculative_tokens
 `, p.ModelID, p.InferenceEngineID, p.Name, p.Port, p.Host, p.ContextSize, p.NGL,
 		p.BatchSize, p.UBatchSize, p.CacheTypeK, p.CacheTypeV,
 		boolToInt(p.FlashAttn), boolToInt(p.Jinja),
 		p.Temperature, p.ReasoningBudget, p.TopP, p.TopK,
-		boolToInt(p.NoKVOffload), boolToInt(p.UseMmproj), p.ExtraFlags, string(p.EngineConfig))
+		boolToInt(p.NoKVOffload), boolToInt(p.UseMmproj), p.ExtraFlags, string(p.EngineConfig),
+		p.SpeculativeMode, p.DraftModelID, p.SpeculativeTokens)
 	if err != nil {
 		return err
 	}
@@ -673,6 +693,7 @@ func scanProfile(rows *sql.Rows) (model.Profile, error) {
 		&p.BatchSize, &p.UBatchSize, &p.CacheTypeK, &p.CacheTypeV,
 		&flashAttn, &jinja, &p.Temperature, &p.ReasoningBudget, &p.TopP, &p.TopK,
 		&noKVOffload, &useMmproj, &p.ExtraFlags, &p.EngineConfig,
+		&p.SpeculativeMode, &p.DraftModelID, &p.SpeculativeTokens,
 	)
 	p.FlashAttn = flashAttn == 1
 	p.Jinja = jinja == 1

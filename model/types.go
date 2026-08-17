@@ -69,6 +69,15 @@ const (
 	EngineVLLM     EngineKind = "vllm"
 )
 
+type SpeculativeMode string
+
+const (
+	SpeculativeOff          SpeculativeMode = ""
+	SpeculativeNativeMTP    SpeculativeMode = "native_mtp"
+	SpeculativeDraftModel   SpeculativeMode = "draft_model"
+	SpeculativeMTPAssistant SpeculativeMode = "mtp_assistant"
+)
+
 type InferenceEngine struct {
 	ID       string
 	Name     string
@@ -113,6 +122,9 @@ type Profile struct {
 	UseMmproj         bool
 	ExtraFlags        string
 	EngineConfig      string
+	SpeculativeMode   SpeculativeMode
+	DraftModelID      *int64
+	SpeculativeTokens *int
 }
 
 func (p Profile) VLLMConfig() (VLLMConfig, error) {

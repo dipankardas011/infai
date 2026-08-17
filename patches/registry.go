@@ -16,6 +16,7 @@ type Patch struct {
 var All = []Patch{
 	{Version: 5, Name: "typed_model_artifacts", Apply: m0005},
 	{Version: 6, Name: "copy_to_model_registry", Apply: m0006},
+	{Version: 8, Name: "speculative_profile_flags", Apply: m0008},
 }
 
 func Apply(db *sql.DB, fromVersion, toVersion int) error {

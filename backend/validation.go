@@ -121,14 +121,15 @@ var validVLLMDTypes = map[string]bool{
 
 var reservedLlamaCPPFlags = []string{"--metrics", "--port", "--host", "-m", "--mmproj", "-c", "-ngl",
 	"-b", "-ub", "--cache-type-k", "--cache-type-v", "--flash-attn", "--jinja",
-	"--temperature", "--reasoning-budget", "--top_p", "--top_k", "--no-kv-offload"}
+	"--temperature", "--reasoning-budget", "--top_p", "--top_k", "--no-kv-offload",
+	"--spec-type", "--spec-draft-model", "--spec-draft-n-max"}
 
 var reservedVLLMFlags = []string{"--host", "--port", "--max-model-len",
 	"--gpu-memory-utilization", "--max-num-seqs", "--max-num-batched-tokens",
 	"--dtype", "--tensor-parallel-size", "--pipeline-parallel-size",
-	"--enable-prefix-caching", "--trust-remote-code", "--served-model-name"}
+	"--enable-prefix-caching", "--trust-remote-code", "--served-model-name", "--speculative-config"}
 
-func ValidateProfile(p *model.Profile, m *model.ModelEntry, engine *model.InferenceEngine) ValidationErrors {
+func ValidateProfile(p *model.Profile, m *model.ModelEntry, engine *model.InferenceEngine, draftModels ...*model.ModelEntry) ValidationErrors {
 	var issues ValidationErrors
 
 	if p == nil {
@@ -140,11 +141,120 @@ func ValidateProfile(p *model.Profile, m *model.ModelEntry, engine *model.Infere
 	validateModelEngineCompatibility(p, m, engine, &issues)
 	validateNetwork(p, &issues)
 	validateContextSize(p, m, &issues)
+	var draft *model.ModelEntry
+	if len(draftModels) > 0 {
+		draft = draftModels[0]
+	}
+	validateSpeculative(p, m, draft, engine, &issues)
 	validateLlamaCPPFields(p, engine, &issues)
 	validateVLLMFields(p, engine, m, &issues)
 	validateExtraFlags(p, engine, &issues)
 
 	return issues
+}
+
+func validateSpeculative(p *model.Profile, target, draft *model.ModelEntry, engine *model.InferenceEngine, issues *ValidationErrors) {
+	if p.SpeculativeMode != model.SpeculativeOff && p.SpeculativeTokens == nil {
+		*issues = append(*issues, ValidationError{Field: "speculative_tokens", Issue: "speculative tokens are required when speculative decoding is enabled", Severity: SeverityError})
+	} else if p.SpeculativeTokens != nil && *p.SpeculativeTokens <= 0 {
+		*issues = append(*issues, ValidationError{Field: "speculative_tokens", Issue: "speculative tokens must be > 0", Severity: SeverityError})
+	}
+	var kind model.EngineKind
+	if engine != nil {
+		kind = engine.Kind
+		if kind == "" {
+			kind = model.EngineLlamaCPP
+		}
+	}
+
+	switch p.SpeculativeMode {
+	case model.SpeculativeOff:
+		return
+	case model.SpeculativeNativeMTP:
+		validateNativeMTPMetadata(target, issues)
+	case model.SpeculativeDraftModel, model.SpeculativeMTPAssistant:
+		if p.DraftModelID == nil || *p.DraftModelID <= 0 {
+			*issues = append(*issues, ValidationError{Field: "draft_model_id", Issue: "a draft model is required for this speculative mode", Severity: SeverityError})
+			return
+		}
+		if *p.DraftModelID == p.ModelID {
+			*issues = append(*issues, ValidationError{Field: "draft_model_id", Issue: "draft model must be different from the target model", Severity: SeverityError})
+			return
+		}
+		if draft == nil {
+			*issues = append(*issues, ValidationError{Field: "draft_model_id", Issue: "selected draft model does not exist in the model registry", Severity: SeverityError})
+			return
+		}
+	default:
+		*issues = append(*issues, ValidationError{Field: "speculative_mode", Issue: fmt.Sprintf("unsupported speculative mode %q", p.SpeculativeMode), Severity: SeverityError})
+		return
+	}
+
+	if engine == nil {
+		return
+	}
+	if draft == nil {
+		return
+	}
+	switch kind {
+	case model.EngineLlamaCPP:
+		if draft.Type != model.TypeGGUF && draft.Type != model.TypeGGUFMultimodal {
+			*issues = append(*issues, ValidationError{Field: "draft_model_id", Issue: "llama.cpp requires a GGUF draft model", Severity: SeverityError})
+		}
+	case model.EngineVLLM:
+		if draft.Type != model.TypeSafetensors && draft.Type != model.TypeHFQuantized {
+			*issues = append(*issues, ValidationError{Field: "draft_model_id", Issue: "vLLM requires a safetensors or HF-quantized draft model", Severity: SeverityError})
+		}
+	}
+	validateDraftCompatibility(p.SpeculativeMode, target, draft, issues)
+}
+
+func validateDraftCompatibility(mode model.SpeculativeMode, target, draft *model.ModelEntry, issues *ValidationErrors) {
+	var targetMeta, draftMeta model.ModelMetadata
+	targetOK := target != nil && json.Unmarshal([]byte(target.Metadata), &targetMeta) == nil
+	draftOK := draft != nil && json.Unmarshal([]byte(draft.Metadata), &draftMeta) == nil
+	established := false
+
+	if targetOK && draftOK {
+		if targetMeta.VocabSize > 0 && draftMeta.VocabSize > 0 {
+			established = true
+			if targetMeta.VocabSize != draftMeta.VocabSize {
+				*issues = append(*issues, ValidationError{Field: "draft_model_id", Issue: fmt.Sprintf("draft vocabulary size %d does not match target vocabulary size %d", draftMeta.VocabSize, targetMeta.VocabSize), Severity: SeverityError})
+			}
+		}
+		if targetMeta.TokenizerModel != "" && draftMeta.TokenizerModel != "" {
+			established = true
+			if targetMeta.TokenizerModel != draftMeta.TokenizerModel {
+				*issues = append(*issues, ValidationError{Field: "draft_model_id", Issue: fmt.Sprintf("draft tokenizer %q does not match target tokenizer %q", draftMeta.TokenizerModel, targetMeta.TokenizerModel), Severity: SeverityError})
+			}
+		}
+	}
+	if !established {
+		*issues = append(*issues, ValidationError{Field: "draft_model_id", Issue: "draft tokenizer compatibility cannot be verified from model metadata", Severity: SeverityWarning})
+	}
+
+	if mode == model.SpeculativeMTPAssistant && (!draftOK || (draftMeta.MTPNumLayers == 0 && !strings.Contains(strings.ToLower(draftMeta.Architecture), "assistant") && !strings.Contains(strings.ToLower(draftMeta.Architecture), "mtp"))) {
+		*issues = append(*issues, ValidationError{Field: "draft_model_id", Issue: "selected model metadata does not identify an MTP assistant; verify that it is built for this target", Severity: SeverityWarning})
+	}
+}
+
+func validateNativeMTPMetadata(target *model.ModelEntry, issues *ValidationErrors) {
+	if target == nil {
+		*issues = append(*issues, ValidationError{Field: "speculative_mode", Issue: "native MTP support cannot be verified because the target model is not in the model registry", Severity: SeverityError})
+		return
+	}
+	if strings.TrimSpace(target.Metadata) == "" {
+		*issues = append(*issues, ValidationError{Field: "speculative_mode", Issue: "native MTP requires model metadata, but metadata is absent", Severity: SeverityError})
+		return
+	}
+	var meta model.ModelMetadata
+	if err := json.Unmarshal([]byte(target.Metadata), &meta); err != nil {
+		*issues = append(*issues, ValidationError{Field: "speculative_mode", Issue: fmt.Sprintf("native MTP support cannot be verified because model metadata is malformed: %v", err), Severity: SeverityError})
+		return
+	}
+	if meta.MTPNumLayers == 0 {
+		*issues = append(*issues, ValidationError{Field: "speculative_mode", Issue: "model metadata does not report native MTP layers", Severity: SeverityError})
+	}
 }
 
 func validateIdentity(p *model.Profile, issues *ValidationErrors) {

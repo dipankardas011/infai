@@ -291,7 +291,7 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.profileEdit.errMsg = "recommendation unavailable; manual defaults are active: " + msg.err.Error()
 			return a, nil
 		}
-		a.profileEdit = NewProfileEditModel(msg.entry, msg.engines, &msg.suggestion.Draft, a.width, a.height)
+		a.profileEdit = NewProfileEditModel(msg.entry, msg.engines, &msg.suggestion.Draft, a.width, a.height, a.profileEdit.availableModels)
 		a.profileEdit.SetRecommendation(suggestionLines(msg.suggestion), msg.suggestion.Fit.Confidence == memoryfit.ConfidenceMedium || msg.suggestion.Fit.Fit == memoryfit.FitTight || msg.suggestion.Fit.Fit == memoryfit.FitDoesNotFit)
 		return a, nil
 
@@ -311,8 +311,13 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setErr("no compatible inference engine configured for this model")
 			return a, nil
 		}
+		models, err := a.service.ListModels()
+		if err != nil {
+			a.setErr(err.Error())
+			return a, nil
+		}
 		a.selectedModel = msg.entry.Model
-		a.profileEdit = NewProfileEditModel(msg.entry.Model, engines, &profile, a.width, a.height)
+		a.profileEdit = NewProfileEditModel(msg.entry.Model, engines, &profile, a.width, a.height, models)
 		a.profileEditReturn = screenHome
 		a.screen = screenProfileEdit
 		a.errMsg = ""
@@ -686,8 +691,13 @@ func (a *AppModel) updateModelList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.screen = screenHome
 				return a, nil
 			}
+			models, err := a.service.ListModels()
+			if err != nil {
+				a.setErr(err.Error())
+				return a, nil
+			}
 			a.selectedModel = entry
-			a.profileEdit = NewProfileEditModel(entry, engines, nil, a.width, a.height)
+			a.profileEdit = NewProfileEditModel(entry, engines, nil, a.width, a.height, models)
 			a.profileEdit.suggestionLoading = true
 			a.profileEditReturn = screenHome
 			a.screen = screenProfileEdit

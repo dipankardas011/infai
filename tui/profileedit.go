@@ -46,6 +46,7 @@ type ProfileEditModel struct {
 	fields                  []formField
 	focused                 int
 	modelEntry              model.ModelEntry
+	availableModels         []model.ModelEntry
 	engines                 []model.InferenceEngine
 	editingID               int64
 	modelID                 int64
@@ -93,6 +94,7 @@ func (em *ProfileEditModel) SetFieldErrors(issues []backend.ValidationError) {
 			"temperature": "Temperature", "top_p": "Top P", "top_k": "Top K", "reasoning_budget": "Reasoning Budget",
 			"gpu_memory_utilization": "GPU Memory Util", "max_num_seqs": "Max Sequences", "max_batched_tokens": "Max Batched Tokens",
 			"pipeline_parallel_size": "Pipeline Parallel", "tensor_parallel_size": "Tensor Parallel", "dtype": "vLLM DType", "extra_flags": "Extra Flags",
+			"speculative_mode": "Speculative Decoding", "speculative_tokens": "Speculative Tokens", "draft_model_id": "Draft / Assistant",
 		}[issue.Field]
 		if label == "" {
 			label = issue.Field
@@ -165,8 +167,46 @@ func newEngineSelectField(engines []model.InferenceEngine, currentID string) for
 	return formField{label: "Inference Engine", kind: fieldSelect, options: options, optionValues: values, selIdx: idx}
 }
 
-func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p *model.Profile, w, h int) ProfileEditModel {
+func speculativeModeField(m model.ModelEntry) formField {
+	options := []string{"Off"}
+	values := []string{string(model.SpeculativeOff)}
+	mtpLabel := "Native MTP (not detected)"
+	var meta model.ModelMetadata
+	if json.Unmarshal([]byte(m.Metadata), &meta) == nil && meta.MTPNumLayers > 0 {
+		mtpLabel = fmt.Sprintf("Native MTP (%d layer(s))", meta.MTPNumLayers)
+	}
+	options = append(options, mtpLabel, "Draft Model")
+	values = append(values, string(model.SpeculativeNativeMTP), string(model.SpeculativeDraftModel))
+	options = append(options, "MTP Assistant")
+	values = append(values, string(model.SpeculativeMTPAssistant))
+	return formField{label: "Speculative Decoding", optionKey: "speculative_mode", kind: fieldSelect, options: options, optionValues: values}
+}
+
+func draftModelField(target model.ModelEntry, models []model.ModelEntry, kind model.EngineKind) formField {
+	options := []string{"(select model)"}
+	values := []string{""}
+	for _, candidate := range models {
+		if candidate.ID == target.ID {
+			continue
+		}
+		compatible := candidate.Type == model.TypeGGUF || candidate.Type == model.TypeGGUFMultimodal
+		if kind == model.EngineVLLM {
+			compatible = candidate.Type == model.TypeSafetensors || candidate.Type == model.TypeHFQuantized
+		}
+		if compatible {
+			options = append(options, candidate.DisplayName)
+			values = append(values, strconv.FormatInt(candidate.ID, 10))
+		}
+	}
+	return formField{label: "Draft / Assistant", optionKey: "draft_model_id", kind: fieldSelect, options: options, optionValues: values}
+}
+
+func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p *model.Profile, w, h int, modelLists ...[]model.ModelEntry) ProfileEditModel {
 	hasMmproj := m.MmprojPath != ""
+	var availableModels []model.ModelEntry
+	if len(modelLists) > 0 {
+		availableModels = modelLists[0]
+	}
 
 	var cacheKVal, cacheVVal *string
 	if p != nil {
@@ -177,6 +217,16 @@ func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p 
 	currentEngineID := ""
 	if p != nil {
 		currentEngineID = p.InferenceEngineID
+	}
+	selectedKind := model.EngineLlamaCPP
+	for _, engine := range engines {
+		if engine.ID == currentEngineID || currentEngineID == "" {
+			selectedKind = engine.Kind
+			if selectedKind == "" {
+				selectedKind = model.EngineLlamaCPP
+			}
+			break
+		}
 	}
 
 	fields := []formField{
@@ -199,6 +249,9 @@ func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p 
 		{label: "Top K", optionKey: "top_k", kind: fieldInt, input: newTextInput("(empty=omit)"), optional: true},
 		{label: "No KV Offload", optionKey: "kv_offload", kind: fieldBool},
 		{label: "Use Mmproj", optionKey: "mmproj", kind: fieldBool, disabled: !hasMmproj},
+		speculativeModeField(m),
+		{label: "Speculative Tokens", optionKey: "speculative_tokens", kind: fieldInt, input: newTextInput("1"), optional: true},
+		draftModelField(m, availableModels, selectedKind),
 		{label: "Extra Flags", kind: fieldText, input: newTextInput("(empty=omit)"), optional: true},
 		{label: "Served Model Name", optionKey: "served_model_name", kind: fieldText, input: newTextInput("(empty=model name)"), optional: true},
 		{label: "GPU Memory Util", optionKey: "gpu_memory_utilization", kind: fieldFloat, input: newTextInput("0.85"), optional: true},
@@ -227,13 +280,14 @@ func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p 
 	}
 
 	em := ProfileEditModel{
-		fields:      fields,
-		modelEntry:  m,
-		engines:     engines,
-		modelID:     m.ID,
-		visibleRows: h - 12,
-		width:       w,
-		height:      h,
+		fields:          fields,
+		modelEntry:      m,
+		availableModels: append([]model.ModelEntry(nil), availableModels...),
+		engines:         engines,
+		modelID:         m.ID,
+		visibleRows:     h - 12,
+		width:           w,
+		height:          h,
 	}
 
 	set := func(label, val string) {
@@ -260,6 +314,20 @@ func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p 
 						em.fields[i].selIdx = j
 						return
 					}
+				}
+			}
+		}
+	}
+	setSelectValue := func(label, val string) {
+		for i := range em.fields {
+			field := &em.fields[i]
+			if field.label != label || field.kind != fieldSelect {
+				continue
+			}
+			for j, optionValue := range field.optionValues {
+				if optionValue == val {
+					field.selIdx = j
+					return
 				}
 			}
 		}
@@ -309,6 +377,15 @@ func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p 
 		}
 		setBool("No KV Offload", p.NoKVOffload)
 		setBool("Use Mmproj", p.UseMmproj && hasMmproj)
+		setSelectValue("Speculative Decoding", string(p.SpeculativeMode))
+		if p.SpeculativeTokens != nil {
+			set("Speculative Tokens", strconv.Itoa(*p.SpeculativeTokens))
+		} else if p.SpeculativeMode != model.SpeculativeOff {
+			set("Speculative Tokens", "1")
+		}
+		if p.DraftModelID != nil {
+			setSelectValue("Draft / Assistant", strconv.FormatInt(*p.DraftModelID, 10))
+		}
 		set("Extra Flags", p.ExtraFlags)
 		if cfg, err := p.VLLMConfig(); err == nil {
 			set("Served Model Name", cfg.ServedModelName)
@@ -342,6 +419,7 @@ func NewProfileEditModel(m model.ModelEntry, engines []model.InferenceEngine, p 
 		set("GPU Memory Util", "0.85")
 		set("Max Sequences", "32")
 		set("Max Batched Tokens", "4096")
+		set("Speculative Tokens", "1")
 	}
 
 	if em.fields[0].kind != fieldBool && em.fields[0].kind != fieldSelect {
@@ -516,6 +594,13 @@ func (em ProfileEditModel) fieldVisible(field formField) bool {
 	if field.engine != "" && field.engine != em.selectedEngineKind() {
 		return false
 	}
+	mode := model.SpeculativeMode(em.selectedFieldValue("Speculative Decoding"))
+	if field.optionKey == "speculative_tokens" && mode == model.SpeculativeOff {
+		return false
+	}
+	if field.optionKey == "draft_model_id" && mode != model.SpeculativeDraftModel && mode != model.SpeculativeMTPAssistant {
+		return false
+	}
 	if field.optionKey == "" || em.showAdvanced {
 		return true
 	}
@@ -525,6 +610,18 @@ func (em ProfileEditModel) fieldVisible(field formField) bool {
 		}
 	}
 	return true
+}
+
+func (em ProfileEditModel) selectedFieldValue(label string) string {
+	for _, field := range em.fields {
+		if field.label == label && field.kind == fieldSelect && len(field.options) > 0 {
+			if len(field.optionValues) == len(field.options) {
+				return field.optionValues[field.selIdx]
+			}
+			return field.options[field.selIdx]
+		}
+	}
+	return ""
 }
 
 func (em ProfileEditModel) focusedOption() (backend.Option, bool) {
@@ -821,6 +918,23 @@ func (em ProfileEditModel) ToProfile() (model.Profile, error) {
 			break
 		}
 	}
+	speculativeMode := model.SpeculativeMode(getSelectValue("Speculative Decoding"))
+	var speculativeTokens *int
+	var draftModelID *int64
+	if speculativeMode != model.SpeculativeOff {
+		var tokensErr error
+		speculativeTokens, tokensErr = optInt("Speculative Tokens")
+		if tokensErr != nil {
+			return model.Profile{}, tokensErr
+		}
+		if draftValue := getSelectValue("Draft / Assistant"); draftValue != "" && (speculativeMode == model.SpeculativeDraftModel || speculativeMode == model.SpeculativeMTPAssistant) {
+			id, parseErr := strconv.ParseInt(draftValue, 10, 64)
+			if parseErr != nil {
+				return model.Profile{}, fmt.Errorf("Draft / Assistant selection is invalid")
+			}
+			draftModelID = &id
+		}
+	}
 	port, err := strconv.Atoi(get("Port"))
 	if err != nil || port < 1 || port > 65535 {
 		return model.Profile{}, fmt.Errorf("Port must be 1-65535")
@@ -934,6 +1048,9 @@ func (em ProfileEditModel) ToProfile() (model.Profile, error) {
 		UseMmproj:         getBool("Use Mmproj"),
 		ExtraFlags:        get("Extra Flags"),
 		EngineConfig:      engineConfig,
+		SpeculativeMode:   speculativeMode,
+		DraftModelID:      draftModelID,
+		SpeculativeTokens: speculativeTokens,
 	}, nil
 }
 

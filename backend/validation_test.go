@@ -366,6 +366,14 @@ func TestValidateExtraFlags(t *testing.T) {
 		issues := ValidateProfile(prof, validGGUFModel(), validLlamaCPPEngine())
 		assert.Empty(t, issues)
 	})
+
+	t.Run("speculative flags are reserved", func(t *testing.T) {
+		prof := validProfile()
+		prof.ExtraFlags = "--spec-type draft-mtp --spec-draft-n-max 3"
+		issues := ValidateProfile(prof, validGGUFModel(), validLlamaCPPEngine())
+		assert.Contains(t, issues.Error(), "reserved flags")
+	})
+
 }
 
 func TestValidationErrorsMethods(t *testing.T) {
@@ -389,4 +397,85 @@ func TestValidationIssuesUnwrapsJoinedErrors(t *testing.T) {
 	assert.Len(t, issues, 2)
 	assert.Equal(t, "name", issues[0].Field)
 	assert.Equal(t, "port", issues[1].Field)
+}
+
+func TestValidateSpeculativeProfile(t *testing.T) {
+	positive, zero := 4, 0
+	target := validGGUFModel()
+	draftGGUF := &model.ModelEntry{ID: 2, Type: model.TypeGGUF, DisplayName: "draft"}
+	draftST := &model.ModelEntry{ID: 2, Type: model.TypeSafetensors, DisplayName: "draft"}
+	draftID := int64(2)
+
+	tests := []struct {
+		name    string
+		mode    model.SpeculativeMode
+		tokens  *int
+		draftID *int64
+		target  *model.ModelEntry
+		draft   *model.ModelEntry
+		engine  *model.InferenceEngine
+		want    string
+	}{
+		{name: "native metadata detected", mode: model.SpeculativeNativeMTP, tokens: &positive, target: &model.ModelEntry{ID: 1, Type: model.TypeGGUF, Metadata: `{"mtp_num_layers":1}`}, engine: validLlamaCPPEngine()},
+		{name: "tokens required", mode: model.SpeculativeNativeMTP, target: &model.ModelEntry{ID: 1, Type: model.TypeGGUF, Metadata: `{"mtp_num_layers":1}`}, engine: validLlamaCPPEngine(), want: "speculative tokens are required"},
+		{name: "native metadata absent", mode: model.SpeculativeNativeMTP, target: &model.ModelEntry{ID: 1, Type: model.TypeGGUF}, engine: validLlamaCPPEngine(), want: "metadata is absent"},
+		{name: "native metadata has no MTP", mode: model.SpeculativeNativeMTP, target: target, engine: validLlamaCPPEngine(), want: "does not report native MTP"},
+		{name: "tokens must be positive", mode: model.SpeculativeNativeMTP, tokens: &zero, target: &model.ModelEntry{ID: 1, Type: model.TypeGGUF, Metadata: `{"mtp_num_layers":1}`}, engine: validLlamaCPPEngine(), want: "speculative tokens must be > 0"},
+		{name: "draft missing ID", mode: model.SpeculativeDraftModel, target: target, engine: validLlamaCPPEngine(), want: "draft model is required"},
+		{name: "draft deleted", mode: model.SpeculativeDraftModel, draftID: &draftID, target: target, engine: validLlamaCPPEngine(), want: "does not exist"},
+		{name: "draft wrong llama type", mode: model.SpeculativeDraftModel, draftID: &draftID, target: target, draft: draftST, engine: validLlamaCPPEngine(), want: "requires a GGUF draft model"},
+		{name: "draft valid llama type", mode: model.SpeculativeDraftModel, tokens: &positive, draftID: &draftID, target: target, draft: draftGGUF, engine: validLlamaCPPEngine()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := validProfile()
+			p.SpeculativeMode = tt.mode
+			p.SpeculativeTokens = tt.tokens
+			p.DraftModelID = tt.draftID
+			issues := ValidateProfile(p, tt.target, tt.engine, tt.draft)
+			if tt.want == "" {
+				assert.False(t, issues.HasErrors(), "unexpected errors: %v", issues)
+			} else {
+				assert.Contains(t, issues.Error(), tt.want)
+			}
+		})
+	}
+
+	t.Run("self draft", func(t *testing.T) {
+		self := int64(1)
+		p := validProfile()
+		p.SpeculativeMode = model.SpeculativeDraftModel
+		p.DraftModelID = &self
+		issues := ValidateProfile(p, target, validLlamaCPPEngine(), target)
+		assert.Contains(t, issues.Error(), "different from the target")
+	})
+
+	t.Run("draft vocabulary mismatch", func(t *testing.T) {
+		tokens := 1
+		draftID := int64(2)
+		p := validProfile()
+		p.SpeculativeMode = model.SpeculativeDraftModel
+		p.SpeculativeTokens = &tokens
+		p.DraftModelID = &draftID
+		target := &model.ModelEntry{ID: 1, Type: model.TypeGGUF, Metadata: `{"vocab_size":32000,"tokenizer_model":"llama"}`}
+		draft := &model.ModelEntry{ID: 2, Type: model.TypeGGUF, Metadata: `{"vocab_size":64000,"tokenizer_model":"llama"}`}
+		issues := ValidateProfile(p, target, validLlamaCPPEngine(), draft)
+		assert.True(t, issues.HasErrors())
+		assert.Contains(t, issues.Error(), "vocabulary size")
+	})
+
+	t.Run("unknown compatibility warns", func(t *testing.T) {
+		tokens := 1
+		draftID := int64(2)
+		p := validProfile()
+		p.SpeculativeMode = model.SpeculativeMTPAssistant
+		p.SpeculativeTokens = &tokens
+		p.DraftModelID = &draftID
+		target := &model.ModelEntry{ID: 1, Type: model.TypeGGUF, Metadata: `{}`}
+		draft := &model.ModelEntry{ID: 2, Type: model.TypeGGUF, Metadata: `{}`}
+		issues := ValidateProfile(p, target, validLlamaCPPEngine(), draft)
+		assert.False(t, issues.HasErrors())
+		assert.Contains(t, issues.Error(), "cannot be verified")
+		assert.Contains(t, issues.Error(), "does not identify an MTP assistant")
+	})
 }
