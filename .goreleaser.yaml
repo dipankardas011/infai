@@ -81,3 +81,9 @@ homebrew_casks:
     directory: Casks
     homepage: "https://github.com/dipankardas011/infai"
     description: "Zero-management launch templates for llama.cpp"
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/infai"]
+          end
