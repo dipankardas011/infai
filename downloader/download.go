@@ -67,17 +67,21 @@ type Config struct {
 	StagingDir string
 	MaxRetries int
 	RetryDelay time.Duration
+	// MaxConcurrency caps the number of files downloaded in parallel.
+	// Defaults to 3 when unset.
+	MaxConcurrency int
 }
 
 type Downloader struct {
-	client      *http.Client
-	token       string
-	baseURL     string
-	stagingDir  string
-	maxRetries  int
-	retryDelay  time.Duration
-	mu          sync.Mutex
-	activeDests map[string]bool
+	client         *http.Client
+	token          string
+	baseURL        string
+	stagingDir     string
+	maxRetries     int
+	retryDelay     time.Duration
+	maxConcurrency int
+	mu             sync.Mutex
+	activeDests    map[string]bool
 }
 
 func NewDownloader(cfg Config) *Downloader {
@@ -86,6 +90,9 @@ func NewDownloader(cfg Config) *Downloader {
 	}
 	if cfg.RetryDelay <= 0 {
 		cfg.RetryDelay = 2 * time.Second
+	}
+	if cfg.MaxConcurrency <= 0 {
+		cfg.MaxConcurrency = 3
 	}
 	staging := filepath.Clean(cfg.StagingDir)
 	if staging == "" || staging == "." {
@@ -104,10 +111,11 @@ func NewDownloader(cfg Config) *Downloader {
 				return nil
 			},
 		},
-		stagingDir:  staging,
-		maxRetries:  cfg.MaxRetries,
-		retryDelay:  cfg.RetryDelay,
-		activeDests: make(map[string]bool),
+		stagingDir:     staging,
+		maxRetries:     cfg.MaxRetries,
+		retryDelay:     cfg.RetryDelay,
+		maxConcurrency: cfg.MaxConcurrency,
+		activeDests:    make(map[string]bool),
 	}
 }
 
@@ -148,27 +156,62 @@ func (d *Downloader) Download(ctx context.Context, plan *DownloadPlan, dest stri
 	return ch, nil
 }
 
+type downloadState struct {
+	mu       sync.Mutex
+	progress *OverallProgress
+	ch       chan<- OverallProgress
+}
+
+func (s *downloadState) snapshot() OverallProgress {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := *s.progress
+	p.Files = append([]FileProgress(nil), s.progress.Files...)
+	return p
+}
+
+func (s *downloadState) send() {
+	s.ch <- s.snapshot()
+}
+
+func (s *downloadState) update(fn func(*OverallProgress)) {
+	s.mu.Lock()
+	fn(s.progress)
+	s.mu.Unlock()
+	s.send()
+}
+
+func recomputeDoneBytes(p *OverallProgress) {
+	var done int64
+	for _, f := range p.Files {
+		done += f.Downloaded
+	}
+	p.DoneBytes = done
+}
+
 type progressReporter struct {
-	progress  *OverallProgress
-	ch        chan<- OverallProgress
-	fileIdx   int
-	baseBytes int64
-	lastSend  time.Time
-	interval  time.Duration
+	state    *downloadState
+	fileIdx  int
+	lastSend time.Time
+	interval time.Duration
 }
 
 func (r *progressReporter) onBytes(n int64) {
-	r.progress.Files[r.fileIdx].Downloaded = n
-	r.progress.DoneBytes = r.baseBytes + n
+	r.state.mu.Lock()
+	r.state.progress.Files[r.fileIdx].Downloaded = n
+	recomputeDoneBytes(r.state.progress)
+	snap := *r.state.progress
+	snap.Files = append([]FileProgress(nil), r.state.progress.Files...)
+	r.state.mu.Unlock()
 	if now := time.Now(); now.Sub(r.lastSend) >= r.interval {
 		r.lastSend = now
-		r.ch <- *r.progress
+		r.state.ch <- snap
 	}
 }
 
 func (d *Downloader) downloadAll(ctx context.Context, plan *DownloadPlan, dest string, ch chan<- OverallProgress) {
 	combined := plan.CombinedFiles()
-	progress := OverallProgress{
+	progress := &OverallProgress{
 		Files: make([]FileProgress, 0, len(combined)),
 		State: FilePending,
 	}
@@ -180,106 +223,133 @@ func (d *Downloader) downloadAll(ctx context.Context, plan *DownloadPlan, dest s
 		})
 		progress.TotalBytes += f.Size
 	}
+	state := &downloadState{progress: progress, ch: ch}
 
 	stagingRoot := filepath.Join(dest, d.stagingDir)
 	if err := os.MkdirAll(stagingRoot, 0755); err != nil {
-		progress.State = FileFailed
-		for i := range progress.Files {
-			progress.Files[i].State = FileFailed
-			progress.Files[i].Error = fmt.Errorf("staging dir: %w", err)
-		}
-		ch <- progress
+		state.update(func(p *OverallProgress) {
+			p.State = FileFailed
+			for i := range p.Files {
+				p.Files[i].State = FileFailed
+				p.Files[i].Error = fmt.Errorf("staging dir: %w", err)
+			}
+		})
 		return
 	}
 
 	if err := checkDiskSpace(dest, plan.CombinedBytes()); err != nil {
-		progress.State = FileFailed
-		for i := range progress.Files {
-			progress.Files[i].State = FileFailed
-			progress.Files[i].Error = err
-		}
-		ch <- progress
+		state.update(func(p *OverallProgress) {
+			p.State = FileFailed
+			for i := range p.Files {
+				p.Files[i].State = FileFailed
+				p.Files[i].Error = err
+			}
+		})
 		return
 	}
 
-	var completedBytes int64
-	var downloaded []stagedFile
+	workers := d.maxConcurrency
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > len(combined) {
+		workers = len(combined)
+	}
+
+	type result struct {
+		idx    int
+		staged stagedFile
+		err    error
+	}
+	jobs := make(chan int, len(combined))
+	for i := range combined {
+		jobs <- i
+	}
+	close(jobs)
+	results := make(chan result, len(combined))
+
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for i := range jobs {
+			pf := combined[i]
+			state.update(func(p *OverallProgress) { p.Files[i].State = FileDownloading })
+
+			reporter := &progressReporter{state: state, fileIdx: i, interval: 200 * time.Millisecond}
+			staged, err := d.downloadFileWithRetry(ctx, plan, pf, stagingRoot, reporter)
+			if err != nil {
+				state.update(func(p *OverallProgress) {
+					p.Files[i].State = FileFailed
+					p.Files[i].Error = err
+					p.State = FileFailed
+				})
+				results <- result{idx: i, err: err}
+				continue
+			}
+
+			state.update(func(p *OverallProgress) { p.Files[i].State = FileVerifying })
+			if err := verifyChecksum(staged.tmpPath, pf.SHA256); err != nil {
+				checksumErr := fmt.Errorf("checksum mismatch for %s: %w", pf.Path, err)
+				state.update(func(p *OverallProgress) {
+					p.Files[i].State = FileFailed
+					p.Files[i].Error = checksumErr
+					p.State = FileFailed
+				})
+				results <- result{idx: i, err: checksumErr}
+				continue
+			}
+
+			state.update(func(p *OverallProgress) {
+				p.Files[i].State = FileCompleted
+				p.Files[i].Downloaded = pf.Size
+				recomputeDoneBytes(p)
+			})
+			results <- result{idx: i, staged: staged}
+		}
+	}
+
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go worker()
+	}
+	wg.Wait()
+	close(results)
+
+	ordered := make([]stagedFile, len(combined))
 	failed := false
-
-	for i, pf := range combined {
-		if err := ctx.Err(); err != nil {
+	for r := range results {
+		if r.err != nil {
 			failed = true
-			progress.Files[i].State = FileFailed
-			progress.Files[i].Error = err
-			progress.State = FileFailed
-			ch <- progress
-			return
-		}
-
-		progress.Files[i].State = FileDownloading
-		ch <- progress
-
-		reporter := &progressReporter{
-			progress:  &progress,
-			ch:        ch,
-			fileIdx:   i,
-			baseBytes: completedBytes,
-			interval:  200 * time.Millisecond,
-		}
-
-		staged, err := d.downloadFileWithRetry(ctx, plan, pf, stagingRoot, reporter)
-		if err != nil {
-			failed = true
-			progress.Files[i].State = FileFailed
-			progress.Files[i].Error = err
-			progress.State = FileFailed
-			ch <- progress
 			continue
 		}
-
-		progress.Files[i].State = FileVerifying
-		ch <- progress
-
-		if err := verifyChecksum(staged.tmpPath, pf.SHA256); err != nil {
-			failed = true
-			progress.Files[i].State = FileFailed
-			progress.Files[i].Error = fmt.Errorf("checksum mismatch for %s: %w", pf.Path, err)
-			progress.State = FileFailed
-			ch <- progress
-			continue
-		}
-
-		progress.Files[i].State = FileCompleted
-		progress.Files[i].Downloaded = pf.Size
-		completedBytes += pf.Size
-		progress.DoneBytes = completedBytes
-		downloaded = append(downloaded, staged)
-		ch <- progress
+		ordered[r.idx] = r.staged
+	}
+	if ctx.Err() != nil {
+		failed = true
 	}
 
 	if failed {
-		progress.State = FileFailed
-		ch <- progress
+		state.update(func(p *OverallProgress) { p.State = FileFailed })
 		return
 	}
 
-	for _, sf := range downloaded {
+	for _, sf := range ordered {
 		destPath := filepath.Join(dest, filepath.Base(sf.origPath))
 		if err := os.Rename(sf.tmpPath, destPath); err != nil {
-			progress.State = FileFailed
-			for j := range progress.Files {
-				if progress.Files[j].State != FileFailed {
-					progress.Files[j].State = FileFailed
-					progress.Files[j].Error = fmt.Errorf("publish %s: %w", sf.origPath, err)
+			state.update(func(p *OverallProgress) {
+				p.State = FileFailed
+				for j := range p.Files {
+					if p.Files[j].State != FileFailed {
+						p.Files[j].State = FileFailed
+						p.Files[j].Error = fmt.Errorf("publish %s: %w", sf.origPath, err)
+					}
 				}
-			}
-			ch <- progress
+			})
 			return
 		}
 	}
 
-	progress.State = FileCompleted
-	ch <- progress
+	state.update(func(p *OverallProgress) { p.State = FileCompleted })
 }
 
 type stagedFile struct {

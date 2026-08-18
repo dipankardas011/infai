@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 )
 
 type testFileServer struct {
+	mu        sync.Mutex
 	content   []byte
 	sha256    string
 	failFirst int
@@ -25,8 +27,11 @@ type testFileServer struct {
 }
 
 func (s *testFileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
 	s.calls++
-	if s.failFirst > 0 && s.calls <= s.failFirst {
+	calls := s.calls
+	s.mu.Unlock()
+	if s.failFirst > 0 && calls <= s.failFirst {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -188,6 +193,64 @@ func TestDownloadVLLMPlan(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dest, name)); err != nil {
 			t.Fatalf("file %s not published: %v", name, err)
 		}
+	}
+}
+
+func TestDownloadParallel(t *testing.T) {
+	content, sha := testContent(4096)
+
+	var mu sync.Mutex
+	var active, maxActive int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		active++
+		if active > maxActive {
+			maxActive = active
+		}
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		active--
+		mu.Unlock()
+
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	d, dest := newTestDownloader(t)
+	d.client = srv.Client()
+	d.baseURL = srv.URL
+
+	plan := &DownloadPlan{
+		RepoID:     "org/repo",
+		Revision:   "abc123",
+		EngineKind: model.EngineVLLM,
+		Files: []PlanFile{
+			{Path: "a.safetensors", Size: 4096, SHA256: sha},
+			{Path: "b.safetensors", Size: 4096, SHA256: sha},
+			{Path: "c.safetensors", Size: 4096, SHA256: sha},
+		},
+		TotalBytes: 12288,
+	}
+
+	ch, err := d.Download(context.Background(), plan, dest)
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	var last OverallProgress
+	for p := range ch {
+		last = p
+	}
+	if last.State != FileCompleted {
+		t.Fatalf("expected completed, got %s: %+v", last.State, last)
+	}
+
+	mu.Lock()
+	peak := maxActive
+	mu.Unlock()
+	if peak < 2 {
+		t.Fatalf("expected parallel downloads, peak concurrency was %d", peak)
 	}
 }
 
