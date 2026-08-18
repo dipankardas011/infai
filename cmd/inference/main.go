@@ -10,7 +10,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/dipankardas011/infai/internal/backend"
 	"github.com/dipankardas011/infai/internal/config"
 	"github.com/dipankardas011/infai/internal/db"
 	"github.com/dipankardas011/infai/internal/tui"
@@ -32,28 +31,7 @@ func main() {
 	}
 	defer database.Close()
 
-	service := backend.New(database)
-
-	scanDirs, err := database.ListScanDirs()
-	if err != nil {
-		slog.Error("list scan dirs", "error", err)
-		os.Exit(1)
-	}
-
-	syncResult, err := service.SyncModels(scanDirs)
-	if err != nil {
-		slog.Error("sync models", "error", err)
-		os.Exit(1)
-	}
-	for _, issue := range syncResult.Issues {
-		slog.Warn("scan issue", "root", issue.RootDir, "error", issue.Error)
-	}
-
-	if theme, err := database.GetSetting("theme"); err == nil && theme != "" {
-		tui.SetTheme(theme)
-	}
-
-	app := tui.NewApp(database, scanDirs, syncResult.Models, 80, 24)
+	app := tui.NewApp(database, nil, nil, 80, 24)
 	p := tea.NewProgram(&app, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	sigChan := make(chan os.Signal, 1)

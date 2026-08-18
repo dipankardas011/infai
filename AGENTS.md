@@ -70,6 +70,7 @@ Every screen is a struct implementing `Init()`, `Update()`, `View()`. The root m
 - The `internal/patches/` directory contains Go-based data migrations for transformations too complex for SQL (e.g., rewriting model types across tables). Patches are keyed by migration version and run after the corresponding SQL migration.
 - `config.MinSchemaVersion` in `config/version.go` marks the oldest patch that still needs to run. Bump it when removing old patch files.
 - `Sync` and `SyncPerRoot` do diff-and-replace: they delete DB models no longer on disk and upsert new ones. This means a scan directory rename looks like a delete + re-add.
+- Sync is **manual only**: startup (`cmd/inference/main.go`) just opens the DB and loads state via `tui.NewApp`; the only code path that rescans/parses GGUF metadata is the `[s]` sync in the models tab. Don't add a sync to `main()` — re-parsing every model on launch is the ~2s startup delay this was removed to fix.
 
 ## Inference Engine Adapter Pattern
 
