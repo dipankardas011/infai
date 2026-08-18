@@ -118,3 +118,101 @@ func TestBuildSpecRejectsManagedExtraFlags(t *testing.T) {
 		t.Fatalf("expected managed flag conflict, got %v", err)
 	}
 }
+
+func TestBuildLlamaCPPSpecSpeculativeArgs(t *testing.T) {
+	tokens := 5
+	engine := model.InferenceEngine{Kind: model.EngineLlamaCPP, Path: "/bin/llama-server"}
+	target := model.ModelEntry{ModelDir: "/models/target", PrimaryFile: "target.gguf", Type: model.TypeGGUF}
+	draft := model.ModelEntry{ModelDir: "/models/draft", PrimaryFile: "draft.gguf", Type: model.TypeGGUF}
+	base := model.Profile{Host: "127.0.0.1", Port: 8080, ContextSize: 4096, NGL: "auto", SpeculativeTokens: &tokens}
+
+	t.Run("native MTP", func(t *testing.T) {
+		p := base
+		p.SpeculativeMode = model.SpeculativeNativeMTP
+		spec, err := BuildLlamaCPPSpec(engine, target, p, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"-m", "/models/target/target.gguf", "--port", "8080", "--host", "127.0.0.1", "-c", "4096", "-ngl", "auto", "--metrics", "--spec-type", "draft-mtp", "--spec-draft-n-max", "5"}
+		if !reflect.DeepEqual(spec.Args, want) {
+			t.Fatalf("args = %#v, want %#v", spec.Args, want)
+		}
+	})
+
+	t.Run("draft model", func(t *testing.T) {
+		p := base
+		p.SpeculativeMode = model.SpeculativeDraftModel
+		spec, err := BuildLlamaCPPSpec(engine, target, p, &draft)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"-m", "/models/target/target.gguf", "--port", "8080", "--host", "127.0.0.1", "-c", "4096", "-ngl", "auto", "--metrics", "--spec-type", "draft-simple", "--spec-draft-model", "/models/draft/draft.gguf", "--spec-draft-n-max", "5"}
+		if !reflect.DeepEqual(spec.Args, want) {
+			t.Fatalf("args = %#v, want %#v", spec.Args, want)
+		}
+	})
+
+	t.Run("MTP assistant", func(t *testing.T) {
+		p := base
+		p.SpeculativeMode = model.SpeculativeMTPAssistant
+		spec, err := BuildLlamaCPPSpec(engine, target, p, &draft)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"-m", "/models/target/target.gguf", "--port", "8080", "--host", "127.0.0.1", "-c", "4096", "-ngl", "auto", "--metrics", "--spec-type", "draft-mtp", "--spec-draft-model", "/models/draft/draft.gguf", "--spec-draft-n-max", "5"}
+		if !reflect.DeepEqual(spec.Args, want) {
+			t.Fatalf("args = %#v, want %#v", spec.Args, want)
+		}
+	})
+}
+
+func TestBuildVLLMSpecSpeculativeConfig(t *testing.T) {
+	tokens := 3
+	engine := model.InferenceEngine{Kind: model.EngineVLLM, Path: "vllm"}
+	target := model.ModelEntry{ModelDir: "/models/target", Type: model.TypeSafetensors}
+	draft := model.ModelEntry{ModelDir: "/models/draft", Type: model.TypeHFQuantized}
+
+	tests := []struct {
+		name  string
+		mode  model.SpeculativeMode
+		draft *model.ModelEntry
+		json  string
+	}{
+		{name: "native MTP", mode: model.SpeculativeNativeMTP, json: `{"method":"mtp","num_speculative_tokens":3}`},
+		{name: "draft model", mode: model.SpeculativeDraftModel, draft: &draft, json: `{"method":"draft_model","model":"/models/draft","num_speculative_tokens":3}`},
+		{name: "MTP assistant", mode: model.SpeculativeMTPAssistant, draft: &draft, json: `{"method":"mtp","model":"/models/draft","num_speculative_tokens":3}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := model.Profile{Host: "0.0.0.0", Port: 8000, ContextSize: 8192, SpeculativeMode: tt.mode, SpeculativeTokens: &tokens}
+			spec, err := BuildVLLMSpec(engine, target, p, tt.draft)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"serve", "/models/target", "--host", "0.0.0.0", "--port", "8000", "--max-model-len", "8192", "--speculative-config", tt.json}
+			if !reflect.DeepEqual(spec.Args, want) {
+				t.Fatalf("args = %#v, want %#v", spec.Args, want)
+			}
+		})
+	}
+}
+
+func TestBuildSpecRejectsManagedSpeculativeFlags(t *testing.T) {
+	tests := []struct {
+		name   string
+		engine model.InferenceEngine
+		entry  model.ModelEntry
+		flags  string
+	}{
+		{name: "llama", engine: model.InferenceEngine{Kind: model.EngineLlamaCPP, Path: "llama-server"}, entry: model.ModelEntry{ModelDir: "/models", PrimaryFile: "m.gguf", Type: model.TypeGGUF}, flags: "--spec-type=draft-mtp"},
+		{name: "vllm", engine: model.InferenceEngine{Kind: model.EngineVLLM, Path: "vllm"}, entry: model.ModelEntry{ModelDir: "/models/m", Type: model.TypeSafetensors}, flags: `--speculative-config '{}'`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := BuildSpec(tt.engine, tt.entry, model.Profile{Host: "127.0.0.1", Port: 8000, ContextSize: 4096, NGL: "auto", ExtraFlags: tt.flags})
+			if err == nil || !strings.Contains(err.Error(), "managed option") {
+				t.Fatalf("expected managed flag error, got %v", err)
+			}
+		})
+	}
+}

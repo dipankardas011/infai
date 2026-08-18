@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,25 +10,25 @@ import (
 	"github.com/dipankardas011/infai/runner"
 )
 
-func BuildSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
+func BuildSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile, draftModels ...*model.ModelEntry) (runner.LaunchSpec, error) {
 	if engine.Path == "" {
 		return runner.LaunchSpec{}, fmt.Errorf("inference engine executable is empty")
 	}
 	switch engine.Kind {
 	case "", model.EngineLlamaCPP:
-		return BuildLlamaCPPSpec(engine, m, p)
+		return BuildLlamaCPPSpec(engine, m, p, draftModels...)
 	case model.EngineVLLM:
-		return BuildVLLMSpec(engine, m, p)
+		return BuildVLLMSpec(engine, m, p, draftModels...)
 	default:
 		return runner.LaunchSpec{}, fmt.Errorf("unsupported inference engine kind %q", engine.Kind)
 	}
 }
 
-func BuildLlamaCPPSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
+func BuildLlamaCPPSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile, draftModels ...*model.ModelEntry) (runner.LaunchSpec, error) {
 	if m.Type != model.TypeGGUF && m.Type != model.TypeGGUFMultimodal {
 		return runner.LaunchSpec{}, fmt.Errorf("llama.cpp requires a GGUF model, got %s", m.Type)
 	}
-	args, err := buildArgs(engine.Path, m, p)
+	args, err := buildArgs(engine.Path, m, p, firstDraftModel(draftModels))
 	if err != nil {
 		return runner.LaunchSpec{}, err
 	}
@@ -35,7 +36,8 @@ func BuildLlamaCPPSpec(engine model.InferenceEngine, m model.ModelEntry, p model
 	return runner.LaunchSpec{Command: args[0], Args: launchArgs, Env: engine.Env}, nil
 }
 
-func BuildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile) (runner.LaunchSpec, error) {
+func BuildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Profile, draftModels ...*model.ModelEntry) (runner.LaunchSpec, error) {
+	draft := firstDraftModel(draftModels)
 	modelPath := strings.TrimSpace(m.ModelPath())
 	if modelPath == "" {
 		return runner.LaunchSpec{}, fmt.Errorf("vLLM model path is empty")
@@ -83,6 +85,37 @@ func BuildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Pro
 	if cfg.ServedModelName != "" {
 		args = append(args, "--served-model-name", cfg.ServedModelName)
 	}
+	if p.SpeculativeMode != model.SpeculativeOff {
+		type speculativeConfig struct {
+			Method               string `json:"method"`
+			Model                string `json:"model,omitempty"`
+			NumSpeculativeTokens *int   `json:"num_speculative_tokens,omitempty"`
+		}
+		specCfg := speculativeConfig{NumSpeculativeTokens: p.SpeculativeTokens}
+		switch p.SpeculativeMode {
+		case model.SpeculativeNativeMTP:
+			specCfg.Method = "mtp"
+		case model.SpeculativeDraftModel:
+			if draft == nil {
+				return runner.LaunchSpec{}, fmt.Errorf("speculative draft model is unresolved")
+			}
+			specCfg.Method = "draft_model"
+			specCfg.Model = draft.ModelPath()
+		case model.SpeculativeMTPAssistant:
+			if draft == nil {
+				return runner.LaunchSpec{}, fmt.Errorf("MTP assistant model is unresolved")
+			}
+			specCfg.Method = "mtp"
+			specCfg.Model = draft.ModelPath()
+		default:
+			return runner.LaunchSpec{}, fmt.Errorf("unsupported speculative mode %q", p.SpeculativeMode)
+		}
+		raw, err := json.Marshal(specCfg)
+		if err != nil {
+			return runner.LaunchSpec{}, fmt.Errorf("encode speculative config: %w", err)
+		}
+		args = append(args, "--speculative-config", string(raw))
+	}
 	if p.ExtraFlags != "" {
 		extra, err := ParseExtraFlags(p.ExtraFlags)
 		if err != nil {
@@ -96,12 +129,19 @@ func BuildVLLMSpec(engine model.InferenceEngine, m model.ModelEntry, p model.Pro
 	return runner.LaunchSpec{Command: engine.Path, Args: args, Env: engine.Env}, nil
 }
 
-func BuildArgs(serverBin string, m model.ModelEntry, p model.Profile) []string {
-	args, _ := buildArgs(serverBin, m, p)
+func BuildArgs(serverBin string, m model.ModelEntry, p model.Profile, draftModels ...*model.ModelEntry) []string {
+	args, _ := buildArgs(serverBin, m, p, firstDraftModel(draftModels))
 	return args
 }
 
-func buildArgs(serverBin string, m model.ModelEntry, p model.Profile) ([]string, error) {
+func firstDraftModel(models []*model.ModelEntry) *model.ModelEntry {
+	if len(models) == 0 {
+		return nil
+	}
+	return models[0]
+}
+
+func buildArgs(serverBin string, m model.ModelEntry, p model.Profile, draft *model.ModelEntry) ([]string, error) {
 	args := []string{serverBin, "-m", m.ModelPath()}
 
 	if p.UseMmproj && m.MmprojPath != "" {
@@ -149,6 +189,26 @@ func buildArgs(serverBin string, m model.ModelEntry, p model.Profile) ([]string,
 	if p.NoKVOffload {
 		args = append(args, "--no-kv-offload")
 	}
+	switch p.SpeculativeMode {
+	case model.SpeculativeOff:
+	case model.SpeculativeNativeMTP:
+		args = append(args, "--spec-type", "draft-mtp")
+	case model.SpeculativeDraftModel:
+		if draft == nil {
+			return nil, fmt.Errorf("speculative draft model is unresolved")
+		}
+		args = append(args, "--spec-type", "draft-simple", "--spec-draft-model", draft.ModelPath())
+	case model.SpeculativeMTPAssistant:
+		if draft == nil {
+			return nil, fmt.Errorf("MTP assistant model is unresolved")
+		}
+		args = append(args, "--spec-type", "draft-mtp", "--spec-draft-model", draft.ModelPath())
+	default:
+		return nil, fmt.Errorf("unsupported speculative mode %q", p.SpeculativeMode)
+	}
+	if p.SpeculativeMode != model.SpeculativeOff && p.SpeculativeTokens != nil {
+		args = append(args, "--spec-draft-n-max", strconv.Itoa(*p.SpeculativeTokens))
+	}
 	if p.ExtraFlags != "" {
 		extra, err := ParseExtraFlags(p.ExtraFlags)
 		if err != nil {
@@ -163,8 +223,8 @@ func buildArgs(serverBin string, m model.ModelEntry, p model.Profile) ([]string,
 	return args, nil
 }
 
-func BuildCommand(serverBin string, m model.ModelEntry, p model.Profile) string {
-	args, err := buildArgs(serverBin, m, p)
+func BuildCommand(serverBin string, m model.ModelEntry, p model.Profile, draftModels ...*model.ModelEntry) string {
+	args, err := buildArgs(serverBin, m, p, firstDraftModel(draftModels))
 	if err != nil {
 		return ""
 	}
@@ -184,6 +244,7 @@ var llamaManagedFlags = map[string]bool{
 	"-b": true, "-ub": true, "--cache-type-k": true, "--cache-type-v": true, "--flash-attn": true,
 	"--jinja": true, "--temperature": true, "--temp": true, "--reasoning-budget": true,
 	"--top_p": true, "--top-p": true, "--top_k": true, "--top-k": true, "--no-kv-offload": true, "--metrics": true,
+	"--spec-type": true, "--spec-draft-model": true, "--spec-draft-n-max": true,
 }
 
 var vllmManagedFlags = map[string]bool{
@@ -191,6 +252,7 @@ var vllmManagedFlags = map[string]bool{
 	"--max-num-seqs": true, "--max-num-batched-tokens": true, "--dtype": true,
 	"--tensor-parallel-size": true, "--pipeline-parallel-size": true, "--enable-prefix-caching": true,
 	"--trust-remote-code": true, "--served-model-name": true,
+	"--speculative-config": true,
 }
 
 func rejectManagedFlags(args []string, managed map[string]bool) error {

@@ -112,6 +112,110 @@ func TestProfileEditViewFitsShortTerminalWithRecommendation(t *testing.T) {
 	}
 }
 
+func TestProfileEditSpeculativeFieldsAreAdvancedAndConditional(t *testing.T) {
+	target := model.ModelEntry{ID: 1, DisplayName: "target", Type: model.TypeGGUF, Metadata: `{"mtp_num_layers":2}`}
+	draft := model.ModelEntry{ID: 2, DisplayName: "draft", Type: model.TypeGGUF}
+	engines := []model.InferenceEngine{{ID: "e1", Name: "llama", Kind: model.EngineLlamaCPP}}
+	em := NewProfileEditModel(target, engines, nil, 80, 24, []model.ModelEntry{target, draft})
+
+	field := func(label string) *formField {
+		for i := range em.fields {
+			if em.fields[i].label == label {
+				return &em.fields[i]
+			}
+		}
+		t.Fatalf("field %q not found", label)
+		return nil
+	}
+	field("Name").input.SetValue("native-mtp")
+	mode := field("Speculative Decoding")
+	if em.fieldVisible(*mode) {
+		t.Fatal("speculative mode must be hidden until advanced configuration is enabled")
+	}
+	em, _ = em.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	if !em.fieldVisible(*field("Speculative Decoding")) {
+		t.Fatal("speculative mode must be visible in advanced configuration")
+	}
+	for i, value := range mode.optionValues {
+		if value == string(model.SpeculativeNativeMTP) {
+			mode.selIdx = i
+		}
+	}
+	if !em.fieldVisible(*field("Speculative Tokens")) {
+		t.Fatal("token count must be visible when speculation is enabled")
+	}
+	if em.fieldVisible(*field("Draft / Assistant")) {
+		t.Fatal("draft picker must remain hidden for native MTP")
+	}
+
+	p, err := em.ToProfile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.SpeculativeMode != model.SpeculativeNativeMTP || p.SpeculativeTokens == nil || *p.SpeculativeTokens != 1 {
+		t.Fatalf("unexpected native MTP profile: %+v", p)
+	}
+}
+
+func TestProfileEditSeparateSpeculativeModelRoundTrip(t *testing.T) {
+	target := model.ModelEntry{ID: 1, DisplayName: "target", Type: model.TypeSafetensors}
+	assistant := model.ModelEntry{ID: 2, DisplayName: "assistant", Type: model.TypeSafetensors}
+	engines := []model.InferenceEngine{{ID: "e1", Name: "vLLM", Kind: model.EngineVLLM}}
+	tokens := 2
+	assistantID := assistant.ID
+	profile := model.Profile{
+		ID: 9, ModelID: target.ID, InferenceEngineID: "e1", Name: "mtp", Port: 8000,
+		Host: "127.0.0.1", ContextSize: 4096, SpeculativeMode: model.SpeculativeMTPAssistant,
+		SpeculativeTokens: &tokens, DraftModelID: &assistantID,
+	}
+	em := NewProfileEditModel(target, engines, &profile, 80, 24, []model.ModelEntry{target, assistant})
+	if got := em.selectedFieldValue("Speculative Decoding"); got != string(model.SpeculativeMTPAssistant) {
+		t.Fatalf("mode = %q, want MTP assistant", got)
+	}
+	if got := em.selectedFieldValue("Draft / Assistant"); got != "2" {
+		t.Fatalf("assistant = %q, want 2", got)
+	}
+
+	got, err := em.ToProfile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DraftModelID == nil || *got.DraftModelID != assistant.ID || got.SpeculativeTokens == nil || *got.SpeculativeTokens != tokens {
+		t.Fatalf("speculative fields did not round trip: %+v", got)
+	}
+}
+
+func TestProfilesTabShowsSpeculativeConfiguration(t *testing.T) {
+	tokens := 2
+	assistantID := int64(2)
+	entry := db.ProfileEntry{
+		Model:           model.ModelEntry{ID: 1, DisplayName: "target", Metadata: `{"mtp_num_layers":3}`},
+		InferenceEngine: model.InferenceEngine{ID: "e1", Name: "llama.cpp", Kind: model.EngineLlamaCPP},
+		Profile: model.Profile{
+			ID: 1, ModelID: 1, InferenceEngineID: "e1", Name: "mtp", Host: "127.0.0.1", Port: 8000,
+			SpeculativeMode: model.SpeculativeMTPAssistant, SpeculativeTokens: &tokens, DraftModelID: &assistantID,
+		},
+		DraftModelName: "mtp-target-q8",
+	}
+	m := NewProfilesTabModel(nil, []db.ProfileEntry{entry}, 120, 50)
+	m.list.Select(1)
+	m.updateViewport()
+	view := m.viewport.View()
+	for _, want := range []string{"Speculative Decoding", "MTP Assistant", "Draft Tokens", "mtp-target-q8", "3 layer(s) detected"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("profile preview missing %q:\n%s", want, view)
+		}
+	}
+
+	entry.DraftModelName = ""
+	m = NewProfilesTabModel(nil, []db.ProfileEntry{entry}, 120, 50)
+	m.list.Select(1)
+	m.updateViewport()
+	if view := m.viewport.View(); !strings.Contains(view, "missing - select a model in edit") {
+		t.Fatalf("profile preview does not identify deleted assistant:\n%s", view)
+	}
+}
+
 // Esc on a dirty editor must prompt instead of silently discarding; 'n' keeps
 // editing, 'y' leaves the screen.
 func TestProfileEditEscConfirmsDiscard(t *testing.T) {

@@ -98,18 +98,15 @@ func (s *Service) SaveProfile(p *model.Profile) (ValidationErrors, error) {
 	}
 
 	var m *model.ModelEntry
+	var draft *model.ModelEntry
 	var engine *model.InferenceEngine
 
 	if p.ModelID > 0 {
 		models, err := s.db.ListModels()
-		if err == nil {
-			for i := range models {
-				if models[i].ID == p.ModelID {
-					m = &models[i]
-					break
-				}
-			}
+		if err != nil {
+			return nil, fmt.Errorf("list models: %w", err)
 		}
+		m, draft = resolveProfileModels(models, p.ModelID, p.DraftModelID)
 	}
 	if p.InferenceEngineID != "" {
 		e, err := s.db.GetInferenceEngineByID(p.InferenceEngineID)
@@ -118,7 +115,7 @@ func (s *Service) SaveProfile(p *model.Profile) (ValidationErrors, error) {
 		}
 	}
 
-	issues := ValidateProfile(p, m, engine)
+	issues := ValidateProfile(p, m, engine, draft)
 	if issues.HasErrors() {
 		slog.Error("profile validation failed", "profile", p.Name, "issues", issues)
 		return issues.Warnings(), fmt.Errorf("validation: %w", issues.Errors())
@@ -170,15 +167,43 @@ func (s *Service) BuildRunSpec(m model.ModelEntry, p model.Profile, port int) (i
 		return inference.RunSpec{}, err
 	}
 	engine.Path = engineBin
+	var draft *model.ModelEntry
+	if speculativeModeUsesDraft(p.SpeculativeMode) && p.DraftModelID != nil {
+		models, err := s.db.ListModels()
+		if err != nil {
+			return inference.RunSpec{}, fmt.Errorf("list models: %w", err)
+		}
+		_, draft = resolveProfileModels(models, p.ModelID, p.DraftModelID)
+	}
+	issues := ValidateProfile(&p, &m, &engine, draft)
+	if issues.HasErrors() {
+		return inference.RunSpec{}, fmt.Errorf("validation: %w", issues.Errors())
+	}
 	adapter, err := inference.AdapterFor(engine.Kind)
 	if err != nil {
 		return inference.RunSpec{}, err
 	}
-	launch, err := adapter.BuildLaunchSpec(engine, m, p)
+	launch, err := inference.BuildAdapterLaunchSpec(adapter, engine, m, p, draft)
 	if err != nil {
 		return inference.RunSpec{}, err
 	}
 	return inference.RunSpec{Launch: launch, Metrics: adapter.NewMetricsSource(p.Host, p.Port)}, nil
+}
+
+func speculativeModeUsesDraft(mode model.SpeculativeMode) bool {
+	return mode == model.SpeculativeDraftModel || mode == model.SpeculativeMTPAssistant
+}
+
+func resolveProfileModels(models []model.ModelEntry, targetID int64, draftID *int64) (target, draft *model.ModelEntry) {
+	for i := range models {
+		if models[i].ID == targetID {
+			target = &models[i]
+		}
+		if draftID != nil && models[i].ID == *draftID {
+			draft = &models[i]
+		}
+	}
+	return target, draft
 }
 
 func resolveInferenceEngineBinary(path string, kind model.EngineKind) (string, error) {

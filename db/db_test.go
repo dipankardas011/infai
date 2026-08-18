@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"reflect"
 	"testing"
 
@@ -91,6 +92,154 @@ func TestListAllProfilesLoadsFullProfile(t *testing.T) {
 	}
 	if got.Profile.NGL != "auto" || got.Profile.BatchSize == nil || *got.Profile.BatchSize != *p.BatchSize || got.Profile.CacheTypeK == nil || *got.Profile.CacheTypeK != *p.CacheTypeK || !got.Profile.FlashAttn || !got.Profile.Jinja || got.Profile.Temperature == nil || *got.Profile.Temperature != *p.Temperature || got.Profile.TopK == nil || *got.Profile.TopK != *p.TopK || !got.Profile.UseMmproj || got.Profile.ExtraFlags != p.ExtraFlags {
 		t.Fatalf("profile not fully loaded: %#v", got.Profile)
+	}
+}
+
+func TestProfileSpeculativeFieldsRoundTrip(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	d, err := Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+
+	m, _, p := seedModelEngineProfile(t, d)
+	profileID := p.ID
+	draft := model.ModelEntry{ScanDir: "/models", ModelDir: "/models/draft", PrimaryFile: "draft.gguf", DisplayName: "Draft", Type: model.TypeGGUF}
+	if err := d.UpsertModel(&draft); err != nil {
+		t.Fatalf("upsert draft model: %v", err)
+	}
+	tokens := 5
+	p.SpeculativeMode = model.SpeculativeDraftModel
+	p.DraftModelID = &draft.ID
+	p.SpeculativeTokens = &tokens
+	if err := d.UpsertProfile(&p); err != nil {
+		t.Fatalf("update profile: %v", err)
+	}
+
+	got, err := d.GetProfile(profileID)
+	if err != nil {
+		t.Fatalf("get profile: %v", err)
+	}
+	assertSpeculativeProfile(t, got, draft.ID, tokens)
+
+	profiles, err := d.ListProfiles(m.ID)
+	if err != nil {
+		t.Fatalf("list profiles: %v", err)
+	}
+	if len(profiles) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(profiles))
+	}
+	assertSpeculativeProfile(t, profiles[0], draft.ID, tokens)
+
+	all, err := d.ListAllProfiles()
+	if err != nil {
+		t.Fatalf("list all profiles: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 profile entry, got %d", len(all))
+	}
+	assertSpeculativeProfile(t, all[0].Profile, draft.ID, tokens)
+
+	recents, err := d.ListRecents(10)
+	if err != nil {
+		t.Fatalf("list recents: %v", err)
+	}
+	if len(recents) != 1 {
+		t.Fatalf("expected 1 recent, got %d", len(recents))
+	}
+	assertSpeculativeProfile(t, recents[0].Profile, draft.ID, tokens)
+}
+
+func TestDeleteDraftModelSetsProfileReferenceNull(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	d, err := Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+
+	_, _, p := seedModelEngineProfile(t, d)
+	profileID := p.ID
+	draft := model.ModelEntry{ScanDir: "/models", ModelDir: "/models/draft", PrimaryFile: "draft.gguf", DisplayName: "Draft", Type: model.TypeGGUF}
+	if err := d.UpsertModel(&draft); err != nil {
+		t.Fatalf("upsert draft model: %v", err)
+	}
+	p.SpeculativeMode = model.SpeculativeDraftModel
+	p.DraftModelID = &draft.ID
+	if err := d.UpsertProfile(&p); err != nil {
+		t.Fatalf("update profile: %v", err)
+	}
+	if _, err := d.conn.Exec(`DELETE FROM model_registry WHERE id = ?`, draft.ID); err != nil {
+		t.Fatalf("delete draft model: %v", err)
+	}
+
+	got, err := d.GetProfile(profileID)
+	if err != nil {
+		t.Fatalf("get profile: %v", err)
+	}
+	if got.DraftModelID != nil {
+		t.Fatalf("expected draft model reference to be null, got %d", *got.DraftModelID)
+	}
+	if got.SpeculativeMode != model.SpeculativeDraftModel {
+		t.Fatalf("speculative mode changed: %q", got.SpeculativeMode)
+	}
+}
+
+func TestSpeculativeMigrationPreservesExistingProfiles(t *testing.T) {
+	conn, err := sql.Open("sqlite3", t.TempDir()+"/migration.db?_foreign_keys=on")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer conn.Close()
+
+	migrator, err := newMigrate(conn)
+	if err != nil {
+		t.Fatalf("create migrator: %v", err)
+	}
+	if err := migrator.Migrate(7); err != nil {
+		t.Fatalf("migrate to v7: %v", err)
+	}
+	if _, err := conn.Exec(`
+INSERT INTO model_registry (id, model_dir, primary_file, display_name) VALUES (1, '/models/main', 'main.gguf', 'Main');
+INSERT INTO profiles (model_id, name) VALUES (1, 'existing');`); err != nil {
+		t.Fatalf("seed v7 profile: %v", err)
+	}
+	if err := migrator.Migrate(8); err != nil {
+		t.Fatalf("migrate to v8: %v", err)
+	}
+
+	var name string
+	var mode model.SpeculativeMode
+	var draftModelID *int64
+	var tokens *int
+	if err := conn.QueryRow(`SELECT name, speculative_mode, draft_model_id, speculative_tokens FROM profiles`).Scan(&name, &mode, &draftModelID, &tokens); err != nil {
+		t.Fatalf("read migrated profile: %v", err)
+	}
+	if name != "existing" || mode != model.SpeculativeOff || draftModelID != nil || tokens != nil {
+		t.Fatalf("unexpected migrated profile: name=%q mode=%q draft=%v tokens=%v", name, mode, draftModelID, tokens)
+	}
+	if err := migrator.Migrate(7); err != nil {
+		t.Fatalf("migrate back to v7: %v", err)
+	}
+	if err := conn.QueryRow(`SELECT name FROM profiles`).Scan(&name); err != nil {
+		t.Fatalf("read profile after down migration: %v", err)
+	}
+	if name != "existing" {
+		t.Fatalf("profile changed after down migration: %q", name)
+	}
+}
+
+func assertSpeculativeProfile(t *testing.T, p model.Profile, draftModelID int64, tokens int) {
+	t.Helper()
+	if p.SpeculativeMode != model.SpeculativeDraftModel {
+		t.Fatalf("speculative mode mismatch: %q", p.SpeculativeMode)
+	}
+	if p.DraftModelID == nil || *p.DraftModelID != draftModelID {
+		t.Fatalf("draft model mismatch: %v", p.DraftModelID)
+	}
+	if p.SpeculativeTokens == nil || *p.SpeculativeTokens != tokens {
+		t.Fatalf("speculative tokens mismatch: %v", p.SpeculativeTokens)
 	}
 }
 

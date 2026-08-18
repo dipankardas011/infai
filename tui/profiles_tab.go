@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -271,7 +272,7 @@ func (m ProfilesTabModel) selectedEntry() *db.ProfileEntry {
 		return nil
 	}
 	if item.recent != nil {
-		return &db.ProfileEntry{Model: item.recent.Model, InferenceEngine: item.recent.InferenceEngine, Profile: item.recent.Profile}
+		return &db.ProfileEntry{Model: item.recent.Model, InferenceEngine: item.recent.InferenceEngine, Profile: item.recent.Profile, DraftModelName: item.recent.DraftModelName}
 	}
 	return item.entry
 }
@@ -365,6 +366,31 @@ func (m *ProfilesTabModel) updateViewport() {
 		}
 		sb.WriteString("\n")
 	}
+
+	sb.WriteString(sectionStyle.Render("Speculative Decoding") + "\n")
+	mode := "Off"
+	switch p.SpeculativeMode {
+	case model.SpeculativeNativeMTP:
+		mode = "Native MTP"
+	case model.SpeculativeDraftModel:
+		mode = "Draft Model"
+	case model.SpeculativeMTPAssistant:
+		mode = "MTP Assistant"
+	}
+	sb.WriteString(fieldLabel.Render("Mode") + "  " + fieldVal.Render(mode) + "\n")
+	if p.SpeculativeTokens != nil {
+		sb.WriteString(fieldLabel.Render("Draft Tokens") + "  " + fieldVal.Render(fmt.Sprintf("%d", *p.SpeculativeTokens)) + "\n")
+	}
+	if entry.DraftModelName != "" {
+		sb.WriteString(fieldLabel.Render("Assistant") + "  " + fieldVal.Render(entry.DraftModelName) + "\n")
+	} else if p.SpeculativeMode == model.SpeculativeDraftModel || p.SpeculativeMode == model.SpeculativeMTPAssistant {
+		sb.WriteString(fieldLabel.Render("Assistant") + "  " + styleWarning.Render("missing - select a model in edit") + "\n")
+	}
+	var metadata model.ModelMetadata
+	if err := json.Unmarshal([]byte(m2.Metadata), &metadata); err == nil && metadata.MTPNumLayers > 0 {
+		sb.WriteString(fieldLabel.Render("Native MTP") + "  " + fieldVal.Render(fmt.Sprintf("%d layer(s) detected", metadata.MTPNumLayers)) + "\n")
+	}
+	sb.WriteString("\n")
 
 	if p.FlashAttn || p.Jinja || p.NoKVOffload || p.UseMmproj {
 		sb.WriteString(sectionStyle.Render("Flags") + "\n")
