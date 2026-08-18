@@ -93,7 +93,7 @@ Bug reports and pull requests are welcome on [GitHub](https://github.com/dipanka
 # clone and build
 git clone https://github.com/dipankardas011/infai.git
 cd infai
-go build -o infai .
+go build -o infai ./cmd/inference
 
 # run tests
 go test ./...

@@ -6,7 +6,7 @@ before:
 
 builds:
   - id: linux-amd64
-    main: .
+    main: ./cmd/inference
     binary: infai
     goos: [linux]
     goarch: [amd64]
@@ -15,10 +15,10 @@ builds:
       - CC=x86_64-linux-gnu-gcc
       - CXX=x86_64-linux-gnu-g++
     ldflags:
-      - -s -w -X "github.com/dipankardas011/infai/config.version={{ .Version }}"
+      - -s -w -X "github.com/dipankardas011/infai/internal/config.version={{ .Version }}"
 
   - id: linux-arm64
-    main: .
+    main: ./cmd/inference
     binary: infai
     goos: [linux]
     goarch: [arm64]
@@ -27,10 +27,10 @@ builds:
       - CC=aarch64-linux-gnu-gcc
       - CXX=aarch64-linux-gnu-g++
     ldflags:
-      - -s -w -X "github.com/dipankardas011/infai/config.version={{ .Version }}"
+      - -s -w -X "github.com/dipankardas011/infai/internal/config.version={{ .Version }}"
 
   - id: darwin-amd64
-    main: .
+    main: ./cmd/inference
     binary: infai
     goos: [darwin]
     goarch: [amd64]
@@ -39,10 +39,10 @@ builds:
       - CC=o64-clang
       - CXX=o64-clang++
     ldflags:
-      - -s -w -X "github.com/dipankardas011/infai/config.version={{ .Version }}"
+      - -s -w -X "github.com/dipankardas011/infai/internal/config.version={{ .Version }}"
 
   - id: darwin-arm64
-    main: .
+    main: ./cmd/inference
     binary: infai
     goos: [darwin]
     goarch: [arm64]
@@ -51,7 +51,7 @@ builds:
       - CC=oa64-clang
       - CXX=oa64-clang++
     ldflags:
-      - -s -w -X "github.com/dipankardas011/infai/config.version={{ .Version }}"
+      - -s -w -X "github.com/dipankardas011/infai/internal/config.version={{ .Version }}"
 
 archives:
   - name_template: >-

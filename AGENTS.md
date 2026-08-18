@@ -5,13 +5,25 @@ Terminal UI for managing and launching local inference servers. Supports llama.c
 ## Build
 
 ```bash
-CGO_ENABLED=1 go build -o infai .
+CGO_ENABLED=1 go build -o infai ./cmd/inference
 go test ./...
 ```
 
 CGO is required — the project uses `mattn/go-sqlite3`, which is a C library. Builds will fail without a C compiler and `CGO_ENABLED=1`.
 
-Version is injected via ldflags (`-X github.com/dipankardas011/infai/config.version=...`). Without it, the binary reports `dev`.
+Version is injected via ldflags (`-X github.com/dipankardas011/infai/internal/config.version=...`). Without it, the binary reports `dev`.
+
+## Repository Layout
+
+```
+cmd/inference/   entrypoint (main.go). Other binaries go under cmd/ as well.
+internal/        all shared packages. Not importable outside this module.
+pkg/             reserved for packages promoted for external reuse (empty for now).
+docs/            static site, kept at the repo root.
+```
+
+Internal packages are promoted to `pkg/` when an external consumer (separate repo or
+module) actually needs them — `git mv internal/<pkg> pkg/<pkg>` plus a path rewrite.
 
 ## Layered Architecture
 
@@ -54,8 +66,8 @@ Every screen is a struct implementing `Init()`, `Update()`, `View()`. The root m
 
 - Foreign keys are enforced (`_foreign_keys=on` in the DSN). Deleting a model cascades to its profiles and recents.
 - Booleans are stored as `INTEGER` 0/1. Use `boolToInt()` in db.go for conversions.
-- Migrations use `golang-migrate/v4` with SQL files embedded via `go:embed` in `migrations/embed.go`. They run automatically on `db.Open()`.
-- The `patches/` directory contains Go-based data migrations for transformations too complex for SQL (e.g., rewriting model types across tables). Patches are keyed by migration version and run after the corresponding SQL migration.
+- Migrations use `golang-migrate/v4` with SQL files embedded via `go:embed` in `internal/migrations/embed.go`. They run automatically on `db.Open()`.
+- The `internal/patches/` directory contains Go-based data migrations for transformations too complex for SQL (e.g., rewriting model types across tables). Patches are keyed by migration version and run after the corresponding SQL migration.
 - `config.MinSchemaVersion` in `config/version.go` marks the oldest patch that still needs to run. Bump it when removing old patch files.
 - `Sync` and `SyncPerRoot` do diff-and-replace: they delete DB models no longer on disk and upsert new ones. This means a scan directory rename looks like a delete + re-add.
 
