@@ -89,9 +89,11 @@ type DownloadModel struct {
 	variantCursor int
 	variantScroll int
 
-	files      []hub.FileEntry
-	plan       *downloader.DownloadPlan
-	planScroll int
+	files        []hub.FileEntry
+	plan         *downloader.DownloadPlan
+	planScroll   int
+	reviewCursor int
+	optSel       []bool
 
 	fileBrowser  FileBrowserModel
 	browsingDest bool
@@ -324,10 +326,10 @@ func (m DownloadModel) updateSelectEngine(msg tea.Msg) (DownloadModel, tea.Cmd) 
 				m.variantScroll = 0
 				m.step = stepSelectVariant
 			} else if msg.plan != nil {
-				m.plan = msg.plan
+				m.setPlan(msg.plan)
 				m.step = stepReviewPlan
 			} else if msg.engine == model.EngineLlamaCPP && len(msg.variants) == 1 {
-				m.plan = downloader.PlanGGUFVariant(m.selectedRepo.ID, "main", msg.variants[0], msg.files)
+				m.setPlan(downloader.PlanGGUFVariant(m.selectedRepo.ID, "main", msg.variants[0], msg.files))
 				m.step = stepReviewPlan
 			}
 			m.errMsg = ""
@@ -406,8 +408,7 @@ func (m DownloadModel) updateSelectVariant(msg tea.Msg) (DownloadModel, tea.Cmd)
 			}
 		case "enter":
 			selected := m.variants[m.variantCursor]
-			m.plan = downloader.PlanGGUFVariant(m.selectedRepo.ID, "main", selected, m.files)
-			m.planScroll = 0
+			m.setPlan(downloader.PlanGGUFVariant(m.selectedRepo.ID, "main", selected, m.files))
 			m.step = stepReviewPlan
 			m.errMsg = ""
 		case "esc":
@@ -432,19 +433,68 @@ func (m DownloadModel) variantMaxVisible() int {
 	return max(m.height-4-3, 3)
 }
 
+func (m *DownloadModel) setPlan(plan *downloader.DownloadPlan) {
+	m.plan = plan
+	m.planScroll = 0
+	m.reviewCursor = 0
+	m.optSel = make([]bool, len(plan.OptionalFiles))
+	for i := range m.optSel {
+		m.optSel[i] = true
+	}
+}
+
+// planFiles returns the combined required + optional file list and the index
+// at which the optional section begins.
+func (m DownloadModel) planFiles() ([]downloader.PlanFile, int) {
+	files := make([]downloader.PlanFile, 0, len(m.plan.Files)+len(m.plan.OptionalFiles))
+	files = append(files, m.plan.Files...)
+	optStart := len(files)
+	files = append(files, m.plan.OptionalFiles...)
+	return files, optStart
+}
+
+// effectivePlan returns a copy of the plan with only the selected optional
+// files retained, so the downloader fetches exactly what the user chose.
+func (m DownloadModel) effectivePlan() *downloader.DownloadPlan {
+	plan := *m.plan
+	plan.OptionalFiles = make([]downloader.PlanFile, 0, len(m.plan.OptionalFiles))
+	for i, f := range m.plan.OptionalFiles {
+		if i < len(m.optSel) && m.optSel[i] {
+			plan.OptionalFiles = append(plan.OptionalFiles, f)
+		}
+	}
+	plan.TotalBytes = plan.CombinedBytes()
+	return &plan
+}
+
+func (m *DownloadModel) scrollToReviewCursor() {
+	maxVisible := m.planMaxVisible()
+	if m.reviewCursor < m.planScroll {
+		m.planScroll = m.reviewCursor
+	} else if m.reviewCursor >= m.planScroll+maxVisible {
+		m.planScroll = m.reviewCursor - maxVisible + 1
+	}
+	if m.planScroll < 0 {
+		m.planScroll = 0
+	}
+}
+
 func (m DownloadModel) updateReviewPlan(msg tea.Msg) (DownloadModel, tea.Cmd) {
-	totalFiles := len(m.plan.Files) + len(m.plan.OptionalFiles)
+	allFiles, optStart := m.planFiles()
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
-			if m.planScroll > 0 {
-				m.planScroll--
+			if m.reviewCursor > 0 {
+				m.reviewCursor--
 			}
 		case "down", "j":
-			maxVisible := m.planMaxVisible()
-			if m.planScroll < totalFiles-maxVisible {
-				m.planScroll++
+			if m.reviewCursor < len(allFiles)-1 {
+				m.reviewCursor++
+			}
+		case " ":
+			if idx := m.reviewCursor - optStart; idx >= 0 && idx < len(m.optSel) {
+				m.optSel[idx] = !m.optSel[idx]
 			}
 		case "enter":
 			m.browsingDest = true
@@ -463,9 +513,7 @@ func (m DownloadModel) updateReviewPlan(msg tea.Msg) (DownloadModel, tea.Cmd) {
 			m.errMsg = ""
 		}
 	}
-	if m.planScroll < 0 {
-		m.planScroll = 0
-	}
+	m.scrollToReviewCursor()
 	return m, nil
 }
 
@@ -531,6 +579,8 @@ func (m DownloadModel) updateChooseDest(msg tea.Msg) (DownloadModel, tea.Cmd) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		m.cancelFunc = cancel
+
+		m.plan = m.effectivePlan()
 
 		ch, err := m.dl.Download(ctx, m.plan, m.destPath)
 		if err != nil {
@@ -744,12 +794,9 @@ func (m DownloadModel) View() string {
 			repoName = parts[1]
 		}
 		sb.WriteString(titleStyle.Render("Download Plan") + "\n")
-		sb.WriteString(mutedStyle.Render("  "+m.plan.RepoID+" → ")+lipgloss.NewStyle().Foreground(t.Secondary).Render(repoName+"/") + "\n")
+		sb.WriteString(mutedStyle.Render("  "+m.plan.RepoID+" → ") + lipgloss.NewStyle().Foreground(t.Secondary).Render(repoName+"/") + "\n")
 
-		allFiles := make([]downloader.PlanFile, 0, len(m.plan.Files)+len(m.plan.OptionalFiles))
-		allFiles = append(allFiles, m.plan.Files...)
-		optStart := len(m.plan.Files)
-		allFiles = append(allFiles, m.plan.OptionalFiles...)
+		allFiles, optStart := m.planFiles()
 
 		maxVisible := m.planMaxVisible()
 		start := m.planScroll
@@ -757,32 +804,45 @@ func (m DownloadModel) View() string {
 		if end > len(allFiles) {
 			end = len(allFiles)
 		}
-		optLabelVisible := len(m.plan.OptionalFiles) > 0 && optStart >= start && optStart < end
-		effectiveMax := maxVisible
-		if optLabelVisible {
-			effectiveMax--
-			end = start + effectiveMax
-			if end > len(allFiles) {
-				end = len(allFiles)
-			}
-		}
 		if start > 0 {
 			sb.WriteString(mutedStyle.Render(fmt.Sprintf("  ↑ %d more", start)) + "\n")
 		}
 		for i := start; i < end; i++ {
-			if i == optStart && len(m.plan.OptionalFiles) > 0 {
-				sb.WriteString(mutedStyle.Render("  Optional:") + "\n")
-			}
 			f := allFiles[i]
-			sb.WriteString(fmt.Sprintf("  %-50s %s\n", truncate(f.Path, 50), dlFormatBytes(f.Size)))
+			prefix := "  •"
+			if i >= optStart {
+				if m.optSel[i-optStart] {
+					prefix = styleSuccess.Render(" [✓]")
+				} else {
+					prefix = mutedStyle.Render(" [ ]")
+				}
+			}
+			cursor := "  "
+			if i == m.reviewCursor {
+				cursor = lipgloss.NewStyle().Foreground(t.Primary).Render("▶ ")
+			}
+			sb.WriteString(fmt.Sprintf("%s%s  %-48s %s\n", cursor, prefix, truncate(f.Path, 48), dlFormatBytes(f.Size)))
 		}
 		if end < len(allFiles) {
 			sb.WriteString(mutedStyle.Render(fmt.Sprintf("  ↓ %d more", len(allFiles)-end)) + "\n")
 		}
+		var total int64
+		for _, f := range m.plan.Files {
+			total += f.Size
+		}
+		for i, f := range m.plan.OptionalFiles {
+			if m.optSel[i] {
+				total += f.Size
+			}
+		}
 		sb.WriteString(lipgloss.NewStyle().Foreground(t.Secondary).Bold(true).Render(
-			fmt.Sprintf("  Total: %s  (%d files)", dlFormatBytes(m.plan.TotalBytes), len(allFiles)),
+			fmt.Sprintf("  Total: %s  (%d files)", dlFormatBytes(total), len(m.plan.Files)+countSelected(m.optSel)),
 		) + "\n")
-		sb.WriteString(mutedStyle.Render("  ↑/↓: scroll  enter: destination  esc: back"))
+		help := "  ↑/↓: move  enter: destination  esc: back"
+		if len(m.optSel) > 0 {
+			help = "  ↑/↓: move  space: toggle optional  enter: destination  esc: back"
+		}
+		sb.WriteString(mutedStyle.Render(help))
 
 	case stepChooseDest:
 		if m.browsingDest {
@@ -890,4 +950,14 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func countSelected(sel []bool) int {
+	n := 0
+	for _, s := range sel {
+		if s {
+			n++
+		}
+	}
+	return n
 }

@@ -149,12 +149,12 @@ func (d *Downloader) Download(ctx context.Context, plan *DownloadPlan, dest stri
 }
 
 type progressReporter struct {
-	progress *OverallProgress
-	ch       chan<- OverallProgress
-	fileIdx  int
+	progress  *OverallProgress
+	ch        chan<- OverallProgress
+	fileIdx   int
 	baseBytes int64
-	lastSend time.Time
-	interval time.Duration
+	lastSend  time.Time
+	interval  time.Duration
 }
 
 func (r *progressReporter) onBytes(n int64) {
@@ -167,11 +167,12 @@ func (r *progressReporter) onBytes(n int64) {
 }
 
 func (d *Downloader) downloadAll(ctx context.Context, plan *DownloadPlan, dest string, ch chan<- OverallProgress) {
+	combined := plan.CombinedFiles()
 	progress := OverallProgress{
-		Files: make([]FileProgress, 0, len(plan.Files)),
+		Files: make([]FileProgress, 0, len(combined)),
 		State: FilePending,
 	}
-	for _, f := range plan.Files {
+	for _, f := range combined {
 		progress.Files = append(progress.Files, FileProgress{
 			Path:  f.Path,
 			State: FilePending,
@@ -191,7 +192,7 @@ func (d *Downloader) downloadAll(ctx context.Context, plan *DownloadPlan, dest s
 		return
 	}
 
-	if err := checkDiskSpace(dest, plan.TotalBytes); err != nil {
+	if err := checkDiskSpace(dest, plan.CombinedBytes()); err != nil {
 		progress.State = FileFailed
 		for i := range progress.Files {
 			progress.Files[i].State = FileFailed
@@ -205,7 +206,7 @@ func (d *Downloader) downloadAll(ctx context.Context, plan *DownloadPlan, dest s
 	var downloaded []stagedFile
 	failed := false
 
-	for i, pf := range plan.Files {
+	for i, pf := range combined {
 		if err := ctx.Err(); err != nil {
 			failed = true
 			progress.Files[i].State = FileFailed

@@ -90,6 +90,9 @@ func TestPlanGGUFWithMmproj(t *testing.T) {
 	if plan.OptionalFiles[0].Path != "mmproj-llama-7b-f16.gguf" {
 		t.Fatalf("expected mmproj file, got %s", plan.OptionalFiles[0].Path)
 	}
+	if plan.TotalBytes != 4_500_000_000 {
+		t.Fatalf("expected combined total 4500000000, got %d", plan.TotalBytes)
+	}
 }
 
 func TestPlanGGUFMultipleQuants(t *testing.T) {

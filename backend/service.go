@@ -418,9 +418,12 @@ func (s *Service) ImportDownloaded(destDir string, plan *downloader.DownloadPlan
 		return result, err
 	}
 
-	sourceFiles := make([]string, len(plan.Files))
-	for i, f := range plan.Files {
-		sourceFiles[i] = f.Path
+	sourceFiles := make([]string, 0, len(plan.Files)+len(plan.OptionalFiles))
+	for _, f := range plan.Files {
+		sourceFiles = append(sourceFiles, f.Path)
+	}
+	for _, f := range plan.OptionalFiles {
+		sourceFiles = append(sourceFiles, f.Path)
 	}
 	filesJSON, err := json.Marshal(sourceFiles)
 	if err != nil {

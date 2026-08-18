@@ -40,6 +40,20 @@ func ToPlanFiles(entries []hub.FileEntry) []PlanFile {
 	return files
 }
 
+// CombinedFiles returns the required files followed by the optional files in
+// the order they should be downloaded.
+func (p *DownloadPlan) CombinedFiles() []PlanFile {
+	files := make([]PlanFile, 0, len(p.Files)+len(p.OptionalFiles))
+	files = append(files, p.Files...)
+	files = append(files, p.OptionalFiles...)
+	return files
+}
+
+// CombinedBytes sums the sizes of all required and optional files.
+func (p *DownloadPlan) CombinedBytes() int64 {
+	return sumBytes(p.CombinedFiles())
+}
+
 func ValidatePlan(plan *DownloadPlan) error {
 	if plan == nil {
 		return fmt.Errorf("plan is nil")
@@ -57,14 +71,14 @@ func ValidatePlan(plan *DownloadPlan) error {
 		return fmt.Errorf("plan has no files")
 	}
 
-	for _, f := range plan.Files {
+	for _, f := range plan.CombinedFiles() {
 		if strings.Contains(f.Path, "..") {
 			return fmt.Errorf("path traversal detected: %q", f.Path)
 		}
 	}
 
 	seen := make(map[string]bool)
-	for _, f := range plan.Files {
+	for _, f := range plan.CombinedFiles() {
 		dest := filepath.Base(f.Path)
 		if seen[dest] {
 			return fmt.Errorf("duplicate destination name: %q", dest)

@@ -17,11 +17,11 @@ import (
 )
 
 type testFileServer struct {
-	content    []byte
-	sha256     string
-	failFirst  int
-	calls      int
-	noRange    bool
+	content   []byte
+	sha256    string
+	failFirst int
+	calls     int
+	noRange   bool
 }
 
 func (s *testFileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -105,6 +105,89 @@ func TestDownloadSingleFile(t *testing.T) {
 	}
 	if stat.Size() != 4096 {
 		t.Fatalf("expected 4096 bytes, got %d", stat.Size())
+	}
+}
+
+func TestDownloadOptionalFiles(t *testing.T) {
+	content, sha := testContent(2048)
+	srv := httptest.NewServer(&testFileServer{content: content, sha256: sha})
+	defer srv.Close()
+
+	d, dest := newTestDownloader(t)
+	d.client = srv.Client()
+	d.baseURL = srv.URL
+
+	plan := &DownloadPlan{
+		RepoID:        "org/repo",
+		Revision:      "abc123",
+		EngineKind:    model.EngineLlamaCPP,
+		Files:         []PlanFile{{Path: "model.gguf", Size: 2048, SHA256: sha}},
+		OptionalFiles: []PlanFile{{Path: "mmproj.gguf", Size: 2048, SHA256: sha}},
+		TotalBytes:    4096,
+	}
+
+	ch, err := d.Download(context.Background(), plan, dest)
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+
+	var last OverallProgress
+	for p := range ch {
+		last = p
+	}
+	if last.State != FileCompleted {
+		t.Fatalf("expected completed, got %s: %+v", last.State, last)
+	}
+	if len(last.Files) != 2 {
+		t.Fatalf("expected 2 files in progress, got %d", len(last.Files))
+	}
+	for _, name := range []string{"model.gguf", "mmproj.gguf"} {
+		if _, err := os.Stat(filepath.Join(dest, name)); err != nil {
+			t.Fatalf("file %s not published: %v", name, err)
+		}
+	}
+}
+
+func TestDownloadVLLMPlan(t *testing.T) {
+	content, sha := testContent(4096)
+	srv := httptest.NewServer(&testFileServer{content: content, sha256: sha})
+	defer srv.Close()
+
+	d, dest := newTestDownloader(t)
+	d.client = srv.Client()
+	d.baseURL = srv.URL
+
+	plan := &DownloadPlan{
+		RepoID:     "org/repo",
+		Revision:   "abc123",
+		EngineKind: model.EngineVLLM,
+		Files: []PlanFile{
+			{Path: "config.json", Size: 4096, SHA256: sha},
+			{Path: "tokenizer.json", Size: 4096, SHA256: sha},
+			{Path: "model.safetensors", Size: 4096, SHA256: sha},
+		},
+		TotalBytes: 12288,
+	}
+
+	ch, err := d.Download(context.Background(), plan, dest)
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+
+	var last OverallProgress
+	for p := range ch {
+		last = p
+	}
+	if last.State != FileCompleted {
+		t.Fatalf("expected completed, got %s: %+v", last.State, last)
+	}
+	if len(last.Files) != 3 {
+		t.Fatalf("expected 3 files in progress, got %d", len(last.Files))
+	}
+	for _, name := range []string{"config.json", "tokenizer.json", "model.safetensors"} {
+		if _, err := os.Stat(filepath.Join(dest, name)); err != nil {
+			t.Fatalf("file %s not published: %v", name, err)
+		}
 	}
 }
 

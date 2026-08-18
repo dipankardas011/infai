@@ -67,7 +67,7 @@ func PlanGGUFVariant(repoID, revision string, variant GGUFVariant, allFiles []hu
 	if len(mmprojFiles) > 0 {
 		plan.OptionalFiles = ToPlanFiles(mmprojFiles)
 	}
-	plan.TotalBytes = sumBytes(plan.Files)
+	plan.TotalBytes = plan.CombinedBytes()
 	return plan
 }
 
@@ -116,7 +116,7 @@ func PlanSafetensorsWithIndex(repoID, revision string, files []hub.FileEntry, in
 	}
 
 	plan.Files = append(plan.Files, ToPlanFiles(shards)...)
-	plan.TotalBytes = sumBytes(plan.Files)
+	plan.TotalBytes = plan.CombinedBytes()
 	return plan, nil
 }
 
@@ -174,7 +174,7 @@ func planGGUF(repoID, revision string, files []hub.FileEntry) (*DownloadPlan, er
 		plan.OptionalFiles = ToPlanFiles(mmprojFiles)
 	}
 
-	plan.TotalBytes = sumBytes(plan.Files)
+	plan.TotalBytes = plan.CombinedBytes()
 	return plan, nil
 }
 
@@ -190,7 +190,7 @@ func planSafetensors(repoID, revision string, files []hub.FileEntry) (*DownloadP
 	}
 
 	plan.Files = append(plan.Files, ToPlanFiles(sfFiles)...)
-	plan.TotalBytes = sumBytes(plan.Files)
+	plan.TotalBytes = plan.CombinedBytes()
 	return plan, nil
 }
 
@@ -289,13 +289,13 @@ func isMmprojFile(filepath string) bool {
 
 func findTokenizerFiles(files []hub.FileEntry) []hub.FileEntry {
 	names := map[string]bool{
-		"tokenizer.json":         true,
-		"tokenizer_config.json":  true,
+		"tokenizer.json":          true,
+		"tokenizer_config.json":   true,
 		"special_tokens_map.json": true,
-		"vocab.json":             true,
-		"merges.txt":             true,
-		"added_tokens.json":      true,
-		"chat_template.jinja":    true,
+		"vocab.json":              true,
+		"merges.txt":              true,
+		"added_tokens.json":       true,
+		"chat_template.jinja":     true,
 	}
 	var out []hub.FileEntry
 	for _, f := range files {
