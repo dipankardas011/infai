@@ -41,11 +41,23 @@ func main() {
 	}))
 	wlog.DebugContext(ctx, "Loaded config", "config", cfg)
 
-	svc := engine.NewInfaiAgentEngine(wlog, cfg)
+	// NOTE: what is happening is we have scope of handling multiple sessions.
+	// Each of the AgentEngine is one
+	// Either we can have Multiple Spwan of AgentEngine and handle overhere
+	// or inside the AgentEngine it handles multiple sessions
+	// TODO: need to take decision :kek
+
+	svc, err := engine.NewInfaiAgentEngine(wlog, cfg)
+	if err != nil {
+		wlog.ErrorContext(ctx, "Error creating engine", "error", err)
+		os.Exit(1)
+	}
+
 	go func() {
 		if err := svc.Run(); err != nil {
 			wlog.ErrorContext(ctx, "Error from engine", "error", err)
 		}
+		wlog.InfoContext(ctx, "Engine work done")
 	}()
 
 	sigChan := make(chan os.Signal, 1)
@@ -53,8 +65,6 @@ func main() {
 
 	sig := <-sigChan
 	wlog.DebugContext(ctx, "Received terminate signal", "signal", sig.String())
-
-	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
