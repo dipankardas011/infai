@@ -37,6 +37,10 @@ inference-run: ## Build and run inference
 inference-install: ## Install inference into GOBIN
 	@CGO_ENABLED=$(CGO_ENABLED) $(GO) install -trimpath -ldflags "$(LDFLAGS)" $(MAIN)
 
+.PHONY: agent-run
+agent-run: ## Run the agent
+	$(call go-run, ./cmd/agent)
+
 .PHONY: test
 test: ## Run all tests
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) test ./...

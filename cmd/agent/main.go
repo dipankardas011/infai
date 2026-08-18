@@ -1,0 +1,69 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/dipankardas011/infai/pkg/agent/config"
+	"github.com/dipankardas011/infai/pkg/agent/engine"
+)
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	defer cancel()
+
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		panic(err)
+	}
+
+	wlog := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		AddSource: true,
+		Level: func() slog.Level {
+			switch cfg.Logging.Level {
+			case "debug":
+				return slog.LevelDebug
+			case "info":
+				return slog.LevelInfo
+			case "warn":
+				return slog.LevelWarn
+			case "error":
+				return slog.LevelError
+			default:
+				return slog.LevelDebug
+			}
+		}(),
+	}))
+	wlog.DebugContext(ctx, "Loaded config", "config", cfg)
+
+	svc := engine.NewInfaiAgentEngine(wlog, cfg)
+	go func() {
+		if err := svc.Run(); err != nil {
+			wlog.ErrorContext(ctx, "Error from engine", "error", err)
+		}
+	}()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	sig := <-sigChan
+	wlog.DebugContext(ctx, "Received terminate signal", "signal", sig.String())
+
+	cancel()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		wlog.ErrorContext(shutdownCtx, "Error during engine shutdown", "error", err)
+	} else {
+		wlog.InfoContext(shutdownCtx, "engine shutdown completed gracefully")
+	}
+
+	wlog.DebugContext(ctx, "Shutdown complete")
+}
