@@ -3,12 +3,19 @@ package engine
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"io"
 	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/config"
-	"github.com/dipankardas011/infai/pkg/agent/loop"
-	"github.com/dipankardas011/infai/pkg/ds"
 	"github.com/google/uuid"
+)
+
+const (
+	AgentMaxQueuedSessions = 10
 )
 
 type AgentComm struct {
@@ -29,81 +36,113 @@ func FreshAgentComms() *AgentComms {
 	}
 }
 
-// TODO: we would need to handle to resume a session where we need to load the agentMapping and sessionId as the first process.
 type InfaiAgentEngine struct {
-	sessionID uuid.UUID
 	bgLogger  *slog.Logger
 	engineCfg *config.AgentEngineConfig
 
-	// Need to handle N number of agents as go routine so for that case a better place ig is goroutune manager or a workerPool manager like with one agent only when launch and when needed we can call and when there is a specific <if_cond{subagent}> then we can branch it in some sort by tell engine to register Another agent given a UUIDv7 of a agent it will check and register based on resource constraints of the harness
-	// for communication we can use a channel a RWMap which we can use for retrival of neccessary pipe for sharing info
+	_ *sql.DB
+	// Only holds sessions that were enqueued but not yet picked up by Run.
+	// "Active" (running) sessions are the goroutines Run spawned from this.
+	ActiveQueuedSessions chan *InfaiAgentSession
 
-	// WARN: we do need to properly handle the Concurrency.
-	agentMapping  map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
-	runtime_comms map[uuid.UUID]*AgentComms        // By this when N no of children can send comms with engine and even the
-
-	Agents map[uuid.UUID]*loop.Agent
+	stopOnce sync.Once
+	stopCh   chan struct{}
+	runDone  chan struct{}
+	wg       *sync.WaitGroup
 }
 
 func NewInfaiAgentEngine(bgLogger *slog.Logger, cfg *config.AgentEngineConfig) (*InfaiAgentEngine, error) {
 	o := &InfaiAgentEngine{
-		bgLogger:      bgLogger,
-		engineCfg:     cfg,
-		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
-		runtime_comms: make(map[uuid.UUID]*AgentComms),
-		Agents:        make(map[uuid.UUID]*loop.Agent),
-	}
-
-	if v, err := uuid.NewV7(); err != nil {
-		o.sessionID = v
+		bgLogger:             bgLogger,
+		engineCfg:            cfg,
+		ActiveQueuedSessions: make(chan *InfaiAgentSession, AgentMaxQueuedSessions),
+		stopCh:               make(chan struct{}),
+		runDone:              make(chan struct{}),
+		wg:                   &sync.WaitGroup{},
 	}
 
 	return o, nil
 }
 
-func (e *InfaiAgentEngine) Run() error {
-	e.bgLogger.Info("Session started", "session_id", e.sessionID)
-	defer e.bgLogger.Info("Session ended", "session_id", e.sessionID)
+// Run drains ActiveQueuedSessions and runs each session in its own goroutine.
+// It returns when the parent ctx is canceled or when Shutdown closes stopCh.
+func (e *InfaiAgentEngine) Run(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer close(e.runDone)
+	defer cancel()
 
-	// for now assumption is always the first node is the parentagent
-	firstAgent, err := e.registerNewParentAgent()
+	for {
+		select {
+		case sess, ok := <-e.ActiveQueuedSessions:
+			if !ok {
+				return nil
+			}
+			e.wg.Go(func() {
+				if err := sess.RunSession(runCtx); err != nil {
+					e.bgLogger.ErrorContext(runCtx, "session error", "error", err, "session_id", sess.sessionID)
+				}
+			})
+		case <-e.stopCh:
+			// Shutdown requested: stop accepting new sessions. In-flight
+			// sessions get runCtx canceled via defer cancel() above.
+			return nil
+		case <-runCtx.Done():
+			return runCtx.Err()
+		}
+	}
+}
+
+var (
+	ErrSessionCapacityFull = errors.New("session capacity full: maximum active sessions reached")
+	ErrEngineShuttingDown  = errors.New("engine is shutting down")
+)
+
+// Based on user request like a HTTP or a TUI trigger
+func (e *InfaiAgentEngine) CreateSession(ctx context.Context, r io.Reader, w io.Writer) error {
+	sess, err := NewSession(r, w, e.bgLogger.WithGroup("session"))
 	if err != nil {
 		return err
 	}
 
-	firstAgent.Invoke()
+	const enqueueTimeout = 10 * time.Second
 
-	return nil
-}
-
-func (e *InfaiAgentEngine) registerNewParentAgent() (*loop.Agent, error) {
-	id, err := uuid.NewV7()
-	if err != nil {
-		return nil, err
+	select {
+	case e.ActiveQueuedSessions <- sess:
+		return nil
+	case <-e.stopCh:
+		return ErrEngineShuttingDown
+	case <-time.After(enqueueTimeout):
+		e.bgLogger.ErrorContext(ctx, "session enqueue timed out", "session_id", sess.sessionID)
+		return ErrSessionCapacityFull
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-
-	e.agentMapping[id] = ds.NewSet[uuid.UUID]()
-	e.runtime_comms[id] = FreshAgentComms()
-	e.Agents[id], err = loop.NewAgent(id, loop.WithMaxTurns(100))
-	return e.Agents[id], err
 }
 
-// func (e *InfaiAgentEngine) spawnSubAgent(
-// 	parentId uuid.UUID,
-// 	parentComms *AgentComms,
-// ) error {
-// 	// TODO: we need to handle the concurrency here
-// 	id, err := uuid.NewV7()
-// 	if err != nil {
-// 		return err
-// 	}
-// 	e.agentMapping[parentId].Add(id)
-// 	e.agentMapping[id] = ds.NewSet[uuid.UUID]()
-// 	e.runtime_comms[id] = parentComms
-//
-// 	return nil
-// }
+func (e *InfaiAgentEngine) ResumeSession(session uuid.UUID, r io.Reader, w io.Writer) {
+	// TODO: we need to load from a location into the running memory
+}
 
 func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
-	return nil
+	e.bgLogger.DebugContext(ctx, "Recieved shutdown request")
+	// Signal Run to stop draining the channel. Closing stopCh also makes
+	// CreateSession fail fast with ErrEngineShuttingDown.
+	e.stopOnce.Do(func() {
+		close(e.stopCh)
+	})
+
+	done := make(chan struct{})
+	go func() {
+		// Wait for Run to exit first so no more wg.Add can race with wg.Wait.
+		<-e.runDone
+		e.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

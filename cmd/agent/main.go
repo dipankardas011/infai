@@ -41,12 +41,6 @@ func main() {
 	}))
 	wlog.DebugContext(ctx, "Loaded config", "config", cfg)
 
-	// NOTE: what is happening is we have scope of handling multiple sessions.
-	// Each of the AgentEngine is one
-	// Either we can have Multiple Spwan of AgentEngine and handle overhere
-	// or inside the AgentEngine it handles multiple sessions
-	// TODO: need to take decision :kek
-
 	svc, err := engine.NewInfaiAgentEngine(wlog, cfg)
 	if err != nil {
 		wlog.ErrorContext(ctx, "Error creating engine", "error", err)
@@ -54,7 +48,7 @@ func main() {
 	}
 
 	go func() {
-		if err := svc.Run(); err != nil {
+		if err := svc.Run(ctx); err != nil {
 			wlog.ErrorContext(ctx, "Error from engine", "error", err)
 		}
 		wlog.InfoContext(ctx, "Engine work done")

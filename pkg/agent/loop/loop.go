@@ -10,9 +10,10 @@ import (
 type AgentStatus string
 
 const (
-	Idle    AgentStatus = "Idle"
-	Working AgentStatus = "Working"
-	Error   AgentStatus = "Error"
+	Idle            AgentStatus = "idle"
+	Working         AgentStatus = "working"
+	PendingApproval AgentStatus = "pending_approval"
+	Error           AgentStatus = "error"
 )
 
 type Agent struct {
