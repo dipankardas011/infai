@@ -1,8 +1,41 @@
 package contracts
 
+// ChatMessage is the single source of truth for chat messages and is
+// serialized directly as the OpenAI-compatible wire format. Adapters must
+// not define their own parallel message types.
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role     string  `json:"role"`
+	Content  *string `json:"content,omitempty"`
+	Thinking *string `json:"thinking,omitempty"`
+	Name     *string `json:"name,omitempty"`
+}
+
+// Text returns the message content, or "" when the message carried none.
+func (m ChatMessage) Text() string {
+	if m.Content == nil {
+		return ""
+	}
+	return *m.Content
+}
+
+func NewSystemMessage(content string) ChatMessage {
+	return ChatMessage{Role: "system", Content: &content}
+}
+
+func NewUserMessage(content string) ChatMessage {
+	return ChatMessage{Role: "user", Content: &content}
+}
+
+func NewAssistantMessage(content string) ChatMessage {
+	return ChatMessage{Role: "assistant", Content: &content}
+}
+
+// Skill is a capability the model can apply (knowledge/memory), described
+// for the system prompt. Skills live with memory because they are learned
+// capabilities rather than executable actions.
+type Skill struct {
+	Title       string
+	Description string
 }
 
 // DeepKnowledge we can store Skills

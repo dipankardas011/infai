@@ -1,11 +1,16 @@
 package engine
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 
-	"github.com/dipankardas011/infai/pkg/agent/loop"
+	"github.com/dipankardas011/infai/pkg/agent/agent"
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/ds"
 	"github.com/google/uuid"
 )
@@ -18,15 +23,20 @@ type InfaiAgentSession struct {
 	read  io.Reader
 	write io.Writer
 
+	model contracts.InfaiModelAdaptor
+
 	// WARN: we do need to properly handle the Concurrency.
 	agentMapping  map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
 	runtime_comms map[uuid.UUID]*AgentComms        // By this when N no of children can send comms with engine and even the
 
 	baseAgentId uuid.UUID
 
-	Agents map[uuid.UUID]*loop.Agent
+	Agents map[uuid.UUID]*agent.Agent
 }
 
+// model is chosen per-session (the model a session runs is a property of the
+// conversation, not the engine). Hardcoded to a local OpenAI-compatible
+// endpoint for now; the request payload will drive selection later.
 func NewSession(r io.Reader, w io.Writer, l *slog.Logger) (*InfaiAgentSession, error) {
 	o := &InfaiAgentSession{
 		l:             l,
@@ -34,7 +44,7 @@ func NewSession(r io.Reader, w io.Writer, l *slog.Logger) (*InfaiAgentSession, e
 		write:         w,
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
 		runtime_comms: make(map[uuid.UUID]*AgentComms),
-		Agents:        make(map[uuid.UUID]*loop.Agent),
+		Agents:        make(map[uuid.UUID]*agent.Agent),
 	}
 
 	if v, err := uuid.NewV7(); err != nil {
@@ -57,12 +67,30 @@ func (e *InfaiAgentSession) RunSession(ctx context.Context) error {
 		return err
 	}
 
-	firstAgent.Invoke()
+	firstAgent.SetModel(models.NewOpenAICompatableAPI("http://0.0.0.0:8000/v1", "local-model", ""))
+
+	// Primitive: the first line read from the session input is the user
+	// prompt. Proper request parsing/session resume comes later.
+	userPrompt, err := bufio.NewReader(e.read).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return err
+	}
+	userPrompt = strings.TrimSpace(userPrompt)
+
+	systemPrompt, err := GetBasicSystemPrompt(nil, nil)
+	if err != nil {
+		return err
+	}
+
+	if _, err := firstAgent.Invoke(ctx, systemPrompt, userPrompt); err != nil {
+		e.l.ErrorContext(ctx, "agent invoke failed", "session_id", e.sessionID, "error", err)
+		return err
+	}
 
 	return nil
 }
 
-func (e *InfaiAgentSession) registerNewParentAgent() (*loop.Agent, error) {
+func (e *InfaiAgentSession) registerNewParentAgent() (*agent.Agent, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
@@ -70,8 +98,17 @@ func (e *InfaiAgentSession) registerNewParentAgent() (*loop.Agent, error) {
 
 	e.agentMapping[id] = ds.NewSet[uuid.UUID]()
 	e.runtime_comms[id] = FreshAgentComms()
-	e.Agents[id], err = loop.NewAgent(id, loop.WithMaxTurns(100))
-	return e.Agents[id], err
+	e.Agents[id], err = agent.NewAgent(id,
+		agent.WithMaxTurns(100),
+		agent.WithTurnHook(func(m contracts.ChatMessage) {
+			fmt.Fprintf(e.write, "[%s] %s\n", m.Role, m.Text())
+		}),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return e.Agents[id], nil
 }
 
 // func (e *InfaiAgentEngine) spawnSubAgent(

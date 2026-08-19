@@ -1,35 +1,28 @@
 package contracts
 
-import (
-	"context"
-	"time"
-)
+import "context"
 
-// AgentEngine (Domain Logic)
-//     ├── Injected: IModelAdapter
-//     ├── Injected: IToolExecutor
-//     └── Injected: IContextStore
+// InfaiModelAdaptor is the primitive model contract. The agent feeds it the
+// running conversation and it returns the next assistant message.
 //
-// Method: Step()
-//     1. context  := ContextStore.BuildCurrentWindow()
-//     2. response := ModelAdapter.Generate(context)
-//     3. actions  := Parser.ExtractToolCalls(response)
-//     4. IF len(actions) == 0: RETURN StopSignal
-//     5. results  := ToolExecutor.ExecuteAll(actions)
-//     6. ContextStore.AppendResults(results)
-//     7. REPEAT
-
+// The "proper" saga (InitializeSession, EstablishRESTConnection, ListModels,
+// streaming, cost tracking, …) comes back on top of this once the primitive
+// loop is proven out.
 type InfaiModelAdaptor interface {
-	// llm handles the organise with the specific provider needs
-	InitializeSession(systemPrompt string, tools map[string]string, skills map[string]string, mcps map[string]string, memories map[string]string) error
+	// Generate returns the next assistant message for the given history.
+	// A nil opts means "use adapter defaults".
+	Generate(ctx context.Context, messages []ChatMessage, opts *GenerateOptions) (ChatMessage, error)
+}
 
-	EstablishRESTConnection(ctx context.Context, MaxBackoffRetryDuringNetworkError int) error
-	// EstablishWebSocetConnection(ctx context.Context, MaxBackoffRetryDuringNetworkError int) error
-
-	ListModels(ctx context.Context, ttl time.Duration) ([]string, error)
-	AvailableThinkingModes() ([]string, error)
-	Generate() error
-	CurrentCost() (<-chan float64, error)
+// GenerateOptions carries per-request provider knobs. Zero values mean
+// "use the adapter default". Thinking budget / reasoning effort are per-turn
+// settings, whereas the emitted reasoning text itself lives on
+// ChatMessage.Thinking so it is echoed back across turns.
+type GenerateOptions struct {
+	MaxTokens            int
+	Temperature          float64
+	ThinkingBudgetTokens int
+	ReasoningEffort      string
 }
 
 // ChatCompletion()
