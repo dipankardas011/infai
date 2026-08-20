@@ -102,11 +102,12 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string) (*ChatResul
 	s.history = result.Messages
 
 	return &ChatResult{
-		SessionID: s.sessionID,
-		Status:    result.Status,
-		Reply:     lastAssistantText(result.Messages),
-		Pending:   result.Pending,
-		Usage:     result.Usage,
+		SessionID:        s.sessionID,
+		Status:           result.Status,
+		Reply:            lastAssistantText(result.Messages),
+		ReasoningContent: lastAssistantReasoning(result.Messages),
+		Pending:          result.Pending,
+		Usage:            result.Usage,
 	}, nil
 }
 
@@ -139,6 +140,17 @@ func lastAssistantText(messages []contracts.ChatMessage) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == "assistant" {
 			return messages[i].Text()
+		}
+	}
+	return ""
+}
+
+// lastAssistantReasoning extracts the reasoning text of the final assistant
+// message, or "" when the provider returned none.
+func lastAssistantReasoning(messages []contracts.ChatMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if m := messages[i]; m.Role == "assistant" && m.ReasoningContent != "" {
+			return m.ReasoningContent
 		}
 	}
 	return ""

@@ -4,10 +4,10 @@ package contracts
 // serialized directly as the OpenAI-compatible wire format. Adapters must
 // not define their own parallel message types.
 type ChatMessage struct {
-	Role     string  `json:"role"`
-	Content  *string `json:"content,omitempty"`
-	Thinking *string `json:"thinking,omitempty"`
-	Name     *string `json:"name,omitempty"`
+	Role             string  `json:"role"`
+	Content          *string `json:"content,omitempty"`
+	ReasoningContent string  `json:"reasoning_content,omitempty"`
+	Name             *string `json:"name,omitempty"`
 }
 
 // Text returns the message content, or "" when the message carried none.

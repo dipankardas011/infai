@@ -33,11 +33,12 @@ func FreshAgentComms() *AgentComms {
 
 // ChatResult is the outcome of one Chat call on a session.
 type ChatResult struct {
-	SessionID uuid.UUID
-	Status    agent.TurnStatus
-	Reply     string
-	Pending   *agent.ApprovalRequest
-	Usage     *contracts.TokenUsage
+	SessionID        uuid.UUID
+	Status           agent.TurnStatus
+	Reply            string
+	ReasoningContent string
+	Pending          *agent.ApprovalRequest
+	Usage            *contracts.TokenUsage
 }
 
 // SessionInfo is a registered session, for listing.

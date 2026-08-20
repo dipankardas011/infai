@@ -102,6 +102,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		"status":     res.Status.String(),
 		"reply":      res.Reply,
 	}
+	if res.ReasoningContent != "" {
+		body["reasoning_content"] = res.ReasoningContent
+	}
 	if res.Pending != nil {
 		body["pending"] = res.Pending
 	}

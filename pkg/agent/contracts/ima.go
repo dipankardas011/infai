@@ -32,10 +32,7 @@ func (t *TokenUsage) Add(o *TokenUsage) {
 	t.TotalTokens += o.TotalTokens
 }
 
-// GenerateOptions carries per-request provider knobs. Zero values mean
-// "use the adapter default". Thinking budget / reasoning effort are per-turn
-// settings, whereas the emitted reasoning text itself lives on
-// ChatMessage.Thinking so it is echoed back across turns.
+// GenerateOptions carries per-request provider knobs.
 type GenerateOptions struct {
 	MaxTokens            int
 	Temperature          float64

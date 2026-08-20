@@ -28,53 +28,54 @@ func NewRemoteClient(baseURL string) *RemoteClient {
 	}
 }
 
-func (c *RemoteClient) Chat(ctx context.Context, prompt string) (string, error) {
+func (c *RemoteClient) Chat(ctx context.Context, prompt string) (*ChatReply, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.sessionID == uuid.Nil {
 		id, err := c.createSession(ctx)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		c.sessionID = id
 	}
 
 	payload, err := json.Marshal(map[string]string{"prompt": prompt})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.baseURL+"/v1/sessions/"+c.sessionID.String()+"/chat", bytes.NewReader(payload))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	var res struct {
-		SessionID uuid.UUID `json:"session_id"`
-		Status    string    `json:"status"`
-		Reply     string    `json:"reply"`
-		Error     string    `json:"error"`
+		SessionID        uuid.UUID `json:"session_id"`
+		Status           string    `json:"status"`
+		Reply            string    `json:"reply"`
+		ReasoningContent string    `json:"reasoning_content"`
+		Error            string    `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return "", err
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		if res.Error != "" {
-			return "", fmt.Errorf("server: %s", res.Error)
+			return nil, fmt.Errorf("server: %s", res.Error)
 		}
-		return "", fmt.Errorf("chat failed (HTTP %d)", resp.StatusCode)
+		return nil, fmt.Errorf("chat failed (HTTP %d)", resp.StatusCode)
 	}
 
-	return res.Reply, nil
+	return &ChatReply{Reply: res.Reply, ReasoningContent: res.ReasoningContent}, nil
 }
 func (c *RemoteClient) createSession(ctx context.Context) (uuid.UUID, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/sessions", nil)
