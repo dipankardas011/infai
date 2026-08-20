@@ -43,4 +43,5 @@ type TurnResult struct {
 	Status   TurnStatus
 	Messages []contracts.ChatMessage
 	Pending  *ApprovalRequest
+	Usage    *contracts.TokenUsage
 }

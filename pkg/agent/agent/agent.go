@@ -95,12 +95,17 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 	messages := make([]contracts.ChatMessage, len(history))
 	copy(messages, history)
 
+	// usage accumulates across every turn of the run — each Generate is a
+	// separate request with its own token accounting.
+	var usage contracts.TokenUsage
+
 	for turn := 0; turn < a.MaxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			return TurnResult{Status: TurnCanceled, Messages: messages}, nil
 		}
 
-		reply, err := a.model.Generate(ctx, messages, nil)
+		reply, u, err := a.model.Generate(ctx, messages, nil)
+		usage.Add(u)
 		if err != nil {
 			if ctx.Err() != nil {
 				// Canceled mid-call: report as canceled, not a model error.
@@ -123,5 +128,5 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 		return TurnResult{Status: TurnCanceled, Messages: messages}, nil
 	}
 
-	return TurnResult{Status: TurnDone, Messages: messages}, nil
+	return TurnResult{Status: TurnDone, Messages: messages, Usage: &usage}, nil
 }

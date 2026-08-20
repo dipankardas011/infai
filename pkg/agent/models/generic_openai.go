@@ -41,9 +41,10 @@ type openAIChatResponse struct {
 	Choices []struct {
 		Message contracts.ChatMessage `json:"message"`
 	} `json:"choices"`
+	Usage *contracts.TokenUsage `json:"usage"`
 }
 
-func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []contracts.ChatMessage, opts *contracts.GenerateOptions) (contracts.ChatMessage, error) {
+func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []contracts.ChatMessage, opts *contracts.GenerateOptions) (contracts.ChatMessage, *contracts.TokenUsage, error) {
 	reqBody := openAIChatRequest{
 		Model:    o.model,
 		Messages: messages,
@@ -62,12 +63,12 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 
 	raw, err := json.Marshal(reqBody)
 	if err != nil {
-		return contracts.ChatMessage{}, err
+		return contracts.ChatMessage{}, nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
-		return contracts.ChatMessage{}, err
+		return contracts.ChatMessage{}, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if o.apiKey != "" {
@@ -76,21 +77,21 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 
 	resp, err := o.client.Do(req)
 	if err != nil {
-		return contracts.ChatMessage{}, err
+		return contracts.ChatMessage{}, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return contracts.ChatMessage{}, fmt.Errorf("openai compatible api: status %d: %s", resp.StatusCode, string(body))
+		return contracts.ChatMessage{}, nil, fmt.Errorf("openai compatible api: status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var parsed openAIChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return contracts.ChatMessage{}, err
+		return contracts.ChatMessage{}, nil, err
 	}
 	if len(parsed.Choices) == 0 {
-		return contracts.ChatMessage{}, fmt.Errorf("openai compatible api: empty choices")
+		return contracts.ChatMessage{}, nil, fmt.Errorf("openai compatible api: empty choices")
 	}
 
 	reply := parsed.Choices[0].Message
@@ -98,5 +99,5 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 		reply.Role = "assistant"
 	}
 
-	return reply, nil
+	return reply, parsed.Usage, nil
 }

@@ -105,6 +105,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if res.Pending != nil {
 		body["pending"] = res.Pending
 	}
+	if res.Usage != nil {
+		body["usage"] = res.Usage
+	}
 	writeJSON(w, http.StatusOK, body)
 }
 

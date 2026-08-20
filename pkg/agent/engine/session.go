@@ -106,6 +106,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string) (*ChatResul
 		Status:    result.Status,
 		Reply:     lastAssistantText(result.Messages),
 		Pending:   result.Pending,
+		Usage:     result.Usage,
 	}, nil
 }
 

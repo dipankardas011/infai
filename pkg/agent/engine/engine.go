@@ -9,6 +9,7 @@ import (
 
 	"github.com/dipankardas011/infai/pkg/agent/agent"
 	"github.com/dipankardas011/infai/pkg/agent/config"
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/google/uuid"
 )
 
@@ -36,6 +37,7 @@ type ChatResult struct {
 	Status    agent.TurnStatus
 	Reply     string
 	Pending   *agent.ApprovalRequest
+	Usage     *contracts.TokenUsage
 }
 
 // SessionInfo is a registered session, for listing.
