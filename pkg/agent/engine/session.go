@@ -1,12 +1,10 @@
 package engine
 
 import (
-	"bufio"
 	"context"
-	"fmt"
-	"io"
+	"errors"
 	"log/slog"
-	"strings"
+	"sync"
 
 	"github.com/dipankardas011/infai/pkg/agent/agent"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -15,15 +13,22 @@ import (
 	"github.com/google/uuid"
 )
 
+var ErrSessionClosed = errors.New("session closed")
+
+// InfaiAgentSession is the persistent state of one conversation. It is a
+// passive object: it holds history and the agent tree, and Chat() runs the
+// loop against it. Between Chat calls the session is idle — no goroutine is
+// held — so it stays registered until explicitly closed.
 type InfaiAgentSession struct {
 	sessionID uuid.UUID
 
 	l *slog.Logger
 
-	read  io.Reader
-	write io.Writer
-
 	model contracts.InfaiModelAdaptor
+
+	mu      sync.Mutex
+	closed  bool
+	history []contracts.ChatMessage
 
 	// WARN: we do need to properly handle the Concurrency.
 	agentMapping  map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
@@ -37,11 +42,10 @@ type InfaiAgentSession struct {
 // model is chosen per-session (the model a session runs is a property of the
 // conversation, not the engine). Hardcoded to a local OpenAI-compatible
 // endpoint for now; the request payload will drive selection later.
-func NewSession(r io.Reader, w io.Writer, l *slog.Logger) (*InfaiAgentSession, error) {
+func NewSession(l *slog.Logger) (*InfaiAgentSession, error) {
 	o := &InfaiAgentSession{
 		l:             l,
-		read:          r,
-		write:         w,
+		model:         models.NewOpenAICompatableAPI("http://0.0.0.0:8000/v1", "local-model", ""),
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
 		runtime_comms: make(map[uuid.UUID]*AgentComms),
 		Agents:        make(map[uuid.UUID]*agent.Agent),
@@ -53,76 +57,88 @@ func NewSession(r io.Reader, w io.Writer, l *slog.Logger) (*InfaiAgentSession, e
 		o.sessionID = v
 	}
 
+	firstAgent, err := o.registerNewParentAgent()
+	if err != nil {
+		return nil, err
+	}
+	o.baseAgentId = firstAgent.Id
+
 	return o, nil
 }
 
-func (e *InfaiAgentSession) RunSession(ctx context.Context) error {
-
-	e.l.InfoContext(ctx, "Session started", "session_id", e.sessionID)
-	defer e.l.InfoContext(ctx, "Session ended", "session_id", e.sessionID)
-
-	// for now assumption is always the first node is the parentagent
-	firstAgent, err := e.registerNewParentAgent()
-	if err != nil {
-		return err
-	}
-
-	firstAgent.SetModel(models.NewOpenAICompatableAPI("http://0.0.0.0:8000/v1", "local-model", ""))
-
-	// Primitive: the first line read from the session input is the user
-	// prompt. Proper request parsing/session resume comes later.
-	userPrompt, err := bufio.NewReader(e.read).ReadString('\n')
-	if err != nil && err != io.EOF {
-		return err
-	}
-	userPrompt = strings.TrimSpace(userPrompt)
-
-	systemPrompt, err := GetBasicSystemPrompt(nil, nil)
-	if err != nil {
-		return err
-	}
-
-	if _, err := firstAgent.Invoke(ctx, systemPrompt, userPrompt); err != nil {
-		e.l.ErrorContext(ctx, "agent invoke failed", "session_id", e.sessionID, "error", err)
-		return err
-	}
-
-	return nil
+func (s *InfaiAgentSession) ID() uuid.UUID {
+	return s.sessionID
 }
 
-func (e *InfaiAgentSession) registerNewParentAgent() (*agent.Agent, error) {
+// Chat runs the base agent loop for one user prompt against the session's
+// persistent history and returns the outcome. The session stays registered
+// and idle after the call; the next Chat reuses the same conversation.
+func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string) (*ChatResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return nil, ErrSessionClosed
+	}
+
+	if len(s.history) == 0 {
+		sys, err := GetBasicSystemPrompt(nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		s.history = append(s.history, contracts.NewSystemMessage(sys))
+	}
+	s.history = append(s.history, contracts.NewUserMessage(prompt))
+
+	a := s.Agents[s.baseAgentId]
+	if a == nil {
+		return nil, errors.New("session: base agent missing")
+	}
+
+	result, err := a.Invoke(ctx, s.history)
+	if err != nil {
+		return nil, err
+	}
+	s.history = result.Messages
+
+	return &ChatResult{
+		SessionID: s.sessionID,
+		Status:    result.Status,
+		Reply:     lastAssistantText(result.Messages),
+		Pending:   result.Pending,
+	}, nil
+}
+
+func (s *InfaiAgentSession) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+}
+
+func (s *InfaiAgentSession) registerNewParentAgent() (*agent.Agent, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
 	}
 
-	e.agentMapping[id] = ds.NewSet[uuid.UUID]()
-	e.runtime_comms[id] = FreshAgentComms()
-	e.Agents[id], err = agent.NewAgent(id,
-		agent.WithMaxTurns(100),
-		agent.WithTurnHook(func(m contracts.ChatMessage) {
-			fmt.Fprintf(e.write, "[%s] %s\n", m.Role, m.Text())
-		}),
-	)
+	s.agentMapping[id] = ds.NewSet[uuid.UUID]()
+	s.runtime_comms[id] = FreshAgentComms()
+	s.Agents[id], err = agent.NewAgent(id, agent.WithMaxTurns(100))
 	if err != nil {
 		return nil, err
 	}
-
-	return e.Agents[id], nil
+	s.Agents[id].SetModel(s.model)
+	return s.Agents[id], nil
 }
 
-// func (e *InfaiAgentEngine) spawnSubAgent(
-// 	parentId uuid.UUID,
-// 	parentComms *AgentComms,
-// ) error {
-// 	// TODO: we need to handle the concurrency here
-// 	id, err := uuid.NewV7()
-// 	if err != nil {
-// 		return err
-// 	}
-// 	e.agentMapping[parentId].Add(id)
-// 	e.agentMapping[id] = ds.NewSet[uuid.UUID]()
-// 	e.runtime_comms[id] = parentComms
-//
-// 	return nil
-// }
+// lastAssistantText extracts the agent's answer from the full history. It
+// lives here (the API boundary) because the wire format wants a plain reply
+// string — the agent itself only returns history.
+func lastAssistantText(messages []contracts.ChatMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			return messages[i].Text()
+		}
+	}
+	return ""
+}

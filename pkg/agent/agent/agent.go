@@ -80,27 +80,34 @@ func (a *Agent) SetModel(model contracts.InfaiModelAdaptor) {
 	a.model = model
 }
 
-// Invoke is the primitive chatbot: seed the conversation with a system and
-// user prompt, ask the model once, append the reply to the history and emit
-// it through the turn hook. Multi-turn continuation plugs into this loop.
-func (a *Agent) Invoke(ctx context.Context, systemPrompt, userPrompt string) ([]contracts.ChatMessage, error) {
+// Invoke runs the turn loop over the given conversation history, appending
+// each reply. It checks ctx each turn so a canceled session context unwinds
+// cleanly (children get derived contexts, so cancellation propagates to the
+// whole agent tree without explicit close messages).
+func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (TurnResult, error) {
 	if a.model == nil {
-		return nil, ErrNoModel
+		return TurnResult{}, ErrNoModel
 	}
 
 	a.Status = Working
 	defer func() { a.Status = Idle }()
 
-	messages := []contracts.ChatMessage{
-		contracts.NewSystemMessage(systemPrompt),
-		contracts.NewUserMessage(userPrompt),
-	}
+	messages := make([]contracts.ChatMessage, len(history))
+	copy(messages, history)
 
 	for turn := 0; turn < a.MaxTurns; turn++ {
+		if err := ctx.Err(); err != nil {
+			return TurnResult{Status: TurnCanceled, Messages: messages}, nil
+		}
+
 		reply, err := a.model.Generate(ctx, messages, nil)
 		if err != nil {
+			if ctx.Err() != nil {
+				// Canceled mid-call: report as canceled, not a model error.
+				return TurnResult{Status: TurnCanceled, Messages: messages}, nil
+			}
 			a.Status = Error
-			return messages, fmt.Errorf("agent: turn %d: %w", turn, err)
+			return TurnResult{Status: TurnDone, Messages: messages}, fmt.Errorf("agent: turn %d: %w", turn, err)
 		}
 		messages = append(messages, reply)
 
@@ -111,5 +118,10 @@ func (a *Agent) Invoke(ctx context.Context, systemPrompt, userPrompt string) ([]
 		break
 	}
 
-	return messages, nil
+	// Canceled on the final iteration's boundary — report it, not "done".
+	if err := ctx.Err(); err != nil {
+		return TurnResult{Status: TurnCanceled, Messages: messages}, nil
+	}
+
+	return TurnResult{Status: TurnDone, Messages: messages}, nil
 }

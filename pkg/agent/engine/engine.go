@@ -1,21 +1,15 @@
-// This is the main handling procecss or manager so you can say
 package engine
 
 import (
 	"context"
 	"database/sql"
 	"errors"
-	"io"
 	"log/slog"
 	"sync"
-	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/agent"
 	"github.com/dipankardas011/infai/pkg/agent/config"
 	"github.com/google/uuid"
-)
-
-const (
-	AgentMaxQueuedSessions = 10
 )
 
 type AgentComm struct {
@@ -36,113 +30,131 @@ func FreshAgentComms() *AgentComms {
 	}
 }
 
+// ChatResult is the outcome of one Chat call on a session.
+type ChatResult struct {
+	SessionID uuid.UUID
+	Status    agent.TurnStatus
+	Reply     string
+	Pending   *agent.ApprovalRequest
+}
+
+// SessionInfo is a registered session, for listing.
+type SessionInfo struct {
+	Id uuid.UUID
+}
+
+var (
+	ErrSessionNotFound    = errors.New("session not found")
+	ErrEngineShuttingDown = errors.New("engine is shutting down")
+)
+
+// InfaiAgentEngine owns the session registry. Sessions are created, stay
+// registered in an idle state (no goroutine held), and are reused by Chat
+// until CloseSession or Shutdown.
 type InfaiAgentEngine struct {
 	bgLogger  *slog.Logger
 	engineCfg *config.AgentEngineConfig
 
 	_ *sql.DB
-	// Only holds sessions that were enqueued but not yet picked up by Run.
-	// "Active" (running) sessions are the goroutines Run spawned from this.
-	ActiveQueuedSessions chan *InfaiAgentSession
+
+	mu       sync.Mutex
+	sessions map[uuid.UUID]*InfaiAgentSession
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
-	runDone  chan struct{}
-	wg       *sync.WaitGroup
 }
 
 func NewInfaiAgentEngine(bgLogger *slog.Logger, cfg *config.AgentEngineConfig) (*InfaiAgentEngine, error) {
 	o := &InfaiAgentEngine{
-		bgLogger:             bgLogger,
-		engineCfg:            cfg,
-		ActiveQueuedSessions: make(chan *InfaiAgentSession, AgentMaxQueuedSessions),
-		stopCh:               make(chan struct{}),
-		runDone:              make(chan struct{}),
-		wg:                   &sync.WaitGroup{},
+		bgLogger:  bgLogger,
+		engineCfg: cfg,
+		sessions:  make(map[uuid.UUID]*InfaiAgentSession),
+		stopCh:    make(chan struct{}),
 	}
 
 	return o, nil
 }
 
-// Run drains ActiveQueuedSessions and runs each session in its own goroutine.
-// It returns when the parent ctx is canceled or when Shutdown closes stopCh.
-func (e *InfaiAgentEngine) Run(ctx context.Context) error {
-	runCtx, cancel := context.WithCancel(ctx)
-	defer close(e.runDone)
-	defer cancel()
-
-	for {
-		select {
-		case sess, ok := <-e.ActiveQueuedSessions:
-			if !ok {
-				return nil
-			}
-			e.wg.Go(func() {
-				if err := sess.RunSession(runCtx); err != nil {
-					e.bgLogger.ErrorContext(runCtx, "session error", "error", err, "session_id", sess.sessionID)
-				}
-			})
-		case <-e.stopCh:
-			// Shutdown requested: stop accepting new sessions. In-flight
-			// sessions get runCtx canceled via defer cancel() above.
-			return nil
-		case <-runCtx.Done():
-			return runCtx.Err()
-		}
-	}
-}
-
-var (
-	ErrSessionCapacityFull = errors.New("session capacity full: maximum active sessions reached")
-	ErrEngineShuttingDown  = errors.New("engine is shutting down")
-)
-
-// Based on user request like a HTTP or a TUI trigger
-func (e *InfaiAgentEngine) CreateSession(ctx context.Context, r io.Reader, w io.Writer) error {
-	sess, err := NewSession(r, w, e.bgLogger.WithGroup("session"))
-	if err != nil {
-		return err
-	}
-
-	const enqueueTimeout = 10 * time.Second
-
+// CreateSession registers a new idle session. It persists until CloseSession
+// or Shutdown; a prompt can be sent any number of times via Chat.
+func (e *InfaiAgentEngine) CreateSession(ctx context.Context) (*InfaiAgentSession, error) {
 	select {
-	case e.ActiveQueuedSessions <- sess:
-		return nil
 	case <-e.stopCh:
-		return ErrEngineShuttingDown
-	case <-time.After(enqueueTimeout):
-		e.bgLogger.ErrorContext(ctx, "session enqueue timed out", "session_id", sess.sessionID)
-		return ErrSessionCapacityFull
+		return nil, ErrEngineShuttingDown
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
+	default:
 	}
+
+	sess, err := NewSession(e.bgLogger.WithGroup("session"))
+	if err != nil {
+		return nil, err
+	}
+
+	e.mu.Lock()
+	e.sessions[sess.sessionID] = sess
+	e.mu.Unlock()
+
+	e.bgLogger.Info("session created", "session_id", sess.sessionID)
+	return sess, nil
 }
 
-func (e *InfaiAgentEngine) ResumeSession(session uuid.UUID, r io.Reader, w io.Writer) {
-	// TODO: we need to load from a location into the running memory
+// Chat runs one prompt against an existing session and returns the outcome.
+func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string) (*ChatResult, error) {
+	e.mu.Lock()
+	sess, ok := e.sessions[id]
+	e.mu.Unlock()
+	if !ok {
+		return nil, ErrSessionNotFound
+	}
+	return sess.Chat(ctx, prompt)
 }
 
+// CloseSession removes and closes a session. An in-flight Chat finishes or is
+// canceled by its own context.
+func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
+	e.mu.Lock()
+	sess, ok := e.sessions[id]
+	if ok {
+		delete(e.sessions, id)
+	}
+	e.mu.Unlock()
+
+	if !ok {
+		return ErrSessionNotFound
+	}
+	sess.close()
+	e.bgLogger.Info("session closed", "session_id", id)
+	return nil
+}
+
+// ListSessions returns the registered (idle or running) sessions.
+func (e *InfaiAgentEngine) ListSessions() []SessionInfo {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	infos := make([]SessionInfo, 0, len(e.sessions))
+	for id := range e.sessions {
+		infos = append(infos, SessionInfo{Id: id})
+	}
+	return infos
+}
+
+// Shutdown stops accepting sessions and closes every registered one.
 func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
-	e.bgLogger.DebugContext(ctx, "Recieved shutdown request")
-	// Signal Run to stop draining the channel. Closing stopCh also makes
-	// CreateSession fail fast with ErrEngineShuttingDown.
+	e.bgLogger.DebugContext(ctx, "received shutdown request")
+
 	e.stopOnce.Do(func() {
 		close(e.stopCh)
 	})
 
-	done := make(chan struct{})
-	go func() {
-		// Wait for Run to exit first so no more wg.Add can race with wg.Wait.
-		<-e.runDone
-		e.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	e.mu.Lock()
+	for id, sess := range e.sessions {
+		sess.close()
+		delete(e.sessions, id)
 	}
+	e.mu.Unlock()
+
+	e.bgLogger.DebugContext(ctx, "engine shutdown complete")
+	return nil
 }

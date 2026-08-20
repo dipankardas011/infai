@@ -63,7 +63,7 @@ func LoadConfig() (*AgentEngineConfig, error) {
 	viper.SetDefault("enable_healthz", false)
 
 	viper.SetDefault("host", "localhost")
-	viper.SetDefault("port", 8080)
+	viper.SetDefault("port", 6000)
 	viper.SetDefault("enable_metrics", false)
 	viper.SetDefault("enable_healthz", true)
 
