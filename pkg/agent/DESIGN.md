@@ -87,6 +87,19 @@ When the agent says "done", the harness runs the session's validation
 agent iterates or gives up. policy + allowed tools + validate + system prompt +
 pinned model = a **versioned agent profile**.
 
+### D12. Composite tools (pipes) — sequence, not byte streams.
+Bash's pipes are compositional; tools should be too. But tools speak structured
+JSON, not raw byte streams, so a pipe composite feeds **structured output into a
+matching input schema**:
+
+```
+pipeline(toolA, toolB)   # toolB declares an input schema matching toolA's output
+```
+
+A bash-pipe is itself a deterministic *sequence step* — so pipes live naturally
+at the workflow layer (D14), where they are just UNIX. Composite tool == a
+2-node sequence in the workflow graph (unification, section 8).
+
 ## 4. Subagent rules
 
 - **Ceiling, then subset**: a subagent inherits the parent's policy as its
@@ -95,9 +108,21 @@ pinned model = a **versioned agent profile**.
   parent's permission checks.
 - **Single-turn loop**: the subagent runs a bounded loop and returns a result.
   No continuous conversation.
-- **Evaluation criterion, agreed up front**: every spawn carries an explicit
-  completion criterion, checked **twice** — the child self-checks before
-  returning, the parent re-checks on return. No criterion, no spawn.
+- **Evaluation criterion — child-owned, checked by the child only**: every spawn
+  carries an explicit completion criterion. The child calls `evaluate()` each
+  loop iteration: pass → return `Done`, fail → continue. The parent **never
+  re-runs the child's criterion** (that would pollute the parent). Instead the
+  parent owns *fitness* — "is this useful to my goal" — and decides
+  accept / retry / ask human. Different judgment, stays in the parent.
+  - The eval-loop is a **mode, not mandatory**: `spawn(task, criterion?, scope)`
+    with `max_iterations: 1` gives a single-shot delegation.
+- **Hard rule: parent = decision hub, subagent = worker.** The child never
+  decides policy; it does work and reports. Consistent by default, relaxed
+  for trivial delegations.
+- **Context: only the parent compacts.** The child gets a fresh, bounded
+  context and returns a **compact artifact** (`Summary` + `Steps` trace) —
+  never its transcript. That is what keeps the parent's context from exploding.
+- **Thinking mode is a spawn parameter**, set by the parent (budget/effort).
 - **No HITL inside the subagent**: the child cannot reach a human. HITL lives at
   the parent/session level. On failure it returns a trace; the parent relays it.
 
@@ -132,7 +157,53 @@ ToolCallResult { CallID, Status: success|error|timeout|canceled, Output, Error }
 - Default harness timeout: **5m**, overridable per call (caller's ctx feeds it).
 - Parent cancellation tears down the whole fan-out via `ctx`.
 
-## 6. Security model (layers)
+## 6. Workflow engine (vision — next big milestone)
+
+`<binary> --workflow=<file>` composes a **graph of computation units**: AI
+agents *and* deterministic systems. Deterministic where it's great, LLM where
+it's great — always a combination. Not stuck in HITL: headless, CI-friendly,
+OTel-observable (per-node spans).
+
+### D13. One abstraction: `Node` + `State`
+```
+Node  := { Name, Kind, input/output field mappings }
+State := map[string]any     // structured data flowing between nodes
+```
+
+**Three node kinds:**
+- `agent` — wraps a session: input state → templated prompt (+ tool scope +
+  subagent policy) → agent runs → extract outputs into state.
+- `step` — deterministic: bash `cmd` (pipes live here; reuse `runner` for
+  exec/timeout/rlimits), a Go func, or a direct `ToolCall`.
+- `composite` — `sequence`, `parallel`, `branch` (if/else on state), `loop`
+  (until condition or budget). **Control-flow that escapes agent evaluation.**
+
+Edges map `node.outputs.field → next.inputs.field`. A branch is decided
+deterministically (`{plan}.ok == true`) **or by an agent** (non-deterministic
+routing) — the "combination" in one primitive.
+
+```yaml
+release.yaml:
+  plan:    {kind: agent,  prompt: "plan release for {repo}", outputs: {plan: reply}}
+  build:   {kind: step,   cmd: "go build ./...",   after: plan}
+  gate:    {kind: branch, on: "{plan}.ok",         yes: [deploy], no: [report]}
+  deploy:  {kind: step,   cmd: "infai deploy",     after: gate}
+```
+
+### D14. Plumbing
+`infai --workflow=release.yaml` (client) → POSTs workflow → server runs it as a
+session → SSE streams node events (agent deltas + node status, unified) → exit
+code = pass/fail. Approvals resolve via policy or record as blocked (headless).
+Same server = usable as a GitHub Actions service. OTel per-node spans = the
+LangSmith analogue.
+
+### D15. Build path: deterministic-first
+Steps + sequence + parallel + branch run with **zero LLM** (testable graph
+runner) *first*; then `agent` becomes "just another node kind". The graph model
+subsumes earlier layers: composite tool = 2-node sequence, subagent = agent
+node, bash command = step node.
+
+## 7. Security model (layers)
 
 1. Tool design — code paths, no command strings. (primary)
 2. AccessControl — allow/deny/ask middleware per call. (enforcement)
@@ -148,7 +219,7 @@ ToolCallResult { CallID, Status: success|error|timeout|canceled, Output, Error }
    `--bind $WORKSPACE /sandbox` turns the path rule into kernel-enforced mounts.
    Also no root required; deferred until the tool set stabilizes.
 
-## 7. Deferred (on purpose)
+## 8. Deferred (on purpose)
 
 - **git worktree for multi-session contention** — we *will* borrow this: when a
   workspace has `.git`, give each session its own worktree
@@ -162,7 +233,7 @@ ToolCallResult { CallID, Status: success|error|timeout|canceled, Output, Error }
 - **Workspace lock / serialization** — only needed for non-git workspaces.
 - Concurrency amplifies shared-workspace races; worktree is the fix.
 
-## 8. Next steps (build order)
+## 9. Next steps (build order)
 
 1. `Tool` contract + registry — `Tool`, `ToolCall`, `ToolResult`, `ToolRegistry`
    (each tool declares its capability + schema). Pure types next to `contracts`.
@@ -183,6 +254,9 @@ ToolCallResult { CallID, Status: success|error|timeout|canceled, Output, Error }
    routed via parent.
 10. HITL plumbing — wire `TurnPendingApproval` → session → TUI approve/deny →
     resume.
+11. **Workflow engine** (section 6) — deterministic-first: `Node`/`State`
+    abstraction, `step` + `sequence`/`parallel`/`branch`/`loop`, then `agent`
+    as a node kind, then `--workflow` client flag + headless/CI mode + OTel.
 
 Prototype slices 1–5 as a vertical slice first: one code-path tool
 (`read_file`), one `ask` policy, prove the loop, then layer the rest.
