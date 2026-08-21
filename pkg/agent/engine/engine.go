@@ -41,6 +41,13 @@ type ChatResult struct {
 	Usage            *contracts.TokenUsage
 }
 
+// ChatOptions carries per-chat knobs. OnDelta receives streamed text
+// fragments (content and reasoning) as they are generated; nil means the
+// caller only wants the final result.
+type ChatOptions struct {
+	OnDelta func(kind contracts.DeltaKind, text string)
+}
+
 // SessionInfo is a registered session, for listing.
 type SessionInfo struct {
 	Id uuid.UUID
@@ -103,14 +110,14 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context) (*InfaiAgentSessio
 }
 
 // Chat runs one prompt against an existing session and returns the outcome.
-func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string) (*ChatResult, error) {
+func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string, opts ChatOptions) (*ChatResult, error) {
 	e.mu.Lock()
 	sess, ok := e.sessions[id]
 	e.mu.Unlock()
 	if !ok {
 		return nil, ErrSessionNotFound
 	}
-	return sess.Chat(ctx, prompt)
+	return sess.Chat(ctx, prompt, opts)
 }
 
 // CloseSession removes and closes a session. An in-flight Chat finishes or is

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/engine"
 	"github.com/google/uuid"
 )
@@ -87,13 +89,53 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.engine.Chat(r.Context(), id, req.Prompt)
+	stream := r.URL.Query().Get("stream") == "true" || strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+
+	opts := engine.ChatOptions{}
+	if stream {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			writeError(w, http.StatusBadRequest, errors.New("streaming not supported"))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+		opts.OnDelta = func(kind contracts.DeltaKind, text string) {
+			k := "content"
+			if kind == contracts.DeltaReasoning {
+				k = "reasoning"
+			}
+			writeSSE(w, map[string]any{"kind": k, "delta": text})
+			flusher.Flush()
+		}
+	}
+
+	res, err := s.engine.Chat(r.Context(), id, req.Prompt, opts)
 	if errors.Is(err, engine.ErrSessionNotFound) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
 	if err != nil {
+		if stream {
+			writeSSE(w, map[string]any{"error": err.Error()})
+			flush(w)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	if stream {
+		writeSSE(w, map[string]any{
+			"done":              true,
+			"session_id":        res.SessionID,
+			"status":            res.Status.String(),
+			"reply":             res.Reply,
+			"reasoning_content": res.ReasoningContent,
+		})
+		flush(w)
 		return
 	}
 
@@ -139,4 +181,19 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeError(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, map[string]any{"error": err.Error()})
+}
+
+// writeSSE emits one Server-Sent Event carrying a JSON payload.
+func writeSSE(w http.ResponseWriter, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "data: %s\n\n", b)
+}
+
+func flush(w http.ResponseWriter) {
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }

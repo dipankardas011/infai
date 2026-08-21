@@ -73,7 +73,7 @@ func (s *InfaiAgentSession) ID() uuid.UUID {
 // Chat runs the base agent loop for one user prompt against the session's
 // persistent history and returns the outcome. The session stays registered
 // and idle after the call; the next Chat reuses the same conversation.
-func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string) (*ChatResult, error) {
+func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOptions) (*ChatResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -94,6 +94,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string) (*ChatResul
 	if a == nil {
 		return nil, errors.New("session: base agent missing")
 	}
+	a.SetDeltaHook(opts.OnDelta)
 
 	result, err := a.Invoke(ctx, s.history)
 	if err != nil {

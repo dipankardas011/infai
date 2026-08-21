@@ -38,6 +38,22 @@ type GenerateOptions struct {
 	Temperature          float64
 	ThinkingBudgetTokens int
 	ReasoningEffort      string
+
+	// Stream asks the adapter to stream output as it is generated. Deltas
+	// (typed by DeltaKind, in stream order) are delivered to OnDelta; the
+	// full message is still returned as usual.
+	Stream  bool
+	OnDelta func(kind DeltaKind, text string)
 }
+
+// DeltaKind distinguishes the text fragments a stream delivers.
+type DeltaKind int
+
+const (
+	// DeltaContent is the model's visible answer text.
+	DeltaContent DeltaKind = iota
+	// DeltaReasoning is the model's reasoning text (shown separately).
+	DeltaReasoning
+)
 
 // ChatCompletion()

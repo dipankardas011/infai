@@ -23,16 +23,18 @@ var ErrNoModel = errors.New("agent: no model adapter set")
 type Agent struct {
 	Id uuid.UUID
 
-	model    contracts.InfaiModelAdaptor
-	chatCtx  contracts.SessionMemory
-	turnHook func(contracts.ChatMessage)
-	Status   AgentStatus
-	MaxTurns int
+	model     contracts.InfaiModelAdaptor
+	chatCtx   contracts.SessionMemory
+	turnHook  func(contracts.ChatMessage)
+	deltaHook func(contracts.DeltaKind, string)
+	Status    AgentStatus
+	MaxTurns  int
 }
 
 type agentOption struct {
-	maxTurns int
-	turnHook func(contracts.ChatMessage)
+	maxTurns  int
+	turnHook  func(contracts.ChatMessage)
+	deltaHook func(contracts.DeltaKind, string)
 }
 
 type AgentOptions func(*agentOption) error
@@ -54,6 +56,13 @@ func WithTurnHook(hook func(contracts.ChatMessage)) AgentOptions {
 	}
 }
 
+func WithDeltaHook(hook func(contracts.DeltaKind, string)) AgentOptions {
+	return func(o *agentOption) error {
+		o.deltaHook = hook
+		return nil
+	}
+}
+
 // NewAgent creates an agent with an independent short-term context (the
 // message history built up by Invoke).
 func NewAgent(id uuid.UUID, opts ...AgentOptions) (*Agent, error) {
@@ -67,17 +76,24 @@ func NewAgent(id uuid.UUID, opts ...AgentOptions) (*Agent, error) {
 	}
 
 	return &Agent{
-		Id:       id,
-		model:    nil,
-		chatCtx:  nil,
-		turnHook: o.turnHook,
-		Status:   Idle,
-		MaxTurns: o.maxTurns,
+		Id:        id,
+		model:     nil,
+		chatCtx:   nil,
+		turnHook:  o.turnHook,
+		deltaHook: o.deltaHook,
+		Status:    Idle,
+		MaxTurns:  o.maxTurns,
 	}, nil
 }
 
 func (a *Agent) SetModel(model contracts.InfaiModelAdaptor) {
 	a.model = model
+}
+
+// SetDeltaHook wires a per-call streaming hook (set by the session before
+// each Invoke). Safe to call with nil.
+func (a *Agent) SetDeltaHook(hook func(contracts.DeltaKind, string)) {
+	a.deltaHook = hook
 }
 
 // Invoke runs the turn loop over the given conversation history, appending
@@ -104,7 +120,14 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 			return TurnResult{Status: TurnCanceled, Messages: messages}, nil
 		}
 
-		reply, u, err := a.model.Generate(ctx, messages, nil)
+		// Streaming is always on: deltas flow to the delta hook (the adapter
+		// still returns the full message).
+		goOpts := contracts.GenerateOptions{Stream: true}
+		if a.deltaHook != nil {
+			goOpts.OnDelta = a.deltaHook
+		}
+
+		reply, u, err := a.model.Generate(ctx, messages, &goOpts)
 		usage.Add(u)
 		if err != nil {
 			if ctx.Err() != nil {

@@ -5,15 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/google/uuid"
 )
 
 // RemoteClient attaches the TUI to a running <binary> server. The first Chat
 // creates a session; subsequent Chats reuse it, so the conversation persists
-// server-side and survives the client.
+// server-side and survives the client. It always streams via SSE.
 type RemoteClient struct {
 	baseURL   string
 	client    *http.Client
@@ -28,7 +31,7 @@ func NewRemoteClient(baseURL string) *RemoteClient {
 	}
 }
 
-func (c *RemoteClient) Chat(ctx context.Context, prompt string) (*ChatReply, error) {
+func (c *RemoteClient) Chat(ctx context.Context, prompt string, onDelta func(kind contracts.DeltaKind, text string)) (*ChatReply, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -51,6 +54,8 @@ func (c *RemoteClient) Chat(ctx context.Context, prompt string) (*ChatReply, err
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.URL.RawQuery = "stream=true"
+	req.Header.Set("Accept", "text/event-stream")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -58,25 +63,61 @@ func (c *RemoteClient) Chat(ctx context.Context, prompt string) (*ChatReply, err
 	}
 	defer resp.Body.Close()
 
-	var res struct {
-		SessionID        uuid.UUID `json:"session_id"`
-		Status           string    `json:"status"`
-		Reply            string    `json:"reply"`
-		ReasoningContent string    `json:"reasoning_content"`
-		Error            string    `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		if res.Error != "" {
-			return nil, fmt.Errorf("server: %s", res.Error)
+	return c.readStream(resp.Body, onDelta)
+}
+
+// readStream consumes the SSE chat stream, delivering deltas to onDelta and
+// returning the final reply.
+func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.DeltaKind, text string)) (*ChatReply, error) {
+	dec := models.NewDecoder(body)
+
+	var reply ChatReply
+	for {
+		ev, err := dec.Decode()
+		if err == io.EOF {
+			break
 		}
-		return nil, fmt.Errorf("chat failed (HTTP %d)", resp.StatusCode)
+		if err != nil {
+			return nil, err
+		}
+
+		var sseEv struct {
+			Kind             string `json:"kind"`
+			Delta            string `json:"delta"`
+			Done             bool   `json:"done"`
+			Reply            string `json:"reply"`
+			ReasoningContent string `json:"reasoning_content"`
+			Error            string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(ev.Data), &sseEv); err != nil {
+			return nil, err
+		}
+		if sseEv.Error != "" {
+			return nil, fmt.Errorf("server: %s", sseEv.Error)
+		}
+		if sseEv.Delta != "" {
+			kind := contracts.DeltaContent
+			if sseEv.Kind == "reasoning" {
+				kind = contracts.DeltaReasoning
+			}
+			if kind == contracts.DeltaContent {
+				reply.Reply += sseEv.Delta
+			} else {
+				reply.ReasoningContent += sseEv.Delta
+			}
+			if onDelta != nil {
+				onDelta(kind, sseEv.Delta)
+			}
+		}
+		if sseEv.Done {
+			reply.Reply = sseEv.Reply
+			reply.ReasoningContent = sseEv.ReasoningContent
+		}
 	}
 
-	return &ChatReply{Reply: res.Reply, ReasoningContent: res.ReasoningContent}, nil
+	return &reply, nil
 }
+
 func (c *RemoteClient) createSession(ctx context.Context) (uuid.UUID, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/sessions", nil)
 	if err != nil {
