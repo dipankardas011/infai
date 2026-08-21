@@ -1,0 +1,188 @@
+# infai Agent Engine — Design Decisions & Next Steps
+
+Status: active (primitive loop working; tool/subagent layer is next)
+Scope: `pkg/agent/*`
+
+This document records the decisions we reached together and the next build steps.
+It is a living doc — update it as decisions change.
+
+---
+
+## 1. Mission
+
+A primitive agentic engine for infai. The model is a *pure text-in/text-out*
+component with **zero capabilities**. Every interaction with the outside world
+is granted by the harness and travels through a named, policy-checked code path.
+
+## 2. Core architecture decisions
+
+### D1. Server = execution host; TUI = pure client. No single-run mode.
+The `<binary> server` process is the only thing that executes tools, spawns
+subagents, and talks to the model. The TUI (`<binary>`) is a client that
+attaches over HTTP/SSE. There is deliberately **no** "run everything in the
+client process" mode — the server is the chokepoint for policy and isolation.
+
+### D2. The harness grants capability; the model never asks for it.
+Tools are **code paths, not command strings**. The model cannot execute a shell
+command unless a tool accepts one. Tool design is the primary defense: a tool
+like `search_files(pattern, dir)` performs its own path validation; nothing
+accepts arbitrary `bash -c`.
+
+### D3. Streaming is always on (server → model) and always on (TUI).
+- The adapter always consumes the model via SSE (`Stream: true`), accumulating
+  the full message even when nobody listens to deltas. One code path.
+- The TUI always streams from the server (`?stream=true`, `Accept:
+  text/event-stream`). No JSON fallback, no toggle — the earlier dual nature was
+  removed (`pkg/agent/tui/remote.go`).
+
+### D4. `contracts.ChatMessage` is the single source of truth and the wire format.
+- Preserve `reasoning_content` on the wire (DeepSeek requires it for tool turns;
+  vLLM degrades without it).
+- Never send a `thinking` message field (not in the OpenAI message schema).
+
+### D5. Sessions are passive state in a registry.
+Sessions live server-side and survive client disconnects. No per-session
+goroutines are held; close via ctx cancel + registry removal.
+
+## 3. Tool & permission layer (next milestone)
+
+### D6. ToolEngine is a central place (like `engine`).
+Given a session + a requested `ToolCall`, it grants access to that specific tool
+against the session's policy, executes it, and returns a result.
+
+### D7. AccessControl is middleware over every tool call.
+A **pure function** `authorize(ctx, sessionPolicy, toolCall) → decision`
+(allow / deny / ask), wrapped as middleware in the tool path. Pattern borrowed
+from Authzed, but **not** the system — no SpiceDB/Zanzibar, no policy DSL. A
+policy is a Go struct / JSON table. It must be I/O-free and unit-testable.
+
+### D8. The workspace is an explicit capability, not process cwd.
+claude-code/opencode get isolation "for free" because the process is born in the
+cwd. A long-lived multi-session server cannot rely on its own cwd, so:
+- Session creation declares a `workspace` root (TUI passes cwd — same UX).
+- All file paths are resolved with `Abs` + `EvalSymlinks`, then prefix-checked
+  against the workspace root (symlink escapes are the #1 footgun).
+- The workspace is **fixed at session creation**. New project = new session.
+- `fs` capability = workspace (rw) + profile-declared extra roots (ro),
+  e.g. `~/.gitconfig`, `~/.npmrc`. Extra roots are human-declared, never
+  model-chosen.
+- **Deny semantics**: a workspace escape is a hard deny, reported back to the
+  model as a tool result ("denied: path outside workspace /x") so the model
+  self-corrects (nemoclaw's "try allowed, report failure mode"). Only `ask`
+  ops go to a human.
+
+### D9. Bash is a special tool: ask-by-default.
+Bash always risks escaping an allowlist (the `grep`/`find` → `bash -c` class of
+escape). Policy = per-session allowlist of **full argv** (an allowed `git` does
+not allow `git push`), plus an `*` fallback meaning **always ask the human**.
+Everything else is a direct code-path tool.
+
+### D10. Scratchpad: runtime-only working memory per agent.
+Not persisted. Carries tool-call coordination across one turn: write-before-read
+tracking, consecutive-error counts, retry budgets.
+
+### D11. Validate hooks → completion gate → agent profile.
+When the agent says "done", the harness runs the session's validation
+(`go build && go vet`, `pnpm run dev`, …) and feeds the result back so the
+agent iterates or gives up. policy + allowed tools + validate + system prompt +
+pinned model = a **versioned agent profile**.
+
+## 4. Subagent rules
+
+- **Ceiling, then subset**: a subagent inherits the parent's policy as its
+  *maximum*; `spawn_subagent(task, scope)` narrows it further. Blanket-allow
+  inside a subagent is forbidden — it would be the model's way around the
+  parent's permission checks.
+- **Single-turn loop**: the subagent runs a bounded loop and returns a result.
+  No continuous conversation.
+- **Evaluation criterion, agreed up front**: every spawn carries an explicit
+  completion criterion, checked **twice** — the child self-checks before
+  returning, the parent re-checks on return. No criterion, no spawn.
+- **No HITL inside the subagent**: the child cannot reach a human. HITL lives at
+  the parent/session level. On failure it returns a trace; the parent relays it.
+
+```
+SubagentResult {
+  Status:          Done | Blocked | Denied | Timeout
+  CriterionResult: pass/fail
+  Summary:         "what it did"
+  Steps:           []action+result   // what & where
+  StopReason:      "human denial" | "policy block" | "timeout" | "deadlock"
+}
+```
+
+## 5. Fire-and-forget concurrent tool calls
+
+The model's turn ends when it emits `[tool_1, tool_2, tool_3]` in one response.
+The harness fans them out and waits — the model does not wait for them.
+
+- Each call runs under its own `context.WithTimeout(ctx, toolTimeout)`.
+- A `WaitGroup`/collector waits for **all**, then results are appended **keyed
+  by `tool_call_id` in the request order** (never goroutine-completion order).
+- Result envelope:
+
+```
+ToolCallResult { CallID, Status: success|error|timeout|canceled, Output, Error }
+```
+
+- A timeout kills *that* call, not the batch. The model sees the timeout result
+  and decides (retry / adjust / give up).
+- **The timeout clock starts AFTER approval.** Approval (`ask`) is untimed (a
+  human takes as long as they take); the timer starts on actual execution.
+- Default harness timeout: **5m**, overridable per call (caller's ctx feeds it).
+- Parent cancellation tears down the whole fan-out via `ctx`.
+
+## 6. Security model (layers)
+
+1. Tool design — code paths, no command strings. (primary)
+2. AccessControl — allow/deny/ask middleware per call. (enforcement)
+3. Workspace — canonicalized paths bound to the session root. (scope)
+4. Process hygiene — server runs as an unprivileged user; exec under process
+   groups + `prlimit` (CPU/mem/nofile). (containment)
+5. Network/egress — policy + human approval on unapproved egress.
+6. syscall filtering (seccomp) — hygiene layer only; it does **not** stop
+   `bash -c`. It can only block whole classes (`mount`, `ptrace`, userns
+   creation). Enforced by the process on its own children via
+   `prctl(PR_SET_SECCOMP)`; **no root required**.
+7. Sandbox backstop (deferred) — `bwrap` (unprivileged user namespaces) via
+   `--bind $WORKSPACE /sandbox` turns the path rule into kernel-enforced mounts.
+   Also no root required; deferred until the tool set stabilizes.
+
+## 7. Deferred (on purpose)
+
+- **git worktree for multi-session contention** — we *will* borrow this: when a
+  workspace has `.git`, give each session its own worktree
+  (`$XDG_DATA_HOME/infai/worktrees/<repo-id>/<session-id>`) so sessions build
+  and edit the same repo in parallel with zero contention, each on its own
+  branch. Worktree is *concurrency/branch* isolation, **not** security.
+  - Non-git projects fall back to the plain workspace.
+  - Later: a warning when another session is already running on the same folder.
+- **WASM workbench** — right for pure-compute plugin tools, wrong for real
+  binaries (git, npm, test runners) whose credential helpers break under WASI.
+- **Workspace lock / serialization** — only needed for non-git workspaces.
+- Concurrency amplifies shared-workspace races; worktree is the fix.
+
+## 8. Next steps (build order)
+
+1. `Tool` contract + registry — `Tool`, `ToolCall`, `ToolResult`, `ToolRegistry`
+   (each tool declares its capability + schema). Pure types next to `contracts`.
+2. AccessControl — policy model (allow/deny/ask per capability + path/host
+   constraints) + `authorize()` pure function + middleware.
+3. ToolEngine — executes an *authorized* call: runs the tool impl under
+   ctx/timeout, returns `ToolResult`, records to scratchpad.
+4. Scratchpad — in-memory per-session helper.
+5. **Loop integration (the big one)** — `Invoke` grows a tool step: model
+   proposes `ToolCall` → AccessControl → fan-out concurrent execution
+   (section 5) → append results → loop until no calls. Includes the
+   `ToolCallResult` timeout envelope.
+6. Bash tool — ask-by-default + session allowlist.
+7. Validate gate — run checks on "done", feed results back, iterate.
+8. Profile manifest — policy + tools + validate + system prompt + model,
+   versioned.
+9. Subagent spawn — single-turn child loop, `Done`/`Blocked` result, approval
+   routed via parent.
+10. HITL plumbing — wire `TurnPendingApproval` → session → TUI approve/deny →
+    resume.
+
+Prototype slices 1–5 as a vertical slice first: one code-path tool
+(`read_file`), one `ask` policy, prove the loop, then layer the rest.
