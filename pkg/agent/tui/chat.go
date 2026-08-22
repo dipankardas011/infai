@@ -189,7 +189,11 @@ func runChatTUI(ctx context.Context, c Client, sessions []store.SessionMeta, opt
 				return nil
 			case cmdKey:
 				t.input += string(ev.key)
-				t.redraw()
+				if t.input == "/" {
+					t.showCommandPopup()
+				} else {
+					t.redraw()
+				}
 			case cmdBackspace:
 				if r, n := utf8.DecodeLastRuneInString(t.input); n > 0 {
 					t.input = t.input[:len(t.input)-n]
@@ -362,6 +366,28 @@ func (t *chatTUI) showApproval(reply *ChatReply) {
 	}, func() {
 		t.blocks = append(t.blocks, block{role: "system", text: "denied · " + reply.Pending.Message})
 	})
+}
+
+// showCommandPopup presents the slash commands as an autocomplete palette.
+// Choosing a command inserts it into the input; the user still presses Enter
+// to execute it, keeping the palette from unexpectedly running commands.
+func (t *chatTUI) showCommandPopup() {
+	commands := []struct {
+		name string
+		help string
+	}{
+		{"/model", "switch the active model"},
+		{"/help", "show keyboard shortcuts"},
+		{"/quit", "leave the harness"},
+		{"/exit", "leave the harness"},
+	}
+	opts := make([]popupOption, 0, len(commands))
+	for _, command := range commands {
+		opts = append(opts, popupOption{label: command.name + "  " + command.help})
+	}
+	t.showPopup("commands", []string{"choose a command"}, opts, func(idx int) {
+		t.input = commands[idx].name
+	}, func() {})
 }
 
 // ---- launch ----
