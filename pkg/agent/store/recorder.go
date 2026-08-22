@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"time"
 )
 
 // ErrNotFound is returned when a requested session transcript does not exist.
@@ -126,9 +125,4 @@ func (r *Recorder) Close() error {
 		return fmt.Errorf("store: close session: %w", closeErr)
 	}
 	return nil
-}
-
-// NowISO returns a sortable RFC3339 timestamp.
-func NowISO() string {
-	return time.Now().UTC().Format(time.RFC3339Nano)
 }

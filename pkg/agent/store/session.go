@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/google/uuid"
@@ -24,8 +25,8 @@ type SessionMeta struct {
 	Model         string    `json:"model"`
 	Cwd           string    `json:"cwd,omitempty"`
 	ContextWindow int       `json:"context_window"`
-	CreatedAt     string    `json:"created_at"`
-	UpdatedAt     string    `json:"updated_at"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 	TurnCount     int       `json:"turn_count"`
 }
 
@@ -70,7 +71,7 @@ type CompactionRecord struct {
 // transcript.
 type Record struct {
 	Kind       RecordKind             `json:"kind"`
-	Ts         string                 `json:"ts"`
+	Timestamp  time.Time              `json:"ts"`
 	Meta       *SessionMeta           `json:"meta,omitempty"`
 	Message    *contracts.ChatMessage `json:"message,omitempty"`
 	DeltaKind  string                 `json:"delta_kind,omitempty"`
@@ -128,7 +129,7 @@ func (s *SessionStore) List() ([]SessionMeta, error) {
 		metas = append(metas, meta)
 	}
 	sort.Slice(metas, func(i, j int) bool {
-		return metas[i].UpdatedAt > metas[j].UpdatedAt
+		return metas[i].UpdatedAt.After(metas[j].UpdatedAt)
 	})
 	return metas, nil
 }
@@ -233,9 +234,9 @@ func (s *SessionStore) OpenRecorder(meta SessionMeta) (*Recorder, error) {
 		return nil, err
 	}
 	if err := r.appendLocked(Record{
-		Kind: KindMeta,
-		Ts:   meta.UpdatedAt,
-		Meta: &meta,
+		Kind:      KindMeta,
+		Timestamp: meta.UpdatedAt,
+		Meta:      &meta,
 	}); err != nil {
 		r.Close()
 		return nil, err
@@ -277,13 +278,13 @@ func (s *SessionStore) Append(sessId uuid.UUID, messages ...contracts.ChatMessag
 	defer r.Close()
 
 	for _, m := range messages {
-		if err := r.appendLocked(Record{Kind: KindMessage, Ts: NowISO(), Message: &m}); err != nil {
+		if err := r.appendLocked(Record{Kind: KindMessage, Timestamp: time.Now().UTC(), Message: &m}); err != nil {
 			return err
 		}
 		for _, tc := range m.ToolCalls {
 			if err := r.appendLocked(Record{
-				Kind: KindToolCall,
-				Ts:   NowISO(),
+				Kind:      KindToolCall,
+				Timestamp: time.Now().UTC(),
 				ToolCall: &ToolCallRecord{
 					ID:        tc.ID,
 					Type:      tc.Type,
@@ -296,8 +297,8 @@ func (s *SessionStore) Append(sessId uuid.UUID, messages ...contracts.ChatMessag
 		}
 		if m.Role == "tool" {
 			if err := r.appendLocked(Record{
-				Kind: KindToolResult,
-				Ts:   NowISO(),
+				Kind:      KindToolResult,
+				Timestamp: time.Now().UTC(),
 				ToolResult: &ToolResultRecord{
 					CallID: m.ToolCallID,
 					Status: "success",

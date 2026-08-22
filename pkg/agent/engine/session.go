@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/agent"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -69,7 +70,7 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 		o.sessionID = v
 	}
 
-	now := store.NowISO()
+	now := time.Now().UTC()
 	o.meta = store.SessionMeta{
 		ID:            o.sessionID,
 		Provider:      p.Name,
@@ -169,8 +170,8 @@ func (s *InfaiAgentSession) setModelLocked(p *store.Provider, name string, ctxWi
 	s.meta.Provider = p.Name
 	s.meta.Model = name
 	s.meta.ContextWindow = ctxWindow
-	s.meta.UpdatedAt = store.NowISO()
-	if err := s.rec.Record(store.Record{Kind: store.KindMeta, Ts: s.meta.UpdatedAt, Meta: &s.meta}); err != nil {
+	s.meta.UpdatedAt = time.Now().UTC()
+	if err := s.rec.Record(store.Record{Kind: store.KindMeta, Timestamp: s.meta.UpdatedAt, Meta: &s.meta}); err != nil {
 		s.l.Error("persist session meta", "session_id", s.sessionID, "error", err)
 	}
 	if err := s.rec.Sync(); err != nil {
@@ -197,7 +198,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		}
 		sysMsg := contracts.NewSystemMessage(sysPrompt)
 		s.history = append(s.history, sysMsg)
-		if err := s.rec.Record(store.Record{Kind: store.KindMessage, Ts: store.NowISO(), Message: &sysMsg}); err != nil {
+		if err := s.rec.Record(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &sysMsg}); err != nil {
 			s.l.Error("persist system prompt", "session_id", s.sessionID, "error", err)
 		}
 	}
@@ -207,7 +208,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 	// lose what was typed. The reply is synced at turn end; an interrupted
 	// reply is the only thing a crash can take.
 	msg := s.history[len(s.history)-1]
-	if err := s.rec.Record(store.Record{Kind: store.KindMessage, Ts: store.NowISO(), Message: &msg}); err != nil {
+	if err := s.rec.Record(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &msg}); err != nil {
 		s.l.Error("persist user message", "session_id", s.sessionID, "error", err)
 	}
 	if err := s.rec.Sync(); err != nil {
@@ -224,7 +225,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		if kind == contracts.DeltaReasoning {
 			k = "reasoning"
 		}
-		s.rec.Record(store.Record{Kind: store.KindDelta, Ts: store.NowISO(), DeltaKind: k, Text: text})
+		s.rec.Record(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: k, Text: text})
 	})
 
 	result, err := a.Invoke(ctx, s.history)
@@ -235,8 +236,8 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 
 	s.persistMessagesLocked()
 	s.meta.TurnCount++
-	s.meta.UpdatedAt = store.NowISO()
-	if err := s.rec.Record(store.Record{Kind: store.KindMeta, Ts: s.meta.UpdatedAt, Meta: &s.meta}); err != nil {
+	s.meta.UpdatedAt = time.Now().UTC()
+	if err := s.rec.Record(store.Record{Kind: store.KindMeta, Timestamp: s.meta.UpdatedAt, Meta: &s.meta}); err != nil {
 		s.l.Error("persist session meta", "session_id", s.sessionID, "error", err)
 	}
 	// One fsync per finished turn: by the time Chat returns, this turn is
@@ -262,13 +263,13 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 func (s *InfaiAgentSession) persistMessagesLocked() {
 	for i := s.persisted; i < len(s.history); i++ {
 		m := s.history[i]
-		if err := s.rec.Record(store.Record{Kind: store.KindMessage, Ts: store.NowISO(), Message: &m}); err != nil {
+		if err := s.rec.Record(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &m}); err != nil {
 			s.l.Error("persist message", "session_id", s.sessionID, "error", err)
 		}
 		for _, tc := range m.ToolCalls {
 			if err := s.rec.Record(store.Record{
-				Kind: store.KindToolCall,
-				Ts:   store.NowISO(),
+				Kind:      store.KindToolCall,
+				Timestamp: time.Now().UTC(),
 				ToolCall: &store.ToolCallRecord{
 					ID:        tc.ID,
 					Type:      tc.Type,
@@ -281,8 +282,8 @@ func (s *InfaiAgentSession) persistMessagesLocked() {
 		}
 		if m.Role == "tool" {
 			if err := s.rec.Record(store.Record{
-				Kind: store.KindToolResult,
-				Ts:   store.NowISO(),
+				Kind:      store.KindToolResult,
+				Timestamp: time.Now().UTC(),
 				ToolResult: &store.ToolResultRecord{
 					CallID: m.ToolCallID,
 					Status: "success",

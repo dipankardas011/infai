@@ -496,13 +496,8 @@ func pickSession(ctx context.Context, c Client, out io.Writer, scan *bufio.Scann
 	return sessions[idx-1].ID, nil
 }
 
-// humanTime renders an RFC3339 timestamp in a short local format ("Jan 02
-// 15:04"), falling back to the raw value when it cannot be parsed.
-func humanTime(ts string) string {
-	t, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		return ts
-	}
+// humanTime renders a timestamp in a short local format ("Jan 02 15:04").
+func humanTime(t time.Time) string {
 	return t.Local().Format("Jan 02 15:04")
 }
 

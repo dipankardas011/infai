@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestTimelineAppendLookupPathAndRotation(t *testing.T) {
@@ -22,6 +24,9 @@ func TestTimelineAppendLookupPathAndRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if first.ID == uuid.Nil || first.ID.Version() != 7 {
+		t.Fatalf("event id=%s version=%s", first.ID, first.ID.Version())
+	}
 	second, err := timeline.AppendToHead(Record{Kind: KindMessage, Text: "assistant"})
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +38,7 @@ func TestTimelineAppendLookupPathAndRotation(t *testing.T) {
 	if err != nil || got.Record == nil || first.Record == nil || got.Record.Text != first.Record.Text {
 		t.Fatalf("lookup: event=%+v err=%v", got, err)
 	}
-	path, err := timeline.LoadFullAncestry(0)
+	path, err := timeline.LoadFullAncestry(ROOT_EVENT_ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +90,16 @@ func TestTimelineLargePayloadUsesSHA256Blob(t *testing.T) {
 	if err := timeline.Close(); err != nil {
 		t.Fatal(err)
 	}
+	reloaded, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reloaded.Close()
+
+	got, err = reloaded.LoadEvent(event.ID)
+	if err != nil || got.Record == nil || got.Record.Text != record.Text {
+		t.Fatalf("reloaded blob event=%+v err=%v", got, err)
+	}
 }
 
 func TestTimelineReloadsIndexAndHead(t *testing.T) {
@@ -135,11 +150,11 @@ func TestTimelineActivePathStopsAtCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	full, err := timeline.LoadFullAncestry(0)
+	full, err := timeline.LoadFullAncestry(ROOT_EVENT_ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, err := timeline.LoadActiveAncestry(0)
+	active, err := timeline.LoadActiveAncestry(ROOT_EVENT_ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +196,7 @@ func TestTimelineBranchSelectionDoesNotMoveHeadUntilAppend(t *testing.T) {
 	if timeline.CurrentHeadEventID() != oldReply.ID {
 		t.Fatalf("branch selection moved head: got=%d want=%d", timeline.CurrentHeadEventID(), oldReply.ID)
 	}
-	oldPath, err := timeline.LoadFullAncestry(0)
+	oldPath, err := timeline.LoadFullAncestry(ROOT_EVENT_ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +211,7 @@ func TestTimelineBranchSelectionDoesNotMoveHeadUntilAppend(t *testing.T) {
 	if branched.ParentID != root.ID || timeline.CurrentHeadEventID() != branched.ID {
 		t.Fatalf("branch head=%d parent=%d", timeline.CurrentHeadEventID(), branched.ParentID)
 	}
-	newPath, err := timeline.LoadFullAncestry(0)
+	newPath, err := timeline.LoadFullAncestry(ROOT_EVENT_ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +229,7 @@ func TestTimelineBranchSelectionDoesNotMoveHeadUntilAppend(t *testing.T) {
 	if timeline.CurrentHeadEventID() != branched.ID {
 		t.Fatalf("reloaded head=%d want=%d", timeline.CurrentHeadEventID(), branched.ID)
 	}
-	reloadedPath, err := timeline.LoadFullAncestry(0)
+	reloadedPath, err := timeline.LoadFullAncestry(ROOT_EVENT_ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,5 +242,77 @@ func TestTimelineBranchSelectionDoesNotMoveHeadUntilAppend(t *testing.T) {
 	}
 	if len(oldPath) != 2 || oldPath[1].ID != oldReply.ID {
 		t.Fatalf("original path was changed: %+v", oldPath)
+	}
+}
+
+func TestTimelineRebuildsMissingIndexEntriesFromChunks(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "timeline")
+	timeline, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := timeline.AppendToHead(Record{Kind: KindMessage, Text: "recover me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := timeline.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "index.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if recovered.CurrentHeadEventID() != event.ID {
+		t.Fatalf("recovered head=%d want=%d", recovered.CurrentHeadEventID(), event.ID)
+	}
+	got, err := recovered.LoadEvent(event.ID)
+	if err != nil || got.Record == nil || got.Record.Text != "recover me" {
+		t.Fatalf("recovered event=%+v err=%v", got, err)
+	}
+}
+
+func TestTimelineRejectsInvalidParentsAndLiveDeltas(t *testing.T) {
+	timeline, err := NewTimeline(filepath.Join(t.TempDir(), "timeline"), TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer timeline.Close()
+	if _, err := timeline.AppendFromParent(Record{Kind: KindMessage, Text: "orphan"}, uuid.New()); err == nil {
+		t.Fatal("invalid parent was accepted")
+	}
+	if _, err := timeline.AppendToHead(Record{Kind: KindDelta, Text: "live"}); err == nil {
+		t.Fatal("live delta was persisted")
+	}
+}
+
+func TestTimelineRejectsCorruptedBlob(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "timeline")
+	timeline, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("x"), blobBytesThreshold)
+	event, err := timeline.AppendToHead(Record{Kind: KindToolResult, Text: string(payload)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := timeline.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "blobs", event.BlobHash), []byte("corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reloaded.Close()
+	if _, err := reloaded.LoadEvent(event.ID); err == nil {
+		t.Fatal("corrupted blob was accepted")
 	}
 }
