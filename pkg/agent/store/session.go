@@ -29,13 +29,16 @@ type SessionMeta struct {
 	TurnCount     int       `json:"turn_count"`
 }
 
-// Record kinds written to a session transcript file.
+// RecordKind identifies the durable event type written to a session timeline.
+type RecordKind string
+
 const (
-	KindMeta       = "meta"
-	KindMessage    = "message"
-	KindDelta      = "delta"
-	KindToolCall   = "tool_call"
-	KindToolResult = "tool_result"
+	KindMeta       RecordKind = "meta"
+	KindMessage    RecordKind = "message"
+	KindDelta      RecordKind = "delta"
+	KindToolCall   RecordKind = "tool_call"
+	KindToolResult RecordKind = "tool_result"
+	KindCompaction RecordKind = "compaction"
 )
 
 // ToolCallRecord is what the model requested; ToolResultRecord is what it got
@@ -56,11 +59,17 @@ type ToolResultRecord struct {
 	Error  string `json:"error"`
 }
 
+// CompactionRecord marks a point where the active model context was replaced
+// by a continuation summary. Earlier timeline events remain untouched.
+type CompactionRecord struct {
+	Summary string `json:"summary"`
+}
+
 // Record is one JSON line in a session transcript. Deltas are live-only (they
 // fan out to sinks but are never persisted); everything else is the durable
 // transcript.
 type Record struct {
-	Kind       string                 `json:"kind"`
+	Kind       RecordKind             `json:"kind"`
 	Ts         string                 `json:"ts"`
 	Meta       *SessionMeta           `json:"meta,omitempty"`
 	Message    *contracts.ChatMessage `json:"message,omitempty"`
@@ -68,6 +77,7 @@ type Record struct {
 	Text       string                 `json:"text,omitempty"`
 	ToolCall   *ToolCallRecord        `json:"tool_call,omitempty"`
 	ToolResult *ToolResultRecord      `json:"tool_result,omitempty"`
+	Compaction *CompactionRecord      `json:"compaction,omitempty"`
 }
 
 // SessionStore reads and writes session transcripts under harness/sessions,
