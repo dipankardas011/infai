@@ -41,6 +41,12 @@ func newRecorderAppend(path string) (*Recorder, error) {
 	return &Recorder{file: f, buf: bufio.NewWriter(f), sinks: make(map[int]Sink)}, nil
 }
 
+// NewLiveRecorder creates a sink fan-out without a legacy transcript file.
+// Timeline owns durable session history; this recorder is only for streaming.
+func NewLiveRecorder() *Recorder {
+	return &Recorder{sinks: make(map[int]Sink)}
+}
+
 // AddSink registers a live consumer and returns a function that removes it.
 func (r *Recorder) AddSink(fn func(Record) error) func() {
 	r.mu.Lock()
@@ -62,7 +68,7 @@ func (r *Recorder) Record(rec Record) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if rec.Kind != KindDelta {
+	if rec.Kind != KindDelta && r.file != nil {
 		if err := r.appendLocked(rec); err != nil {
 			return err
 		}

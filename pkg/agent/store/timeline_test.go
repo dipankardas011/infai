@@ -204,7 +204,7 @@ func TestTimelineBranchSelectionDoesNotMoveHeadUntilAppend(t *testing.T) {
 		t.Fatalf("old path changed before branch append: %+v", oldPath)
 	}
 
-	branched, err := timeline.AppendFromParent(Record{Kind: KindMessage, Text: "branched prompt"}, selectedParent)
+	branched, err := timeline.BranchFromEventID(Record{Kind: KindMessage, Text: "branched prompt"}, selectedParent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestTimelineRejectsInvalidParentsAndLiveDeltas(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer timeline.Close()
-	if _, err := timeline.AppendFromParent(Record{Kind: KindMessage, Text: "orphan"}, uuid.New()); err == nil {
+	if _, err := timeline.BranchFromEventID(Record{Kind: KindMessage, Text: "orphan"}, uuid.New()); err == nil {
 		t.Fatal("invalid parent was accepted")
 	}
 	if _, err := timeline.AppendToHead(Record{Kind: KindDelta, Text: "live"}); err == nil {

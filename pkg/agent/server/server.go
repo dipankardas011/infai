@@ -38,6 +38,8 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("POST /v1/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /v1/sessions", s.handleListSessions)
 	mux.HandleFunc("GET /v1/sessions/{id}", s.handleGetSession)
+	mux.HandleFunc("GET /v1/sessions/{id}/timeline", s.handleGetTimeline)
+	mux.HandleFunc("POST /v1/sessions/{id}/timeline/branch", s.handleBranchTimeline)
 	mux.HandleFunc("POST /v1/sessions/{id}/load", s.handleLoadSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/model", s.handleSetSessionModel)
 	mux.HandleFunc("POST /v1/sessions/{id}/chat", s.handleChat)
@@ -117,6 +119,46 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, SessionDetailResponse{Meta: meta, Records: records})
+}
+
+func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	meta, events, head, err := s.engine.GetTimeline(id)
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, err)
+		return
+	}
+	response := TimelineResponse{Meta: meta, Head: head, Events: make([]TimelineEventResponse, 0, len(events))}
+	for _, event := range events {
+		response.Events = append(response.Events, TimelineEventResponse{ID: event.ID, ParentID: event.ParentID, BranchFrom: event.BranchFrom, BlobHash: event.BlobHash, Record: event.Record})
+	}
+	s.writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleBranchTimeline(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	var req BranchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.EventID == uuid.Nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("event_id is required"))
+		return
+	}
+	if err := s.engine.SelectBranch(id, req.EventID); err != nil {
+		if errors.Is(err, engine.ErrSessionNotFound) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"event_id": req.EventID, "selected": true})
 }
 
 func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {

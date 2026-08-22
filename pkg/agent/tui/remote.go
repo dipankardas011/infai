@@ -214,6 +214,30 @@ func (c *RemoteClient) GetSession(ctx context.Context, id uuid.UUID) (*store.Ses
 	return &out.Meta, out.Records, nil
 }
 
+func (c *RemoteClient) GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions/"+id.String()+"/timeline", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+	var out TimelineView
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *RemoteClient) SelectBranch(ctx context.Context, id, eventID uuid.UUID) error {
+	return c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/timeline/branch", map[string]uuid.UUID{"event_id": eventID}, http.StatusOK, &struct{}{})
+}
+
 func (c *RemoteClient) DeleteSession(ctx context.Context, id uuid.UUID) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/sessions/"+id.String(), nil)
 	if err != nil {

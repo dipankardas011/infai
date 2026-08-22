@@ -377,6 +377,7 @@ func (t *chatTUI) showCommandPopup() {
 		help string
 	}{
 		{"/model", "switch the active model"},
+		{"/branch-timeline", "inspect and select a branch point"},
 		{"/help", "show keyboard shortcuts"},
 		{"/quit", "leave the harness"},
 		{"/exit", "leave the harness"},
@@ -426,7 +427,13 @@ func (t *chatTUI) beginLaunch(sessions []store.SessionMeta, opts RunOptions) {
 
 // resumeSession loads a saved session into the TUI and renders its history.
 func (t *chatTUI) resumeSession(id uuid.UUID) {
-	meta, records, err := t.client.GetSession(t.ctx, id)
+	meta, err := t.client.LoadSession(t.ctx, id)
+	if err != nil {
+		t.showPopup("could not load session", wrapLines(err.Error(), 56),
+			[]popupOption{{label: "OK", key: 'o'}}, func(int) {}, func() { t.quitNow = true })
+		return
+	}
+	_, records, err := t.client.GetSession(t.ctx, id)
 	if err != nil {
 		t.showPopup("could not load session", wrapLines(err.Error(), 56),
 			[]popupOption{{label: "OK", key: 'o'}}, func(int) {}, func() { t.quitNow = true })
@@ -498,6 +505,8 @@ func (t *chatTUI) runTUICommand(line string) {
 	switch line {
 	case "/model":
 		t.pickModelPopup(true, func() {}) // switch the active session's model
+	case "/branch-timeline":
+		t.showBranchTimeline()
 	case "/quit", "/exit":
 		t.quitNow = true
 	case "/help":
@@ -510,6 +519,106 @@ func (t *chatTUI) runTUICommand(line string) {
 		t.appendError(fmt.Errorf("unknown command %q — /help for options", line))
 	}
 	t.redraw()
+}
+
+func (t *chatTUI) showBranchTimeline() {
+	view, err := t.client.GetTimeline(t.ctx, t.session.ID)
+	if err != nil {
+		t.appendError(err)
+		t.redraw()
+		return
+	}
+	parents := make(map[uuid.UUID]uuid.UUID, len(view.Events))
+	byID := make(map[uuid.UUID]TimelineEvent, len(view.Events))
+	for _, event := range view.Events {
+		parents[event.ID] = event.ParentID
+		byID[event.ID] = event
+	}
+	var events []TimelineEvent
+	for _, event := range view.Events {
+		if event.Record == nil || event.Record.Kind != store.KindMeta {
+			events = append(events, event)
+		}
+	}
+	if len(events) == 0 {
+		t.appendError(fmt.Errorf("timeline is empty"))
+		t.redraw()
+		return
+	}
+	options := make([]popupOption, 0, len(events))
+	for _, event := range events {
+		depth := 0
+		cursor := event
+		for cursor.ParentID != uuid.Nil && depth < 32 {
+			if cursor.BranchFrom != nil {
+				depth++
+			}
+			cursor = byID[parents[cursor.ID]]
+		}
+		options = append(options, popupOption{
+			label: timelineTreePrefix(event, parents, byID) + timelineEventLabel(event),
+			style: timelineEventRole(event),
+		})
+	}
+	t.showPopup("branch timeline", []string{"select where the next prompt should branch"}, options, func(idx int) {
+		selected := events[idx]
+		if err := t.client.SelectBranch(t.ctx, t.session.ID, selected.ID); err != nil {
+			t.appendError(err)
+			return
+		}
+		t.blocks = append(t.blocks, block{role: "system", text: "branch selected at " + shortID(selected.ID)})
+	}, func() {})
+}
+
+func timelineTreePrefix(event TimelineEvent, parents map[uuid.UUID]uuid.UUID, byID map[uuid.UUID]TimelineEvent) string {
+	depth := 0
+	cursor := event
+	for cursor.ParentID != uuid.Nil && depth < 32 {
+		if cursor.BranchFrom != nil {
+			depth++
+		}
+		cursor = byID[parents[cursor.ID]]
+	}
+	if depth == 0 {
+		return ""
+	}
+	if event.BranchFrom != nil {
+		return strings.Repeat("│  ", depth-1) + "└─ "
+	}
+	return strings.Repeat("│  ", depth)
+}
+
+func timelineEventLabel(event TimelineEvent) string {
+	if event.Record == nil {
+		return "blob  content unavailable"
+	}
+	label := string(event.Record.Kind)
+	text := event.Record.Text
+	if event.Record.Message != nil {
+		label = event.Record.Message.Role
+		text = event.Record.Message.Text()
+	}
+	text = strings.ReplaceAll(text, "\n", " ")
+	if len(text) > 48 {
+		text = text[:48] + "..."
+	}
+	if text == "" {
+		text = string(event.Record.Kind)
+	}
+	return label + "  " + text
+}
+
+func timelineEventRole(event TimelineEvent) string {
+	if event.Record != nil && event.Record.Message != nil {
+		switch event.Record.Message.Role {
+		case "system", "user", "assistant":
+			return event.Record.Message.Role
+		}
+	}
+	if event.Record != nil && event.Record.Kind == store.KindCompaction {
+		return "system"
+	}
+	return ""
 }
 
 func (t *chatTUI) appendDelta(kind contracts.DeltaKind, text string) {

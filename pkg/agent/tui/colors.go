@@ -10,6 +10,6 @@ var (
 	cThinking  = color.New(color.FgHiBlack)          // model reasoning (dark grey)
 	cAssistant = color.New(color.FgGreen)            // model answers (● dot, green)
 	cHeader    = color.New(color.FgHiBlack)          // footer + separators
-	cSystem    = color.New(color.FgYellow)           // system/notices
+	cSystem    = color.New(color.FgMagenta)          // system/notices
 	cError     = color.New(color.FgRed)              // errors
 )

@@ -55,6 +55,22 @@ type Client interface {
 	ListSessions(ctx context.Context) ([]store.SessionMeta, error)
 	ListProviders(ctx context.Context) ([]store.Provider, error)
 	SetSessionModel(ctx context.Context, provider, model string) error
+	GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error)
+	SelectBranch(ctx context.Context, id, eventID uuid.UUID) error
+}
+
+type TimelineEvent struct {
+	ID         uuid.UUID     `json:"id"`
+	ParentID   uuid.UUID     `json:"parent_id"`
+	BranchFrom *uuid.UUID    `json:"branch_from,omitempty"`
+	BlobHash   string        `json:"blob_hash,omitempty"`
+	Record     *store.Record `json:"record,omitempty"`
+}
+
+type TimelineView struct {
+	Meta   store.SessionMeta `json:"meta"`
+	Head   uuid.UUID         `json:"head"`
+	Events []TimelineEvent   `json:"events"`
 }
 
 // RunOptions controls REPL startup.
@@ -332,6 +348,7 @@ func runCommand(ctx context.Context, c Client, out io.Writer, s *replState, line
   /session rm <uuid>             delete a saved session
   /new                           start a fresh session
   /ctx                           show context used vs total
+  /branch-timeline               inspect and select a branch point
   /pwd                           show the session working directory
   /quit, /exit                   leave
 
@@ -394,6 +411,9 @@ multi-line: end a line with \ to continue typing on the next line`)
 		fmt.Fprintf(out, "context used: %d / %d\n", s.used, s.session.ContextWindow)
 		return false, nil
 
+	case "/branch-timeline":
+		return false, runBranchTimeline(ctx, c, out, s, scan)
+
 	case "/pwd":
 		if s.session.ID == uuid.Nil {
 			return false, fmt.Errorf("no active session")
@@ -407,6 +427,42 @@ multi-line: end a line with \ to continue typing on the next line`)
 	default:
 		return false, fmt.Errorf("unknown command %q — /help for options", cmd)
 	}
+}
+
+func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replState, scan *bufio.Scanner) error {
+	if s.session.ID == uuid.Nil {
+		return fmt.Errorf("no active session")
+	}
+	view, err := c.GetTimeline(ctx, s.session.ID)
+	if err != nil {
+		return err
+	}
+	parents := make(map[uuid.UUID]uuid.UUID, len(view.Events))
+	byID := make(map[uuid.UUID]TimelineEvent, len(view.Events))
+	options := make([]TimelineEvent, 0, len(view.Events))
+	for _, event := range view.Events {
+		parents[event.ID] = event.ParentID
+		byID[event.ID] = event
+		if event.Record == nil || event.Record.Kind != store.KindMeta {
+			options = append(options, event)
+		}
+	}
+	for i, event := range options {
+		fmt.Fprintf(out, "  %d  %s%s\n", i, timelineTreePrefix(event, parents, byID), timelineEventLabel(event))
+	}
+	fmt.Fprint(out, "branch at> ")
+	if !scan.Scan() {
+		return scan.Err()
+	}
+	idx, err := strconv.Atoi(strings.TrimSpace(scan.Text()))
+	if err != nil || idx < 0 || idx >= len(options) {
+		return fmt.Errorf("invalid timeline selection")
+	}
+	if err := c.SelectBranch(ctx, s.session.ID, options[idx].ID); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "branch selected at %s\n", shortID(options[idx].ID))
+	return nil
 }
 
 // setModelFor switches the active session to the given provider/model. An
@@ -555,8 +611,8 @@ func runSessionCmd(ctx context.Context, c Client, out io.Writer, s *replState, a
 
 func shortID(id uuid.UUID) string {
 	s := id.String()
-	if len(s) > 8 {
-		return s[:8]
+	if len(s) > 12 {
+		return s[:4] + "-" + s[len(s)-8:]
 	}
 	return s
 }

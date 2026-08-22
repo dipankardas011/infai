@@ -32,10 +32,11 @@ const (
 var ROOT_EVENT_ID = uuid.Nil
 
 type Event struct {
-	ID       uuid.UUID
-	ParentID uuid.UUID
-	Record   *Record
-	BlobHash string
+	ID         uuid.UUID
+	ParentID   uuid.UUID
+	BranchFrom *uuid.UUID
+	Record     *Record
+	BlobHash   string
 }
 
 type EventLocation struct {
@@ -66,20 +67,22 @@ type Timeline struct {
 }
 
 type eventDisk struct {
-	ID       uuid.UUID `json:"id"`
-	ParentID uuid.UUID `json:"parent_id,omitempty"`
-	Record   *Record   `json:"record,omitempty"`
-	BlobHash string    `json:"blob_hash,omitempty"`
+	ID         uuid.UUID  `json:"id"`
+	ParentID   uuid.UUID  `json:"parent_id,omitempty"`
+	BranchFrom *uuid.UUID `json:"branch_from,omitempty"`
+	Record     *Record    `json:"record,omitempty"`
+	BlobHash   string     `json:"blob_hash,omitempty"`
 }
 
 type indexDisk struct {
-	Type      string         `json:"type"`
-	ID        uuid.UUID      `json:"id,omitempty"`
-	ParentID  uuid.UUID      `json:"parent_id,omitempty"`
-	Kind      RecordKind     `json:"kind,omitempty"`
-	Timestamp time.Time      `json:"timestamp"`
-	Loc       *EventLocation `json:"location,omitempty"`
-	Head      uuid.UUID      `json:"head,omitempty"`
+	Type       string         `json:"type"`
+	ID         uuid.UUID      `json:"id,omitempty"`
+	ParentID   uuid.UUID      `json:"parent_id,omitempty"`
+	BranchFrom *uuid.UUID     `json:"branch_from,omitempty"`
+	Kind       RecordKind     `json:"kind,omitempty"`
+	Timestamp  time.Time      `json:"timestamp"`
+	Loc        *EventLocation `json:"location,omitempty"`
+	Head       uuid.UUID      `json:"head,omitempty"`
 }
 
 func NewTimeline(root string, opts TimelineOptions) (*Timeline, error) {
@@ -116,19 +119,42 @@ func NewTimeline(root string, opts TimelineOptions) (*Timeline, error) {
 func (t *Timeline) AppendToHead(record Record) (Event, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.appendFromParentLocked(record, t.head)
+	return t.appendFromParentLocked(record, t.head, nil)
 }
 
-// AppendFromParent commits a new event from an explicit parent. This is the
+// BranchFromEventID commits a new event from an explicit parent. This is the
 // operation used after the user selects a branch point and submits a prompt.
 // RootEventID creates a root event; non-root IDs create a new committed branch.
-func (t *Timeline) AppendFromParent(record Record, parent uuid.UUID) (Event, error) {
+func (t *Timeline) BranchFromEventID(record Record, parent uuid.UUID) (Event, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.appendFromParentLocked(record, parent)
+	var branchFrom *uuid.UUID
+	if t.hasChildLocked(parent) {
+		branchFrom = &parent
+	}
+	return t.appendFromParentLocked(record, parent, branchFrom)
 }
 
-func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID) (Event, error) {
+// hasChildLocked if it has childreen of a event from whome we are going to branch from if yes
+// then we mark it as branch else we remember it as retrugning to main timeline.
+func (t *Timeline) hasChildLocked(parent uuid.UUID) bool {
+	for child, existingParent := range t.parents {
+		if existingParent == parent {
+			loc, ok := t.index[child]
+			if !ok {
+				continue
+			}
+			event, err := t.readAt(child, loc)
+			if err == nil && event.Record != nil && event.Record.Kind == KindMeta {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID, branchFrom *uuid.UUID) (Event, error) {
 	if t.broken != nil {
 		return Event{}, fmt.Errorf("timeline: writer requires reopen: %w", t.broken)
 	}
@@ -153,7 +179,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID) (Ev
 		return Event{}, fmt.Errorf("timeline: encode record: %w", err)
 	}
 
-	disk := eventDisk{ID: id, ParentID: parentID}
+	disk := eventDisk{ID: id, ParentID: parentID, BranchFrom: branchFrom}
 	if len(encodedRecord) >= blobBytesThreshold {
 		hash, err := t.writeBlob(encodedRecord)
 		if err != nil {
@@ -186,7 +212,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID) (Ev
 		return Event{}, fmt.Errorf("timeline: sync chunk: %w", err)
 	}
 	t.chunkOffset += int64(len(line))
-	if err := t.appendIndex(indexDisk{Type: "event", ID: id, ParentID: parentID, Kind: record.Kind, Timestamp: record.Timestamp, Loc: &loc}); err != nil {
+	if err := t.appendIndex(indexDisk{Type: "event", ID: id, ParentID: parentID, BranchFrom: branchFrom, Kind: record.Kind, Timestamp: record.Timestamp, Loc: &loc}); err != nil {
 		t.broken = err
 		return Event{}, err
 	}
@@ -197,7 +223,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID) (Ev
 	t.index[id] = loc
 	t.parents[id] = parentID
 	t.head = id
-	return Event{ID: id, ParentID: parentID, Record: &record, BlobHash: disk.BlobHash}, nil
+	return Event{ID: id, ParentID: parentID, BranchFrom: branchFrom, Record: &record, BlobHash: disk.BlobHash}, nil
 }
 
 func (t *Timeline) CurrentHeadEventID() uuid.UUID {
@@ -213,7 +239,18 @@ func (t *Timeline) LoadEvent(id uuid.UUID) (Event, error) {
 	if !ok {
 		return Event{}, fmt.Errorf("timeline: event %d not found", id)
 	}
-	return t.readAt(id, loc)
+	event, err := t.readAt(id, loc)
+	if err != nil {
+		return Event{}, err
+	}
+	if event.Record == nil {
+		record, err := t.resolveRecord(event)
+		if err != nil {
+			return Event{}, err
+		}
+		event.Record = &record
+	}
+	return event, nil
 }
 
 // Path returns the active ancestry in chronological order. The traversal is
@@ -246,6 +283,36 @@ func (t *Timeline) LoadFullAncestry(head uuid.UUID) ([]Event, error) {
 		reverse[i], reverse[j] = reverse[j], reverse[i]
 	}
 	return reverse, nil
+}
+
+// LoadAllEvents returns every event in physical append order without resolving
+// blob-backed records. It is intended for timeline inspection and branching.
+func (t *Timeline) LoadAllEvents() ([]Event, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	type located struct {
+		id  uuid.UUID
+		loc EventLocation
+	}
+	entries := make([]located, 0, len(t.index))
+	for id, loc := range t.index {
+		entries = append(entries, located{id: id, loc: loc})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].loc.Chunk != entries[j].loc.Chunk {
+			return entries[i].loc.Chunk < entries[j].loc.Chunk
+		}
+		return entries[i].loc.Offset < entries[j].loc.Offset
+	})
+	events := make([]Event, 0, len(entries))
+	for _, entry := range entries {
+		event, err := t.readAt(entry.id, entry.loc)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, nil
 }
 
 // LoadActiveAncestry returns only the selected ancestry needed for the active
@@ -397,7 +464,7 @@ func (t *Timeline) reconcileChunks() error {
 					kind = disk.Record.Kind
 					ts = disk.Record.Timestamp
 				}
-				missing = append(missing, indexDisk{Type: "event", ID: disk.ID, ParentID: disk.ParentID, Kind: kind, Timestamp: ts, Loc: &loc})
+				missing = append(missing, indexDisk{Type: "event", ID: disk.ID, ParentID: disk.ParentID, BranchFrom: disk.BranchFrom, Kind: kind, Timestamp: ts, Loc: &loc})
 				t.index[disk.ID] = loc
 				t.parents[disk.ID] = disk.ParentID
 			}
@@ -504,26 +571,44 @@ func (t *Timeline) readAt(id uuid.UUID, loc EventLocation) (Event, error) {
 	if disk.ID != id {
 		return Event{}, fmt.Errorf("timeline: index points to event %d, requested %d", disk.ID, id)
 	}
-	var record Record
-	if disk.BlobHash != "" {
-		data, readErr := os.ReadFile(filepath.Join(t.blobsRoot, disk.BlobHash))
-		err = readErr
-		if err != nil {
-			return Event{}, fmt.Errorf("timeline: read blob %s: %w", disk.BlobHash, err)
-		}
-		digest := sha256.Sum256(data)
-		if actual := hex.EncodeToString(digest[:]); actual != disk.BlobHash {
-			return Event{}, fmt.Errorf("timeline: blob %s hash mismatch: got %s", disk.BlobHash, actual)
-		}
-		if err := json.Unmarshal(data, &record); err != nil {
-			return Event{}, fmt.Errorf("timeline: decode blob %s: %w", disk.BlobHash, err)
-		}
-	} else if disk.Record != nil {
-		record = *disk.Record
-	} else {
+	var record *Record
+	if disk.Record != nil {
+		decoded := *disk.Record
+		record = &decoded
+	} else if disk.BlobHash == "" {
 		return Event{}, fmt.Errorf("timeline: event %d has no record", id)
 	}
-	return Event{ID: disk.ID, ParentID: disk.ParentID, Record: &record, BlobHash: disk.BlobHash}, nil
+	return Event{ID: disk.ID, ParentID: disk.ParentID, BranchFrom: disk.BranchFrom, Record: record, BlobHash: disk.BlobHash}, nil
+}
+
+// ResolveRecord materializes a blob-backed event when its content is needed.
+// Ancestry reads intentionally leave blobs as placeholders.
+func (t *Timeline) ResolveRecord(event Event) (Record, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.resolveRecord(event)
+}
+
+func (t *Timeline) resolveRecord(event Event) (Record, error) {
+	if event.Record != nil {
+		return *event.Record, nil
+	}
+	if event.BlobHash == "" {
+		return Record{}, fmt.Errorf("timeline: event %d has no record", event.ID)
+	}
+	data, err := os.ReadFile(filepath.Join(t.blobsRoot, event.BlobHash))
+	if err != nil {
+		return Record{}, fmt.Errorf("timeline: read blob %s: %w", event.BlobHash, err)
+	}
+	digest := sha256.Sum256(data)
+	if actual := hex.EncodeToString(digest[:]); actual != event.BlobHash {
+		return Record{}, fmt.Errorf("timeline: blob %s hash mismatch: got %s", event.BlobHash, actual)
+	}
+	var record Record
+	if err := json.Unmarshal(data, &record); err != nil {
+		return Record{}, fmt.Errorf("timeline: decode blob %s: %w", event.BlobHash, err)
+	}
+	return record, nil
 }
 
 func (t *Timeline) writeBlob(payload []byte) (string, error) {

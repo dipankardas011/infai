@@ -110,6 +110,16 @@ func (s *SessionStore) Path(id uuid.UUID) string {
 	return filepath.Join(s.root, id.String()+".jsonl")
 }
 
+// TimelinePath returns the durable event timeline directory for a session.
+func (s *SessionStore) TimelinePath(id uuid.UUID) string {
+	return filepath.Join(s.root, id.String())
+}
+
+// OpenTimeline opens the authoritative event history for a session.
+func (s *SessionStore) OpenTimeline(id uuid.UUID) (*Timeline, error) {
+	return NewTimeline(s.TimelinePath(id), TimelineOptions{})
+}
+
 // List returns every saved session's meta, newest-updated first.
 func (s *SessionStore) List() ([]SessionMeta, error) {
 	s.mu.Lock()
@@ -121,12 +131,43 @@ func (s *SessionStore) List() ([]SessionMeta, error) {
 	}
 
 	metas := make([]SessionMeta, 0, len(matches))
+	seen := make(map[uuid.UUID]struct{})
 	for _, m := range matches {
 		meta, err := s.readMetaLocked(m)
 		if err != nil {
 			continue
 		}
 		metas = append(metas, meta)
+		seen[meta.ID] = struct{}{}
+	}
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return nil, fmt.Errorf("store: read timeline sessions: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		id, err := uuid.Parse(entry.Name())
+		if _, exists := seen[id]; err != nil || exists {
+			continue
+		}
+		timeline, err := NewTimeline(filepath.Join(s.root, entry.Name()), TimelineOptions{})
+		if err != nil {
+			continue
+		}
+		events, err := timeline.LoadFullAncestry(ROOT_EVENT_ID)
+		_ = timeline.Close()
+		if err != nil {
+			continue
+		}
+		for _, event := range events {
+			if event.Record != nil && event.Record.Kind == KindMeta && event.Record.Meta != nil {
+				metas = append(metas, *event.Record.Meta)
+				seen[id] = struct{}{}
+				break
+			}
+		}
 	}
 	sort.Slice(metas, func(i, j int) bool {
 		return metas[i].UpdatedAt.After(metas[j].UpdatedAt)
@@ -212,6 +253,9 @@ func (s *SessionStore) Delete(id uuid.UUID) error {
 	err := os.Remove(s.Path(id))
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("store: delete session: %w", err)
+	}
+	if err := os.RemoveAll(s.TimelinePath(id)); err != nil {
+		return fmt.Errorf("store: delete timeline: %w", err)
 	}
 	return nil
 }

@@ -24,11 +24,29 @@ type ChatRequest struct {
 	Prompt string `json:"prompt"`
 }
 
+type BranchRequest struct {
+	EventID uuid.UUID `json:"event_id"`
+}
+
 // ---- responses ----
 
 type SessionDetailResponse struct {
 	Meta    store.SessionMeta `json:"meta"`
 	Records []store.Record    `json:"records"`
+}
+
+type TimelineEventResponse struct {
+	ID         uuid.UUID     `json:"id"`
+	ParentID   uuid.UUID     `json:"parent_id"`
+	BranchFrom *uuid.UUID    `json:"branch_from,omitempty"`
+	BlobHash   string        `json:"blob_hash,omitempty"`
+	Record     *store.Record `json:"record,omitempty"`
+}
+
+type TimelineResponse struct {
+	Meta   store.SessionMeta       `json:"meta"`
+	Head   uuid.UUID               `json:"head"`
+	Events []TimelineEventResponse `json:"events"`
 }
 
 type ChatResponse struct {

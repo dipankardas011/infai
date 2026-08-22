@@ -168,8 +168,18 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 	default:
 	}
 
-	meta, records, err := e.sessionStore.Load(id)
+	timeline, err := e.sessionStore.OpenTimeline(id)
 	if err != nil {
+		return nil, err
+	}
+	events, err := timeline.LoadActiveAncestry(store.ROOT_EVENT_ID)
+	if err != nil {
+		_ = timeline.Close()
+		return nil, err
+	}
+	meta, history, err := timelineSession(timeline, events)
+	if err != nil {
+		_ = timeline.Close()
 		return nil, err
 	}
 
@@ -178,9 +188,9 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		return nil, ErrNoProvider
 	}
 
-	history := e.sessionStore.Reconstruct(records)
-	sess, err := NewResumedSession(e.bgLogger.WithGroup("session"), &p, meta, history, e.sessionStore)
+	sess, err := NewResumedSession(e.bgLogger.WithGroup("session"), &p, meta, history, timeline)
 	if err != nil {
+		_ = timeline.Close()
 		return nil, err
 	}
 
@@ -273,7 +283,46 @@ func (e *InfaiAgentEngine) ListSessions() []store.SessionMeta {
 
 // GetSessionRecords returns a session's meta plus its full transcript.
 func (e *InfaiAgentEngine) GetSessionRecords(id uuid.UUID) (store.SessionMeta, []store.Record, error) {
-	return e.sessionStore.Load(id)
+	timeline, err := e.sessionStore.OpenTimeline(id)
+	if err != nil {
+		return store.SessionMeta{}, nil, err
+	}
+	defer timeline.Close()
+	events, err := timeline.LoadActiveAncestry(store.ROOT_EVENT_ID)
+	if err != nil {
+		return store.SessionMeta{}, nil, err
+	}
+	meta, records, err := timelineRecords(timeline, events, true)
+	return meta, records, err
+}
+
+func (e *InfaiAgentEngine) GetTimeline(id uuid.UUID) (store.SessionMeta, []store.Event, uuid.UUID, error) {
+	if sess, ok := e.Session(id); ok {
+		events, head, err := sess.Timeline()
+		if err != nil {
+			return store.SessionMeta{}, nil, uuid.Nil, err
+		}
+		return sess.Meta(), events, head, nil
+	}
+	timeline, err := e.sessionStore.OpenTimeline(id)
+	if err != nil {
+		return store.SessionMeta{}, nil, uuid.Nil, err
+	}
+	defer timeline.Close()
+	events, err := timeline.LoadAllEvents()
+	if err != nil {
+		return store.SessionMeta{}, nil, uuid.Nil, err
+	}
+	meta, _, err := timelineRecords(timeline, events, false)
+	return meta, events, timeline.CurrentHeadEventID(), err
+}
+
+func (e *InfaiAgentEngine) SelectBranch(id, eventID uuid.UUID) error {
+	sess, ok := e.Session(id)
+	if !ok {
+		return ErrSessionNotFound
+	}
+	return sess.SelectBranch(eventID)
 }
 
 // Shutdown stops accepting sessions and closes every registered one.

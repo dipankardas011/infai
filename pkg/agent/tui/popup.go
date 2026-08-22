@@ -14,6 +14,7 @@ type popupOption struct {
 	label string
 	key   rune
 	kind  string // "allow" | "deny" | "" (neutral)
+	style string // timeline role styling: system, user, assistant
 }
 
 // popup is a focus-taking overlay drawn on top of the chat. It shows a title, a
@@ -109,12 +110,14 @@ func (p *popup) lines(width, maxH int) []string {
 				}
 				line = padRight(line, avail-len(key)) + key
 			} else {
+				line = trunc(line, width-3)
 				line = padRight(line, width-3)
 			}
 			if oi == p.sel {
-				out = append(out, cHeader.Sprint("│")+" "+cPrompt.Sprint("\033[7m"+line+"\033[0m")+cHeader.Sprint("│"))
+				styled := timelineOptionStyle(o.style).Sprint(line)
+				out = append(out, cHeader.Sprint("│")+" "+cPrompt.Sprint("\033[7m"+styled+"\033[0m")+cHeader.Sprint("│"))
 			} else {
-				out = append(out, cHeader.Sprint("│")+" "+cHeader.Sprint(line)+cHeader.Sprint("│"))
+				out = append(out, cHeader.Sprint("│")+" "+timelineOptionStyle(o.style).Sprint(line)+cHeader.Sprint("│"))
 			}
 		}
 	} else {
@@ -126,6 +129,19 @@ func (p *popup) lines(width, maxH int) []string {
 
 	out = append(out, cHeader.Sprint("└"+strings.Repeat("─", inner)+"┘"))
 	return out
+}
+
+func timelineOptionStyle(role string) *color.Color {
+	switch role {
+	case "system":
+		return cSystem
+	case "user":
+		return cUser
+	case "assistant":
+		return cAssistant
+	default:
+		return cHeader
+	}
 }
 
 // popContentRow renders one body line inside the box: "│ text ... │".
