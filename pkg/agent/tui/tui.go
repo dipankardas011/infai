@@ -18,6 +18,7 @@ import (
 
 // ChatReply is what the client surfaces: the answer, any reasoning the model
 // produced, and the session/usage facts needed to render the status header.
+// Pending is set when the agent paused at a human-in-the-loop checkpoint.
 type ChatReply struct {
 	Reply            string
 	ReasoningContent string
@@ -25,6 +26,14 @@ type ChatReply struct {
 	Model            string
 	ContextWindow    int
 	Usage            *contracts.TokenUsage
+	Pending          *Approval
+}
+
+// Approval is a human-in-the-loop checkpoint the agent reached; the turn
+// pauses until the user decides.
+type Approval struct {
+	ID      uuid.UUID
+	Message string
 }
 
 // SessionCreateOptions describes a new session for the server.
@@ -81,8 +90,15 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 		return fmt.Errorf("cannot reach server: %v (is `agent server` running?)", err)
 	}
 
-	// Resume the explicitly requested session, or let the user pick one (or a
-	// new session) from what the engine has.
+	// Interactive terminal → the TUI. Session/model selection happens inside
+	// the TUI through floating popups, so the user never sees a plain-text
+	// numbered prompt; the whole launch is the chat interface.
+	if term.IsTerminal(os.Stdout.Fd()) {
+		return runChatTUI(ctx, c, sessions, opts)
+	}
+
+	// Non-interactive → the plain line REPL: resume the explicitly requested
+	// session, or let the user pick one (or a new session) by number.
 	var resume uuid.UUID
 	if opts.SessionID != uuid.Nil {
 		resume = opts.SessionID
@@ -110,18 +126,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 		state.session = *meta
 	}
 
-	// Interactive terminal → the sticky-bottom TUI (history / status / input).
-	if term.IsTerminal(os.Stdout.Fd()) {
-		var seed []block
-		if resume != uuid.Nil {
-			if _, records, err := c.GetSession(ctx, resume); err == nil {
-				seed = blocksFromRecords(records)
-			}
-		}
-		return runChatTUI(ctx, c, state.session, state.used, seed)
-	}
-
-	// Non-interactive → the plain line REPL, printing the history first.
+	// Resumed session: print the history first, then drop into the loop.
 	if resume != uuid.Nil {
 		if _, records, err := c.GetSession(ctx, resume); err == nil {
 			renderHistory(out, records)
@@ -559,4 +564,13 @@ func shortID(id uuid.UUID) string {
 		return s[:8]
 	}
 	return s
+}
+
+// orModel returns a displayable model label, falling back when the session was
+// never configured with one.
+func orModel(m string) string {
+	if m == "" {
+		return "no model"
+	}
+	return m
 }

@@ -48,14 +48,15 @@ type ChatDeltaEvent struct {
 }
 
 type ChatDoneEvent struct {
-	Done             bool                  `json:"done"`
-	SessionID        uuid.UUID             `json:"session_id"`
-	Status           string                `json:"status"`
-	Reply            string                `json:"reply"`
-	ReasoningContent string                `json:"reasoning_content"`
-	Model            string                `json:"model"`
-	ContextWindow    int                   `json:"ctx_window"`
-	Usage            *contracts.TokenUsage `json:"usage,omitempty"`
+	Done             bool                   `json:"done"`
+	SessionID        uuid.UUID              `json:"session_id"`
+	Status           string                 `json:"status"`
+	Reply            string                 `json:"reply"`
+	ReasoningContent string                 `json:"reasoning_content"`
+	Model            string                 `json:"model"`
+	ContextWindow    int                    `json:"ctx_window"`
+	Pending          *agent.ApprovalRequest `json:"pending,omitempty"`
+	Usage            *contracts.TokenUsage  `json:"usage,omitempty"`
 }
 
 type ChatErrorEvent struct {

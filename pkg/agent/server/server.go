@@ -243,6 +243,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			ReasoningContent: res.ReasoningContent,
 			Model:            meta.Model,
 			ContextWindow:    meta.ContextWindow,
+			Pending:          res.Pending,
 			Usage:            res.Usage,
 		}
 		if werr := s.writeSSE(w, done); werr != nil {

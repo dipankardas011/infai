@@ -3,6 +3,7 @@ package tui
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/store"
+	"github.com/google/uuid"
 )
 
 // eventCmd is what a single uiEvent means to the chat loop.
@@ -71,7 +73,10 @@ type pos struct{ row, col int }
 
 // chatTUI is the raw-mode, alternate-screen chat UI: history scrolls on top,
 // a status bar sits above a sticky multi-line input at the very bottom.
+// Floating popups (session picker, model picker, human-approval) render as a
+// focus-taking overlay over the history region.
 type chatTUI struct {
+	ctx     context.Context
 	client  Client
 	session store.SessionMeta
 	used    int
@@ -83,6 +88,13 @@ type chatTUI struct {
 	input  string
 	scroll int // history scroll offset from the bottom (0 = newest)
 	rows   []histRow
+
+	// floating popup (session picker, model picker, approval). While non-nil
+	// it owns the keyboard; chat input is frozen underneath.
+	popup       *popup
+	popupOK     func(idx int) // invoked with the chosen option
+	popupCancel func()        // invoked on Esc
+	quitNow     bool          // graceful quit requested from a popup/command
 
 	// app-level text selection (mouse drag), in content coordinates
 	selecting bool
@@ -101,16 +113,16 @@ type chatTUI struct {
 }
 
 // runChatTUI enters raw mode + the alternate screen and runs the chat loop
-// until the user quits. seed is the resumed session's history, if any.
-func runChatTUI(ctx context.Context, c Client, session store.SessionMeta, used int, seed []block) error {
+// until the user quits. If opts.SessionID is set that session is resumed;
+// otherwise the launch popup asks the user to start a new session or resume an
+// existing one, and (for a new session) to pick a model.
+func runChatTUI(ctx context.Context, c Client, sessions []store.SessionMeta, opts RunOptions) error {
 	t := &chatTUI{
-		client:  c,
-		session: session,
-		used:    used,
-		events:  make(chan uiEvent, 256),
-		input:   "",
-		blocks:  seed,
-		done:    make(chan struct{}),
+		ctx:    ctx,
+		client: c,
+		events: make(chan uiEvent, 256),
+		input:  "",
+		done:   make(chan struct{}),
 	}
 	defer close(t.done)
 
@@ -156,12 +168,22 @@ func runChatTUI(ctx context.Context, c Client, session store.SessionMeta, used i
 	go t.readKeys()
 	go t.tick()
 
+	// Launch: resume the requested session, or let the user pick via popups.
+	t.beginLaunch(sessions, opts)
+
 	t.redraw()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case ev := <-t.events:
+			if t.popup != nil {
+				t.popupKey(ev)
+				if t.quitNow {
+					return nil
+				}
+				continue
+			}
 			switch ev.cmd {
 			case cmdQuit:
 				return nil
@@ -178,7 +200,7 @@ func runChatTUI(ctx context.Context, c Client, session store.SessionMeta, used i
 				t.input += "\n"
 				t.redraw()
 			case cmdEnter:
-				t.submit(ctx)
+				t.submit()
 			case cmdDelta:
 				t.scroll = 0
 				t.appendDelta(ev.kind, ev.text)
@@ -192,6 +214,9 @@ func runChatTUI(ctx context.Context, c Client, session store.SessionMeta, used i
 					t.used += tokenCount(ev.reply)
 					t.session.TurnCount++
 					t.session.Model = ev.reply.Model
+					if ev.reply.Pending != nil {
+						t.showApproval(ev.reply)
+					}
 				}
 				t.redraw()
 			case cmdTick:
@@ -215,17 +240,29 @@ func runChatTUI(ctx context.Context, c Client, session store.SessionMeta, used i
 			case cmdRedraw:
 				t.redraw()
 			}
+			if t.quitNow {
+				return nil
+			}
 		}
 	}
 }
 
 // submit sends the current input as a user message and starts a turn.
-func (t *chatTUI) submit(ctx context.Context) {
+func (t *chatTUI) submit() {
 	prompt := strings.TrimSpace(t.input)
 	if prompt == "" || t.working {
 		return
 	}
 	t.input = ""
+	if strings.HasPrefix(prompt, "/") {
+		t.runTUICommand(prompt)
+		return
+	}
+	if t.session.ID == uuid.Nil {
+		t.appendError(errors.New("no active session"))
+		t.redraw()
+		return
+	}
 	t.blocks = append(t.blocks, block{role: "user", text: prompt})
 	t.scroll = 0
 	t.working = true
@@ -233,7 +270,7 @@ func (t *chatTUI) submit(ctx context.Context) {
 
 	ev := make(chan uiEvent, 256)
 	go func() {
-		reply, err := t.client.Chat(ctx, prompt, func(kind contracts.DeltaKind, text string) {
+		reply, err := t.client.Chat(t.ctx, prompt, func(kind contracts.DeltaKind, text string) {
 			ev <- uiEvent{cmd: cmdDelta, kind: kind, text: text}
 		})
 		ev <- uiEvent{cmd: cmdDone, reply: reply, err: err}
@@ -245,6 +282,207 @@ func (t *chatTUI) submit(ctx context.Context) {
 		}
 	}()
 
+	t.redraw()
+}
+
+// ---- floating popups ----
+
+// showPopup opens a focus-taking overlay with the given title, body ("what")
+// and selectable options. ok is called with the chosen option index; cancel
+// (optional) is called on Esc.
+func (t *chatTUI) showPopup(title string, body []string, opts []popupOption, ok func(int), cancel func()) {
+	t.popup = newPopup(title, body, opts)
+	t.popupOK = ok
+	t.popupCancel = cancel
+	t.selecting = false
+	t.redraw()
+}
+
+// selectPopup resolves the popup with the given option and runs its callback.
+func (t *chatTUI) selectPopup(idx int) {
+	ok := t.popupOK
+	t.popup = nil
+	t.popupOK = nil
+	t.popupCancel = nil
+	if ok != nil {
+		ok(idx)
+	}
+	t.redraw()
+}
+
+// popupKey routes keyboard input to the open popup; every command is consumed
+// so the chat input stays frozen underneath.
+func (t *chatTUI) popupKey(ev uiEvent) {
+	p := t.popup
+	switch ev.cmd {
+	case cmdEnter:
+		if len(p.opts) > 0 {
+			t.selectPopup(p.sel)
+		}
+	case cmdScrollUp:
+		p.move(-1)
+		t.redraw()
+	case cmdScrollDown:
+		p.move(1)
+		t.redraw()
+	case cmdKey:
+		for i, o := range p.opts {
+			if o.key != 0 && ev.key == o.key {
+				t.selectPopup(i)
+				return
+			}
+		}
+	case cmdQuit:
+		if t.popupCancel != nil {
+			t.popupCancel()
+		}
+		t.popup = nil
+		t.popupOK = nil
+		t.popupCancel = nil
+		t.redraw()
+	case cmdTick:
+		if t.working {
+			t.redraw()
+		}
+	}
+}
+
+// showApproval presents a human-in-the-loop checkpoint the agent reached:
+// what is being asked plus Allow / Always allow / Deny, opencode-style.
+func (t *chatTUI) showApproval(reply *ChatReply) {
+	body := wrapLines(reply.Pending.Message, 56)
+	opts := []popupOption{
+		{label: "Allow", key: 'a', kind: "allow"},
+		{label: "Always allow", key: 'y', kind: "allow"},
+		{label: "Deny", key: 'd', kind: "deny"},
+	}
+	t.showPopup("approval required", body, opts, func(idx int) {
+		verdict := [...]string{"allowed", "always allowed", "denied"}[clamp(idx, 0, 2)]
+		t.blocks = append(t.blocks, block{role: "system", text: verdict + " · " + reply.Pending.Message})
+	}, func() {
+		t.blocks = append(t.blocks, block{role: "system", text: "denied · " + reply.Pending.Message})
+	})
+}
+
+// ---- launch ----
+
+// beginLaunch resumes the requested session or opens the session/model popups.
+func (t *chatTUI) beginLaunch(sessions []store.SessionMeta, opts RunOptions) {
+	if opts.SessionID != uuid.Nil {
+		t.resumeSession(opts.SessionID)
+		return
+	}
+	if len(sessions) == 0 {
+		t.pickModelPopup(false, func() { t.quitNow = true })
+		return
+	}
+	optsList := []popupOption{{label: "Start a new session", key: 'n', kind: "new"}}
+	for i, m := range sessions {
+		label := fmt.Sprintf("%s · %s · %s", shortID(m.ID), orModel(m.Model), humanTime(m.UpdatedAt))
+		if i < 9 {
+			optsList = append(optsList, popupOption{label: label, key: '1' + rune(i)})
+		} else {
+			optsList = append(optsList, popupOption{label: label})
+		}
+	}
+	t.showPopup("infai · choose a session",
+		[]string{"resume a conversation or start a fresh one"},
+		optsList,
+		func(idx int) {
+			if idx == 0 {
+				t.pickModelPopup(false, func() { t.quitNow = true })
+				return
+			}
+			t.resumeSession(sessions[idx-1].ID)
+		},
+		func() { t.quitNow = true })
+}
+
+// resumeSession loads a saved session into the TUI and renders its history.
+func (t *chatTUI) resumeSession(id uuid.UUID) {
+	meta, records, err := t.client.GetSession(t.ctx, id)
+	if err != nil {
+		t.showPopup("could not load session", wrapLines(err.Error(), 56),
+			[]popupOption{{label: "OK", key: 'o'}}, func(int) {}, func() { t.quitNow = true })
+		return
+	}
+	t.session = *meta
+	t.client.SetSession(meta.ID)
+	t.blocks = blocksFromRecords(records)
+}
+
+// providerModel is a (provider, model) pair selectable from the model popup.
+type providerModel struct{ provider, model string }
+
+// pickModelPopup opens the model picker. switchModel is true for /model (the
+// active session switches to the choice) and false at launch (a new session is
+// created). cancel runs when the user dismisses the popup with Esc.
+func (t *chatTUI) pickModelPopup(switchModel bool, cancel func()) {
+	providers, err := t.client.ListProviders(t.ctx)
+	if err != nil {
+		t.showPopup("could not list models", wrapLines(err.Error(), 56),
+			[]popupOption{{label: "OK", key: 'o'}}, func(int) {}, func() { t.quitNow = true })
+		return
+	}
+	var pairs []providerModel
+	var opts []popupOption
+	for _, p := range providers {
+		for _, name := range p.ModelNames() {
+			pairs = append(pairs, providerModel{p.Name, name})
+			opts = append(opts, popupOption{label: fmt.Sprintf("%s @ %s", name, p.Name)})
+		}
+	}
+	if len(opts) == 0 {
+		t.showPopup("no models configured", []string{"add providers/models to models.json and restart the server"},
+			[]popupOption{{label: "OK", key: 'o'}}, func(int) {}, func() { t.quitNow = true })
+		return
+	}
+	t.showPopup("choose a model", []string{"select the model to chat with"}, opts,
+		func(idx int) {
+			pair := pairs[idx]
+			if switchModel {
+				if err := t.client.SetSessionModel(t.ctx, pair.provider, pair.model); err != nil {
+					t.appendError(err)
+					return
+				}
+				t.session.Provider = pair.provider
+				t.session.Model = pair.model
+				return
+			}
+			t.createSession(pair.provider, pair.model)
+		},
+		cancel)
+}
+
+// createSession creates a fresh session for the chosen provider/model.
+func (t *chatTUI) createSession(provider, model string) {
+	cwd, _ := os.Getwd()
+	meta, err := t.client.CreateSession(t.ctx, SessionCreateOptions{Provider: provider, Model: model, Cwd: cwd})
+	if err != nil {
+		t.showPopup("could not create session", wrapLines(err.Error(), 56),
+			[]popupOption{{label: "OK", key: 'o'}}, func(int) {}, func() { t.quitNow = true })
+		return
+	}
+	t.session = *meta
+	t.client.SetSession(meta.ID)
+}
+
+// runTUICommand handles a slash command typed into the chat input.
+func (t *chatTUI) runTUICommand(line string) {
+	switch line {
+	case "/model":
+		t.pickModelPopup(true, func() {}) // switch the active session's model
+	case "/quit", "/exit":
+		t.quitNow = true
+	case "/help":
+		t.blocks = append(t.blocks, block{role: "system", text: strings.Join([]string{
+			"/model · switch model via popup",
+			"/quit, /exit · leave",
+			"enter submits · ctrl+j / alt+enter newline · wheel or arrows scroll",
+		}, "\n")})
+	default:
+		t.appendError(fmt.Errorf("unknown command %q — /help for options", line))
+	}
 	t.redraw()
 }
 
@@ -490,10 +728,10 @@ func read3(r *bufio.Reader) (byte, byte, byte, error) {
 
 // mouseEvent routes a mouse report to scroll or selection.
 func (t *chatTUI) mouseEvent(btn, x, y int, press bool) uiEvent {
-	switch {
-	case btn == 64: // wheel up
+	switch btn {
+	case 64: // wheel up
 		return uiEvent{cmd: cmdScrollUp}
-	case btn == 65: // wheel down
+	case 65: // wheel down
 		return uiEvent{cmd: cmdScrollDown}
 	}
 	// left press/drag (0/32) and everything else feed the selection handler
@@ -572,6 +810,8 @@ func (t *chatTUI) renderRow(hr histRow, selected bool, a, b int) string {
 		return cThinking.Sprint(s)
 	case "error":
 		return cError.Sprint(s)
+	case "system":
+		return cSystem.Sprint(s)
 	}
 	return s
 }
@@ -662,8 +902,8 @@ func (t *chatTUI) handleCSI(seq []byte) {
 func modifiedEnter(seq []byte) bool {
 	s := string(seq)
 	var key, mod int
-	if strings.HasSuffix(s, "u") {
-		parts := strings.Split(strings.TrimSuffix(s, "u"), ";")
+	if before, ok := strings.CutSuffix(s, "u"); ok {
+		parts := strings.Split(before, ";")
 		if len(parts) < 2 {
 			return false
 		}
@@ -788,16 +1028,18 @@ func (t *chatTUI) redraw() {
 	sb.WriteString("\033[K\r\n")
 
 	// input (sticky at the very bottom), framed by top and bottom rules, with
-	// the "infai harness" brand line beneath it.
+	// the "infai harness" brand line beneath it. On a short window the input
+	// is clamped to its last lines so the prompt stays anchored.
 	sb.WriteString(cHeader.Sprint(strings.Repeat("─", t.width)))
 	sb.WriteString("\033[K\r\n")
 	lines := strings.Split(t.input, "\n")
-	for i, l := range lines {
+	vis := min(len(lines), t.inputRows())
+	for i := len(lines) - vis; i < len(lines); i++ {
 		if i == len(lines)-1 {
-			sb.WriteString(cPrompt.Sprintf("λ %s", l))
+			sb.WriteString(cPrompt.Sprintf("λ %s", lines[i]))
 			sb.WriteString("\033[K")
 		} else {
-			sb.WriteString(l)
+			sb.WriteString(lines[i])
 			sb.WriteString("\033[K\r\n")
 		}
 	}
@@ -806,15 +1048,63 @@ func (t *chatTUI) redraw() {
 	sb.WriteString("\033[K\r\n")
 	sb.WriteString(cHeader.Sprint("infai harness"))
 	sb.WriteString("\033[K")
-	// place the blinking cursor back on the input's last line at its column
-	sb.WriteString(fmt.Sprintf("\033[2A\r\033[%dC", utf8.RuneCountInString(lines[len(lines)-1])+2))
+
+	// Floating popup overlay: hide the chat cursor and draw the box centered
+	// over the history+status region (absolute positioning). Otherwise place
+	// the blinking cursor back on the input's last line at its column.
+	if t.popup != nil {
+		t.drawPopup(&sb)
+		sb.WriteString("\033[?25l")
+	} else {
+		fmt.Fprintf(&sb, "\033[2A\r\033[%dC", utf8.RuneCountInString(lines[len(lines)-1])+2)
+		sb.WriteString("\033[?25h")
+	}
 
 	_, _ = io.WriteString(os.Stdout, sb.String())
 }
 
-// inputRows is how many terminal rows the input text occupies.
+// drawPopup renders the open popup as a centered overlay over the history and
+// status region. It degrades to compact on short windows (body truncated,
+// options scroll) and never overflows the terminal.
+func (t *chatTUI) drawPopup(sb *strings.Builder) {
+	p := t.popup
+	if p == nil {
+		return
+	}
+	boxW := min(72, t.width-4)
+	if boxW < 8 {
+		boxW = t.width - 2
+	}
+	if boxW < 8 {
+		boxW = 8
+	}
+	regionH := t.historyHeight() + t.statusRows()
+	maxH := max(4, regionH)
+	lines := p.lines(boxW, maxH)
+	boxH := len(lines)
+	if boxH > maxH {
+		boxH = maxH
+		lines = lines[:boxH]
+	}
+	left := max((t.width-boxW)/2, 0)
+	top := max((regionH-boxH)/2, 0)
+	for i, l := range lines {
+		fmt.Fprintf(sb, "\033[%d;%dH%s", top+1+i, left+1, l)
+		sb.WriteString("\033[K")
+	}
+}
+
+// inputRows is how many terminal rows the input text occupies, clamped so the
+// input never crowds out the history region on a short window.
 func (t *chatTUI) inputRows() int {
-	return len(strings.Split(t.input, "\n"))
+	n := len(strings.Split(t.input, "\n"))
+	if cap := t.height - 5; n > cap { // status + 2 borders + brand = 4 fixed rows
+		if cap < 1 {
+			return 1
+		}
+		return cap
+	}
+	return n
 }
 
 // inputAreaRows is the input text plus its top/bottom border lines.
@@ -865,6 +1155,10 @@ func (t *chatTUI) buildRows() []histRow {
 			for _, l := range wrap(b.text, t.width-3) {
 				out = append(out, histRow{plain: "! " + l, style: "error"})
 			}
+		case "system":
+			for _, l := range wrap(b.text, t.width-3) {
+				out = append(out, histRow{plain: "· " + l, style: "system"})
+			}
 		}
 	}
 	return out
@@ -878,6 +1172,9 @@ func (t *chatTUI) spinnerFrame() string {
 
 // statusLine builds the model/session/context status bar.
 func (t *chatTUI) statusLine() string {
+	if t.session.ID == uuid.Nil {
+		return cHeader.Sprint("no session · pick one from the popup above")
+	}
 	scrolled := ""
 	if t.scroll > 0 {
 		scrolled = fmt.Sprintf("  ·  ↑ %d", t.scroll)
