@@ -187,6 +187,31 @@ func (c *RemoteClient) LoadSession(ctx context.Context, id uuid.UUID) (*store.Se
 	return &meta, nil
 }
 
+// GetSession fetches a session's meta and full transcript (message records in
+// order) so a resumed session can render its history.
+func (c *RemoteClient) GetSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, []store.Record, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions/"+id.String(), nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, readAPIError(resp)
+	}
+	var out struct {
+		Meta    store.SessionMeta `json:"meta"`
+		Records []store.Record    `json:"records"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, nil, err
+	}
+	return &out.Meta, out.Records, nil
+}
+
 func (c *RemoteClient) DeleteSession(ctx context.Context, id uuid.UUID) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/sessions/"+id.String(), nil)
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/x/term"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -38,9 +39,9 @@ type SessionCreateOptions struct {
 type Client interface {
 	Chat(ctx context.Context, prompt string, onDelta func(kind contracts.DeltaKind, text string)) (*ChatReply, error)
 	SetSession(id uuid.UUID)
-	SessionID() uuid.UUID
 	CreateSession(ctx context.Context, opts SessionCreateOptions) (*store.SessionMeta, error)
 	LoadSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, error)
+	GetSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, []store.Record, error)
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	ListSessions(ctx context.Context) ([]store.SessionMeta, error)
 	ListProviders(ctx context.Context) ([]store.Provider, error)
@@ -68,33 +69,71 @@ func Run(ctx context.Context, c Client, in io.Reader, out io.Writer, opts RunOpt
 // runLine is the plain-stdio REPL (used when stdout is not a terminal).
 func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts RunOptions) error {
 	state := &replState{}
+	scanner := bufio.NewScanner(in)
 
+	// Startup header.
+	fmt.Fprintln(out, "infai agent")
+	cSystem.Fprintln(out, "  /help shortcuts · /model switch model · /sessions list · /quit exit")
+
+	// Fail fast on an unreachable server, and pick what to do on launch.
+	sessions, err := c.ListSessions(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot reach server: %v (is `agent server` running?)", err)
+	}
+
+	// Resume the explicitly requested session, or let the user pick one (or a
+	// new session) from what the engine has.
+	var resume uuid.UUID
 	if opts.SessionID != uuid.Nil {
-		meta, err := c.LoadSession(ctx, opts.SessionID)
+		resume = opts.SessionID
+	} else if len(sessions) > 0 {
+		resume, err = pickSession(ctx, c, out, scanner, sessions)
+		if err != nil {
+			return err
+		}
+	}
+	if resume != uuid.Nil {
+		meta, err := c.LoadSession(ctx, resume)
 		if err != nil {
 			Notice(out, "Error", err.Error())
 			return err
 		}
 		c.SetSession(meta.ID)
 		state.session = *meta
-		fmt.Fprintf(out, "infai agent — resumed session %s.\n", meta.ID)
-		fmt.Fprintln(out, "type a message, /help for commands, or /quit to leave.")
 	} else {
-		// Fail fast on an unreachable server, but do NOT require a session or
-		// provider yet: on first run the user adds a provider from inside the
-		// REPL, and the session is created lazily on the first real message.
-		if _, err := c.ListProviders(ctx); err != nil {
-			return fmt.Errorf("cannot reach server: %v (is `agent server` running?)", err)
+		// New session: pick the provider/model now, not on the first message.
+		meta, err := ensureSession(ctx, c, out, scanner, opts)
+		if err != nil {
+			Notice(out, "Error", err.Error())
+			return err
 		}
-		fmt.Fprintln(out, "infai agent — no session yet. Type a message to start one, or configure a model first:")
-		fmt.Fprintln(out, "  edit models.json to add providers/models, then restart the server")
-		fmt.Fprintln(out, "/help for all commands, /quit to leave.")
+		state.session = *meta
 	}
 
-	scanner := bufio.NewScanner(in)
-	echo := isTerminal(in)
+	// Interactive terminal → the sticky-bottom TUI (history / status / input).
+	if term.IsTerminal(os.Stdout.Fd()) {
+		var seed []block
+		if resume != uuid.Nil {
+			if _, records, err := c.GetSession(ctx, resume); err == nil {
+				seed = blocksFromRecords(records)
+			}
+		}
+		return runChatTUI(ctx, c, state.session, state.used, seed)
+	}
+
+	// Non-interactive → the plain line REPL, printing the history first.
+	if resume != uuid.Nil {
+		if _, records, err := c.GetSession(ctx, resume); err == nil {
+			renderHistory(out, records)
+		}
+		cSystem.Fprintf(out, "resumed session %s\n", resume)
+	}
+
 	for {
+		// Footer (bottom status bar) then editor prompt, like Pi's regular
+		// mode: the terminal scrolls the transcript above them.
 		renderStatus(out, state)
+		cPrompt.Fprint(out, "> ")
 
 		if !scanner.Scan() {
 			break
@@ -142,55 +181,68 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 			fmt.Fprintf(out, "\nnew session %s.\n", meta.ID)
 		}
 
-		// In a terminal the typed input is already echoed next to the "> "
-		// prompt; when not (piped), label the message so it stays readable.
-		if !echo {
-			cUser.Fprintf(out, "you: %s\n", prompt)
-		}
+		cUser.Fprintf(out, "▶ %s\n", prompt)
 		fmt.Fprintln(out)
 
-		thinkingOpen := false
-		thinkingEndedNewline := false
-		closeThinking := func() {
-			if thinkingOpen {
-				if !thinkingEndedNewline {
-					fmt.Fprintln(out)
-				}
-				cHeader.Fprintln(out, "────────")
-				thinkingOpen = false
-			}
-		}
-		replyStarted := false
+		thinkingShown := false
+		contentStarted := false
 		reply, err := c.Chat(ctx, prompt, func(kind contracts.DeltaKind, text string) {
 			switch kind {
 			case contracts.DeltaReasoning:
-				if !thinkingOpen {
+				if !thinkingShown {
 					cThinking.Fprintln(out, "─ thinking ─")
-					thinkingOpen = true
+					thinkingShown = true
 				}
 				cThinking.Fprint(out, text)
-				thinkingEndedNewline = strings.HasSuffix(text, "\n")
 			case contracts.DeltaContent:
-				closeThinking()
-				if !replyStarted {
-					cAssistantLabel.Fprint(out, "assistant: ")
-					replyStarted = true
+				if thinkingShown {
+					cHeader.Fprintln(out, "────────")
+				}
+				if !contentStarted {
+					cAssistant.Fprint(out, "● ")
+					contentStarted = true
 				}
 				cAssistant.Fprint(out, text)
 			}
 		})
+		if thinkingShown && !contentStarted {
+			cHeader.Fprintln(out, "────────")
+		}
 		if err != nil {
-			closeThinking()
 			Notice(out, "Error", err.Error())
 			continue
 		}
-		closeThinking()
 		fmt.Fprintln(out)
 
 		updateState(state, reply)
 	}
 
 	return scanner.Err()
+}
+
+// renderHistory prints a saved session's transcript (message records in order)
+// so a resumed session reads like the live chat. Tool records and the system
+// prompt are skipped.
+func renderHistory(out io.Writer, records []store.Record) {
+	for _, rec := range records {
+		if rec.Kind != store.KindMessage || rec.Message == nil {
+			continue
+		}
+		m := rec.Message
+		switch m.Role {
+		case "user":
+			cUser.Fprintf(out, "▶ %s\n", m.Text())
+			fmt.Fprintln(out)
+		case "assistant":
+			if m.ReasoningContent != "" {
+				cThinking.Fprintln(out, "─ thinking ─")
+				cThinking.Fprintln(out, m.ReasoningContent)
+				cHeader.Fprintln(out, "────────")
+			}
+			cAssistant.Fprintf(out, "● %s\n", m.Text())
+			fmt.Fprintln(out)
+		}
+	}
 }
 
 // ensureSession has the user pick a provider and model, creates the session on
@@ -236,38 +288,23 @@ func updateState(s *replState, reply *ChatReply) {
 	s.session.TurnCount++
 }
 
-// renderStatus prints the right-aligned status header above the prompt.
+// renderStatus prints the footer status bar (model, session, context, turns).
 func renderStatus(out io.Writer, s *replState) {
-	seg := []string{
-		"model: " + s.session.Model,
-		"sess: " + s.session.ID.String(),
-		fmt.Sprintf("ctx: %d/%d", s.used, s.session.ContextWindow),
-		fmt.Sprintf("turns: %d", s.session.TurnCount),
-	}
-	line := strings.Join(seg, "  ·  ")
-
 	if s.session.ID == uuid.Nil {
-		cHeader.Fprintf(out, "%s\n", "no session · edit models.json to configure providers/models")
-		cPrompt.Fprint(out, "> ")
+		cHeader.Fprintln(out, "no session · edit models.json to configure providers/models")
 		return
 	}
-
-	width := 80
-	if w, _, err := term.GetSize(os.Stdout.Fd()); err == nil && w > 0 {
-		width = w
+	pct := ""
+	if s.session.ContextWindow > 0 {
+		pct = fmt.Sprintf(" (%d%%)", s.used*100/s.session.ContextWindow)
 	}
-	if len(line) < width {
-		line = strings.Repeat(" ", width-len(line)) + line
-	}
+	line := strings.Join([]string{
+		"model: " + s.session.Model,
+		"sess: " + s.session.ID.String(),
+		fmt.Sprintf("ctx: %d/%d%s", s.used, s.session.ContextWindow, pct),
+		fmt.Sprintf("turns: %d", s.session.TurnCount),
+	}, "  ·  ")
 	cHeader.Fprintln(out, line)
-	cPrompt.Fprint(out, "> ")
-}
-
-// isTerminal reports whether r is a terminal (i.e. the user's typed input is
-// echoed back, so the REPL need not print it a second time).
-func isTerminal(r io.Reader) bool {
-	f, ok := r.(*os.File)
-	return ok && term.IsTerminal(f.Fd())
 }
 
 // runCommand handles a slash command. scan lets interactive commands (the
@@ -405,9 +442,16 @@ func chooseModel(ctx context.Context, c Client, out io.Writer, scan *bufio.Scann
 		return "", "", fmt.Errorf("no models configured — add models in models.json and restart the server")
 	}
 
+	// Align the model column so the provider reads as a table.
+	maxModel := 0
+	for _, o := range opts {
+		if len(o.model) > maxModel {
+			maxModel = len(o.model)
+		}
+	}
 	cPrompt.Fprintln(out, "select a model:")
 	for i, o := range opts {
-		fmt.Fprintf(out, "  %d  %s @ %s\n", i, o.model, o.provider)
+		fmt.Fprintf(out, "  %d  %-*s @ %s\n", i, maxModel, o.model, o.provider)
 	}
 	cPrompt.Fprint(out, "> ")
 
@@ -420,6 +464,41 @@ func chooseModel(ctx context.Context, c Client, out io.Writer, scan *bufio.Scann
 		return "", "", fmt.Errorf("invalid selection %q", choice)
 	}
 	return opts[idx].provider, opts[idx].model, nil
+}
+
+// pickSession lists the engine's saved sessions and reads a numbered choice:
+// 0 starts a new session, 1..N resume an existing one. Returns uuid.Nil for a
+// new session.
+func pickSession(ctx context.Context, c Client, out io.Writer, scan *bufio.Scanner, sessions []store.SessionMeta) (uuid.UUID, error) {
+	cSystem.Fprintln(out, "sessions:")
+	fmt.Fprintf(out, "  %d  start a new session\n", 0)
+	for i, m := range sessions {
+		fmt.Fprintf(out, "  %d  %s  %s  %s\n", i+1, m.ID, m.Model, humanTime(m.UpdatedAt))
+	}
+	cPrompt.Fprint(out, "> ")
+
+	if !scan.Scan() {
+		return uuid.Nil, scan.Err()
+	}
+	choice := strings.TrimSpace(scan.Text())
+	idx, err := strconv.Atoi(choice)
+	if err != nil || idx < 0 || idx > len(sessions) {
+		return uuid.Nil, fmt.Errorf("invalid selection %q", choice)
+	}
+	if idx == 0 {
+		return uuid.Nil, nil
+	}
+	return sessions[idx-1].ID, nil
+}
+
+// humanTime renders an RFC3339 timestamp in a short local format ("Jan 02
+// 15:04"), falling back to the raw value when it cannot be parsed.
+func humanTime(ts string) string {
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return ts
+	}
+	return t.Local().Format("Jan 02 15:04")
 }
 
 // pickModel is the /model no-arg handler: choose a model, then switch the
