@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/store"
+	"github.com/fatih/color"
 	"github.com/google/uuid"
 )
 
@@ -64,8 +65,9 @@ type block struct {
 // histRow is one rendered, uncolored line of the conversation, tagged with
 // its style. It backs both rendering and app-level text selection.
 type histRow struct {
-	plain string
-	style string // "user" | "thinking" | "assistant" | "error"
+	plain     string
+	style     string // "user" | "thinking" | "assistant" | "error"
+	prefixLen int    // colored chat prefix width, when present
 }
 
 // pos is a cell in the conversation content (row = index into rows).
@@ -301,7 +303,11 @@ func (t *chatTUI) submit() {
 // and selectable options. ok is called with the chosen option index; cancel
 // (optional) is called on Esc.
 func (t *chatTUI) showPopup(title string, body []string, opts []popupOption, ok func(int), cancel func()) {
-	t.popup = newPopup(title, body, opts)
+	t.showPopupMode(title, body, opts, true, ok, cancel)
+}
+
+func (t *chatTUI) showPopupMode(title string, body []string, opts []popupOption, escapable bool, ok func(int), cancel func()) {
+	t.popup = newPopup(title, body, opts, escapable)
 	t.popupOK = ok
 	t.popupCancel = cancel
 	t.selecting = false
@@ -343,6 +349,9 @@ func (t *chatTUI) popupKey(ev uiEvent) {
 			}
 		}
 	case cmdQuit:
+		if !p.escapable {
+			return
+		}
 		if t.popupCancel != nil {
 			t.popupCancel()
 		}
@@ -419,9 +428,10 @@ func (t *chatTUI) beginLaunch(sessions []store.SessionMeta, opts RunOptions) {
 			optsList = append(optsList, popupOption{label: label})
 		}
 	}
-	t.showPopup("infai · choose a session",
+	t.showPopupMode("infai · choose a session",
 		[]string{"resume a conversation or start a fresh one"},
 		optsList,
+		false,
 		func(idx int) {
 			if idx == 0 {
 				t.pickModelPopup(false, func() { t.quitNow = true })
@@ -579,8 +589,9 @@ func (t *chatTUI) showBranchTimeline() {
 			cursor = byID[parents[cursor.ID]]
 		}
 		options = append(options, popupOption{
-			label: timelineTreePrefix(event, parents, byID) + timelineEventLabel(event),
-			style: timelineEventRole(event),
+			prefix: timelineTreePrefix(event, parents, byID),
+			label:  timelineEventLabel(event),
+			style:  timelineEventRole(event),
 		})
 	}
 	t.showPopup("branch timeline", []string{"select where the next prompt should branch"}, options, func(idx int) {
@@ -778,8 +789,13 @@ func (t *chatTUI) readKeys() {
 
 		switch c {
 		case 0x1b: // escape sequence, Alt+Enter, or a mouse report
+			if r.Buffered() == 0 && !waitForInput(int(os.Stdin.Fd()), 50*time.Millisecond) {
+				t.events <- uiEvent{cmd: cmdQuit}
+				continue
+			}
 			next, err := r.Peek(1)
 			if err != nil {
+				t.events <- uiEvent{cmd: cmdQuit}
 				continue
 			}
 			switch next[0] {
@@ -853,6 +869,17 @@ func (t *chatTUI) readKeys() {
 			t.events <- uiEvent{cmd: cmdKey, key: run}
 		}
 	}
+}
+
+func waitForInput(fd int, timeout time.Duration) bool {
+	if fd < 0 {
+		return false
+	}
+	var set syscall.FdSet
+	set.Bits[fd/64] |= 1 << uint(fd%64)
+	tv := syscall.NsecToTimeval(timeout.Nanoseconds())
+	ready, err := syscall.Select(fd+1, &set, nil, nil, &tv)
+	return err == nil && ready > 0
 }
 
 // CopyToClipboard copies text to the system clipboard via the first available
@@ -993,6 +1020,9 @@ func (t *chatTUI) selBounds() (pos, pos) {
 // renderRow colors a row's plain text, wrapping any selected columns in
 // reverse video.
 func (t *chatTUI) renderRow(hr histRow, selected bool, a, b int) string {
+	if hr.style == "user" || hr.style == "assistant" {
+		return renderChatRow(hr.plain, hr.prefixLen, selected, a, b, hr.style)
+	}
 	s := hr.plain
 	if selected {
 		runes := []rune(s)
@@ -1019,6 +1049,30 @@ func (t *chatTUI) renderRow(hr histRow, selected bool, a, b int) string {
 		return cSystem.Sprint(s)
 	}
 	return s
+}
+
+func renderChatRow(text string, prefixLen int, selected bool, a, b int, role string) string {
+	runes := []rune(text)
+	prefixLen = clamp(prefixLen, 0, len(runes))
+	dotStyle := cUser
+	if role == "assistant" {
+		dotStyle = cAssistant
+	}
+	if !selected {
+		return dotStyle.Sprint(string(runes[:prefixLen])) + cChatText.Sprint(string(runes[prefixLen:]))
+	}
+	return renderSelectedSegment(string(runes[:prefixLen]), dotStyle, 0, a, b) +
+		renderSelectedSegment(string(runes[prefixLen:]), cChatText, prefixLen, a, b)
+}
+
+func renderSelectedSegment(text string, style *color.Color, offset, start, end int) string {
+	runes := []rune(text)
+	lo := clamp(start-offset, 0, len(runes))
+	hi := clamp(end-offset, 0, len(runes))
+	if lo >= hi {
+		return style.Sprint(text)
+	}
+	return style.Sprint(string(runes[:lo])) + "\033[7m" + style.Sprint(string(runes[lo:hi])) + "\033[0m" + style.Sprint(string(runes[hi:]))
 }
 
 // copySelection copies the selected text to the clipboard.
@@ -1241,7 +1295,7 @@ func (t *chatTUI) redraw() {
 	vis := min(len(lines), t.inputRows())
 	for i := len(lines) - vis; i < len(lines); i++ {
 		if i == len(lines)-1 {
-			sb.WriteString(cPrompt.Sprintf("λ %s", lines[i]))
+			sb.WriteString(cPrompt.Sprint("λ ") + cChatText.Sprint(lines[i]))
 			sb.WriteString("\033[K")
 		} else {
 			sb.WriteString(lines[i])
@@ -1276,7 +1330,7 @@ func (t *chatTUI) drawPopup(sb *strings.Builder) {
 	if p == nil {
 		return
 	}
-	boxW := min(72, t.width-4)
+	boxW := min(96, t.width-4)
 	if boxW < 8 {
 		boxW = t.width - 2
 	}
@@ -1338,18 +1392,22 @@ func (t *chatTUI) buildRows() []histRow {
 		case "user":
 			for i, l := range wrap(b.text, t.width-3) {
 				prefix := "● "
+				prefixLen := 2
 				if i > 0 {
 					prefix = "  "
+					prefixLen = 0
 				}
-				out = append(out, histRow{plain: prefix + l, style: "user"})
+				out = append(out, histRow{plain: prefix + l, style: "user", prefixLen: prefixLen})
 			}
 		case "assistant":
 			for i, l := range wrap(b.text, t.width-3) {
 				prefix := "● "
+				prefixLen := 2
 				if i > 0 {
 					prefix = "  "
+					prefixLen = 0
 				}
-				out = append(out, histRow{plain: prefix + l, style: "assistant"})
+				out = append(out, histRow{plain: prefix + l, style: "assistant", prefixLen: prefixLen})
 			}
 		case "thinking":
 			out = append(out, histRow{plain: "─ thinking ─", style: "thinking"})

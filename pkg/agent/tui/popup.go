@@ -11,26 +11,28 @@ import (
 // is a single-keystroke shortcut; kind colors the intent (used by approval
 // popups to distinguish allow from deny).
 type popupOption struct {
-	label string
-	key   rune
-	kind  string // "allow" | "deny" | "" (neutral)
-	style string // timeline role styling: system, user, assistant
+	label  string
+	prefix string
+	key    rune
+	kind   string // "allow" | "deny" | "" (neutral)
+	style  string // timeline role styling: system, user, assistant
 }
 
 // popup is a focus-taking overlay drawn on top of the chat. It shows a title, a
 // body describing *what* is being asked, and a selectable option list. While a
 // popup is open all keyboard input goes to it, not the chat input.
 type popup struct {
-	title string
-	body  []string // pre-wrapped "what" lines
-	opts  []popupOption
+	title     string
+	body      []string // pre-wrapped "what" lines
+	opts      []popupOption
+	escapable bool
 
 	sel    int // selected option index
 	scroll int // option window scroll offset
 }
 
-func newPopup(title string, body []string, opts []popupOption) *popup {
-	return &popup{title: title, body: body, opts: opts}
+func newPopup(title string, body []string, opts []popupOption, escapable bool) *popup {
+	return &popup{title: title, body: body, opts: opts, escapable: escapable}
 }
 
 // move shifts the selection by delta (clamped); the option window follows.
@@ -54,13 +56,13 @@ func (p *popup) lines(width, maxH int) []string {
 
 	// top border + title
 	title := trunc(p.title, inner-3)
-	pad := inner - len(title) - 1 // "┌─ " prefix and "┐" suffix
+	pad := inner - utf8.RuneCountInString(title) - 1 // "┌─ " prefix and "┐" suffix
 	if pad < 0 {
 		pad = 0
 	}
 	// Keep both horizontal rules visually identical. The title is intentionally
 	// part of the same muted border line rather than introducing a second color.
-	out = append(out, cHeader.Sprint("┌─ "+title+strings.Repeat("─", pad)+"┐"))
+	out = append(out, cPopupBorder.Sprint("┌─ "+title+strings.Repeat("─", pad)+"┐"))
 
 	// option window height: never exceed maxH total rows
 	optH := maxH - 3 // title + bottom border + at least one content row
@@ -78,7 +80,7 @@ func (p *popup) lines(width, maxH int) []string {
 	}
 	n := min(len(p.body), bodyH)
 	for i := 0; i < n; i++ {
-		out = append(out, popContentRow(p.body[i], width, cThinking))
+		out = append(out, popContentRow(p.body[i], width, cChatText))
 	}
 	// a blank separator between body and options when both are present
 	if n > 0 && optH > 0 && bodyH > n {
@@ -98,36 +100,41 @@ func (p *popup) lines(width, maxH int) []string {
 				break
 			}
 			o := p.opts[oi]
-			line := "  " + o.label
+			marker := "  "
 			if oi == p.sel {
-				line = "▸ " + o.label
+				marker = "> "
 			}
+			line := marker + o.prefix + o.label
 			if o.key != 0 {
 				key := " [" + string(o.key) + "]"
 				avail := width - 3
-				if len(line)+len(key) > avail {
-					line = trunc(line, avail-len(key)-1) + "…"
+				if utf8.RuneCountInString(line)+utf8.RuneCountInString(key) > avail {
+					line = trunc(line, avail-utf8.RuneCountInString(key)-1) + "…"
 				}
-				line = padRight(line, avail-len(key)) + key
+				line = padRight(line, avail-utf8.RuneCountInString(key)) + key
 			} else {
 				line = trunc(line, width-3)
 				line = padRight(line, width-3)
 			}
 			if oi == p.sel {
-				styled := timelineOptionStyle(o.style).Sprint(line)
-				out = append(out, cHeader.Sprint("│")+" "+cPrompt.Sprint("\033[7m"+styled+"\033[0m")+cHeader.Sprint("│"))
+				prefix := marker + o.prefix
+				label := strings.TrimPrefix(line, prefix)
+				styled := cPopupBorder.Sprint("> ") + cThinking.Sprint(o.prefix) + timelineOptionStyle(o.style).Sprint(label)
+				out = append(out, cPopupBorder.Sprint("│")+" "+styled+cPopupBorder.Sprint("│"))
 			} else {
-				out = append(out, cHeader.Sprint("│")+" "+timelineOptionStyle(o.style).Sprint(line)+cHeader.Sprint("│"))
+				prefix := "  " + o.prefix
+				label := strings.TrimPrefix(line, prefix)
+				out = append(out, cPopupBorder.Sprint("│")+" "+cThinking.Sprint(prefix)+timelineOptionStyle(o.style).Sprint(label)+cPopupBorder.Sprint("│"))
 			}
 		}
 	} else {
 		// no options: fill the row budget so the box keeps its shape
 		for i := 0; i < optH; i++ {
-			out = append(out, popContentRow("", width, cHeader))
+			out = append(out, popContentRow("", width, cChatText))
 		}
 	}
 
-	out = append(out, cHeader.Sprint("└"+strings.Repeat("─", inner)+"┘"))
+	out = append(out, cPopupBorder.Sprint("└"+strings.Repeat("─", inner)+"┘"))
 	return out
 }
 
@@ -140,13 +147,13 @@ func timelineOptionStyle(role string) *color.Color {
 	case "assistant":
 		return cAssistant
 	default:
-		return cHeader
+		return cChatText
 	}
 }
 
 // popContentRow renders one body line inside the box: "│ text ... │".
 func popContentRow(text string, width int, style *color.Color) string {
-	return cHeader.Sprint("│") + " " + style.Sprint(padRight(trunc(text, width-3), width-3)) + cHeader.Sprint("│")
+	return cPopupBorder.Sprint("│") + " " + style.Sprint(padRight(trunc(text, width-3), width-3)) + cPopupBorder.Sprint("│")
 }
 
 func trunc(s string, n int) string {
