@@ -14,29 +14,39 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/engine"
 	"github.com/dipankardas011/infai/pkg/agent/server"
 	"github.com/dipankardas011/infai/pkg/agent/tui"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
 var (
-	host string
-	port int
+	host      string
+	port      int
+	sessionID string
 )
 
 func main() {
 	root := newRootCmd()
 	if err := root.Execute(); err != nil {
+		// Cobra's default on a RunE error is to print the error and dump the
+		// usage/help block. Runtime failures are already surfaced (REPL Notice
+		// or the error text itself) — the help menu adds noise, so silence it
+		// and print the error once.
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 }
 
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "agent",
-		Short: "infai agent engine",
-		RunE:  runTUI,
+		Use:           "agent",
+		Short:         "infai agent engine",
+		RunE:          runTUI,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 	cmd.Flags().StringVar(&host, "host", "localhost", "agent server host to attach to")
 	cmd.Flags().IntVar(&port, "port", 6000, "agent server port to attach to")
+	cmd.Flags().StringVar(&sessionID, "session", "", "resume a saved session by uuid")
 	cmd.AddCommand(newServerCmd())
 	return cmd
 }
@@ -71,11 +81,21 @@ func newLogger(level string) *slog.Logger {
 	}))
 }
 
-// runTUI is the default mode: a line-based chat client that attaches to a
-// running <binary> server.
 func runTUI(cmd *cobra.Command, args []string) error {
 	client := tui.NewRemoteClient(fmt.Sprintf("http://%s:%d", host, port))
-	return tui.Run(context.Background(), client, os.Stdin, os.Stdout)
+
+	var resume uuid.UUID
+	if sessionID != "" {
+		id, err := uuid.Parse(sessionID)
+		if err != nil {
+			return fmt.Errorf("invalid --session uuid: %w", err)
+		}
+		resume = id
+	}
+
+	return tui.Run(context.Background(), client, os.Stdin, os.Stdout, tui.RunOptions{
+		SessionID: resume,
+	})
 }
 
 // runServer exposes the engine over HTTP so any client (web UI, remote TUI,

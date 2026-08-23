@@ -21,17 +21,6 @@ type TokenUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// Add sums another usage into t. Nil-safe; use it to accumulate usage across
-// every turn of a multi-turn agent run.
-func (t *TokenUsage) Add(o *TokenUsage) {
-	if t == nil || o == nil {
-		return
-	}
-	t.PromptTokens += o.PromptTokens
-	t.CompletionTokens += o.CompletionTokens
-	t.TotalTokens += o.TotalTokens
-}
-
 // GenerateOptions carries per-request provider knobs.
 type GenerateOptions struct {
 	MaxTokens            int
@@ -47,13 +36,17 @@ type GenerateOptions struct {
 }
 
 // DeltaKind distinguishes the text fragments a stream delivers.
-type DeltaKind int
+type DeltaKind string
 
 const (
 	// DeltaContent is the model's visible answer text.
-	DeltaContent DeltaKind = iota
+	DeltaContent DeltaKind = "content"
 	// DeltaReasoning is the model's reasoning text (shown separately).
-	DeltaReasoning
+	DeltaReasoning DeltaKind = "reasoning"
+	// DeltaStatus is a live UI status update, not model output.
+	DeltaStatus DeltaKind = "status"
+	// DeltaCompactionSummary is a live-only compaction summary for the UI.
+	DeltaCompactionSummary DeltaKind = "compaction_summary"
 )
 
 // ChatCompletion()

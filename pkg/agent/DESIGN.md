@@ -235,6 +235,21 @@ node, bash command = step node.
 
 ## 9. Next steps (build order)
 
+**Done:** provider registry + session persistence (`pkg/agent/store`), slash-command
+CLI with live status header, recorder multi-writer (stream → user + transcript).
+
+Storage layout (`$XDG_CONFIG_HOME/infai/harness`):
+- `models.json` — provider registry (name/base_url/model/api_key/ctx_window/
+  default + lazily fetched available models from the provider's `/v1/models`).
+- `sessions/<uuid>.jsonl` — one append-only transcript per session. Kinds:
+  `meta`, `message`, `tool_call`, `tool_result`, `usage`, `delta` (delta is
+  live-only — it fans out to the user sink but never lands in the file).
+- The session's `SessionEventHub` is the live broadcaster: one `Publish()` fans out to the
+  live sink (SSE response / stdout) and persists the durable transcript.
+- Session meta records the model used, last-use method (cli/ui/server) and cwd.
+- Tool-call schema + recording path are wired; the tool loop (AccessControl)
+  is the remaining producer.
+
 1. `Tool` contract + registry — `Tool`, `ToolCall`, `ToolResult`, `ToolRegistry`
    (each tool declares its capability + schema). Pure types next to `contracts`.
 2. AccessControl — policy model (allow/deny/ask per capability + path/host

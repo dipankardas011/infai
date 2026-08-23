@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,12 +12,17 @@ import (
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/models"
+	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
 )
 
-// RemoteClient attaches the TUI to a running <binary> server. The first Chat
-// creates a session; subsequent Chats reuse it, so the conversation persists
-// server-side and survives the client. It always streams via SSE.
+// ErrNoSession is returned by Chat when no session has been created/loaded
+// yet.
+var ErrNoSession = errors.New("client: no active session; create or load one first")
+
+// RemoteClient attaches the CLI to a running <binary> server. The REPL
+// explicitly creates or loads a session and calls SetSession; Chat then reuses
+// that session, so the conversation persists server-side.
 type RemoteClient struct {
 	baseURL   string
 	client    *http.Client
@@ -31,16 +37,24 @@ func NewRemoteClient(baseURL string) *RemoteClient {
 	}
 }
 
+func (c *RemoteClient) SetSession(id uuid.UUID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sessionID = id
+}
+
+func (c *RemoteClient) SessionID() uuid.UUID {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sessionID
+}
+
 func (c *RemoteClient) Chat(ctx context.Context, prompt string, onDelta func(kind contracts.DeltaKind, text string)) (*ChatReply, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.sessionID == uuid.Nil {
-		id, err := c.createSession(ctx)
-		if err != nil {
-			return nil, err
-		}
-		c.sessionID = id
+		return nil, ErrNoSession
 	}
 
 	payload, err := json.Marshal(map[string]string{"prompt": prompt})
@@ -63,6 +77,11 @@ func (c *RemoteClient) Chat(ctx context.Context, prompt string, onDelta func(kin
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
+	}
+
 	return c.readStream(resp.Body, onDelta)
 }
 
@@ -82,12 +101,18 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 		}
 
 		var sseEv struct {
-			Kind             string `json:"kind"`
-			Delta            string `json:"delta"`
-			Done             bool   `json:"done"`
-			Reply            string `json:"reply"`
-			ReasoningContent string `json:"reasoning_content"`
-			Error            string `json:"error"`
+			Kind             string                `json:"kind"`
+			Delta            string                `json:"delta"`
+			Done             bool                  `json:"done"`
+			Reply            string                `json:"reply"`
+			ReasoningContent string                `json:"reasoning_content"`
+			Error            string                `json:"error"`
+			SessionID        uuid.UUID             `json:"session_id"`
+			Model            string                `json:"model"`
+			ContextWindow    int                   `json:"ctx_window"`
+			Usage            *contracts.TokenUsage `json:"usage"`
+			ContextTokens    int                   `json:"context_tokens"`
+			Pending          *Approval             `json:"pending"`
 		}
 		if err := json.Unmarshal([]byte(ev.Data), &sseEv); err != nil {
 			return nil, err
@@ -97,12 +122,17 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 		}
 		if sseEv.Delta != "" {
 			kind := contracts.DeltaContent
-			if sseEv.Kind == "reasoning" {
+			switch sseEv.Kind {
+			case "reasoning":
 				kind = contracts.DeltaReasoning
+			case "status":
+				kind = contracts.DeltaStatus
+			case "compaction_summary":
+				kind = contracts.DeltaCompactionSummary
 			}
 			if kind == contracts.DeltaContent {
 				reply.Reply += sseEv.Delta
-			} else {
+			} else if kind == contracts.DeltaReasoning {
 				reply.ReasoningContent += sseEv.Delta
 			}
 			if onDelta != nil {
@@ -112,30 +142,197 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 		if sseEv.Done {
 			reply.Reply = sseEv.Reply
 			reply.ReasoningContent = sseEv.ReasoningContent
+			reply.SessionID = sseEv.SessionID
+			reply.Model = sseEv.Model
+			reply.ContextWindow = sseEv.ContextWindow
+			reply.Usage = sseEv.Usage
+			reply.ContextTokens = sseEv.ContextTokens
+			reply.Pending = sseEv.Pending
 		}
 	}
 
 	return &reply, nil
 }
 
-func (c *RemoteClient) createSession(ctx context.Context) (uuid.UUID, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/sessions", nil)
-	if err != nil {
-		return uuid.Nil, err
-	}
+// ---- providers (read-only) ----
 
+func (c *RemoteClient) ListProviders(ctx context.Context) ([]store.Provider, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/providers", nil)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+	var out []store.Provider
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
+// ---- sessions ----
+
+func (c *RemoteClient) CreateSession(ctx context.Context, opts SessionCreateOptions) (*store.SessionMeta, error) {
+	var meta store.SessionMeta
+	err := c.postJSONInto(ctx, "/v1/sessions", opts, http.StatusCreated, &meta)
+	if err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
+func (c *RemoteClient) LoadSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, error) {
+	var meta store.SessionMeta
+	err := c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/load", struct{}{}, http.StatusOK, &meta)
+	if err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
+// GetSession fetches a session's meta and active timeline records so a resumed
+// session can render its history.
+func (c *RemoteClient) GetSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, []store.Record, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions/"+id.String(), nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, readAPIError(resp)
+	}
 	var out struct {
-		Id uuid.UUID `json:"id"`
+		Meta    store.SessionMeta `json:"meta"`
+		Records []store.Record    `json:"records"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return uuid.Nil, err
+		return nil, nil, err
 	}
+	return &out.Meta, out.Records, nil
+}
 
-	return out.Id, nil
+func (c *RemoteClient) GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions/"+id.String()+"/timeline", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+	var out TimelineView
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *RemoteClient) SelectBranch(ctx context.Context, id, eventID uuid.UUID) error {
+	return c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/timeline/branch", map[string]uuid.UUID{"event_id": eventID}, http.StatusOK, &struct{}{})
+}
+
+func (c *RemoteClient) DeleteSession(ctx context.Context, id uuid.UUID) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/sessions/"+id.String(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return readAPIError(resp)
+	}
+	return nil
+}
+
+func (c *RemoteClient) ListSessions(ctx context.Context) ([]store.SessionMeta, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+	var out []store.SessionMeta
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *RemoteClient) SetSessionModel(ctx context.Context, provider, model string) error {
+	return c.postJSON(ctx, "/v1/sessions/"+c.SessionID().String()+"/model", map[string]string{"provider": provider, "model": model}, http.StatusOK)
+}
+
+func (c *RemoteClient) Compact(ctx context.Context) (*store.SessionMeta, error) {
+	id := c.SessionID()
+	if id == uuid.Nil {
+		return nil, ErrNoSession
+	}
+	var meta store.SessionMeta
+	if err := c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/compact", struct{}{}, http.StatusOK, &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
+func (c *RemoteClient) postJSON(ctx context.Context, path string, body any, wantCode int) error {
+	var out any
+	return c.postJSONInto(ctx, path, body, wantCode, &out)
+}
+
+func (c *RemoteClient) postJSONInto(ctx context.Context, path string, body any, wantCode int, out any) error {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantCode {
+		return readAPIError(resp)
+	}
+	if out != nil {
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+	return nil
+}
+
+func readAPIError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &e) == nil && e.Error != "" {
+		return fmt.Errorf("server: %s", e.Error)
+	}
+	return fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
 }
