@@ -71,7 +71,7 @@ type LongTermMemory interface {
 
 // SessionMemory is the persistence contract for a session transcript.
 type SessionMemory interface {
-	Load(sessId string) ([]ChatMessage, error)
-	Append(sessId string, messages ...ChatMessage) error
-	Delete(sessId string) error
+	Load(sessID string) ([]ChatMessage, error)
+	Append(sessID string, messages ...ChatMessage) error
+	Delete(sessID string) error
 }

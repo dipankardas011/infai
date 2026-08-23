@@ -134,7 +134,7 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 	response := TimelineResponse{Meta: meta, Head: head, Events: make([]TimelineEventResponse, 0, len(events))}
 	for _, event := range events {
-		response.Events = append(response.Events, TimelineEventResponse{ID: event.ID, ParentID: event.ParentID, BranchFrom: event.BranchFrom, BlobHash: event.BlobHash, Record: event.Record})
+		response.Events = append(response.Events, TimelineEventResponse{ID: event.ID, ParentID: event.ParentID, BranchFrom: event.BranchFrom, Kind: event.Kind, BlobHash: event.BlobHash, Record: event.Record})
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }
@@ -243,8 +243,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 
 		// The session's recorder is the multi-writer: it feeds this SSE sink
-		// for the live stream AND appends the durable transcript to disk.
-		remove := sess.Recorder().AddSink(func(rec store.Record) error {
+		// for the live stream; durable records are written to the timeline.
+		remove := sess.EventHub().Subscribe(func(rec store.Record) error {
 			if rec.Kind != store.KindDelta {
 				return nil
 			}

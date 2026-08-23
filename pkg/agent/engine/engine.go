@@ -159,7 +159,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	return sess, nil
 }
 
-// LoadSession rebuilds a saved session from its transcript and registers it
+// LoadSession rebuilds a saved session from its timeline and registers it
 // as active so it can be chatted with again.
 func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error) {
 	select {
@@ -167,19 +167,23 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		return nil, ErrEngineShuttingDown
 	default:
 	}
+	meta, err := e.sessionStore.LoadMeta(id)
+	if err != nil {
+		return nil, err
+	}
 
-	timeline, err := e.sessionStore.OpenTimeline(id)
+	timeline, err := e.sessionStore.LoadSessionTimelineClient(id)
 	if err != nil {
 		return nil, err
 	}
-	events, err := timeline.LoadActiveAncestry(store.ROOT_EVENT_ID)
+	defer timeline.Close()
+
+	events, err := timeline.LoadActiveSessionTimeline()
 	if err != nil {
-		_ = timeline.Close()
 		return nil, err
 	}
-	meta, history, err := timelineSession(timeline, events)
+	history, err := timelineHistory(timeline, events)
 	if err != nil {
-		_ = timeline.Close()
 		return nil, err
 	}
 
@@ -187,10 +191,12 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 	if !ok {
 		return nil, ErrNoProvider
 	}
+	if model, ok := p.Model(meta.Model); ok {
+		meta.ContextWindow = model.ContextWindow
+	}
 
-	sess, err := NewResumedSession(e.bgLogger.WithGroup("session"), &p, meta, history, timeline)
+	sess, err := NewResumedSession(e.bgLogger.WithGroup("session"), &p, meta, history, timeline, e.sessionStore)
 	if err != nil {
-		_ = timeline.Close()
 		return nil, err
 	}
 
@@ -249,7 +255,7 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string
 	return sess.Chat(ctx, prompt, opts)
 }
 
-// CloseSession removes and closes a session and deletes its transcript from
+// CloseSession removes and closes a session and deletes its timeline from
 // disk. An in-flight Chat finishes or is canceled by its own context.
 func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 	e.mu.Lock()
@@ -281,18 +287,24 @@ func (e *InfaiAgentEngine) ListSessions() []store.SessionMeta {
 	return metas
 }
 
-// GetSessionRecords returns a session's meta plus its full transcript.
+// GetSessionRecords returns a session's meta plus its active timeline records.
 func (e *InfaiAgentEngine) GetSessionRecords(id uuid.UUID) (store.SessionMeta, []store.Record, error) {
-	timeline, err := e.sessionStore.OpenTimeline(id)
+	meta, err := e.sessionStore.LoadMeta(id)
+	if err != nil {
+		return store.SessionMeta{}, nil, err
+	}
+
+	timeline, err := e.sessionStore.LoadSessionTimelineClient(id)
 	if err != nil {
 		return store.SessionMeta{}, nil, err
 	}
 	defer timeline.Close()
-	events, err := timeline.LoadActiveAncestry(store.ROOT_EVENT_ID)
+
+	events, err := timeline.LoadActiveSessionTimeline()
 	if err != nil {
 		return store.SessionMeta{}, nil, err
 	}
-	meta, records, err := timelineRecords(timeline, events, true)
+	records, err := timelineRecords(timeline, events)
 	return meta, records, err
 }
 
@@ -304,16 +316,20 @@ func (e *InfaiAgentEngine) GetTimeline(id uuid.UUID) (store.SessionMeta, []store
 		}
 		return sess.Meta(), events, head, nil
 	}
-	timeline, err := e.sessionStore.OpenTimeline(id)
+	meta, err := e.sessionStore.LoadMeta(id)
+	if err != nil {
+		return store.SessionMeta{}, nil, uuid.Nil, err
+	}
+
+	timeline, err := e.sessionStore.LoadSessionTimelineClient(id)
 	if err != nil {
 		return store.SessionMeta{}, nil, uuid.Nil, err
 	}
 	defer timeline.Close()
-	events, err := timeline.LoadAllEvents()
+	events, err := timeline.LoadFullSessionTimeline()
 	if err != nil {
 		return store.SessionMeta{}, nil, uuid.Nil, err
 	}
-	meta, _, err := timelineRecords(timeline, events, false)
 	return meta, events, timeline.CurrentHeadEventID(), err
 }
 

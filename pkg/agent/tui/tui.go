@@ -60,11 +60,12 @@ type Client interface {
 }
 
 type TimelineEvent struct {
-	ID         uuid.UUID     `json:"id"`
-	ParentID   uuid.UUID     `json:"parent_id"`
-	BranchFrom *uuid.UUID    `json:"branch_from,omitempty"`
-	BlobHash   string        `json:"blob_hash,omitempty"`
-	Record     *store.Record `json:"record,omitempty"`
+	ID         uuid.UUID        `json:"id"`
+	ParentID   uuid.UUID        `json:"parent_id"`
+	BranchFrom *uuid.UUID       `json:"branch_from,omitempty"`
+	Kind       store.RecordKind `json:"kind"`
+	BlobHash   string           `json:"blob_hash,omitempty"`
+	Record     *store.Record    `json:"record,omitempty"`
 }
 
 type TimelineView struct {
@@ -241,7 +242,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 	return scanner.Err()
 }
 
-// renderHistory prints a saved session's transcript (message records in order)
+// renderHistory prints a saved session's active timeline (message records in order)
 // so a resumed session reads like the live chat. Tool records and the system
 // prompt are skipped.
 func renderHistory(out io.Writer, records []store.Record) {
@@ -443,9 +444,7 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 	for _, event := range view.Events {
 		parents[event.ID] = event.ParentID
 		byID[event.ID] = event
-		if event.Record == nil || event.Record.Kind != store.KindMeta {
-			options = append(options, event)
-		}
+		options = append(options, event)
 	}
 	for i, event := range options {
 		fmt.Fprintf(out, "  %d  %s%s\n", i, timelineTreePrefix(event, parents, byID), timelineEventLabel(event))

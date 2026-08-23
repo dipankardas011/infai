@@ -24,7 +24,6 @@ type Agent struct {
 	Id uuid.UUID
 
 	model     contracts.InfaiModelAdaptor
-	chatCtx   contracts.SessionMemory
 	turnHook  func(contracts.ChatMessage)
 	deltaHook func(contracts.DeltaKind, string)
 	Status    AgentStatus
@@ -66,19 +65,15 @@ func WithDeltaHook(hook func(contracts.DeltaKind, string)) AgentOptions {
 // NewAgent creates an agent with an independent short-term context (the
 // message history built up by Invoke).
 func NewAgent(id uuid.UUID, opts ...AgentOptions) (*Agent, error) {
-	o := &agentOption{
-		maxTurns: 65536,
-	}
+	o := &agentOption{maxTurns: 65536}
 	for _, opt := range opts {
 		if err := opt(o); err != nil {
 			return nil, err
 		}
 	}
-
 	return &Agent{
 		Id:        id,
 		model:     nil,
-		chatCtx:   nil,
 		turnHook:  o.turnHook,
 		deltaHook: o.deltaHook,
 		Status:    Idle,
@@ -111,13 +106,11 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 	messages := make([]contracts.ChatMessage, len(history))
 	copy(messages, history)
 
-	// usage accumulates across every turn of the run — each Generate is a
-	// separate request with its own token accounting.
-	var usage contracts.TokenUsage
+	var usage *contracts.TokenUsage
 
 	for turn := 0; turn < a.MaxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
-			return TurnResult{Status: TurnCanceled, Messages: messages}, nil
+			return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, nil
 		}
 
 		// Streaming is always on: deltas flow to the delta hook (the adapter
@@ -128,17 +121,16 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 		}
 
 		reply, u, err := a.model.Generate(ctx, messages, &goOpts)
-		usage.Add(u)
+		usage = u
 		if err != nil {
 			if ctx.Err() != nil {
 				// Canceled mid-call: report as canceled, not a model error.
-				return TurnResult{Status: TurnCanceled, Messages: messages}, nil
+				return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, nil
 			}
 			a.Status = Error
-			return TurnResult{Status: TurnDone, Messages: messages}, fmt.Errorf("agent: turn %d: %w", turn, err)
+			return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, fmt.Errorf("agent: turn %d: %w", turn, err)
 		}
 		messages = append(messages, reply)
-
 		if a.turnHook != nil {
 			a.turnHook(reply)
 		}
@@ -148,8 +140,7 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 
 	// Canceled on the final iteration's boundary — report it, not "done".
 	if err := ctx.Err(); err != nil {
-		return TurnResult{Status: TurnCanceled, Messages: messages}, nil
+		return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, nil
 	}
-
-	return TurnResult{Status: TurnDone, Messages: messages, Usage: &usage}, nil
+	return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, nil
 }

@@ -29,12 +29,13 @@ const (
 	blobBytesThreshold = 1 << 20
 )
 
-var ROOT_EVENT_ID = uuid.Nil
+var rootEventID = uuid.Nil
 
 type Event struct {
 	ID         uuid.UUID
 	ParentID   uuid.UUID
 	BranchFrom *uuid.UUID
+	Kind       RecordKind
 	Record     *Record
 	BlobHash   string
 }
@@ -70,6 +71,7 @@ type eventDisk struct {
 	ID         uuid.UUID  `json:"id"`
 	ParentID   uuid.UUID  `json:"parent_id,omitempty"`
 	BranchFrom *uuid.UUID `json:"branch_from,omitempty"`
+	Kind       RecordKind `json:"kind"`
 	Record     *Record    `json:"record,omitempty"`
 	BlobHash   string     `json:"blob_hash,omitempty"`
 }
@@ -124,10 +126,14 @@ func (t *Timeline) AppendToHead(record Record) (Event, error) {
 
 // BranchFromEventID commits a new event from an explicit parent. This is the
 // operation used after the user selects a branch point and submits a prompt.
-// RootEventID creates a root event; non-root IDs create a new committed branch.
+// A nil parent is reserved for the internal root; non-nil IDs create a new
+// committed branch.
 func (t *Timeline) BranchFromEventID(record Record, parent uuid.UUID) (Event, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if parent == rootEventID {
+		return Event{}, errors.New("timeline: branch of root of the session is not allowed")
+	}
 	var branchFrom *uuid.UUID
 	if t.hasChildLocked(parent) {
 		branchFrom = &parent
@@ -140,12 +146,7 @@ func (t *Timeline) BranchFromEventID(record Record, parent uuid.UUID) (Event, er
 func (t *Timeline) hasChildLocked(parent uuid.UUID) bool {
 	for child, existingParent := range t.parents {
 		if existingParent == parent {
-			loc, ok := t.index[child]
-			if !ok {
-				continue
-			}
-			event, err := t.readAt(child, loc)
-			if err == nil && event.Record != nil && event.Record.Kind == KindMeta {
+			if _, ok := t.index[child]; !ok {
 				continue
 			}
 			return true
@@ -164,7 +165,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID, bra
 	if record.Kind == KindDelta {
 		return Event{}, errors.New("timeline: delta records are live-only")
 	}
-	if parentID != ROOT_EVENT_ID {
+	if parentID != rootEventID {
 		if _, ok := t.index[parentID]; !ok {
 			return Event{}, fmt.Errorf("timeline: parent event %d not found", parentID)
 		}
@@ -179,7 +180,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID, bra
 		return Event{}, fmt.Errorf("timeline: encode record: %w", err)
 	}
 
-	disk := eventDisk{ID: id, ParentID: parentID, BranchFrom: branchFrom}
+	disk := eventDisk{ID: id, ParentID: parentID, BranchFrom: branchFrom, Kind: record.Kind}
 	if len(encodedRecord) >= blobBytesThreshold {
 		hash, err := t.writeBlob(encodedRecord)
 		if err != nil {
@@ -223,7 +224,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID, bra
 	t.index[id] = loc
 	t.parents[id] = parentID
 	t.head = id
-	return Event{ID: id, ParentID: parentID, BranchFrom: branchFrom, Record: &record, BlobHash: disk.BlobHash}, nil
+	return Event{ID: id, ParentID: parentID, BranchFrom: branchFrom, Kind: record.Kind, Record: &record, BlobHash: disk.BlobHash}, nil
 }
 
 func (t *Timeline) CurrentHeadEventID() uuid.UUID {
@@ -253,17 +254,21 @@ func (t *Timeline) LoadEvent(id uuid.UUID) (Event, error) {
 	return event, nil
 }
 
-// Path returns the active ancestry in chronological order. The traversal is
-// iterative to avoid stack growth on long sessions.
-func (t *Timeline) LoadFullAncestry(head uuid.UUID) ([]Event, error) {
+// LoadFullSessionTimeline returns the complete current session path. Blob
+// backed records remain lazy and are not resolved by this call.
+func (t *Timeline) LoadFullSessionTimeline() ([]Event, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if head == ROOT_EVENT_ID {
-		head = t.head
+	if t.head == rootEventID {
+		return []Event{}, nil
 	}
+	return t.loadFullAncestryLocked(t.head)
+}
+
+func (t *Timeline) loadFullAncestryLocked(head uuid.UUID) ([]Event, error) {
 	var reverse []Event
 	seen := make(map[uuid.UUID]struct{})
-	for head != ROOT_EVENT_ID {
+	for head != rootEventID {
 		if _, ok := seen[head]; ok {
 			return nil, fmt.Errorf("timeline: parent cycle at event %d", head)
 		}
@@ -285,49 +290,33 @@ func (t *Timeline) LoadFullAncestry(head uuid.UUID) ([]Event, error) {
 	return reverse, nil
 }
 
-// LoadAllEvents returns every event in physical append order without resolving
-// blob-backed records. It is intended for timeline inspection and branching.
-func (t *Timeline) LoadAllEvents() ([]Event, error) {
+// LoadActiveSessionTimeline returns the current session context after the
+// latest compaction. Blob backed records remain lazy and are not resolved.
+func (t *Timeline) LoadActiveSessionTimeline() ([]Event, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	type located struct {
-		id  uuid.UUID
-		loc EventLocation
+	if t.head == rootEventID {
+		return []Event{}, nil
 	}
-	entries := make([]located, 0, len(t.index))
-	for id, loc := range t.index {
-		entries = append(entries, located{id: id, loc: loc})
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].loc.Chunk != entries[j].loc.Chunk {
-			return entries[i].loc.Chunk < entries[j].loc.Chunk
-		}
-		return entries[i].loc.Offset < entries[j].loc.Offset
-	})
-	events := make([]Event, 0, len(entries))
-	for _, entry := range entries {
-		event, err := t.readAt(entry.id, entry.loc)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, event)
-	}
-	return events, nil
+	return t.loadActiveAncestryLocked(t.head)
 }
 
-// LoadActiveAncestry returns only the selected ancestry needed for the active
-// model context, stopping at the latest compaction marker. Full history remains
-// available through LoadFullAncestry.
-func (t *Timeline) LoadActiveAncestry(head uuid.UUID) ([]Event, error) {
+// LoadActiveSessionTimelineAt loads active context for a temporary branch
+// parent. Ordinary session access should use LoadActiveSessionTimeline, which
+// reads the timeline's internal HEAD.
+func (t *Timeline) LoadActiveSessionTimelineAt(head uuid.UUID) ([]Event, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if head == ROOT_EVENT_ID {
-		head = t.head
+	if head == rootEventID {
+		return nil, errors.New("timeline: nil ancestry head is not allowed")
 	}
+	return t.loadActiveAncestryLocked(head)
+}
 
+func (t *Timeline) loadActiveAncestryLocked(head uuid.UUID) ([]Event, error) {
 	var reverse []Event
 	seen := make(map[uuid.UUID]struct{})
-	for head != ROOT_EVENT_ID {
+	for head != rootEventID {
 		if _, ok := seen[head]; ok {
 			return nil, fmt.Errorf("timeline: parent cycle at event %d", head)
 		}
@@ -341,7 +330,7 @@ func (t *Timeline) LoadActiveAncestry(head uuid.UUID) ([]Event, error) {
 			return nil, err
 		}
 		reverse = append(reverse, event)
-		if event.Record != nil && event.Record.Kind == KindCompaction {
+		if event.Kind == KindCompaction {
 			break
 		}
 		head = event.ParentID
@@ -358,12 +347,10 @@ func (t *Timeline) Close() error {
 	if t.chunkFile == nil {
 		return nil
 	}
-	if err := t.chunkFile.Sync(); err != nil {
-		return err
-	}
-	err := t.chunkFile.Close()
+	syncErr := t.chunkFile.Sync()
+	closeErr := t.chunkFile.Close()
 	t.chunkFile = nil
-	return err
+	return errors.Join(syncErr, closeErr)
 }
 
 func (t *Timeline) appendIndex(entry indexDisk) error {
@@ -460,7 +447,8 @@ func (t *Timeline) reconcileChunks() error {
 			if current, ok := t.index[disk.ID]; !ok || current != loc {
 				var kind RecordKind
 				var ts time.Time
-				if disk.Record != nil {
+				kind = disk.Kind
+				if kind == "" && disk.Record != nil {
 					kind = disk.Record.Kind
 					ts = disk.Record.Timestamp
 				}
@@ -477,7 +465,7 @@ func (t *Timeline) reconcileChunks() error {
 			return err
 		}
 	}
-	if latest != ROOT_EVENT_ID && t.head != latest {
+	if latest != rootEventID && t.head != latest {
 		if err := t.appendIndex(indexDisk{Type: "head", Head: latest}); err != nil {
 			return err
 		}
@@ -578,7 +566,11 @@ func (t *Timeline) readAt(id uuid.UUID, loc EventLocation) (Event, error) {
 	} else if disk.BlobHash == "" {
 		return Event{}, fmt.Errorf("timeline: event %d has no record", id)
 	}
-	return Event{ID: disk.ID, ParentID: disk.ParentID, BranchFrom: disk.BranchFrom, Record: record, BlobHash: disk.BlobHash}, nil
+	kind := disk.Kind
+	if kind == "" && disk.Record != nil {
+		kind = disk.Record.Kind
+	}
+	return Event{ID: disk.ID, ParentID: disk.ParentID, BranchFrom: disk.BranchFrom, Kind: kind, Record: record, BlobHash: disk.BlobHash}, nil
 }
 
 // ResolveRecord materializes a blob-backed event when its content is needed.
@@ -627,12 +619,10 @@ func (t *Timeline) writeBlob(payload []byte) (string, error) {
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := tmp.Write(payload); err != nil {
-		tmp.Close()
-		return "", err
+		return "", errors.Join(err, tmp.Close())
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return "", err
+		return "", errors.Join(err, tmp.Close())
 	}
 	if err := tmp.Close(); err != nil {
 		return "", err
@@ -651,6 +641,7 @@ func syncTimelineDir(path string) error {
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
-	return dir.Sync()
+	syncErr := dir.Sync()
+	closeErr := dir.Close()
+	return errors.Join(syncErr, closeErr)
 }

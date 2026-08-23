@@ -536,9 +536,7 @@ func (t *chatTUI) showBranchTimeline() {
 	}
 	var events []TimelineEvent
 	for _, event := range view.Events {
-		if event.Record == nil || event.Record.Kind != store.KindMeta {
-			events = append(events, event)
-		}
+		events = append(events, event)
 	}
 	if len(events) == 0 {
 		t.appendError(fmt.Errorf("timeline is empty"))
@@ -590,7 +588,7 @@ func timelineTreePrefix(event TimelineEvent, parents map[uuid.UUID]uuid.UUID, by
 
 func timelineEventLabel(event TimelineEvent) string {
 	if event.Record == nil {
-		return "blob  content unavailable"
+		return string(event.Kind) + "  blob content unavailable"
 	}
 	label := string(event.Record.Kind)
 	text := event.Record.Text
@@ -615,7 +613,7 @@ func timelineEventRole(event TimelineEvent) string {
 			return event.Record.Message.Role
 		}
 	}
-	if event.Record != nil && event.Record.Kind == store.KindCompaction {
+	if event.Kind == store.KindCompaction {
 		return "system"
 	}
 	return ""
@@ -648,7 +646,7 @@ func tokenCount(r *ChatReply) int {
 	return r.Usage.PromptTokens + r.Usage.CompletionTokens
 }
 
-// blocksFromRecords converts a saved transcript into chat blocks so a resumed
+// blocksFromRecords converts saved timeline records into chat blocks so a resumed
 // session renders its history.
 func blocksFromRecords(records []store.Record) []block {
 	var blocks []block

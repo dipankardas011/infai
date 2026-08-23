@@ -3,9 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,18 +16,19 @@ import (
 )
 
 var (
-	ErrSessionClosed = errors.New("session closed")
-	ErrNoProvider    = errors.New("engine: no provider configured")
+	ErrSessionClosed   = errors.New("session closed")
+	ErrNoProvider      = errors.New("engine: no provider configured")
+	ErrCompactionLimit = errors.New("session: automatic compaction limit reached")
 )
 
-const contextCompactionRatio = 0.80
+const maxAutomaticCompactions = 2
 
 // InfaiAgentSession is the persistent state of one conversation. It is a
 // passive object: it holds history and the agent tree, and Chat() runs the
 // loop against it. Between Chat calls the session is idle — no goroutine is
 // held — so it stays registered until explicitly closed. Every turn is
-// streamed through the session's Recorder, which fans out to the live user
-// sink (SSE/stdout) and appends the durable transcript to disk.
+// streamed through the session's event hub, which fans out to the live user
+// sink (SSE/stdout); durable history is written directly to the timeline.
 type InfaiAgentSession struct {
 	sessionID uuid.UUID
 
@@ -41,11 +40,12 @@ type InfaiAgentSession struct {
 	closed  bool
 	history []contracts.ChatMessage
 
-	meta         store.SessionMeta
-	timeline     *store.Timeline
-	rec          *store.Recorder
-	persisted    int
-	branchParent uuid.UUID
+	meta                store.SessionMeta
+	timeline            *store.Timeline
+	store               *store.SessionStore
+	events              *store.SessionEventHub
+	persisted           int
+	pendingBranchParent uuid.UUID
 
 	// WARN: we do need to properly handle the Concurrency.
 	agentMapping  map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
@@ -65,6 +65,7 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 	o := &InfaiAgentSession{
 		l:             l,
 		model:         models.NewOpenAICompatableAPI(p.Endpoint, model, p.APIKey),
+		store:         ss,
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
 		runtime_comms: make(map[uuid.UUID]*AgentComms),
 		Agents:        make(map[uuid.UUID]*agent.Agent),
@@ -87,17 +88,26 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 		UpdatedAt:     now,
 	}
 
-	if err := o.openTimeline(ss, true); err != nil {
+	o.events = store.NewSessionEventHub()
+	if err := ss.SaveMeta(o.meta); err != nil {
 		return nil, err
 	}
+
+	timeline, err := ss.LoadSessionTimelineClient(o.meta.ID)
+	if err != nil {
+		return nil, err
+	}
+	o.timeline = timeline
+
 	if err := o.registerBaseAgent(); err != nil {
 		return nil, err
 	}
 	return o, nil
 }
 
-// NewResumedSession rebuilds a session from the active timeline ancestry.
-func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta, history []contracts.ChatMessage, timeline *store.Timeline) (*InfaiAgentSession, error) {
+// NewResumedSession rebuilds a session from the active timeline ancestry. The
+// caller resolves lazy blob records before constructing the chat history.
+func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta, history []contracts.ChatMessage, timeline *store.Timeline, sessionStore *store.SessionStore) (*InfaiAgentSession, error) {
 	if p == nil {
 		return nil, ErrNoProvider
 	}
@@ -110,32 +120,20 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 		Agents:        make(map[uuid.UUID]*agent.Agent),
 		sessionID:     meta.ID,
 		meta:          meta,
+		store:         sessionStore,
 		history:       history,
 		persisted:     len(history),
+		timeline:      timeline,
+		events:        store.NewSessionEventHub(),
 	}
 
-	o.timeline = timeline
-	o.rec = store.NewLiveRecorder()
+	if err := sessionStore.SaveMeta(meta); err != nil {
+		return nil, err
+	}
 	if err := o.registerBaseAgent(); err != nil {
 		return nil, err
 	}
 	return o, nil
-}
-
-func (s *InfaiAgentSession) openTimeline(ss *store.SessionStore, writeMeta bool) error {
-	timeline, err := ss.OpenTimeline(s.meta.ID)
-	if err != nil {
-		return err
-	}
-	s.timeline = timeline
-	s.rec = store.NewLiveRecorder()
-	if writeMeta {
-		if _, err := s.timeline.AppendToHead(store.Record{Kind: store.KindMeta, Timestamp: s.meta.UpdatedAt, Meta: &s.meta}); err != nil {
-			_ = s.timeline.Close()
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *InfaiAgentSession) registerBaseAgent() error {
@@ -157,10 +155,10 @@ func (s *InfaiAgentSession) Meta() store.SessionMeta {
 	return s.meta
 }
 
-// Recorder exposes the session's multi-writer so the server can attach the
+// EventHub exposes the session's live broadcaster so the server can attach the
 // live SSE sink per request.
-func (s *InfaiAgentSession) Recorder() *store.Recorder {
-	return s.rec
+func (s *InfaiAgentSession) EventHub() *store.SessionEventHub {
+	return s.events
 }
 
 // Timeline returns the full branch ancestry as lightweight events. Blob-backed
@@ -168,7 +166,7 @@ func (s *InfaiAgentSession) Recorder() *store.Recorder {
 func (s *InfaiAgentSession) Timeline() ([]store.Event, uuid.UUID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	events, err := s.timeline.LoadAllEvents()
+	events, err := s.timeline.LoadFullSessionTimeline()
 	return events, s.timeline.CurrentHeadEventID(), err
 }
 
@@ -178,7 +176,7 @@ func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) error {
 	if _, err := s.timeline.LoadEvent(eventID); err != nil {
 		return err
 	}
-	s.branchParent = eventID
+	s.pendingBranchParent = eventID
 	return nil
 }
 
@@ -202,8 +200,8 @@ func (s *InfaiAgentSession) setModelLocked(p *store.Provider, name string, ctxWi
 	s.meta.Model = name
 	s.meta.ContextWindow = ctxWindow
 	s.meta.UpdatedAt = time.Now().UTC()
-	if _, err := s.timeline.AppendToHead(store.Record{Kind: store.KindMeta, Timestamp: s.meta.UpdatedAt, Meta: &s.meta}); err != nil {
-		s.l.Error("persist session meta", "session_id", s.sessionID, "error", err)
+	if err := s.store.SaveMeta(s.meta); err != nil {
+		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
 	}
 }
 
@@ -219,20 +217,20 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		return nil, ErrSessionClosed
 	}
 	parentID := s.timeline.CurrentHeadEventID()
-	selectedBranch := s.branchParent != uuid.Nil
-	if s.branchParent != uuid.Nil {
-		events, err := s.timeline.LoadActiveAncestry(s.branchParent)
+	selectedBranch := s.pendingBranchParent != uuid.Nil
+	if s.pendingBranchParent != uuid.Nil {
+		events, err := s.timeline.LoadActiveSessionTimelineAt(s.pendingBranchParent)
 		if err != nil {
 			return nil, err
 		}
-		_, history, err := timelineSession(s.timeline, events)
+		history, err := timelineHistory(s.timeline, events)
 		if err != nil {
 			return nil, err
 		}
 		s.history = history
 		s.persisted = len(history)
-		parentID = s.branchParent
-		s.branchParent = uuid.Nil
+		parentID = s.pendingBranchParent
+		s.pendingBranchParent = uuid.Nil
 	}
 
 	if len(s.history) == 0 {
@@ -248,9 +246,6 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		if !selectedBranch {
 			parentID = s.timeline.CurrentHeadEventID()
 		}
-	}
-	if err := s.compactIfNeededLocked(ctx, prompt); err != nil {
-		return nil, err
 	}
 	s.history = append(s.history, contracts.NewUserMessage(prompt))
 
@@ -269,29 +264,43 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 	}
 	s.persisted = len(s.history)
 
-	a := s.Agents[s.baseAgentId]
-	if a == nil {
+	agentLoop := s.Agents[s.baseAgentId]
+	if agentLoop == nil {
 		return nil, errors.New("session: base agent missing")
 	}
-	a.SetDeltaHook(func(kind contracts.DeltaKind, text string) {
+	agentLoop.SetDeltaHook(func(kind contracts.DeltaKind, text string) {
 		k := "content"
 		if kind == contracts.DeltaReasoning {
 			k = "reasoning"
 		}
-		s.rec.Record(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: k, Text: text})
+		s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: k, Text: text})
 	})
 
-	result, err := a.Invoke(ctx, s.history)
-	if err != nil {
-		return nil, err
+	var result agent.TurnResult
+	var invokeErr error
+	for compactions := 0; ; compactions++ {
+		result, invokeErr = agentLoop.Invoke(ctx, s.history)
+		if result.Messages != nil {
+			s.history = result.Messages
+			s.persistMessagesLocked()
+		}
+		if invokeErr != nil {
+			return nil, invokeErr
+		}
+		if !s.shouldCompact(result.Usage) {
+			break
+		}
+		if compactions >= maxAutomaticCompactions {
+			return nil, ErrCompactionLimit
+		}
+		if err := s.compactLocked(ctx, true); err != nil {
+			return nil, err
+		}
 	}
-	s.history = result.Messages
-
-	s.persistMessagesLocked()
 	s.meta.TurnCount++
 	s.meta.UpdatedAt = time.Now().UTC()
-	if _, err := s.timeline.AppendToHead(store.Record{Kind: store.KindMeta, Timestamp: s.meta.UpdatedAt, Meta: &s.meta}); err != nil {
-		s.l.Error("persist session meta", "session_id", s.sessionID, "error", err)
+	if err := s.store.SaveMeta(s.meta); err != nil {
+		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
 	}
 
 	return &ChatResult{
@@ -318,38 +327,7 @@ func (s *InfaiAgentSession) persistMessagesLocked() {
 	s.persisted = len(s.history)
 }
 
-func (s *InfaiAgentSession) compactIfNeededLocked(ctx context.Context, nextPrompt string) error {
-	if s.meta.ContextWindow <= 0 || estimateMessages(s.history)+estimateText(nextPrompt) < int(float64(s.meta.ContextWindow)*contextCompactionRatio) {
-		return nil
-	}
-
-	var transcript strings.Builder
-	for _, message := range s.history {
-		text := message.Text()
-		if text == "" {
-			continue
-		}
-		fmt.Fprintf(&transcript, "%s: %s\n", message.Role, text)
-	}
-	summary := transcript.String()
-	if len(summary) > 32*1024 {
-		summary = summary[len(summary)-32*1024:]
-	}
-	summaryPrompt := contracts.NewUserMessage("Summarize the following conversation for continuation. Preserve decisions, constraints, tool results, and unresolved work. Be concise.\n\n" + summary)
-	reply, _, err := s.model.Generate(ctx, []contracts.ChatMessage{summaryPrompt}, &contracts.GenerateOptions{})
-	if err == nil && reply.Text() != "" {
-		summary = reply.Text()
-	}
-	if summary == "" {
-		summary = "Conversation compacted; no summary content was available."
-	}
-	if _, err := s.timeline.AppendToHead(store.Record{
-		Kind:       store.KindCompaction,
-		Timestamp:  time.Now().UTC(),
-		Compaction: &store.CompactionRecord{Summary: summary},
-	}); err != nil {
-		return err
-	}
+func (s *InfaiAgentSession) resetHistoryLocked(summary string) {
 	system := ""
 	if len(s.history) > 0 && s.history[0].Role == "system" {
 		system = s.history[0].Text()
@@ -357,30 +335,59 @@ func (s *InfaiAgentSession) compactIfNeededLocked(ctx context.Context, nextPromp
 	s.history = []contracts.ChatMessage{contracts.NewSystemMessage(system), contracts.NewSystemMessage("Previous context summary:\n" + summary)}
 	s.persisted = len(s.history)
 	s.l.Info("session context compacted", "session_id", s.sessionID, "context_window", s.meta.ContextWindow)
+}
+
+// Compact creates and persists a continuation summary without adding a
+// summarizer request to the normal conversation history.
+func (s *InfaiAgentSession) Compact(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrSessionClosed
+	}
+	return s.compactLocked(ctx, false)
+}
+
+func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
+	return usage != nil && s.meta.ContextWindow > 0 && usage.PromptTokens*100 >= s.meta.ContextWindow*80
+}
+
+func (s *InfaiAgentSession) compactLocked(ctx context.Context, automatic bool) error {
+	result, err := s.summarize(ctx, s.history, automatic)
+	if err != nil {
+		return err
+	}
+	if result.Summary == "" {
+		return errors.New("session: compaction produced an empty summary")
+	}
+	if _, err := s.timeline.AppendToHead(store.Record{
+		Kind: store.KindCompaction, Timestamp: time.Now().UTC(),
+		Compaction: &store.CompactionRecord{Summary: result.Summary},
+	}); err != nil {
+		return err
+	}
+	s.resetHistoryLocked(result.Summary)
 	return nil
 }
 
-func estimateMessages(messages []contracts.ChatMessage) int {
-	tokens := 0
-	for _, message := range messages {
-		tokens += estimateText(message.Text()) + 8
+func (s *InfaiAgentSession) summarize(ctx context.Context, history []contracts.ChatMessage, automatic bool) (agent.CompactionResult, error) {
+	prompt := ManualCompactionPrompt(history)
+	if automatic {
+		prompt = AutomaticCompactionPrompt(history)
 	}
-	return tokens
-}
-
-func estimateText(text string) int {
-	if text == "" {
-		return 0
+	reply, _, err := s.model.Generate(ctx, prompt, &contracts.GenerateOptions{})
+	if err != nil {
+		return agent.CompactionResult{}, err
 	}
-	return (len(text) + 3) / 4
+	return agent.CompactionResult{Summary: reply.Text()}, nil
 }
 
 func (s *InfaiAgentSession) close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
-	if s.rec != nil {
-		_ = s.rec.Close()
+	if s.events != nil {
+		s.events.Close()
 	}
 	if s.timeline != nil {
 		_ = s.timeline.Close()
@@ -426,10 +433,12 @@ func lastAssistantReasoning(messages []contracts.ChatMessage) string {
 	return ""
 }
 
-func timelineSession(timeline *store.Timeline, events []store.Event) (store.SessionMeta, []contracts.ChatMessage, error) {
-	meta, records, err := timelineRecords(timeline, events, true)
+func timelineHistory(timeline *store.Timeline, events []store.Event) ([]contracts.ChatMessage, error) {
+	// Timeline loads events lazily so inspection stays cheap. Resuming a
+	// session is the boundary where blob-backed records must become messages.
+	records, err := timelineRecords(timeline, events)
 	if err != nil {
-		return store.SessionMeta{}, nil, err
+		return nil, err
 	}
 	var history []contracts.ChatMessage
 	hasSystem := false
@@ -453,31 +462,21 @@ func timelineSession(timeline *store.Timeline, events []store.Event) (store.Sess
 			}
 		}
 	}
-	if meta.ID == uuid.Nil {
-		return store.SessionMeta{}, nil, errors.New("timeline: session has no metadata record")
-	}
-	return meta, history, nil
+	return history, nil
 }
 
-func timelineRecords(timeline *store.Timeline, events []store.Event, resolveBlobs bool) (store.SessionMeta, []store.Record, error) {
-	var meta store.SessionMeta
+func timelineRecords(timeline *store.Timeline, events []store.Event) ([]store.Record, error) {
 	records := make([]store.Record, 0, len(events))
 	for _, event := range events {
 		record := event.Record
 		if record == nil {
-			if !resolveBlobs {
-				continue
-			}
 			resolved, err := timeline.ResolveRecord(event)
 			if err != nil {
-				return store.SessionMeta{}, nil, err
+				return nil, err
 			}
 			record = &resolved
 		}
 		records = append(records, *record)
-		if record.Kind == store.KindMeta && record.Meta != nil {
-			meta = *record.Meta
-		}
 	}
-	return meta, records, nil
+	return records, nil
 }

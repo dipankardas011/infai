@@ -38,7 +38,7 @@ func TestTimelineAppendLookupPathAndRotation(t *testing.T) {
 	if err != nil || got.Record == nil || first.Record == nil || got.Record.Text != first.Record.Text {
 		t.Fatalf("lookup: event=%+v err=%v", got, err)
 	}
-	path, err := timeline.LoadFullAncestry(ROOT_EVENT_ID)
+	path, err := timeline.LoadFullSessionTimeline()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,11 +150,11 @@ func TestTimelineActivePathStopsAtCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	full, err := timeline.LoadFullAncestry(ROOT_EVENT_ID)
+	full, err := timeline.LoadFullSessionTimeline()
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, err := timeline.LoadActiveAncestry(ROOT_EVENT_ID)
+	active, err := timeline.LoadActiveSessionTimeline()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestTimelineBranchSelectionDoesNotMoveHeadUntilAppend(t *testing.T) {
 	if timeline.CurrentHeadEventID() != oldReply.ID {
 		t.Fatalf("branch selection moved head: got=%d want=%d", timeline.CurrentHeadEventID(), oldReply.ID)
 	}
-	oldPath, err := timeline.LoadFullAncestry(ROOT_EVENT_ID)
+	oldPath, err := timeline.LoadFullSessionTimeline()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestTimelineBranchSelectionDoesNotMoveHeadUntilAppend(t *testing.T) {
 	if branched.ParentID != root.ID || timeline.CurrentHeadEventID() != branched.ID {
 		t.Fatalf("branch head=%d parent=%d", timeline.CurrentHeadEventID(), branched.ParentID)
 	}
-	newPath, err := timeline.LoadFullAncestry(ROOT_EVENT_ID)
+	newPath, err := timeline.LoadFullSessionTimeline()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,14 +229,14 @@ func TestTimelineBranchSelectionDoesNotMoveHeadUntilAppend(t *testing.T) {
 	if timeline.CurrentHeadEventID() != branched.ID {
 		t.Fatalf("reloaded head=%d want=%d", timeline.CurrentHeadEventID(), branched.ID)
 	}
-	reloadedPath, err := timeline.LoadFullAncestry(ROOT_EVENT_ID)
+	reloadedPath, err := timeline.LoadFullSessionTimeline()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(reloadedPath) != 2 || reloadedPath[1].ID != branched.ID {
 		t.Fatalf("reloaded branch path=%+v", reloadedPath)
 	}
-	oldPath, err = timeline.LoadFullAncestry(oldReply.ID)
+	oldPath, err = timeline.loadFullAncestryLocked(oldReply.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

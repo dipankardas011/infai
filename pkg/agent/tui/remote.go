@@ -189,8 +189,8 @@ func (c *RemoteClient) LoadSession(ctx context.Context, id uuid.UUID) (*store.Se
 	return &meta, nil
 }
 
-// GetSession fetches a session's meta and full transcript (message records in
-// order) so a resumed session can render its history.
+// GetSession fetches a session's meta and active timeline records so a resumed
+// session can render its history.
 func (c *RemoteClient) GetSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, []store.Record, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions/"+id.String(), nil)
 	if err != nil {

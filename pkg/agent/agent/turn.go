@@ -45,3 +45,9 @@ type TurnResult struct {
 	Pending  *ApprovalRequest
 	Usage    *contracts.TokenUsage
 }
+
+// CompactionResult carries a continuation summary produced by the session's
+// separate compaction request.
+type CompactionResult struct {
+	Summary string
+}

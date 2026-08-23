@@ -36,11 +36,12 @@ type SessionDetailResponse struct {
 }
 
 type TimelineEventResponse struct {
-	ID         uuid.UUID     `json:"id"`
-	ParentID   uuid.UUID     `json:"parent_id"`
-	BranchFrom *uuid.UUID    `json:"branch_from,omitempty"`
-	BlobHash   string        `json:"blob_hash,omitempty"`
-	Record     *store.Record `json:"record,omitempty"`
+	ID         uuid.UUID        `json:"id"`
+	ParentID   uuid.UUID        `json:"parent_id"`
+	BranchFrom *uuid.UUID       `json:"branch_from,omitempty"`
+	Kind       store.RecordKind `json:"kind"`
+	BlobHash   string           `json:"blob_hash,omitempty"`
+	Record     *store.Record    `json:"record,omitempty"`
 }
 
 type TimelineResponse struct {

@@ -21,17 +21,6 @@ type TokenUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// Add sums another usage into t. Nil-safe; use it to accumulate usage across
-// every turn of a multi-turn agent run.
-func (t *TokenUsage) Add(o *TokenUsage) {
-	if t == nil || o == nil {
-		return
-	}
-	t.PromptTokens += o.PromptTokens
-	t.CompletionTokens += o.CompletionTokens
-	t.TotalTokens += o.TotalTokens
-}
-
 // GenerateOptions carries per-request provider knobs.
 type GenerateOptions struct {
 	MaxTokens            int

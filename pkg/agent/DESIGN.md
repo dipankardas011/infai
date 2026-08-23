@@ -244,7 +244,7 @@ Storage layout (`$XDG_CONFIG_HOME/infai/harness`):
 - `sessions/<uuid>.jsonl` — one append-only transcript per session. Kinds:
   `meta`, `message`, `tool_call`, `tool_result`, `usage`, `delta` (delta is
   live-only — it fans out to the user sink but never lands in the file).
-- The session's `Recorder` is the multi-writer: one `Record()` fans out to the
+- The session's `SessionEventHub` is the live broadcaster: one `Publish()` fans out to the
   live sink (SSE response / stdout) and persists the durable transcript.
 - Session meta records the model used, last-use method (cli/ui/server) and cwd.
 - Tool-call schema + recording path are wired; the tool loop (AccessControl)
