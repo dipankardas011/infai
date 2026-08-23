@@ -254,15 +254,25 @@ func (t *Timeline) LoadEvent(id uuid.UUID) (Event, error) {
 	return event, nil
 }
 
-// LoadFullSessionTimeline returns the complete current session path. Blob
-// backed records remain lazy and are not resolved by this call.
-func (t *Timeline) LoadFullSessionTimeline() ([]Event, error) {
+// LoadEntireTimeline returns every event in the session graph, including
+// events that are no longer on the current HEAD ancestry. It is intended for
+// branch and timeline inspection, not model context reconstruction.
+func (t *Timeline) LoadEntireTimeline() ([]Event, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.head == rootEventID {
-		return []Event{}, nil
+
+	events := make([]Event, 0, len(t.index))
+	for id, loc := range t.index {
+		event, err := t.readAt(id, loc)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
 	}
-	return t.loadFullAncestryLocked(t.head)
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].ID.String() < events[j].ID.String()
+	})
+	return events, nil
 }
 
 func (t *Timeline) loadFullAncestryLocked(head uuid.UUID) ([]Event, error) {
@@ -290,9 +300,9 @@ func (t *Timeline) loadFullAncestryLocked(head uuid.UUID) ([]Event, error) {
 	return reverse, nil
 }
 
-// LoadActiveSessionTimeline returns the current session context after the
+// LoadActiveBranchContext returns the current session context after the
 // latest compaction. Blob backed records remain lazy and are not resolved.
-func (t *Timeline) LoadActiveSessionTimeline() ([]Event, error) {
+func (t *Timeline) LoadActiveBranchContext() ([]Event, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.head == rootEventID {
@@ -301,10 +311,10 @@ func (t *Timeline) LoadActiveSessionTimeline() ([]Event, error) {
 	return t.loadActiveAncestryLocked(t.head)
 }
 
-// LoadActiveSessionTimelineAt loads active context for a temporary branch
-// parent. Ordinary session access should use LoadActiveSessionTimeline, which
+// LoadActiveContextAt loads active context for a temporary branch parent.
+// Ordinary session access should use LoadActiveContext, which
 // reads the timeline's internal HEAD.
-func (t *Timeline) LoadActiveSessionTimelineAt(head uuid.UUID) ([]Event, error) {
+func (t *Timeline) LoadActiveContextAt(head uuid.UUID) ([]Event, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if head == rootEventID {

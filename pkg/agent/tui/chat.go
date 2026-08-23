@@ -221,7 +221,7 @@ func runChatTUI(ctx context.Context, c Client, sessions []store.SessionMeta, opt
 				if ev.err != nil {
 					t.appendError(ev.err)
 				} else if ev.reply != nil {
-					t.used += tokenCount(ev.reply)
+					t.used = ev.reply.ContextTokens
 					t.session.TurnCount++
 					t.session.Model = ev.reply.Model
 					if ev.reply.Pending != nil {
@@ -542,6 +542,7 @@ func (t *chatTUI) compactSession() {
 		return
 	}
 	t.session = *meta
+	t.used = 0
 	t.blocks = blocksFromRecords(records)
 }
 

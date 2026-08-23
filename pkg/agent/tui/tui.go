@@ -26,6 +26,7 @@ type ChatReply struct {
 	Model            string
 	ContextWindow    int
 	Usage            *contracts.TokenUsage
+	ContextTokens    int
 	Pending          *Approval
 }
 
@@ -295,13 +296,10 @@ func ensureSession(ctx context.Context, c Client, out io.Writer, scan *bufio.Sca
 	return meta, nil
 }
 
-// updateState folds a ChatReply into the REPL state. Token consumption comes
-// from the model's reply usage, accumulated in memory for the header; it is
-// never persisted to the session.
+// updateState folds a ChatReply into the REPL state. Context usage comes from
+// the server and is never persisted to the session.
 func updateState(s *replState, reply *ChatReply) {
-	if reply.Usage != nil {
-		s.used += reply.Usage.PromptTokens + reply.Usage.CompletionTokens
-	}
+	s.used = reply.ContextTokens
 
 	if reply.Model != "" {
 		s.session.Model = reply.Model
@@ -427,6 +425,7 @@ multi-line: end a line with \ to continue typing on the next line`)
 			return false, err
 		}
 		s.session = *meta
+		s.used = 0
 		_, records, err := c.GetSession(ctx, meta.ID)
 		if err != nil {
 			return false, err

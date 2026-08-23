@@ -59,6 +59,7 @@ type ChatResponse struct {
 	ReasoningContent string                 `json:"reasoning_content,omitempty"`
 	Pending          *agent.ApprovalRequest `json:"pending,omitempty"`
 	Usage            *contracts.TokenUsage  `json:"usage,omitempty"`
+	ContextTokens    int                    `json:"context_tokens"`
 }
 
 type ChatDeltaEvent struct {
@@ -76,6 +77,7 @@ type ChatDoneEvent struct {
 	ContextWindow    int                    `json:"ctx_window"`
 	Pending          *agent.ApprovalRequest `json:"pending,omitempty"`
 	Usage            *contracts.TokenUsage  `json:"usage,omitempty"`
+	ContextTokens    int                    `json:"context_tokens"`
 }
 
 type ChatErrorEvent struct {

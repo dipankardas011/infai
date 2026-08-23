@@ -38,7 +38,7 @@ func TestTimelineAppendLookupPathAndRotation(t *testing.T) {
 	if err != nil || got.Record == nil || first.Record == nil || got.Record.Text != first.Record.Text {
 		t.Fatalf("lookup: event=%+v err=%v", got, err)
 	}
-	path, err := timeline.LoadFullSessionTimeline()
+	path, err := timeline.LoadActiveBranchContext()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,11 +150,11 @@ func TestTimelineActivePathStopsAtCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	full, err := timeline.LoadFullSessionTimeline()
+	full, err := timeline.LoadEntireTimeline()
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, err := timeline.LoadActiveSessionTimeline()
+	active, err := timeline.LoadActiveBranchContext()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestTimelineBranchSelectionDoesNotMoveHeadUntilAppend(t *testing.T) {
 	if timeline.CurrentHeadEventID() != oldReply.ID {
 		t.Fatalf("branch selection moved head: got=%d want=%d", timeline.CurrentHeadEventID(), oldReply.ID)
 	}
-	oldPath, err := timeline.LoadFullSessionTimeline()
+	oldPath, err := timeline.LoadActiveBranchContext()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestTimelineBranchSelectionDoesNotMoveHeadUntilAppend(t *testing.T) {
 	if branched.ParentID != root.ID || timeline.CurrentHeadEventID() != branched.ID {
 		t.Fatalf("branch head=%d parent=%d", timeline.CurrentHeadEventID(), branched.ParentID)
 	}
-	newPath, err := timeline.LoadFullSessionTimeline()
+	newPath, err := timeline.LoadActiveBranchContext()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestTimelineBranchSelectionDoesNotMoveHeadUntilAppend(t *testing.T) {
 	if timeline.CurrentHeadEventID() != branched.ID {
 		t.Fatalf("reloaded head=%d want=%d", timeline.CurrentHeadEventID(), branched.ID)
 	}
-	reloadedPath, err := timeline.LoadFullSessionTimeline()
+	reloadedPath, err := timeline.LoadActiveBranchContext()
 	if err != nil {
 		t.Fatal(err)
 	}

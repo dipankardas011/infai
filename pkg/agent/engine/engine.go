@@ -41,6 +41,7 @@ type ChatResult struct {
 	ReasoningContent string
 	Pending          *agent.ApprovalRequest
 	Usage            *contracts.TokenUsage
+	ContextTokens    int
 }
 
 // ChatOptions carries per-chat knobs.
@@ -180,7 +181,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		return nil, err
 	}
 
-	events, err := timeline.LoadActiveSessionTimeline()
+	events, err := timeline.LoadActiveBranchContext()
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -317,7 +318,7 @@ func (e *InfaiAgentEngine) GetSessionRecords(id uuid.UUID) (store.SessionMeta, [
 	}
 	defer timeline.Close()
 
-	events, err := timeline.LoadActiveSessionTimeline()
+	events, err := timeline.LoadActiveBranchContext()
 	if err != nil {
 		return store.SessionMeta{}, nil, err
 	}
@@ -343,7 +344,7 @@ func (e *InfaiAgentEngine) GetTimeline(id uuid.UUID) (store.SessionMeta, []store
 		return store.SessionMeta{}, nil, uuid.Nil, err
 	}
 	defer timeline.Close()
-	events, err := timeline.LoadFullSessionTimeline()
+	events, err := timeline.LoadEntireTimeline()
 	if err != nil {
 		return store.SessionMeta{}, nil, uuid.Nil, err
 	}

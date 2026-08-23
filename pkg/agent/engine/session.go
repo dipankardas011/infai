@@ -169,12 +169,12 @@ func (s *InfaiAgentSession) EventHub() *store.SessionEventHub {
 	return s.events
 }
 
-// Timeline returns the full branch ancestry as lightweight events. Blob-backed
-// records remain placeholders until explicitly resolved.
+// Timeline returns every event in the session graph. Blob-backed records remain
+// placeholders until explicitly resolved.
 func (s *InfaiAgentSession) Timeline() ([]store.Event, uuid.UUID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	events, err := s.timeline.LoadFullSessionTimeline()
+	events, err := s.timeline.LoadEntireTimeline()
 	return events, s.timeline.CurrentHeadEventID(), err
 }
 
@@ -222,12 +222,15 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 	if s.closed {
 		return ErrSessionClosed
 	}
+	s.l.Info("manual compaction requested", "history_messages", len(s.history))
 
 	systemPrompt, history, err := compactionInput(s.history)
 	if err != nil {
+		s.l.Error("manual compaction input failed", "error", err)
 		return err
 	}
 	if err := s.compactChat(ctx, systemPrompt, history); err != nil {
+		s.l.Error("manual compaction failed", "error", err)
 		return err
 	}
 	s.meta.UpdatedAt = time.Now().UTC()
@@ -251,7 +254,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 	parentID := s.timeline.CurrentHeadEventID()
 	switch {
 	case s.pendingBranchParent != uuid.Nil:
-		events, err := s.timeline.LoadActiveSessionTimelineAt(s.pendingBranchParent)
+		events, err := s.timeline.LoadActiveContextAt(s.pendingBranchParent)
 		if err != nil {
 			return nil, err
 		}
@@ -301,14 +304,27 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 	if err != nil {
 		return nil, err
 	}
+	compacted := false
 	if s.shouldCompact(result.Usage) {
+		if result.Usage != nil {
+			s.l.Warn("automatic compaction triggered",
+				"prompt_tokens", result.Usage.PromptTokens,
+				"completion_tokens", result.Usage.CompletionTokens,
+				"total_tokens", result.Usage.TotalTokens,
+				"context_window", s.meta.ContextWindow,
+				"threshold_percent", 80,
+			)
+		}
 		systemPrompt, history, err := compactionInput(s.history)
 		if err != nil {
+			s.l.Error("automatic compaction input failed", "error", err)
 			return nil, err
 		}
 		if err := s.compactChat(ctx, systemPrompt, history); err != nil {
+			s.l.Error("automatic compaction failed", "error", err)
 			return nil, err
 		}
+		compacted = true
 	}
 	s.meta.TurnCount++
 	s.meta.UpdatedAt = time.Now().UTC()
@@ -316,6 +332,13 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
 	}
 
+	contextTokens := 0
+	if !compacted && result.Usage != nil {
+		contextTokens = result.Usage.TotalTokens
+		if contextTokens <= 0 {
+			contextTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
+		}
+	}
 	return &ChatResult{
 		SessionID:        s.sessionID,
 		Status:           result.Status,
@@ -323,6 +346,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		ReasoningContent: lastAssistantReasoning(result.Messages),
 		Pending:          result.Pending,
 		Usage:            result.Usage,
+		ContextTokens:    contextTokens,
 	}, nil
 }
 
@@ -352,7 +376,30 @@ func (s *InfaiAgentSession) Compact(ctx context.Context) error {
 }
 
 func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
-	return usage != nil && s.meta.ContextWindow > 0 && usage.PromptTokens*100 >= s.meta.ContextWindow*80
+	if usage == nil || s.meta.ContextWindow <= 0 {
+		s.l.Debug("automatic compaction not evaluated",
+			"has_usage", usage != nil,
+			"context_window", s.meta.ContextWindow,
+		)
+		return false
+	}
+	used := usage.TotalTokens
+	if used <= 0 {
+		used = usage.PromptTokens + usage.CompletionTokens
+	}
+	threshold := s.meta.ContextWindow * 80 / 100
+	shouldCompact := used >= threshold
+	s.l.Debug("automatic compaction evaluated",
+		"used_tokens", used,
+		"prompt_tokens", usage.PromptTokens,
+		"completion_tokens", usage.CompletionTokens,
+		"total_tokens", usage.TotalTokens,
+		"context_window", s.meta.ContextWindow,
+		"threshold_tokens", threshold,
+		"threshold_percent", 80,
+		"should_compact", shouldCompact,
+	)
+	return shouldCompact
 }
 
 func compactionInput(history []contracts.ChatMessage) (string, []contracts.ChatMessage, error) {
@@ -366,21 +413,27 @@ func compactionInput(history []contracts.ChatMessage) (string, []contracts.ChatM
 }
 
 func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string, history []contracts.ChatMessage) error {
+	s.l.Debug("compaction started", "input_messages", len(history))
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacting"})
 	result, err := s.summarize(ctx, systemPrompt, history)
 	if err != nil {
+		s.l.Error("compaction summary generation failed", "error", err)
 		return err
 	}
 	if result.Summary == "" {
-		return errors.New("session: compaction produced an empty summary")
+		err := errors.New("session: compaction produced an empty summary")
+		s.l.Error("compaction summary is empty", "error", err)
+		return err
 	}
 	if _, err := s.timeline.AppendToHead(store.Record{
 		Kind: store.KindCompaction, Timestamp: time.Now().UTC(),
 		Compaction: &store.CompactionRecord{Summary: result.Summary},
 	}); err != nil {
+		s.l.Error("persist compaction event failed", "error", err)
 		return err
 	}
 	s.resetHistoryLocked(result.Summary)
+	s.l.Info("compaction completed", "summary_chars", len(result.Summary))
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaCompactionSummary, Text: result.Summary})
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacted"})
 	return nil

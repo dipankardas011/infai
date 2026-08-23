@@ -310,6 +310,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			ContextWindow:    meta.ContextWindow,
 			Pending:          res.Pending,
 			Usage:            res.Usage,
+			ContextTokens:    res.ContextTokens,
 		}
 		if werr := s.writeSSE(w, done); werr != nil {
 			s.logger.Debug("stream done event failed", "session_id", id, "error", werr)
@@ -327,6 +328,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		ReasoningContent: res.ReasoningContent,
 		Pending:          res.Pending,
 		Usage:            res.Usage,
+		ContextTokens:    res.ContextTokens,
 	}
 	s.writeJSON(w, http.StatusOK, body)
 }

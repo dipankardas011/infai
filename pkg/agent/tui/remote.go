@@ -111,6 +111,7 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 			Model            string                `json:"model"`
 			ContextWindow    int                   `json:"ctx_window"`
 			Usage            *contracts.TokenUsage `json:"usage"`
+			ContextTokens    int                   `json:"context_tokens"`
 			Pending          *Approval             `json:"pending"`
 		}
 		if err := json.Unmarshal([]byte(ev.Data), &sseEv); err != nil {
@@ -145,6 +146,7 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 			reply.Model = sseEv.Model
 			reply.ContextWindow = sseEv.ContextWindow
 			reply.Usage = sseEv.Usage
+			reply.ContextTokens = sseEv.ContextTokens
 			reply.Pending = sseEv.Pending
 		}
 	}
