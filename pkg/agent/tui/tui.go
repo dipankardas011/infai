@@ -228,6 +228,8 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 				cAssistant.Fprint(out, text)
 			case contracts.DeltaStatus:
 				cSystem.Fprintln(out, statusLabel(text))
+			case contracts.DeltaCompactionSummary:
+				printCompactionSummary(out, text)
 			}
 		})
 		if thinkingShown && !contentStarted {
@@ -425,7 +427,15 @@ multi-line: end a line with \ to continue typing on the next line`)
 			return false, err
 		}
 		s.session = *meta
-		fmt.Fprintln(out, statusLabel("compacted"))
+		_, records, err := c.GetSession(ctx, meta.ID)
+		if err != nil {
+			return false, err
+		}
+		for _, record := range records {
+			if record.Kind == store.KindCompaction && record.Compaction != nil {
+				printCompactionSummary(out, record.Compaction.Summary)
+			}
+		}
 		return false, nil
 
 	case "/branch-timeline":
@@ -488,6 +498,14 @@ func statusLabel(status string) string {
 		return "✓ conversation compacted"
 	default:
 		return status
+	}
+}
+
+func printCompactionSummary(out io.Writer, summary string) {
+	cSystem.Fprintln(out, "┄┄┄ context boundary ┄┄┄")
+	cSystem.Fprintln(out, "✓ compaction summary:")
+	for _, line := range strings.Split(summary, "\n") {
+		cSystem.Fprintf(out, "  %s\n", line)
 	}
 }
 

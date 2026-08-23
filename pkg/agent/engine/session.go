@@ -381,6 +381,7 @@ func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string
 		return err
 	}
 	s.resetHistoryLocked(result.Summary)
+	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaCompactionSummary, Text: result.Summary})
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacted"})
 	return nil
 }

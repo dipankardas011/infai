@@ -21,7 +21,7 @@ type SessionMeta struct {
 	Provider      string    `json:"provider"`
 	Model         string    `json:"model"`
 	Cwd           string    `json:"cwd,omitempty"`
-	ContextWindow int       `json:"-"`
+	ContextWindow int       `json:"context_window,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 	TurnCount     int       `json:"-"`

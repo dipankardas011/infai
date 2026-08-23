@@ -209,6 +209,8 @@ func runChatTUI(ctx context.Context, c Client, sessions []store.SessionMeta, opt
 				t.scroll = 0
 				if ev.kind == contracts.DeltaStatus {
 					t.appendStatus(ev.text)
+				} else if ev.kind == contracts.DeltaCompactionSummary {
+					t.appendCompactionSummary(ev.text)
 				} else {
 					t.appendDelta(ev.kind, ev.text)
 				}
@@ -541,7 +543,6 @@ func (t *chatTUI) compactSession() {
 	}
 	t.session = *meta
 	t.blocks = blocksFromRecords(records)
-	t.blocks = append(t.blocks, block{role: "system", text: "✓ conversation compacted"})
 }
 
 func (t *chatTUI) showBranchTimeline() {
@@ -679,6 +680,20 @@ func (t *chatTUI) appendStatus(text string) {
 	t.blocks = append(t.blocks, block{role: "status", text: text})
 }
 
+func (t *chatTUI) appendCompactionSummary(summary string) {
+	t.blocks = append(t.blocks, block{role: "compaction", text: summary})
+}
+
+func compactionBoundary(width int) string {
+	label := " context boundary "
+	if width <= len(label) {
+		return label[:width]
+	}
+	left := (width - len(label)) / 2
+	right := width - len(label) - left
+	return strings.Repeat("┄", left) + label + strings.Repeat("┄", right)
+}
+
 func (t *chatTUI) appendError(err error) {
 	if len(t.blocks) > 0 && t.blocks[len(t.blocks)-1].role == "error" {
 		t.blocks[len(t.blocks)-1].text = err.Error()
@@ -699,6 +714,10 @@ func tokenCount(r *ChatReply) int {
 func blocksFromRecords(records []store.Record) []block {
 	var blocks []block
 	for _, rec := range records {
+		if rec.Kind == store.KindCompaction && rec.Compaction != nil {
+			blocks = append(blocks, block{role: "compaction", text: rec.Compaction.Summary})
+			continue
+		}
 		if rec.Kind != store.KindMessage || rec.Message == nil {
 			continue
 		}
@@ -993,6 +1012,8 @@ func (t *chatTUI) renderRow(hr histRow, selected bool, a, b int) string {
 		return cError.Sprint(s)
 	case "system":
 		return cSystem.Sprint(s)
+	case "compaction":
+		return cThinking.Sprint(s)
 	case "status":
 		return cSystem.Sprint(s)
 	}
@@ -1341,6 +1362,12 @@ func (t *chatTUI) buildRows() []histRow {
 		case "system":
 			for _, l := range wrap(b.text, t.width-3) {
 				out = append(out, histRow{plain: "· " + l, style: "system"})
+			}
+		case "compaction":
+			out = append(out, histRow{plain: compactionBoundary(t.width), style: "compaction"})
+			out = append(out, histRow{plain: "✓ compaction summary:", style: "compaction"})
+			for _, l := range wrap(b.text, t.width-3) {
+				out = append(out, histRow{plain: "  " + l, style: "compaction"})
 			}
 		}
 	}

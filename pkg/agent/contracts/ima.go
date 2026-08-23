@@ -45,6 +45,8 @@ const (
 	DeltaReasoning DeltaKind = "reasoning"
 	// DeltaStatus is a live UI status update, not model output.
 	DeltaStatus DeltaKind = "status"
+	// DeltaCompactionSummary is a live-only compaction summary for the UI.
+	DeltaCompactionSummary DeltaKind = "compaction_summary"
 )
 
 // ChatCompletion()

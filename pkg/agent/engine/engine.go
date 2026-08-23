@@ -144,7 +144,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	if !ok {
 		return nil, fmt.Errorf("engine: provider %q has no model %q", p.Name, opts.Model)
 	}
-	ctxWindow := max(m.ContextWindow, 8192)
+	ctxWindow := m.ContextWindow
 
 	sess, err := NewSession(e.bgLogger.WithGroup("session"), &p, m.Name, ctxWindow, opts.Cwd, e.sessionStore)
 	if err != nil {
@@ -167,6 +167,9 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		return nil, ErrEngineShuttingDown
 	default:
 	}
+	if sess, ok := e.Session(id); ok {
+		return sess, nil
+	}
 	meta, err := e.sessionStore.LoadMeta(id)
 	if err != nil {
 		return nil, err
@@ -176,19 +179,21 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 	if err != nil {
 		return nil, err
 	}
-	defer timeline.Close()
 
 	events, err := timeline.LoadActiveSessionTimeline()
 	if err != nil {
+		_ = timeline.Close()
 		return nil, err
 	}
 	history, err := timelineHistory(timeline, events)
 	if err != nil {
+		_ = timeline.Close()
 		return nil, err
 	}
 
 	p, ok := e.modelProviderStore.Get(meta.Provider)
 	if !ok {
+		_ = timeline.Close()
 		return nil, ErrNoProvider
 	}
 	if model, ok := p.Model(meta.Model); ok {
@@ -197,6 +202,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 
 	sess, err := NewResumedSession(e.bgLogger.WithGroup("session"), &p, meta, history, timeline, e.sessionStore)
 	if err != nil {
+		_ = timeline.Close()
 		return nil, err
 	}
 

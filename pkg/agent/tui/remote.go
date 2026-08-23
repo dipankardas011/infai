@@ -126,6 +126,8 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 				kind = contracts.DeltaReasoning
 			case "status":
 				kind = contracts.DeltaStatus
+			case "compaction_summary":
+				kind = contracts.DeltaCompactionSummary
 			}
 			if kind == contracts.DeltaContent {
 				reply.Reply += sseEv.Delta
