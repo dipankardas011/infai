@@ -207,7 +207,11 @@ func runChatTUI(ctx context.Context, c Client, sessions []store.SessionMeta, opt
 				t.submit()
 			case cmdDelta:
 				t.scroll = 0
-				t.appendDelta(ev.kind, ev.text)
+				if ev.kind == contracts.DeltaStatus {
+					t.appendStatus(ev.text)
+				} else {
+					t.appendDelta(ev.kind, ev.text)
+				}
 				t.redraw()
 			case cmdDone:
 				t.working = false
@@ -377,6 +381,7 @@ func (t *chatTUI) showCommandPopup() {
 		help string
 	}{
 		{"/model", "switch the active model"},
+		{"/compact", "summarize and refresh the conversation"},
 		{"/branch-timeline", "inspect and select a branch point"},
 		{"/help", "show keyboard shortcuts"},
 		{"/quit", "leave the harness"},
@@ -505,6 +510,8 @@ func (t *chatTUI) runTUICommand(line string) {
 	switch line {
 	case "/model":
 		t.pickModelPopup(true, func() {}) // switch the active session's model
+	case "/compact":
+		t.compactSession()
 	case "/branch-timeline":
 		t.showBranchTimeline()
 	case "/quit", "/exit":
@@ -519,6 +526,22 @@ func (t *chatTUI) runTUICommand(line string) {
 		t.appendError(fmt.Errorf("unknown command %q — /help for options", line))
 	}
 	t.redraw()
+}
+
+func (t *chatTUI) compactSession() {
+	meta, err := t.client.Compact(t.ctx)
+	if err != nil {
+		t.appendError(err)
+		return
+	}
+	_, records, err := t.client.GetSession(t.ctx, meta.ID)
+	if err != nil {
+		t.appendError(err)
+		return
+	}
+	t.session = *meta
+	t.blocks = blocksFromRecords(records)
+	t.blocks = append(t.blocks, block{role: "system", text: "✓ conversation compacted"})
 }
 
 func (t *chatTUI) showBranchTimeline() {
@@ -564,7 +587,7 @@ func (t *chatTUI) showBranchTimeline() {
 			t.appendError(err)
 			return
 		}
-		t.blocks = append(t.blocks, block{role: "system", text: "branch selected at " + shortID(selected.ID)})
+		t.blocks = append(t.blocks, block{role: "system", text: branchSelectionLabel(selected)})
 	}, func() {})
 }
 
@@ -606,6 +629,22 @@ func timelineEventLabel(event TimelineEvent) string {
 	return label + "  " + text
 }
 
+func branchSelectionLabel(event TimelineEvent) string {
+	preview := string(event.Kind)
+	if event.Record != nil {
+		if event.Record.Message != nil {
+			preview = event.Record.Message.Text()
+		} else if event.Record.Text != "" {
+			preview = event.Record.Text
+		}
+	}
+	preview = strings.ReplaceAll(preview, "\n", " ")
+	if len(preview) > 72 {
+		preview = preview[:72] + "..."
+	}
+	return fmt.Sprintf("⎇ branch selected at %s · %q", event.ID, preview)
+}
+
 func timelineEventRole(event TimelineEvent) string {
 	if event.Record != nil && event.Record.Message != nil {
 		switch event.Record.Message.Role {
@@ -629,6 +668,15 @@ func (t *chatTUI) appendDelta(kind contracts.DeltaKind, text string) {
 		return
 	}
 	t.blocks = append(t.blocks, block{role: role, text: text})
+}
+
+func (t *chatTUI) appendStatus(text string) {
+	text = statusLabel(text)
+	if len(t.blocks) > 0 && t.blocks[len(t.blocks)-1].role == "status" {
+		t.blocks[len(t.blocks)-1].text = text
+		return
+	}
+	t.blocks = append(t.blocks, block{role: "status", text: text})
 }
 
 func (t *chatTUI) appendError(err error) {
@@ -944,6 +992,8 @@ func (t *chatTUI) renderRow(hr histRow, selected bool, a, b int) string {
 	case "error":
 		return cError.Sprint(s)
 	case "system":
+		return cSystem.Sprint(s)
+	case "status":
 		return cSystem.Sprint(s)
 	}
 	return s

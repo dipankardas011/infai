@@ -16,12 +16,9 @@ import (
 )
 
 var (
-	ErrSessionClosed   = errors.New("session closed")
-	ErrNoProvider      = errors.New("engine: no provider configured")
-	ErrCompactionLimit = errors.New("session: automatic compaction limit reached")
+	ErrSessionClosed = errors.New("session closed")
+	ErrNoProvider    = errors.New("engine: no provider configured")
 )
-
-const maxAutomaticCompactions = 2
 
 // InfaiAgentSession is the persistent state of one conversation. It is a
 // passive object: it holds history and the agent tree, and Chat() runs the
@@ -51,7 +48,7 @@ type InfaiAgentSession struct {
 	agentMapping  map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
 	runtime_comms map[uuid.UUID]*AgentComms        // By this when N no of children can send comms with engine and even the
 
-	baseAgentId uuid.UUID
+	sessionAgentId uuid.UUID
 
 	Agents map[uuid.UUID]*agent.Agent
 }
@@ -99,9 +96,15 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 	}
 	o.timeline = timeline
 
-	if err := o.registerBaseAgent(); err != nil {
+	systemPrompt, err := GetBasicSystemPrompt(nil, nil)
+	if err != nil {
 		return nil, err
 	}
+	firstAgent, err := o.registerNewParentAgent(systemPrompt)
+	if err != nil {
+		return nil, err
+	}
+	o.sessionAgentId = firstAgent.Id
 	return o, nil
 }
 
@@ -130,18 +133,23 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 	if err := sessionStore.SaveMeta(meta); err != nil {
 		return nil, err
 	}
-	if err := o.registerBaseAgent(); err != nil {
+	if err := o.registerSessionAgent(); err != nil {
 		return nil, err
 	}
 	return o, nil
 }
 
-func (s *InfaiAgentSession) registerBaseAgent() error {
-	firstAgent, err := s.registerNewParentAgent()
+func (s *InfaiAgentSession) registerSessionAgent() error {
+	systemPrompt, err := GetBasicSystemPrompt(nil, nil)
 	if err != nil {
 		return err
 	}
-	s.baseAgentId = firstAgent.Id
+
+	firstAgent, err := s.registerNewParentAgent(systemPrompt)
+	if err != nil {
+		return err
+	}
+	s.sessionAgentId = firstAgent.Id
 	return nil
 }
 
@@ -193,7 +201,7 @@ func (s *InfaiAgentSession) setModelLocked(p *store.Provider, name string, ctxWi
 		return
 	}
 	s.model = models.NewOpenAICompatableAPI(p.Endpoint, name, p.APIKey)
-	if a := s.Agents[s.baseAgentId]; a != nil {
+	if a := s.Agents[s.sessionAgentId]; a != nil {
 		a.SetModel(s.model)
 	}
 	s.meta.Provider = p.Name
@@ -203,6 +211,30 @@ func (s *InfaiAgentSession) setModelLocked(p *store.Provider, name string, ctxWi
 	if err := s.store.SaveMeta(s.meta); err != nil {
 		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
 	}
+}
+
+// CompactChat generates and persists a continuation summary, advances the
+// timeline HEAD with a compaction event, and resets active history.
+func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return ErrSessionClosed
+	}
+
+	systemPrompt, history, err := compactionInput(s.history)
+	if err != nil {
+		return err
+	}
+	if err := s.compactChat(ctx, systemPrompt, history); err != nil {
+		return err
+	}
+	s.meta.UpdatedAt = time.Now().UTC()
+	if err := s.store.SaveMeta(s.meta); err != nil {
+		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
+	}
+	return nil
 }
 
 // Chat runs the base agent loop for one user prompt against the session's
@@ -217,8 +249,8 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		return nil, ErrSessionClosed
 	}
 	parentID := s.timeline.CurrentHeadEventID()
-	selectedBranch := s.pendingBranchParent != uuid.Nil
-	if s.pendingBranchParent != uuid.Nil {
+	switch {
+	case s.pendingBranchParent != uuid.Nil:
 		events, err := s.timeline.LoadActiveSessionTimelineAt(s.pendingBranchParent)
 		if err != nil {
 			return nil, err
@@ -233,26 +265,13 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		s.pendingBranchParent = uuid.Nil
 	}
 
-	if len(s.history) == 0 {
-		sysPrompt, err := GetBasicSystemPrompt(nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		sysMsg := contracts.NewSystemMessage(sysPrompt)
-		s.history = append(s.history, sysMsg)
-		if _, err := s.timeline.AppendToHead(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &sysMsg}); err != nil {
-			s.l.Error("persist system prompt", "session_id", s.sessionID, "error", err)
-		}
-		if !selectedBranch {
-			parentID = s.timeline.CurrentHeadEventID()
-		}
-	}
 	s.history = append(s.history, contracts.NewUserMessage(prompt))
 
 	// Persist the user's message before generation so a hard crash can never
 	// lose what was typed. The reply is synced at turn end; an interrupted
 	// reply is the only thing a crash can take.
 	msg := s.history[len(s.history)-1]
+
 	var appendErr error
 	if parentID == s.timeline.CurrentHeadEventID() {
 		_, appendErr = s.timeline.AppendToHead(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &msg})
@@ -262,38 +281,32 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 	if appendErr != nil {
 		s.l.Error("persist user message", "session_id", s.sessionID, "error", appendErr)
 	}
+
 	s.persisted = len(s.history)
 
-	agentLoop := s.Agents[s.baseAgentId]
+	agentLoop := s.Agents[s.sessionAgentId]
 	if agentLoop == nil {
 		return nil, errors.New("session: base agent missing")
 	}
 	agentLoop.SetDeltaHook(func(kind contracts.DeltaKind, text string) {
-		k := "content"
-		if kind == contracts.DeltaReasoning {
-			k = "reasoning"
-		}
-		s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: k, Text: text})
+		s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: kind, Text: text})
 	})
 
 	var result agent.TurnResult
-	var invokeErr error
-	for compactions := 0; ; compactions++ {
-		result, invokeErr = agentLoop.Invoke(ctx, s.history)
-		if result.Messages != nil {
-			s.history = result.Messages
-			s.persistMessagesLocked()
+	result, err := agentLoop.Invoke(ctx, s.history)
+	if result.Messages != nil {
+		s.history = result.Messages
+		s.persistMessagesLocked()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if s.shouldCompact(result.Usage) {
+		systemPrompt, history, err := compactionInput(s.history)
+		if err != nil {
+			return nil, err
 		}
-		if invokeErr != nil {
-			return nil, invokeErr
-		}
-		if !s.shouldCompact(result.Usage) {
-			break
-		}
-		if compactions >= maxAutomaticCompactions {
-			return nil, ErrCompactionLimit
-		}
-		if err := s.compactLocked(ctx, true); err != nil {
+		if err := s.compactChat(ctx, systemPrompt, history); err != nil {
 			return nil, err
 		}
 	}
@@ -328,32 +341,33 @@ func (s *InfaiAgentSession) persistMessagesLocked() {
 }
 
 func (s *InfaiAgentSession) resetHistoryLocked(summary string) {
-	system := ""
-	if len(s.history) > 0 && s.history[0].Role == "system" {
-		system = s.history[0].Text()
-	}
-	s.history = []contracts.ChatMessage{contracts.NewSystemMessage(system), contracts.NewSystemMessage("Previous context summary:\n" + summary)}
+	s.history = []contracts.ChatMessage{contracts.NewUserMessage("<context-summary>\n" + summary + "\n</context-summary>")}
 	s.persisted = len(s.history)
 	s.l.Info("session context compacted", "session_id", s.sessionID, "context_window", s.meta.ContextWindow)
 }
 
-// Compact creates and persists a continuation summary without adding a
-// summarizer request to the normal conversation history.
+// Compact is kept as an alias for CompactChat.
 func (s *InfaiAgentSession) Compact(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return ErrSessionClosed
-	}
-	return s.compactLocked(ctx, false)
+	return s.CompactChat(ctx)
 }
 
 func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
 	return usage != nil && s.meta.ContextWindow > 0 && usage.PromptTokens*100 >= s.meta.ContextWindow*80
 }
 
-func (s *InfaiAgentSession) compactLocked(ctx context.Context, automatic bool) error {
-	result, err := s.summarize(ctx, s.history, automatic)
+func compactionInput(history []contracts.ChatMessage) (string, []contracts.ChatMessage, error) {
+	systemPrompt, err := CompactionAgentSystemPrompt()
+	if err != nil {
+		return "", nil, err
+	}
+	input := append([]contracts.ChatMessage(nil), history...)
+	input = append(input, contracts.NewUserMessage("Can you compact based on the history?"))
+	return systemPrompt, input, nil
+}
+
+func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string, history []contracts.ChatMessage) error {
+	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacting"})
+	result, err := s.summarize(ctx, systemPrompt, history)
 	if err != nil {
 		return err
 	}
@@ -367,19 +381,27 @@ func (s *InfaiAgentSession) compactLocked(ctx context.Context, automatic bool) e
 		return err
 	}
 	s.resetHistoryLocked(result.Summary)
+	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacted"})
 	return nil
 }
 
-func (s *InfaiAgentSession) summarize(ctx context.Context, history []contracts.ChatMessage, automatic bool) (agent.CompactionResult, error) {
-	prompt := ManualCompactionPrompt(history)
-	if automatic {
-		prompt = AutomaticCompactionPrompt(history)
-	}
-	reply, _, err := s.model.Generate(ctx, prompt, &contracts.GenerateOptions{})
+func (s *InfaiAgentSession) summarize(ctx context.Context, systemPrompt string, history []contracts.ChatMessage) (agent.CompactionResult, error) {
+	id, err := uuid.NewV7()
 	if err != nil {
 		return agent.CompactionResult{}, err
 	}
-	return agent.CompactionResult{Summary: reply.Text()}, nil
+	compactionAgent, err := s.registerTransientAgent(id, systemPrompt)
+	if err != nil {
+		return agent.CompactionResult{}, err
+	}
+	defer s.removeAgent(id)
+
+	compactionAgent.SetModel(s.model)
+	result, err := compactionAgent.Invoke(ctx, history)
+	if err != nil {
+		return agent.CompactionResult{}, err
+	}
+	return agent.CompactionResult{Summary: lastAssistantText(result.Messages)}, nil
 }
 
 func (s *InfaiAgentSession) close() {
@@ -394,7 +416,7 @@ func (s *InfaiAgentSession) close() {
 	}
 }
 
-func (s *InfaiAgentSession) registerNewParentAgent() (*agent.Agent, error) {
+func (s *InfaiAgentSession) registerNewParentAgent(systemPrompt string) (*agent.Agent, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
@@ -402,12 +424,29 @@ func (s *InfaiAgentSession) registerNewParentAgent() (*agent.Agent, error) {
 
 	s.agentMapping[id] = ds.NewSet[uuid.UUID]()
 	s.runtime_comms[id] = FreshAgentComms()
-	s.Agents[id], err = agent.NewAgent(id, agent.WithMaxTurns(100))
+	s.Agents[id], err = agent.NewAgent(id, systemPrompt, agent.WithMaxTurns(100))
 	if err != nil {
 		return nil, err
 	}
 	s.Agents[id].SetModel(s.model)
 	return s.Agents[id], nil
+}
+
+func (s *InfaiAgentSession) registerTransientAgent(id uuid.UUID, systemPrompt string) (*agent.Agent, error) {
+	transient, err := agent.NewAgent(id, systemPrompt, agent.WithMaxTurns(1))
+	if err != nil {
+		return nil, err
+	}
+	s.agentMapping[id] = ds.NewSet[uuid.UUID]()
+	s.runtime_comms[id] = FreshAgentComms()
+	s.Agents[id] = transient
+	return transient, nil
+}
+
+func (s *InfaiAgentSession) removeAgent(id uuid.UUID) {
+	delete(s.Agents, id)
+	delete(s.agentMapping, id)
+	delete(s.runtime_comms, id)
 }
 
 // lastAssistantText extracts the agent's answer from the full history. It
@@ -441,24 +480,18 @@ func timelineHistory(timeline *store.Timeline, events []store.Event) ([]contract
 		return nil, err
 	}
 	var history []contracts.ChatMessage
-	hasSystem := false
 	for _, record := range records {
 		switch record.Kind {
 		case store.KindMessage:
 			if record.Message != nil {
 				if record.Message.Role == "system" {
-					hasSystem = true
+					continue
 				}
 				history = append(history, *record.Message)
 			}
 		case store.KindCompaction:
 			if record.Compaction != nil {
-				if !hasSystem {
-					systemPrompt, _ := GetBasicSystemPrompt(nil, nil)
-					history = append(history, contracts.NewSystemMessage(systemPrompt))
-					hasSystem = true
-				}
-				history = append(history, contracts.NewSystemMessage("Previous context summary:\n"+record.Compaction.Summary))
+				history = append(history, contracts.NewUserMessage("<context-summary>\n"+record.Compaction.Summary+"\n</context-summary>"))
 			}
 		}
 	}

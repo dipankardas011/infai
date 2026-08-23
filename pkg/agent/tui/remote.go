@@ -121,12 +121,15 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 		}
 		if sseEv.Delta != "" {
 			kind := contracts.DeltaContent
-			if sseEv.Kind == "reasoning" {
+			switch sseEv.Kind {
+			case "reasoning":
 				kind = contracts.DeltaReasoning
+			case "status":
+				kind = contracts.DeltaStatus
 			}
 			if kind == contracts.DeltaContent {
 				reply.Reply += sseEv.Delta
-			} else {
+			} else if kind == contracts.DeltaReasoning {
 				reply.ReasoningContent += sseEv.Delta
 			}
 			if onDelta != nil {
@@ -276,6 +279,18 @@ func (c *RemoteClient) ListSessions(ctx context.Context) ([]store.SessionMeta, e
 
 func (c *RemoteClient) SetSessionModel(ctx context.Context, provider, model string) error {
 	return c.postJSON(ctx, "/v1/sessions/"+c.SessionID().String()+"/model", map[string]string{"provider": provider, "model": model}, http.StatusOK)
+}
+
+func (c *RemoteClient) Compact(ctx context.Context) (*store.SessionMeta, error) {
+	id := c.SessionID()
+	if id == uuid.Nil {
+		return nil, ErrNoSession
+	}
+	var meta store.SessionMeta
+	if err := c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/compact", struct{}{}, http.StatusOK, &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
 }
 
 func (c *RemoteClient) postJSON(ctx context.Context, path string, body any, wantCode int) error {

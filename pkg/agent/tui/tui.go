@@ -55,6 +55,7 @@ type Client interface {
 	ListSessions(ctx context.Context) ([]store.SessionMeta, error)
 	ListProviders(ctx context.Context) ([]store.Provider, error)
 	SetSessionModel(ctx context.Context, provider, model string) error
+	Compact(ctx context.Context) (*store.SessionMeta, error)
 	GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error)
 	SelectBranch(ctx context.Context, id, eventID uuid.UUID) error
 }
@@ -225,6 +226,8 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 					contentStarted = true
 				}
 				cAssistant.Fprint(out, text)
+			case contracts.DeltaStatus:
+				cSystem.Fprintln(out, statusLabel(text))
 			}
 		})
 		if thinkingShown && !contentStarted {
@@ -349,6 +352,7 @@ func runCommand(ctx context.Context, c Client, out io.Writer, s *replState, line
   /session rm <uuid>             delete a saved session
   /new                           start a fresh session
   /ctx                           show context used vs total
+	  /compact                       compact the current conversation
   /branch-timeline               inspect and select a branch point
   /pwd                           show the session working directory
   /quit, /exit                   leave
@@ -412,6 +416,18 @@ multi-line: end a line with \ to continue typing on the next line`)
 		fmt.Fprintf(out, "context used: %d / %d\n", s.used, s.session.ContextWindow)
 		return false, nil
 
+	case "/compact":
+		if s.session.ID == uuid.Nil {
+			return false, fmt.Errorf("no active session")
+		}
+		meta, err := c.Compact(ctx)
+		if err != nil {
+			return false, err
+		}
+		s.session = *meta
+		fmt.Fprintln(out, statusLabel("compacted"))
+		return false, nil
+
 	case "/branch-timeline":
 		return false, runBranchTimeline(ctx, c, out, s, scan)
 
@@ -460,8 +476,19 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 	if err := c.SelectBranch(ctx, s.session.ID, options[idx].ID); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "branch selected at %s\n", shortID(options[idx].ID))
+	fmt.Fprintln(out, branchSelectionLabel(options[idx]))
 	return nil
+}
+
+func statusLabel(status string) string {
+	switch status {
+	case "compacting":
+		return "⟳ compacting conversation"
+	case "compacted":
+		return "✓ conversation compacted"
+	default:
+		return status
+	}
 }
 
 // setModelFor switches the active session to the given provider/model. An

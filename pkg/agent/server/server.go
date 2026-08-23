@@ -43,6 +43,7 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("POST /v1/sessions/{id}/load", s.handleLoadSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/model", s.handleSetSessionModel)
 	mux.HandleFunc("POST /v1/sessions/{id}/chat", s.handleChat)
+	mux.HandleFunc("POST /v1/sessions/{id}/compact", s.handleCompact)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
 
 	s.httpSrv = &http.Server{
@@ -52,6 +53,28 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 		WriteTimeout: 0, // chats can take a while
 	}
 	return s
+}
+
+func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	if err := s.engine.CompactSession(r.Context(), id); err != nil {
+		if errors.Is(err, engine.ErrSessionNotFound) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	sess, ok := s.engine.Session(id)
+	if !ok {
+		s.writeError(w, http.StatusNotFound, engine.ErrSessionNotFound)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, sess.Meta())
 }
 
 func (s *Server) ListenAndServe() error {
@@ -248,7 +271,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			if rec.Kind != store.KindDelta {
 				return nil
 			}
-			if err := s.writeSSE(w, ChatDeltaEvent{Kind: rec.DeltaKind, Delta: rec.Text}); err != nil {
+			if err := s.writeSSE(w, ChatDeltaEvent{Kind: string(rec.DeltaKind), Delta: rec.Text}); err != nil {
 				s.logger.Debug("stream write failed", "session_id", id, "error", err)
 				return err
 			}

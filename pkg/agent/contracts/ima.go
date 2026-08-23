@@ -36,13 +36,15 @@ type GenerateOptions struct {
 }
 
 // DeltaKind distinguishes the text fragments a stream delivers.
-type DeltaKind int
+type DeltaKind string
 
 const (
 	// DeltaContent is the model's visible answer text.
-	DeltaContent DeltaKind = iota
+	DeltaContent DeltaKind = "content"
 	// DeltaReasoning is the model's reasoning text (shown separately).
-	DeltaReasoning
+	DeltaReasoning DeltaKind = "reasoning"
+	// DeltaStatus is a live UI status update, not model output.
+	DeltaStatus DeltaKind = "status"
 )
 
 // ChatCompletion()

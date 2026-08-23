@@ -23,6 +23,8 @@ var ErrNoModel = errors.New("agent: no model adapter set")
 type Agent struct {
 	Id uuid.UUID
 
+	systemPrompt string
+
 	model     contracts.InfaiModelAdaptor
 	turnHook  func(contracts.ChatMessage)
 	deltaHook func(contracts.DeltaKind, string)
@@ -64,7 +66,7 @@ func WithDeltaHook(hook func(contracts.DeltaKind, string)) AgentOptions {
 
 // NewAgent creates an agent with an independent short-term context (the
 // message history built up by Invoke).
-func NewAgent(id uuid.UUID, opts ...AgentOptions) (*Agent, error) {
+func NewAgent(id uuid.UUID, systemPrompt string, opts ...AgentOptions) (*Agent, error) {
 	o := &agentOption{maxTurns: 65536}
 	for _, opt := range opts {
 		if err := opt(o); err != nil {
@@ -72,12 +74,13 @@ func NewAgent(id uuid.UUID, opts ...AgentOptions) (*Agent, error) {
 		}
 	}
 	return &Agent{
-		Id:        id,
-		model:     nil,
-		turnHook:  o.turnHook,
-		deltaHook: o.deltaHook,
-		Status:    Idle,
-		MaxTurns:  o.maxTurns,
+		Id:           id,
+		model:        nil,
+		turnHook:     o.turnHook,
+		deltaHook:    o.deltaHook,
+		Status:       Idle,
+		MaxTurns:     o.maxTurns,
+		systemPrompt: systemPrompt,
 	}, nil
 }
 
@@ -103,8 +106,7 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 	a.Status = Working
 	defer func() { a.Status = Idle }()
 
-	messages := make([]contracts.ChatMessage, len(history))
-	copy(messages, history)
+	messages := append([]contracts.ChatMessage(nil), history...)
 
 	var usage *contracts.TokenUsage
 
@@ -120,7 +122,11 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 			goOpts.OnDelta = a.deltaHook
 		}
 
-		reply, u, err := a.model.Generate(ctx, messages, &goOpts)
+		requestMessages := make([]contracts.ChatMessage, 0, len(messages)+1)
+		requestMessages = append(requestMessages, contracts.NewSystemMessage(a.systemPrompt))
+		requestMessages = append(requestMessages, messages...)
+
+		reply, u, err := a.model.Generate(ctx, requestMessages, &goOpts)
 		usage = u
 		if err != nil {
 			if ctx.Err() != nil {

@@ -255,6 +255,17 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string
 	return sess.Chat(ctx, prompt, opts)
 }
 
+// CompactSession creates a continuation checkpoint for an active session.
+func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) error {
+	e.mu.Lock()
+	sess, ok := e.active[id]
+	e.mu.Unlock()
+	if !ok {
+		return ErrSessionNotFound
+	}
+	return sess.CompactChat(ctx)
+}
+
 // CloseSession removes and closes a session and deletes its timeline from
 // disk. An in-flight Chat finishes or is canceled by its own context.
 func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
