@@ -54,6 +54,45 @@ func TestTimelineAppendLookupPathAndRotation(t *testing.T) {
 	}
 }
 
+func TestTimelinePersistsHeadSeparately(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "timeline")
+	timeline, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := timeline.AppendToHead(Record{Kind: KindMessage, Text: "persist head"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := timeline.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	head, err := os.ReadFile(filepath.Join(root, "HEAD"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(bytes.TrimSpace(head)) != event.ID.String() {
+		t.Fatalf("HEAD=%q want=%s", bytes.TrimSpace(head), event.ID)
+	}
+	index, err := os.ReadFile(filepath.Join(root, "index.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(index, []byte(`"type":"head"`)) {
+		t.Fatal("index.jsonl contains a HEAD record")
+	}
+
+	reloaded, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reloaded.Close()
+	if got := reloaded.CurrentHeadEventID(); got != event.ID {
+		t.Fatalf("reloaded HEAD=%s want=%s", got, event.ID)
+	}
+}
+
 func TestTimelineLargePayloadUsesSHA256Blob(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "timeline")
 	timeline, err := NewTimeline(root, TimelineOptions{})

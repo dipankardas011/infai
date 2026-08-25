@@ -55,6 +55,7 @@ type Timeline struct {
 	chunksRoot string
 	blobsRoot  string
 	indexPath  string
+	headPath   string
 
 	mu          sync.Mutex
 	index       map[uuid.UUID]EventLocation
@@ -77,14 +78,12 @@ type eventDisk struct {
 }
 
 type indexDisk struct {
-	Type       string         `json:"type"`
 	ID         uuid.UUID      `json:"id,omitempty"`
 	ParentID   uuid.UUID      `json:"parent_id,omitempty"`
 	BranchFrom *uuid.UUID     `json:"branch_from,omitempty"`
 	Kind       RecordKind     `json:"kind,omitempty"`
 	Timestamp  time.Time      `json:"timestamp"`
 	Loc        *EventLocation `json:"location,omitempty"`
-	Head       uuid.UUID      `json:"head,omitempty"`
 }
 
 func NewTimeline(root string, opts TimelineOptions) (*Timeline, error) {
@@ -101,6 +100,7 @@ func NewTimeline(root string, opts TimelineOptions) (*Timeline, error) {
 		chunksRoot: filepath.Join(root, "chunks"),
 		blobsRoot:  filepath.Join(root, "blobs"),
 		indexPath:  filepath.Join(root, "index.jsonl"),
+		headPath:   filepath.Join(root, "HEAD"),
 		index:      make(map[uuid.UUID]EventLocation),
 		parents:    make(map[uuid.UUID]uuid.UUID),
 		chunkBytes: opts.ChunkBytes,
@@ -109,6 +109,12 @@ func NewTimeline(root string, opts TimelineOptions) (*Timeline, error) {
 		return nil, err
 	}
 	if err := t.reconcileChunks(); err != nil {
+		return nil, err
+	}
+	if err := t.recoverHead(); err != nil {
+		return nil, err
+	}
+	if err := t.loadHead(); err != nil {
 		return nil, err
 	}
 	if err := t.openChunk(); err != nil {
@@ -213,11 +219,15 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID, bra
 		return Event{}, fmt.Errorf("timeline: sync chunk: %w", err)
 	}
 	t.chunkOffset += int64(len(line))
-	if err := t.appendIndex(indexDisk{Type: "event", ID: id, ParentID: parentID, BranchFrom: branchFrom, Kind: record.Kind, Timestamp: record.Timestamp, Loc: &loc}); err != nil {
+	if err := t.prepareHead(id); err != nil {
 		t.broken = err
 		return Event{}, err
 	}
-	if err := t.appendIndex(indexDisk{Type: "head", Head: id}); err != nil {
+	if err := t.appendIndex(indexDisk{ID: id, ParentID: parentID, BranchFrom: branchFrom, Kind: record.Kind, Timestamp: record.Timestamp, Loc: &loc}); err != nil {
+		t.broken = err
+		return Event{}, err
+	}
+	if err := t.commitHead(); err != nil {
 		t.broken = err
 		return Event{}, err
 	}
@@ -400,21 +410,95 @@ func (t *Timeline) loadIndex() error {
 			// A torn final index line is recoverable from the chunks.
 			continue
 		}
-		switch entry.Type {
-		case "event":
-			if entry.Loc == nil {
-				continue
-			}
-			t.index[entry.ID] = *entry.Loc
-			t.parents[entry.ID] = entry.ParentID
-		case "head":
-			t.head = entry.Head
+		if entry.Loc == nil || entry.ID == uuid.Nil {
+			continue
 		}
+		t.index[entry.ID] = *entry.Loc
+		t.parents[entry.ID] = entry.ParentID
 	}
 	if err := sc.Err(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (t *Timeline) loadHead() error {
+	data, err := os.ReadFile(t.headPath)
+	if os.IsNotExist(err) {
+		if len(t.index) == 0 {
+			t.head = rootEventID
+			return nil
+		}
+		return fmt.Errorf("timeline: HEAD is missing")
+	}
+	if err != nil {
+		return fmt.Errorf("timeline: read HEAD: %w", err)
+	}
+	id, parseErr := uuid.Parse(string(bytes.TrimSpace(data)))
+	if parseErr != nil {
+		return fmt.Errorf("timeline: invalid HEAD: %w", parseErr)
+	}
+	if id == rootEventID {
+		if len(t.index) != 0 {
+			return errors.New("timeline: HEAD points to root for a non-empty timeline")
+		}
+	} else if _, ok := t.index[id]; !ok {
+		return fmt.Errorf("timeline: HEAD points to unknown event %s", id)
+	}
+	t.head = id
+	return nil
+}
+
+func (t *Timeline) prepareHead(id uuid.UUID) error {
+	tmpPath := t.headPath + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("timeline: create HEAD: %w", err)
+	}
+	if _, err := f.WriteString(id.String() + "\n"); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("timeline: write HEAD: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("timeline: sync HEAD: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("timeline: close HEAD: %w", err)
+	}
+	return nil
+}
+
+func (t *Timeline) commitHead() error {
+	tmpPath := t.headPath + ".tmp"
+	if err := os.Rename(tmpPath, t.headPath); err != nil {
+		return fmt.Errorf("timeline: commit HEAD: %w", err)
+	}
+	if err := syncTimelineDir(t.root); err != nil {
+		return fmt.Errorf("timeline: sync HEAD directory: %w", err)
+	}
+	return nil
+}
+
+func (t *Timeline) recoverHead() error {
+	tmpPath := t.headPath + ".tmp"
+	data, err := os.ReadFile(tmpPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("timeline: read temporary HEAD: %w", err)
+	}
+	id, err := uuid.Parse(string(bytes.TrimSpace(data)))
+	if err == nil {
+		if _, ok := t.index[id]; ok {
+			return t.commitHead()
+		}
+	}
+	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("timeline: remove incomplete HEAD: %w", err)
+	}
+	return syncTimelineDir(t.root)
 }
 
 // reconcileChunks makes the durable chunks authoritative when an append was
@@ -426,7 +510,6 @@ func (t *Timeline) reconcileChunks() error {
 		return err
 	}
 	var missing []indexDisk
-	var latest uuid.UUID
 	for _, file := range files {
 		data, err := os.ReadFile(file.path)
 		if err != nil {
@@ -462,11 +545,10 @@ func (t *Timeline) reconcileChunks() error {
 					kind = disk.Record.Kind
 					ts = disk.Record.Timestamp
 				}
-				missing = append(missing, indexDisk{Type: "event", ID: disk.ID, ParentID: disk.ParentID, BranchFrom: disk.BranchFrom, Kind: kind, Timestamp: ts, Loc: &loc})
+				missing = append(missing, indexDisk{ID: disk.ID, ParentID: disk.ParentID, BranchFrom: disk.BranchFrom, Kind: kind, Timestamp: ts, Loc: &loc})
 				t.index[disk.ID] = loc
 				t.parents[disk.ID] = disk.ParentID
 			}
-			latest = disk.ID
 			offset += len(line)
 		}
 	}
@@ -474,12 +556,6 @@ func (t *Timeline) reconcileChunks() error {
 		if err := t.appendIndex(entry); err != nil {
 			return err
 		}
-	}
-	if latest != rootEventID && t.head != latest {
-		if err := t.appendIndex(indexDisk{Type: "head", Head: latest}); err != nil {
-			return err
-		}
-		t.head = latest
 	}
 	return nil
 }
