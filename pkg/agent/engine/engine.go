@@ -168,7 +168,9 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		return nil, ErrEngineShuttingDown
 	default:
 	}
-	if sess, ok := e.Session(id); ok {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if sess, ok := e.active[id]; ok {
 		return sess, nil
 	}
 	meta, err := e.sessionStore.LoadMeta(id)
@@ -207,9 +209,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		return nil, err
 	}
 
-	e.mu.Lock()
 	e.active[id] = sess
-	e.mu.Unlock()
 
 	e.bgLogger.Info("session loaded", "session_id", id, "provider", p.Name, "turns", meta.TurnCount)
 	return sess, nil

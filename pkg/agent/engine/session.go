@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -283,6 +284,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 	}
 	if appendErr != nil {
 		s.l.Error("persist user message", "session_id", s.sessionID, "error", appendErr)
+		return nil, fmt.Errorf("persist user message: %w", appendErr)
 	}
 
 	s.persisted = len(s.history)
@@ -299,7 +301,9 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 	result, err := agentLoop.Invoke(ctx, s.history)
 	if result.Messages != nil {
 		s.history = result.Messages
-		s.persistMessagesLocked()
+		if err := s.persistMessagesLocked(); err != nil {
+			return nil, err
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -351,17 +355,18 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 }
 
 // persistMessagesLocked writes history entries beyond the watermark as message
-// records, deriving tool-call and tool-result records when present. A
-// persistence failure is logged; the in-memory history is advanced either way
-// so the session keeps working. Caller holds s.mu.
-func (s *InfaiAgentSession) persistMessagesLocked() {
+// records, deriving tool-call and tool-result records when present. Caller
+// holds s.mu.
+func (s *InfaiAgentSession) persistMessagesLocked() error {
 	for i := s.persisted; i < len(s.history); i++ {
 		m := s.history[i]
 		if _, err := s.timeline.AppendToHead(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &m}); err != nil {
 			s.l.Error("persist message", "session_id", s.sessionID, "error", err)
+			return fmt.Errorf("persist message: %w", err)
 		}
 	}
 	s.persisted = len(s.history)
+	return nil
 }
 
 func (s *InfaiAgentSession) resetHistoryLocked(summary string) {

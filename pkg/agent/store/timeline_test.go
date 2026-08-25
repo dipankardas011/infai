@@ -54,6 +54,54 @@ func TestTimelineAppendLookupPathAndRotation(t *testing.T) {
 	}
 }
 
+func TestTimelineBranchesFromSelectedEarlierAssistant(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "timeline")
+	timeline, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer timeline.Close()
+
+	_, err = timeline.AppendToHead(Record{Kind: KindMessage, Text: "Hi Bro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedAssistant, err := timeline.AppendToHead(Record{Kind: KindMessage, Text: "Hi there! How can I help you today?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = timeline.AppendToHead(Record{Kind: KindMessage, Text: "tell me why programming languages?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldLast, err := timeline.AppendToHead(Record{Kind: KindMessage, Text: "That is a huge and fascinating question!"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	branched, err := timeline.BranchFromEventID(Record{Kind: KindMessage, Text: "How was your day?"}, selectedAssistant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branched.ParentID != selectedAssistant.ID {
+		t.Fatalf("branch parent=%s want selected assistant=%s", branched.ParentID, selectedAssistant.ID)
+	}
+	if branched.BranchFrom == nil || *branched.BranchFrom != selectedAssistant.ID {
+		t.Fatalf("branch_from=%v want selected assistant=%s", branched.BranchFrom, selectedAssistant.ID)
+	}
+	if branched.ParentID == oldLast.ID {
+		t.Fatalf("branched from old last event %s", oldLast.ID)
+	}
+
+	path, err := timeline.LoadActiveBranchContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(path) != 3 || path[1].ID != selectedAssistant.ID || path[2].ID != branched.ID {
+		t.Fatalf("active branch path=%+v", path)
+	}
+}
+
 func TestTimelinePersistsHeadSeparately(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "timeline")
 	timeline, err := NewTimeline(root, TimelineOptions{})

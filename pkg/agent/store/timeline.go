@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -81,8 +80,6 @@ type indexDisk struct {
 	ID         uuid.UUID      `json:"id,omitempty"`
 	ParentID   uuid.UUID      `json:"parent_id,omitempty"`
 	BranchFrom *uuid.UUID     `json:"branch_from,omitempty"`
-	Kind       RecordKind     `json:"kind,omitempty"`
-	Timestamp  time.Time      `json:"timestamp"`
 	Loc        *EventLocation `json:"location,omitempty"`
 }
 
@@ -205,6 +202,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID, bra
 
 	if t.chunkOffset > 0 && t.chunkOffset+int64(len(line)) > t.chunkBytes {
 		if err := t.rotateChunk(); err != nil {
+			t.broken = err
 			return Event{}, err
 		}
 	}
@@ -223,7 +221,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID, bra
 		t.broken = err
 		return Event{}, err
 	}
-	if err := t.appendIndex(indexDisk{ID: id, ParentID: parentID, BranchFrom: branchFrom, Kind: record.Kind, Timestamp: record.Timestamp, Loc: &loc}); err != nil {
+	if err := t.appendIndex(indexDisk{ID: id, ParentID: parentID, BranchFrom: branchFrom, Loc: &loc}); err != nil {
 		t.broken = err
 		return Event{}, err
 	}
@@ -538,14 +536,7 @@ func (t *Timeline) reconcileChunks() error {
 			}
 			loc := EventLocation{Chunk: file.number, Offset: int64(offset), Length: int64(len(line))}
 			if current, ok := t.index[disk.ID]; !ok || current != loc {
-				var kind RecordKind
-				var ts time.Time
-				kind = disk.Kind
-				if kind == "" && disk.Record != nil {
-					kind = disk.Record.Kind
-					ts = disk.Record.Timestamp
-				}
-				missing = append(missing, indexDisk{ID: disk.ID, ParentID: disk.ParentID, BranchFrom: disk.BranchFrom, Kind: kind, Timestamp: ts, Loc: &loc})
+				missing = append(missing, indexDisk{ID: disk.ID, ParentID: disk.ParentID, BranchFrom: disk.BranchFrom, Loc: &loc})
 				t.index[disk.ID] = loc
 				t.parents[disk.ID] = disk.ParentID
 			}
@@ -603,6 +594,11 @@ func (t *Timeline) openChunk() error {
 		return err
 	}
 	t.chunkOffset = info.Size()
+	if err := syncTimelineDir(t.chunksRoot); err != nil {
+		_ = t.chunkFile.Close()
+		t.chunkFile = nil
+		return err
+	}
 	return nil
 }
 
