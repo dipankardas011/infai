@@ -29,10 +29,38 @@ type popup struct {
 
 	sel    int // selected option index
 	scroll int // option window scroll offset
+
+	left, top int
+	optTop    int
+	optH      int
+	mouseSel  int
 }
 
 func newPopup(title string, body []string, opts []popupOption, escapable bool) *popup {
-	return &popup{title: title, body: body, opts: opts, escapable: escapable}
+	return &popup{title: title, body: body, opts: opts, escapable: escapable, mouseSel: -1}
+}
+
+func (p *popup) setGeometry(left, top, maxH int) {
+	p.left = left
+	p.top = top
+	p.optH = min(max(maxH-3, 0), len(p.opts))
+	bodyH := max(maxH-3-p.optH, 0)
+	n := min(len(p.body), bodyH)
+	p.optTop = top + 1 + n
+	if n > 0 && p.optH > 0 && bodyH > n {
+		p.optTop++
+	}
+}
+
+func (p *popup) optionAt(x, y int) (int, bool) {
+	if x < p.left || y < p.optTop || y >= p.optTop+p.optH {
+		return 0, false
+	}
+	idx := p.scroll + y - p.optTop
+	if idx < 0 || idx >= len(p.opts) {
+		return 0, false
+	}
+	return idx, true
 }
 
 // move shifts the selection by delta (clamped); the option window follows.
@@ -56,30 +84,18 @@ func (p *popup) lines(width, maxH int) []string {
 
 	// top border + title
 	title := trunc(p.title, inner-3)
-	pad := inner - utf8.RuneCountInString(title) - 1 // "┌─ " prefix and "┐" suffix
-	if pad < 0 {
-		pad = 0
-	}
+	pad := max(inner-utf8.RuneCountInString(title)-1, 0) // "┌─ " prefix and "┐" suffix
 	// Keep both horizontal rules visually identical. The title is intentionally
 	// part of the same muted border line rather than introducing a second color.
 	out = append(out, cPopupBorder.Sprint("┌─ "+title+strings.Repeat("─", pad)+"┐"))
 
 	// option window height: never exceed maxH total rows
-	optH := maxH - 3 // title + bottom border + at least one content row
-	if optH < 0 {
-		optH = 0
-	}
-	if optH > len(p.opts) {
-		optH = len(p.opts)
-	}
+	optH := min(max(maxH-3, 0), len(p.opts))
 
 	// body fills what remains above the option window
-	bodyH := maxH - 3 - optH
-	if bodyH < 0 {
-		bodyH = 0
-	}
+	bodyH := max(maxH-3-optH, 0)
 	n := min(len(p.body), bodyH)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out = append(out, popContentRow(p.body[i], width, cChatText))
 	}
 	// a blank separator between body and options when both are present
@@ -94,7 +110,7 @@ func (p *popup) lines(width, maxH int) []string {
 		if p.sel >= p.scroll+optH {
 			p.scroll = p.sel - optH + 1
 		}
-		for i := 0; i < optH; i++ {
+		for i := range optH {
 			oi := p.scroll + i
 			if oi >= len(p.opts) {
 				break
@@ -129,7 +145,7 @@ func (p *popup) lines(width, maxH int) []string {
 		}
 	} else {
 		// no options: fill the row budget so the box keeps its shape
-		for i := 0; i < optH; i++ {
+		for range optH {
 			out = append(out, popContentRow("", width, cChatText))
 		}
 	}

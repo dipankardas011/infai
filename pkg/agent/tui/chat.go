@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -209,11 +210,12 @@ func runChatTUI(ctx context.Context, c Client, sessions []store.SessionMeta, opt
 				t.submit()
 			case cmdDelta:
 				t.scroll = 0
-				if ev.kind == contracts.DeltaStatus {
+				switch ev.kind {
+				case contracts.DeltaStatus:
 					t.appendStatus(ev.text)
-				} else if ev.kind == contracts.DeltaCompactionSummary {
+				case contracts.DeltaCompactionSummary:
 					t.appendCompactionSummary(ev.text)
-				} else {
+				default:
 					t.appendDelta(ev.kind, ev.text)
 				}
 				t.redraw()
@@ -331,6 +333,26 @@ func (t *chatTUI) selectPopup(idx int) {
 func (t *chatTUI) popupKey(ev uiEvent) {
 	p := t.popup
 	switch ev.cmd {
+	case cmdMouse:
+		if ev.btn != 0 {
+			return
+		}
+		idx, ok := p.optionAt(ev.x-1, ev.y-1)
+		if !ok {
+			p.mouseSel = -1
+			return
+		}
+		if ev.press {
+			p.sel = idx
+			p.mouseSel = idx
+			t.redraw()
+			return
+		}
+		if p.mouseSel == idx {
+			t.selectPopup(idx)
+		}
+		p.mouseSel = -1
+		return
 	case cmdEnter:
 		if len(p.opts) > 0 {
 			t.selectPopup(p.sel)
@@ -569,10 +591,7 @@ func (t *chatTUI) showBranchTimeline() {
 		parents[event.ID] = event.ParentID
 		byID[event.ID] = event
 	}
-	var events []TimelineEvent
-	for _, event := range view.Events {
-		events = append(events, event)
-	}
+	events := timelineTreeOrder(view.Events)
 	if len(events) == 0 {
 		t.appendError(fmt.Errorf("timeline is empty"))
 		t.redraw()
@@ -602,6 +621,54 @@ func (t *chatTUI) showBranchTimeline() {
 		}
 		t.blocks = append(t.blocks, block{role: "system", text: branchSelectionLabel(selected)})
 	}, func() {})
+}
+
+// timelineTreeOrder lays out the event graph as a tree instead of displaying
+// events in UUID/index order. Branch roots are visited before the original
+// continuation so a branch appears immediately below its branch_from event.
+func timelineTreeOrder(events []TimelineEvent) []TimelineEvent {
+	children := make(map[uuid.UUID][]TimelineEvent, len(events))
+	for _, event := range events {
+		children[event.ParentID] = append(children[event.ParentID], event)
+	}
+	for parent := range children {
+		sort.SliceStable(children[parent], func(i, j int) bool {
+			a, b := children[parent][i], children[parent][j]
+			if (a.BranchFrom != nil) != (b.BranchFrom != nil) {
+				return a.BranchFrom != nil
+			}
+			return a.ID.String() < b.ID.String()
+		})
+	}
+
+	ordered := make([]TimelineEvent, 0, len(events))
+	seen := make(map[uuid.UUID]struct{}, len(events))
+	var visit func(uuid.UUID)
+	visit = func(parent uuid.UUID) {
+		for _, event := range children[parent] {
+			if _, ok := seen[event.ID]; ok {
+				continue
+			}
+			seen[event.ID] = struct{}{}
+			ordered = append(ordered, event)
+			visit(event.ID)
+		}
+	}
+	visit(uuid.Nil)
+
+	// Keep malformed/disconnected events visible rather than silently dropping
+	// them from the branch picker.
+	if len(ordered) != len(events) {
+		remaining := make([]TimelineEvent, 0, len(events)-len(ordered))
+		for _, event := range events {
+			if _, ok := seen[event.ID]; !ok {
+				remaining = append(remaining, event)
+			}
+		}
+		sort.Slice(remaining, func(i, j int) bool { return remaining[i].ID.String() < remaining[j].ID.String() })
+		ordered = append(ordered, remaining...)
+	}
+	return ordered
 }
 
 func timelineTreePrefix(event TimelineEvent, parents map[uuid.UUID]uuid.UUID, byID map[uuid.UUID]TimelineEvent) string {
@@ -712,13 +779,6 @@ func (t *chatTUI) appendError(err error) {
 		return
 	}
 	t.blocks = append(t.blocks, block{role: "error", text: err.Error()})
-}
-
-func tokenCount(r *ChatReply) int {
-	if r == nil || r.Usage == nil {
-		return 0
-	}
-	return r.Usage.PromptTokens + r.Usage.CompletionTokens
 }
 
 // blocksFromRecords converts saved timeline records into chat blocks so a resumed
@@ -1347,6 +1407,7 @@ func (t *chatTUI) drawPopup(sb *strings.Builder) {
 	}
 	left := max((t.width-boxW)/2, 0)
 	top := max((regionH-boxH)/2, 0)
+	p.setGeometry(left, top, maxH)
 	for i, l := range lines {
 		fmt.Fprintf(sb, "\033[%d;%dH%s", top+1+i, left+1, l)
 		sb.WriteString("\033[K")
