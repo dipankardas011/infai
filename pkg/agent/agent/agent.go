@@ -30,12 +30,14 @@ type Agent struct {
 	deltaHook func(contracts.DeltaKind, string)
 	Status    AgentStatus
 	MaxTurns  int
+	tools     []contracts.Tool
 }
 
 type agentOption struct {
 	maxTurns  int
 	turnHook  func(contracts.ChatMessage)
 	deltaHook func(contracts.DeltaKind, string)
+	tools     []contracts.Tool
 }
 
 type AgentOptions func(*agentOption) error
@@ -64,6 +66,13 @@ func WithDeltaHook(hook func(contracts.DeltaKind, string)) AgentOptions {
 	}
 }
 
+func WithTools(tools ...contracts.Tool) AgentOptions {
+	return func(o *agentOption) error {
+		o.tools = append([]contracts.Tool(nil), tools...)
+		return nil
+	}
+}
+
 // NewAgent creates an agent with an independent short-term context (the
 // message history built up by Invoke).
 func NewAgent(id uuid.UUID, systemPrompt string, opts ...AgentOptions) (*Agent, error) {
@@ -80,6 +89,7 @@ func NewAgent(id uuid.UUID, systemPrompt string, opts ...AgentOptions) (*Agent, 
 		deltaHook:    o.deltaHook,
 		Status:       Idle,
 		MaxTurns:     o.maxTurns,
+		tools:        o.tools,
 		systemPrompt: systemPrompt,
 	}, nil
 }
@@ -126,7 +136,7 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 		requestMessages = append(requestMessages, contracts.NewSystemMessage(a.systemPrompt))
 		requestMessages = append(requestMessages, messages...)
 
-		reply, u, err := a.model.Generate(ctx, requestMessages, &goOpts)
+		reply, u, err := a.model.Generate(ctx, requestMessages, a.tools, &goOpts)
 		usage = u
 		if err != nil {
 			if ctx.Err() != nil {

@@ -28,7 +28,7 @@ Be Honest if you don't know about it you don't answer just ask for facts
 {{end}}</skills>
 
 <tool_calls>
-{{range .Tools}}- {{.Title}}: {{.Description}}
+{{range .Tools}}- {{.Name}}: {{.Description}}
 {{end}}</tool_calls>
 `)
 	if err != nil {

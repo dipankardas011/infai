@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/actuators"
 	"github.com/dipankardas011/infai/pkg/agent/agent"
+	"github.com/dipankardas011/infai/pkg/agent/auditor"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/store"
@@ -45,6 +47,9 @@ type InfaiAgentSession struct {
 	persisted           int
 	pendingBranchParent uuid.UUID
 
+	auditorPolicy  *auditor.AuditorPolicy
+	availableTools []contracts.Tool
+
 	// WARN: we do need to properly handle the Concurrency.
 	agentMapping  map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
 	runtime_comms map[uuid.UUID]*AgentComms        // By this when N no of children can send comms with engine and even the
@@ -67,6 +72,7 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
 		runtime_comms: make(map[uuid.UUID]*AgentComms),
 		Agents:        make(map[uuid.UUID]*agent.Agent),
+		auditorPolicy: auditor.NewAuditorPolicy(),
 	}
 
 	if v, err := uuid.NewV7(); err != nil {
@@ -106,6 +112,10 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 		return nil, err
 	}
 	o.sessionAgentId = firstAgent.Id
+
+	o.auditorPolicy.SetPolicy(contracts.ReadTool, auditor.HumanPolicy)
+	o.availableTools = append([]contracts.Tool{}, actuators.ReadTool())
+
 	return o, nil
 }
 

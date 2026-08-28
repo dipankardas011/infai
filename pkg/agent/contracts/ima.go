@@ -11,7 +11,7 @@ import "context"
 type InfaiModelAdaptor interface {
 	// Generate returns the next assistant message for the given history plus
 	// the request's token usage (nil when the provider reports none).
-	Generate(ctx context.Context, messages []ChatMessage, opts *GenerateOptions) (ChatMessage, *TokenUsage, error)
+	Generate(ctx context.Context, messages []ChatMessage, tools []Tool, opts *GenerateOptions) (ChatMessage, *TokenUsage, error)
 }
 
 // TokenUsage is the provider-reported token accounting for one request.
