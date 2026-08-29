@@ -8,6 +8,7 @@ type ChatMessage struct {
 	Content          *string    `json:"content,omitempty"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	Name             *string    `json:"name,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
@@ -43,6 +44,10 @@ func NewUserMessage(content string) ChatMessage {
 
 func NewAssistantMessage(content string) ChatMessage {
 	return ChatMessage{Role: "assistant", Content: &content}
+}
+
+func NewToolMessage(callID, content string) ChatMessage {
+	return ChatMessage{Role: "tool", ToolCallID: callID, Content: &content}
 }
 
 // Skill is a capability the model can apply (knowledge/memory), described

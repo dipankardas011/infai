@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/actuators"
 	"github.com/dipankardas011/infai/pkg/agent/agent"
 	"github.com/dipankardas011/infai/pkg/agent/auditor"
+	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/store"
@@ -52,7 +54,7 @@ type InfaiAgentSession struct {
 
 	// WARN: we do need to properly handle the Concurrency.
 	agentMapping map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
-	agentComms   *AgentComms
+	agentComms   *comms.AgentComms
 
 	sessionAgentId uuid.UUID
 
@@ -70,7 +72,7 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 		model:         models.NewOpenAICompatableAPI(p.Endpoint, model, p.APIKey),
 		store:         ss,
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
-		agentComms:    NewAgentComms(),
+		agentComms:    comms.NewAgentComms(),
 		Agents:        make(map[uuid.UUID]*agent.Agent),
 		auditorPolicy: auditor.NewAuditorPolicy(),
 	}
@@ -130,7 +132,7 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 		l:             l,
 		model:         models.NewOpenAICompatableAPI(p.Endpoint, meta.Model, p.APIKey),
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
-		agentComms:    NewAgentComms(),
+		agentComms:    comms.NewAgentComms(),
 		Agents:        make(map[uuid.UUID]*agent.Agent),
 		sessionID:     meta.ID,
 		meta:          meta,
@@ -305,8 +307,35 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: kind, Text: text})
 	})
 
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	commErr := make(chan error, 1)
+	go func() {
+		commErr <- s.handleAgentComms(runCtx)
+	}()
+
+	agentErr := make(chan error, 1)
 	var result agent.TurnResult
-	result, err := agentLoop.Invoke(ctx, s.history)
+	var err error
+	go func() {
+		result, err = agentLoop.Invoke(runCtx, s.history)
+		agentErr <- err
+	}()
+
+	var commRunErr error
+	select {
+	case err = <-agentErr:
+		cancel()
+		commRunErr = <-commErr
+	case commRunErr = <-commErr:
+		cancel()
+		err = <-agentErr
+	}
+
+	if err == nil && commRunErr != nil && !errors.Is(commRunErr, context.Canceled) {
+		err = commRunErr
+	}
+
 	if result.Messages != nil {
 		s.history = result.Messages
 		if err := s.persistMessagesLocked(); err != nil {
@@ -486,6 +515,46 @@ func (s *InfaiAgentSession) close() {
 	}
 }
 
+func (s *InfaiAgentSession) handleAgentComms(ctx context.Context) error {
+	for {
+		msg, err := s.agentComms.ReceiveFromAgents(ctx)
+		if err != nil {
+			return err
+		}
+		if msg.Kind != comms.AgentCommMessage {
+			continue
+		}
+
+		var calls []contracts.ToolCall
+		if err := json.Unmarshal(msg.Payload, &calls); err != nil {
+			return err
+		}
+		toolMessages := make([]contracts.ChatMessage, 0, len(calls))
+		for _, call := range calls {
+			fn, ok := actuators.ResolveTool(contracts.ToolType(call.Function.Name))
+			content := "tool not found"
+			if ok {
+				content = fn()
+			}
+			toolMessages = append(toolMessages, contracts.NewToolMessage(call.ID, content))
+		}
+		payload, err := json.Marshal(toolMessages)
+		if err != nil {
+			return err
+		}
+		if err := s.agentComms.SendToAgent(ctx, msg.From, comms.AgentComm{
+			ID:      uuid.New(),
+			ReplyTo: msg.ID,
+			From:    s.sessionID,
+			To:      msg.From,
+			Kind:    comms.AgentCommResult,
+			Payload: payload,
+		}); err != nil {
+			return err
+		}
+	}
+}
+
 func (s *InfaiAgentSession) registerNewParentAgent(systemPrompt string) (*agent.Agent, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -496,7 +565,7 @@ func (s *InfaiAgentSession) registerNewParentAgent(systemPrompt string) (*agent.
 	if err := s.agentComms.RegisterAgent(id); err != nil {
 		return nil, err
 	}
-	s.Agents[id], err = agent.NewAgent(id, systemPrompt, agent.WithMaxTurns(100))
+	s.Agents[id], err = agent.NewAgent(id, systemPrompt, agent.WithMaxTurns(100), agent.WithIAC(s.agentComms.IACChannel(id)))
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +574,7 @@ func (s *InfaiAgentSession) registerNewParentAgent(systemPrompt string) (*agent.
 }
 
 func (s *InfaiAgentSession) registerTransientAgent(id uuid.UUID, systemPrompt string) (*agent.Agent, error) {
-	transient, err := agent.NewAgent(id, systemPrompt, agent.WithMaxTurns(1))
+	transient, err := agent.NewAgent(id, systemPrompt, agent.WithMaxTurns(1), agent.WithIAC(s.agentComms.IACChannel(id)))
 	if err != nil {
 		return nil, err
 	}

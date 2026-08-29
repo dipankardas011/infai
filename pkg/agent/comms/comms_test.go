@@ -1,4 +1,4 @@
-package engine
+package comms
 
 import (
 	"context"
@@ -15,6 +15,7 @@ func TestAgentCommsRoutesMessages(t *testing.T) {
 	if err := comms.RegisterAgent(agentID); err != nil {
 		t.Fatalf("register agent: %v", err)
 	}
+	iac := comms.IACChannel(agentID)
 
 	t.Run("session to agent", func(t *testing.T) {
 		want := AgentComm{To: agentID, Kind: AgentCommMessage}
@@ -25,7 +26,7 @@ func TestAgentCommsRoutesMessages(t *testing.T) {
 			sent <- comms.SendToAgent(ctx, agentID, want)
 		}()
 
-		got, err := comms.ReceiveForAgent(ctx, agentID)
+		got, err := iac.Receive(ctx)
 		if err != nil {
 			t.Fatalf("receive from session: %v", err)
 		}
@@ -41,7 +42,7 @@ func TestAgentCommsRoutesMessages(t *testing.T) {
 
 		sent := make(chan error, 1)
 		go func() {
-			sent <- comms.SendToSession(ctx, want)
+			sent <- iac.Send(ctx, want)
 		}()
 
 		got, err := comms.ReceiveFromAgents(ctx)
@@ -69,7 +70,7 @@ func TestAgentCommsSharesSessionInbox(t *testing.T) {
 		{From: firstID, Kind: AgentCommResult},
 		{From: secondID, Kind: AgentCommError},
 	} {
-		go func() { _ = comms.SendToSession(ctx, msg) }()
+		go func() { _ = comms.IACChannel(msg.From).Send(ctx, msg) }()
 	}
 
 	received := make(map[uuid.UUID]AgentCommKind, 2)

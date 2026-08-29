@@ -1,4 +1,4 @@
-package engine
+package comms
 
 import (
 	"context"
@@ -82,7 +82,29 @@ func (c *AgentComms) SendToAgent(ctx context.Context, id uuid.UUID, msg AgentCom
 	return sendComm(ctx, inbox, c.done, msg)
 }
 
-func (c *AgentComms) ReceiveForAgent(ctx context.Context, id uuid.UUID) (AgentComm, error) {
+func (c *AgentComms) ReceiveFromAgents(ctx context.Context) (AgentComm, error) {
+	return receiveComm(ctx, c.sessionInbox, c.done)
+}
+
+type IACChannel struct {
+	agentId uuid.UUID
+	c       *AgentComms
+}
+
+// IACChannel is Inter Agent Communication Channel only used for Agent to talk with session/engine.
+func (c *AgentComms) IACChannel(id uuid.UUID) *IACChannel {
+	return &IACChannel{id, c}
+}
+
+func (iac *IACChannel) Send(ctx context.Context, msg AgentComm) error {
+	return sendComm(ctx, iac.c.sessionInbox, iac.c.done, msg)
+}
+
+func (iac *IACChannel) Receive(ctx context.Context) (AgentComm, error) {
+	return iac.c.receiveForAgent(ctx, iac.agentId)
+}
+
+func (c *AgentComms) receiveForAgent(ctx context.Context, id uuid.UUID) (AgentComm, error) {
 	c.mu.RLock()
 	inbox, ok := c.agentInboxes[id]
 	c.mu.RUnlock()
@@ -90,14 +112,6 @@ func (c *AgentComms) ReceiveForAgent(ctx context.Context, id uuid.UUID) (AgentCo
 		return AgentComm{}, ErrAgentNotRegistered
 	}
 	return receiveComm(ctx, inbox, c.done)
-}
-
-func (c *AgentComms) SendToSession(ctx context.Context, msg AgentComm) error {
-	return sendComm(ctx, c.sessionInbox, c.done, msg)
-}
-
-func (c *AgentComms) ReceiveFromAgents(ctx context.Context) (AgentComm, error) {
-	return receiveComm(ctx, c.sessionInbox, c.done)
 }
 
 func (c *AgentComms) Close() {
