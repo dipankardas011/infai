@@ -37,7 +37,7 @@ func TestAgentCommsRoutesMessages(t *testing.T) {
 	})
 
 	t.Run("agent to session", func(t *testing.T) {
-		want := AgentComm{From: agentID, Kind: AgentCommResult}
+		want := AgentComm{From: agentID, Kind: AgentCommMessage}
 		ctx := testContext(t)
 
 		sent := make(chan error, 1)
@@ -67,8 +67,8 @@ func TestAgentCommsSharesSessionInbox(t *testing.T) {
 
 	ctx := testContext(t)
 	for _, msg := range []AgentComm{
-		{From: firstID, Kind: AgentCommResult},
-		{From: secondID, Kind: AgentCommError},
+		{From: firstID, Kind: AgentCommMessage},
+		{From: secondID, Kind: AgentCommTool},
 	} {
 		go func() { _ = comms.IACChannel(msg.From).Send(ctx, msg) }()
 	}
@@ -83,8 +83,8 @@ func TestAgentCommsSharesSessionInbox(t *testing.T) {
 	}
 
 	want := map[uuid.UUID]AgentCommKind{
-		firstID:  AgentCommResult,
-		secondID: AgentCommError,
+		firstID:  AgentCommMessage,
+		secondID: AgentCommTool,
 	}
 	if len(received) != len(want) {
 		t.Fatalf("received %#v, want %#v", received, want)

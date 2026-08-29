@@ -12,10 +12,13 @@ import (
 type AgentCommKind string
 
 const (
-	AgentCommMessage AgentCommKind = "message"
-	AgentCommResult  AgentCommKind = "result"
-	AgentCommError   AgentCommKind = "error"
-	AgentCommCancel  AgentCommKind = "cancel"
+	AgentCommMessage  AgentCommKind = "message"
+	AgentCommTool     AgentCommKind = "tool"
+	AgentCommSubagent AgentCommKind = "subagent"
+
+	// AgentCommResult AgentCommKind = "result"
+	// AgentCommError  AgentCommKind = "error"
+	// AgentCommCancel AgentCommKind = "cancel"
 )
 
 // AgentComm is one internal message between the session and an agent. ID

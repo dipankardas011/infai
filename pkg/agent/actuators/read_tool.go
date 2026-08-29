@@ -22,6 +22,7 @@ func ReadTool() contracts.Tool {
 	}
 }
 
-func readExecution() string {
-	return ""
+func readExecution(arguments string) (string, error) {
+	// The workspace-aware file read will be implemented in this workflow.
+	return "", nil
 }

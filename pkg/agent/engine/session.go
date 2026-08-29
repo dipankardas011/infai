@@ -521,38 +521,50 @@ func (s *InfaiAgentSession) handleAgentComms(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if msg.Kind != comms.AgentCommMessage {
-			continue
-		}
 
-		var calls []contracts.ToolCall
-		if err := json.Unmarshal(msg.Payload, &calls); err != nil {
-			return err
-		}
-		toolMessages := make([]contracts.ChatMessage, 0, len(calls))
-		for _, call := range calls {
-			fn, ok := actuators.ResolveTool(contracts.ToolType(call.Function.Name))
-			content := "tool not found"
-			if ok {
-				content = fn()
+		switch msg.Kind {
+		case comms.AgentCommTool:
+			if err := s.handleToolComm(ctx, msg); err != nil {
+				return err
 			}
-			toolMessages = append(toolMessages, contracts.NewToolMessage(call.ID, content))
-		}
-		payload, err := json.Marshal(toolMessages)
-		if err != nil {
-			return err
-		}
-		if err := s.agentComms.SendToAgent(ctx, msg.From, comms.AgentComm{
-			ID:      uuid.New(),
-			ReplyTo: msg.ID,
-			From:    s.sessionID,
-			To:      msg.From,
-			Kind:    comms.AgentCommResult,
-			Payload: payload,
-		}); err != nil {
-			return err
+		case comms.AgentCommSubagent:
+			if err := s.handleSubagentComm(ctx, msg); err != nil {
+				return err
+			}
 		}
 	}
+}
+
+func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentComm) error {
+	var calls []contracts.ToolCall
+	if err := json.Unmarshal(msg.Payload, &calls); err != nil {
+		return err
+	}
+
+	toolMessages := make([]contracts.ChatMessage, 0, len(calls))
+	for _, call := range calls {
+		content, err := actuators.ExecuteToolCall(call)
+		if err != nil {
+			content = err.Error()
+		}
+		toolMessages = append(toolMessages, contracts.NewToolMessage(call.ID, content))
+	}
+	payload, err := json.Marshal(toolMessages)
+	if err != nil {
+		return err
+	}
+	return s.agentComms.SendToAgent(ctx, msg.From, comms.AgentComm{
+		ID:      uuid.New(),
+		ReplyTo: msg.ID,
+		From:    s.sessionID,
+		To:      msg.From,
+		Kind:    comms.AgentCommMessage,
+		Payload: payload,
+	})
+}
+
+func (s *InfaiAgentSession) handleSubagentComm(context.Context, comms.AgentComm) error {
+	panic("not implemented yet")
 }
 
 func (s *InfaiAgentSession) registerNewParentAgent(systemPrompt string) (*agent.Agent, error) {

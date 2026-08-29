@@ -162,7 +162,7 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 			if err := a.comms.Send(ctx, comms.AgentComm{
 				ID:      uuid.New(),
 				From:    a.Id,
-				Kind:    comms.AgentCommMessage,
+				Kind:    comms.AgentCommTool,
 				Payload: payload,
 			}); err != nil {
 				return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, err
