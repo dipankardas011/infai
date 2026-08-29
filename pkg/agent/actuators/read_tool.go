@@ -1,6 +1,8 @@
 package actuators
 
 import (
+	"context"
+
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
@@ -22,7 +24,7 @@ func ReadTool() contracts.Tool {
 	}
 }
 
-func readExecution(arguments string) (string, error) {
+func readExecution(ctx context.Context) (string, error) {
 	// The workspace-aware file read will be implemented in this workflow.
 	return "", nil
 }

@@ -240,6 +240,7 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 		s.l.Error("manual compaction input failed", "error", err)
 		return err
 	}
+	ctx = actuators.WithWorkspace(ctx, s.meta.Cwd)
 	if err := s.compactChat(ctx, systemPrompt, history); err != nil {
 		s.l.Error("manual compaction failed", "error", err)
 		return err
@@ -308,7 +309,9 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 	})
 
 	runCtx, cancel := context.WithCancel(ctx)
+	runCtx = actuators.WithWorkspace(runCtx, s.meta.Cwd)
 	defer cancel()
+
 	commErr := make(chan error, 1)
 	go func() {
 		commErr <- s.handleAgentComms(runCtx)
@@ -543,9 +546,25 @@ func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentC
 
 	toolMessages := make([]contracts.ChatMessage, 0, len(calls))
 	for _, call := range calls {
-		content, err := actuators.ExecuteToolCall(call)
+		content, err := actuators.ExecuteToolCall(ctx, call)
+		status := string(contracts.ToolExecutionSuccess)
+		toolError := ""
 		if err != nil {
+			status = string(contracts.ToolExecutionError)
+			toolError = err.Error()
 			content = err.Error()
+		}
+		if _, persistErr := s.timeline.AppendToHead(store.Record{
+			Kind:      store.KindToolResult,
+			Timestamp: time.Now().UTC(),
+			ToolResult: &store.ToolResultRecord{
+				CallID: call.ID,
+				Status: status,
+				Output: content,
+				Error:  toolError,
+			},
+		}); persistErr != nil {
+			return fmt.Errorf("persist tool result: %w", persistErr)
 		}
 		toolMessages = append(toolMessages, contracts.NewToolMessage(call.ID, content))
 	}
