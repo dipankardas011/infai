@@ -21,3 +21,7 @@ func ReadTool() contracts.Tool {
 		},
 	}
 }
+
+func readExecution() string {
+	return ""
+}

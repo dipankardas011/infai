@@ -37,7 +37,12 @@ type openAIChatRequest struct {
 	ReasoningEffort string                  `json:"reasoning_effort,omitempty"`
 	Stream          bool                    `json:"stream,omitempty"`
 	StreamOptions   *openAIStreamOptions    `json:"stream_options,omitempty"`
-	Tools           []contracts.Tool        `json:"tools,omitempty"`
+	Tools           []openAITool            `json:"tools,omitempty"`
+}
+
+type openAITool struct {
+	Type     string         `json:"type"`
+	Function contracts.Tool `json:"function"`
 }
 
 type openAIStreamOptions struct {
@@ -55,7 +60,12 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 	reqBody := openAIChatRequest{
 		Model:    o.model,
 		Messages: messages,
-		Tools:    tools,
+	}
+	for _, tool := range tools {
+		reqBody.Tools = append(reqBody.Tools, openAITool{
+			Type:     "function",
+			Function: tool,
+		})
 	}
 	if opts != nil {
 		if opts.MaxTokens > 0 {
