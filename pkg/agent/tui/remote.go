@@ -49,11 +49,11 @@ func (c *RemoteClient) SessionID() uuid.UUID {
 	return c.sessionID
 }
 
-func (c *RemoteClient) Chat(ctx context.Context, prompt string, onDelta func(kind contracts.DeltaKind, text string)) (*ChatReply, error) {
+func (c *RemoteClient) Chat(ctx context.Context, prompt string, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.sessionID == uuid.Nil {
+	sessionID := c.sessionID
+	c.mu.Unlock()
+	if sessionID == uuid.Nil {
 		return nil, ErrNoSession
 	}
 
@@ -63,7 +63,7 @@ func (c *RemoteClient) Chat(ctx context.Context, prompt string, onDelta func(kin
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/v1/sessions/"+c.sessionID.String()+"/chat", bytes.NewReader(payload))
+		c.baseURL+"/v1/sessions/"+sessionID.String()+"/chat", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -82,12 +82,39 @@ func (c *RemoteClient) Chat(ctx context.Context, prompt string, onDelta func(kin
 		return nil, fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
 	}
 
-	return c.readStream(resp.Body, onDelta)
+	return c.readStream(resp.Body, onDelta, onApproval)
+}
+
+func (c *RemoteClient) ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error {
+	payload, err := json.Marshal(map[string]string{
+		"fingerprint": approval.Fingerprint,
+		"decision":    decision,
+		"reason":      reason,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/v1/sessions/"+approval.SessionID.String()+"/approvals/"+approval.ID.String(), bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
 }
 
 // readStream consumes the SSE chat stream, delivering deltas to onDelta and
 // returning the final reply.
-func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.DeltaKind, text string)) (*ChatReply, error) {
+func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
 	dec := models.NewDecoder(body)
 
 	var reply ChatReply
@@ -113,9 +140,25 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 			Usage            *contracts.TokenUsage `json:"usage"`
 			ContextTokens    int                   `json:"context_tokens"`
 			Pending          *Approval             `json:"pending"`
+			Type             string                `json:"type"`
+			ID               uuid.UUID             `json:"id"`
+			Fingerprint      string                `json:"fingerprint"`
+			ToolCall         *contracts.ToolCall   `json:"tool_call"`
+			Decision         string                `json:"decision"`
+			Reason           string                `json:"reason"`
 		}
 		if err := json.Unmarshal([]byte(ev.Data), &sseEv); err != nil {
 			return nil, err
+		}
+		if sseEv.Type != "" && onApproval != nil {
+			onApproval(ApprovalUpdate{
+				Type: sseEv.Type,
+				Approval: &Approval{
+					ID: sseEv.ID, SessionID: sseEv.SessionID,
+					Fingerprint: sseEv.Fingerprint, ToolCall: sseEv.ToolCall,
+				},
+				Decision: sseEv.Decision, Reason: sseEv.Reason,
+			})
 		}
 		if sseEv.Error != "" {
 			return nil, fmt.Errorf("server: %s", sseEv.Error)

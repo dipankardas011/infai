@@ -67,6 +67,17 @@ type ChatDeltaEvent struct {
 	Delta string `json:"delta"`
 }
 
+type ApprovalSSEEvent struct {
+	Type        string              `json:"type"`
+	ID          uuid.UUID           `json:"id"`
+	SessionID   uuid.UUID           `json:"session_id"`
+	AgentID     uuid.UUID           `json:"agent_id"`
+	Fingerprint string              `json:"fingerprint,omitempty"`
+	ToolCall    *contracts.ToolCall `json:"tool_call,omitempty"`
+	Decision    string              `json:"decision,omitempty"`
+	Reason      string              `json:"reason,omitempty"`
+}
+
 type ChatDoneEvent struct {
 	Done             bool                    `json:"done"`
 	SessionID        uuid.UUID               `json:"session_id"`

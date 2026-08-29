@@ -43,6 +43,7 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("POST /v1/sessions/{id}/load", s.handleLoadSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/model", s.handleSetSessionModel)
 	mux.HandleFunc("POST /v1/sessions/{id}/chat", s.handleChat)
+	mux.HandleFunc("POST /v1/sessions/{id}/approvals/{approvalID}", s.handleApproval)
 	mux.HandleFunc("POST /v1/sessions/{id}/compact", s.handleCompact)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
 
@@ -53,6 +54,33 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 		WriteTimeout: 0, // chats can take a while
 	}
 	return s
+}
+
+func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	approvalID, err := uuid.Parse(r.PathValue("approvalID"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid approval id"))
+		return
+	}
+	var req engine.ApprovalDecisionFromClient
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.engine.ResolveApproval(sessionID, approvalID, req); err != nil {
+		if errors.Is(err, engine.ErrSessionNotFound) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusConflict, err)
+		return
+	}
+	s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
 func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
@@ -268,10 +296,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// The session's recorder is the multi-writer: it feeds this SSE sink
 		// for the live stream; durable records are written to the timeline.
 		remove := sess.EventHub().Subscribe(func(rec store.Record) error {
-			if rec.Kind != store.KindDelta {
+			var event any
+			switch rec.Kind {
+			case store.KindDelta:
+				event = ChatDeltaEvent{Kind: string(rec.DeltaKind), Delta: rec.Text}
+			case store.KindApprovalRequested, store.KindApprovalResolved, store.KindApprovalCanceled:
+				event = approvalSSEEvent(rec)
+			default:
 				return nil
 			}
-			if err := s.writeSSE(w, ChatDeltaEvent{Kind: string(rec.DeltaKind), Delta: rec.Text}); err != nil {
+			if err := s.writeSSE(w, event); err != nil {
 				s.logger.Debug("stream write failed", "session_id", id, "error", err)
 				return err
 			}
@@ -331,6 +365,22 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		ContextTokens:    res.ContextTokens,
 	}
 	s.writeJSON(w, http.StatusOK, body)
+}
+
+func approvalSSEEvent(rec store.Record) any {
+	event := ApprovalSSEEvent{Type: string(rec.Kind)}
+	if rec.Approval != nil {
+		event.ID = rec.Approval.ID
+		event.SessionID = rec.Approval.SessionID
+		event.AgentID = rec.Approval.AgentID
+		event.Fingerprint = rec.Approval.Fingerprint
+		event.Decision = rec.Approval.Decision
+		event.Reason = rec.Approval.Reason
+		if rec.Approval.ToolCall != nil {
+			event.ToolCall = rec.Approval.ToolCall
+		}
+	}
+	return event
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {

@@ -133,6 +133,15 @@ type openAIStreamChunk struct {
 		Delta struct {
 			Content          string `json:"content"`
 			ReasoningContent string `json:"reasoning_content"`
+			ToolCalls        []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
 		} `json:"delta"`
 	} `json:"choices"`
 	Usage *contracts.TokenUsage `json:"usage"`
@@ -148,6 +157,7 @@ func (o *genericOpenAICompatableAPI) readStream(ctx context.Context, body io.Rea
 
 	var content, reasoning strings.Builder
 	var usage *contracts.TokenUsage
+	var toolCalls []contracts.ToolCall
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -183,6 +193,23 @@ func (o *genericOpenAICompatableAPI) readStream(ctx context.Context, body io.Rea
 					opts.OnDelta(contracts.DeltaReasoning, d.ReasoningContent)
 				}
 			}
+			for _, delta := range d.ToolCalls {
+				if delta.Index < 0 {
+					return contracts.ChatMessage{}, nil, fmt.Errorf("openai compatible api: invalid tool call index %d", delta.Index)
+				}
+				for len(toolCalls) <= delta.Index {
+					toolCalls = append(toolCalls, contracts.ToolCall{})
+				}
+				call := &toolCalls[delta.Index]
+				if call.ID == "" {
+					call.ID = delta.ID
+				}
+				if call.Type == "" {
+					call.Type = delta.Type
+				}
+				call.Function.Name += delta.Function.Name
+				call.Function.Arguments += delta.Function.Arguments
+			}
 		}
 		if chunk.Usage != nil {
 			usage = chunk.Usage
@@ -194,6 +221,11 @@ func (o *genericOpenAICompatableAPI) readStream(ctx context.Context, body io.Rea
 		Role:             "assistant",
 		Content:          &text,
 		ReasoningContent: reasoning.String(),
+	}
+	for _, call := range toolCalls {
+		if call.ID != "" || call.Function.Name != "" || call.Function.Arguments != "" {
+			msg.ToolCalls = append(msg.ToolCalls, call)
+		}
 	}
 	return msg, usage, nil
 }

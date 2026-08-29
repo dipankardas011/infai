@@ -14,6 +14,17 @@ const (
 	AllowPolicy
 )
 
+func (p PolicyDecision) String() string {
+	switch p {
+	case HumanPolicy:
+		return "human"
+	case AllowPolicy:
+		return "allow"
+	default:
+		return "deny"
+	}
+}
+
 func NewAuditorPolicy() *AuditorPolicy {
 	return &AuditorPolicy{
 		ToolMappings: map[contracts.ToolType]PolicyDecision{

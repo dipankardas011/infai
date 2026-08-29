@@ -244,6 +244,14 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string
 	return sess.Chat(ctx, prompt, opts)
 }
 
+func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, decision ApprovalDecisionFromClient) error {
+	sess, ok := e.Session(id)
+	if !ok {
+		return ErrSessionNotFound
+	}
+	return sess.ResolveApproval(approvalID, decision)
+}
+
 // CompactSession creates a continuation checkpoint for an active session.
 func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) error {
 	e.mu.Lock()

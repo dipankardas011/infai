@@ -2,6 +2,9 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,8 +24,9 @@ import (
 )
 
 var (
-	ErrSessionClosed = errors.New("session closed")
-	ErrNoProvider    = errors.New("engine: no provider configured")
+	ErrSessionClosed  = errors.New("session closed")
+	ErrNoProvider     = errors.New("engine: no provider configured")
+	errApprovalDenied = errors.New("tool execution was denied by the user")
 )
 
 // InfaiAgentSession is the persistent state of one conversation. It is a
@@ -53,12 +57,19 @@ type InfaiAgentSession struct {
 	availableTools []contracts.Tool
 
 	// WARN: we do need to properly handle the Concurrency.
-	agentMapping map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
-	agentComms   *comms.AgentComms
+	agentMapping    map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
+	agentComms      *comms.AgentComms
+	approvalMu      sync.Mutex
+	pendingApproval *pendingApproval
 
 	sessionAgentId uuid.UUID
 
 	Agents map[uuid.UUID]*agent.Agent
+}
+
+type pendingApproval struct {
+	request  ApprovalRequest
+	decision chan ApprovalDecisionFromClient
 }
 
 // NewSession creates a fresh session bound to the given provider and model.
@@ -309,12 +320,22 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 	})
 
 	result, err := s.runAgent(ctx, agentLoop)
+	toolCalls := 0
+	for _, message := range result.Messages {
+		toolCalls += len(message.ToolCalls)
+	}
+	s.l.DebugContext(ctx, "agent invocation completed",
+		"status", result.Status.String(),
+		"messages", len(result.Messages),
+		"tool_calls", toolCalls,
+		"usage", result.Usage != nil,
+	)
 	if err != nil {
 		return nil, err
 	}
 	compacted := false
 	if result.Status == agent.TurnNeedsCompaction {
-		s.l.Info("automatic compaction requested", "session_id", s.sessionID)
+		s.l.InfoContext(ctx, "automatic compaction requested", "session_id", s.sessionID)
 		if result.Usage != nil {
 			s.l.Warn("automatic compaction triggered",
 				"prompt_tokens", result.Usage.PromptTokens,
@@ -493,7 +514,7 @@ func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string
 		return err
 	}
 	s.resetHistoryLocked(result.Summary)
-	s.l.Info("compaction completed", "summary_chars", len(result.Summary))
+	s.l.InfoContext(ctx, "compaction completed", "summary_chars", len(result.Summary))
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaCompactionSummary, Text: result.Summary})
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacted"})
 	return nil
@@ -561,14 +582,54 @@ func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentC
 
 	toolMessages := make([]contracts.ChatMessage, 0, len(calls))
 	for _, call := range calls {
-		content, err := actuators.ExecuteToolCall(ctx, call)
+		policy := s.auditorPolicy.Check(contracts.ToolType(call.Function.Name))
+		s.l.DebugContext(ctx, "tool call received",
+			"agent_id", msg.From,
+			"call_id", call.ID,
+			"tool", call.Function.Name,
+			"policy", policy.String(),
+		)
+
+		s.events.Publish(store.Record{
+			Kind:      store.KindDelta,
+			Timestamp: time.Now().UTC(),
+			DeltaKind: contracts.DeltaStatus,
+			Text:      fmt.Sprintf("tool: %s", call.Function.Name),
+		})
+
 		status := string(contracts.ToolExecutionSuccess)
 		toolError := ""
+		var content string
+		var err error
+
+		switch policy {
+		case auditor.AllowPolicy:
+			content, err = actuators.ExecuteToolCall(ctx, call)
+		case auditor.HumanPolicy:
+			content, err = s.executeAfterApproval(ctx, msg.From, call)
+		default:
+			status = string(contracts.ToolExecutionDenied)
+			toolError = "tool execution was denied by session policy"
+			content = toolError
+		}
+
 		if err != nil {
-			status = string(contracts.ToolExecutionError)
+			if errors.Is(err, errApprovalDenied) {
+				status = string(contracts.ToolExecutionDenied)
+			} else {
+				status = string(contracts.ToolExecutionError)
+			}
 			toolError = err.Error()
 			content = err.Error()
 		}
+
+		s.l.DebugContext(ctx, "tool call completed",
+			"agent_id", msg.From,
+			"call_id", call.ID,
+			"tool", call.Function.Name,
+			"status", status,
+		)
+
 		if _, persistErr := s.timeline.AppendToHead(store.Record{
 			Kind:      store.KindToolResult,
 			Timestamp: time.Now().UTC(),
@@ -597,6 +658,120 @@ func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentC
 	})
 }
 
+func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uuid.UUID, call contracts.ToolCall) (string, error) {
+	approvalID, err := uuid.NewV7()
+	if err != nil {
+		return "", err
+	}
+
+	fingerprintInput := approvalID.String() + s.sessionID.String() + agentID.String() + call.ID + call.Function.Name + call.Function.Arguments
+	hash := sha256.Sum256([]byte(fingerprintInput))
+	fingerprint := hex.EncodeToString(hash[:])
+
+	request := ApprovalRequest{
+		ID:          approvalID,
+		SessionID:   s.sessionID,
+		AgentID:     agentID,
+		ToolCall:    call,
+		Fingerprint: fingerprint,
+		CreatedAt:   time.Now().UTC(),
+	}
+
+	pending := &pendingApproval{
+		request:  request,
+		decision: make(chan ApprovalDecisionFromClient, 1),
+	}
+
+	s.approvalMu.Lock()
+	if s.pendingApproval != nil {
+		s.approvalMu.Unlock()
+		return "", errors.New("another tool approval is already pending")
+	}
+	s.pendingApproval = pending
+	s.approvalMu.Unlock()
+
+	s.events.Publish(store.Record{
+		Kind:      store.KindApprovalRequested,
+		Timestamp: time.Now().UTC(),
+		Approval: &store.ApprovalEvent{
+			ID:          request.ID,
+			SessionID:   request.SessionID,
+			AgentID:     request.AgentID,
+			Fingerprint: request.Fingerprint,
+			ToolCall:    &request.ToolCall,
+		},
+	})
+	s.l.InfoContext(ctx, "tool approval requested",
+		"approval_id", request.ID,
+		"agent_id", request.AgentID,
+		"tool", request.ToolCall.Function.Name,
+	)
+
+	select {
+	case decision := <-pending.decision:
+		s.events.Publish(store.Record{
+			Kind:      store.KindApprovalResolved,
+			Timestamp: time.Now().UTC(),
+			Approval: &store.ApprovalEvent{
+				ID:          request.ID,
+				SessionID:   request.SessionID,
+				AgentID:     request.AgentID,
+				Fingerprint: request.Fingerprint,
+				Decision:    string(decision.Decision),
+				Reason:      decision.Reason,
+			},
+		})
+		s.l.InfoContext(ctx, "tool approval resolved",
+			"approval_id", request.ID,
+			"decision", decision.Decision,
+		)
+		if decision.Decision != ApprovalApprove {
+			return "", errApprovalDenied
+		}
+		return actuators.ExecuteToolCall(ctx, call)
+	case <-ctx.Done():
+		s.approvalMu.Lock()
+		if s.pendingApproval == pending {
+			s.pendingApproval = nil
+		}
+		s.approvalMu.Unlock()
+		s.events.Publish(store.Record{
+			Kind:      store.KindApprovalCanceled,
+			Timestamp: time.Now().UTC(),
+			Approval: &store.ApprovalEvent{
+				ID:          request.ID,
+				SessionID:   request.SessionID,
+				AgentID:     request.AgentID,
+				Fingerprint: request.Fingerprint,
+			},
+		})
+		return "", ctx.Err()
+	}
+}
+
+func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision ApprovalDecisionFromClient) error {
+	s.approvalMu.Lock()
+	defer s.approvalMu.Unlock()
+
+	if s.pendingApproval == nil || s.pendingApproval.request.ID != id {
+		return errors.New("approval not found or already resolved")
+	}
+	if subtle.ConstantTimeCompare(
+		[]byte(s.pendingApproval.request.Fingerprint),
+		[]byte(decision.Fingerprint),
+	) != 1 {
+		return errors.New("invalid approval fingerprint")
+	}
+	if decision.Decision != ApprovalApprove && decision.Decision != ApprovalDeny && decision.Decision != ApprovalDenyWithReason {
+		return errors.New("invalid approval decision")
+	}
+
+	pending := s.pendingApproval
+	s.pendingApproval = nil
+	pending.decision <- decision
+	return nil
+}
+
 func (s *InfaiAgentSession) handleSubagentComm(context.Context, comms.AgentComm) error {
 	panic("not implemented yet")
 }
@@ -611,7 +786,14 @@ func (s *InfaiAgentSession) registerNewParentAgent(systemPrompt string) (*agent.
 	if err := s.agentComms.RegisterAgent(id); err != nil {
 		return nil, err
 	}
-	s.Agents[id], err = agent.NewAgent(id, systemPrompt, agent.WithMaxTurns(100), agent.WithIAC(s.agentComms.IACChannel(id)), agent.WithCompactionCheck(s.shouldCompact))
+	s.Agents[id], err = agent.NewAgent(
+		id,
+		systemPrompt,
+		agent.WithMaxTurns(100),
+		agent.WithTools(s.availableTools...),
+		agent.WithIAC(s.agentComms.IACChannel(id)),
+		agent.WithCompactionCheck(s.shouldCompact),
+	)
 	if err != nil {
 		return nil, err
 	}

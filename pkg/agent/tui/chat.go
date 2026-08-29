@@ -39,22 +39,25 @@ const (
 	cmdMouse // a mouse report (button/coords)
 	cmdPaste // bracketed paste completed; text lands in the input
 	cmdRedraw
+	cmdApproval
+	cmdApprovalError
 )
 
 // uiEvent is either a terminal key, a scroll/mouse action, or a model-stream
 // event (cmdDelta/cmdDone).
 type uiEvent struct {
-	cmd   eventCmd
-	key   rune
-	page  bool
-	btn   int  // mouse button (SGR code); 0=left, 32=drag, 64/65=wheel
-	x, y  int  // mouse cell, 1-based
-	press bool // mouse press vs release
-	kind  contracts.DeltaKind
-	text  string
-	paste string // pasted text for cmdPaste
-	reply *ChatReply
-	err   error
+	cmd      eventCmd
+	key      rune
+	page     bool
+	btn      int  // mouse button (SGR code); 0=left, 32=drag, 64/65=wheel
+	x, y     int  // mouse cell, 1-based
+	press    bool // mouse press vs release
+	kind     contracts.DeltaKind
+	text     string
+	paste    string // pasted text for cmdPaste
+	reply    *ChatReply
+	err      error
+	approval ApprovalUpdate
 }
 
 // block is one rendered conversation entry.
@@ -229,9 +232,15 @@ func runChatTUI(ctx context.Context, c Client, sessions []store.SessionMeta, opt
 					t.session.TurnCount++
 					t.session.Model = ev.reply.Model
 					if ev.reply.Pending != nil {
-						t.showApproval(ev.reply)
+						t.showApproval(ev.reply.Pending)
 					}
 				}
+				t.redraw()
+			case cmdApproval:
+				t.handleApprovalUpdate(ev.approval)
+				t.redraw()
+			case cmdApprovalError:
+				t.appendError(ev.err)
 				t.redraw()
 			case cmdTick:
 				// Only redraw on idle ticks while working; redrawing while
@@ -286,6 +295,8 @@ func (t *chatTUI) submit() {
 	go func() {
 		reply, err := t.client.Chat(t.ctx, prompt, func(kind contracts.DeltaKind, text string) {
 			ev <- uiEvent{cmd: cmdDelta, kind: kind, text: text}
+		}, func(update ApprovalUpdate) {
+			ev <- uiEvent{cmd: cmdApproval, approval: update}
 		})
 		ev <- uiEvent{cmd: cmdDone, reply: reply, err: err}
 		close(ev)
@@ -390,18 +401,51 @@ func (t *chatTUI) popupKey(ev uiEvent) {
 
 // showApproval presents a human-in-the-loop checkpoint the agent reached:
 // what is being asked plus Allow / Always allow / Deny, opencode-style.
-func (t *chatTUI) showApproval(reply *ChatReply) {
-	body := wrapLines(reply.Pending.Message, 56)
+func (t *chatTUI) handleApprovalUpdate(update ApprovalUpdate) {
+	if update.Approval == nil {
+		return
+	}
+	if update.Type == "approval_requested" {
+		t.showApproval(update.Approval)
+		return
+	}
+	if t.popup != nil && t.popup.title == "approval required" {
+		t.popup = nil
+		t.popupOK = nil
+		t.popupCancel = nil
+	}
+	label := "approval canceled"
+	if update.Type == "approval_resolved" {
+		label = "approval " + update.Decision
+	}
+	t.blocks = append(t.blocks, block{role: "system", text: label})
+}
+
+func (t *chatTUI) showApproval(approval *Approval) {
+	message := approval.Message
+	if message == "" && approval.ToolCall != nil {
+		message = fmt.Sprintf("tool: %s\narguments: %s", approval.ToolCall.Function.Name, approval.ToolCall.Function.Arguments)
+	}
+	body := wrapLines(message, 56)
 	opts := []popupOption{
 		{label: "Allow", key: 'a', kind: "allow"},
-		{label: "Always allow", key: 'y', kind: "allow"},
 		{label: "Deny", key: 'd', kind: "deny"},
 	}
 	t.showPopup("approval required", body, opts, func(idx int) {
-		verdict := [...]string{"allowed", "always allowed", "denied"}[clamp(idx, 0, 2)]
-		t.blocks = append(t.blocks, block{role: "system", text: verdict + " · " + reply.Pending.Message})
+		verdict := [...]string{"allowed", "denied"}[clamp(idx, 0, 1)]
+		decision := [...]string{"approve", "deny"}[clamp(idx, 0, 1)]
+		t.blocks = append(t.blocks, block{role: "system", text: verdict + " · " + message})
+		go func() {
+			if err := t.client.ResolveApproval(t.ctx, *approval, decision, ""); err != nil {
+				t.events <- uiEvent{cmd: cmdApprovalError, err: err}
+			}
+		}()
 	}, func() {
-		t.blocks = append(t.blocks, block{role: "system", text: "denied · " + reply.Pending.Message})
+		go func() {
+			if err := t.client.ResolveApproval(t.ctx, *approval, "deny", "canceled by user"); err != nil {
+				t.events <- uiEvent{cmd: cmdApprovalError, err: err}
+			}
+		}()
 	})
 }
 

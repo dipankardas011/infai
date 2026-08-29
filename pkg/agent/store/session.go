@@ -74,6 +74,10 @@ const (
 	KindToolCall   RecordKind = "tool_call"
 	KindToolResult RecordKind = "tool_result"
 	KindCompaction RecordKind = "compaction"
+
+	KindApprovalRequested RecordKind = "approval_requested"
+	KindApprovalResolved  RecordKind = "approval_resolved"
+	KindApprovalCanceled  RecordKind = "approval_canceled"
 )
 
 // ToolCallRecord is what the model requested; ToolResultRecord is what it got
@@ -100,6 +104,16 @@ type CompactionRecord struct {
 	Summary string `json:"summary"`
 }
 
+type ApprovalEvent struct {
+	ID          uuid.UUID           `json:"id"`
+	SessionID   uuid.UUID           `json:"session_id"`
+	AgentID     uuid.UUID           `json:"agent_id"`
+	Fingerprint string              `json:"fingerprint"`
+	ToolCall    *contracts.ToolCall `json:"tool_call,omitempty"`
+	Decision    string              `json:"decision,omitempty"`
+	Reason      string              `json:"reason,omitempty"`
+}
+
 // Record is one durable event in a session timeline. Deltas are live-only and
 // fan out to sinks; everything else is durable.
 type Record struct {
@@ -111,6 +125,7 @@ type Record struct {
 	ToolCall   *ToolCallRecord        `json:"tool_call,omitempty"`
 	ToolResult *ToolResultRecord      `json:"tool_result,omitempty"`
 	Compaction *CompactionRecord      `json:"compaction,omitempty"`
+	Approval   *ApprovalEvent         `json:"approval,omitempty"`
 }
 
 // SessionStore reads and writes session timelines under harness/sessions,

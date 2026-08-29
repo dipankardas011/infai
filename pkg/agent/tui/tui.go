@@ -33,8 +33,18 @@ type ChatReply struct {
 // Approval is a human-in-the-loop checkpoint the agent reached; the turn
 // pauses until the user decides.
 type Approval struct {
-	ID      uuid.UUID
-	Message string
+	ID          uuid.UUID
+	SessionID   uuid.UUID
+	Fingerprint string
+	Message     string
+	ToolCall    *contracts.ToolCall
+}
+
+type ApprovalUpdate struct {
+	Type     string
+	Approval *Approval
+	Decision string
+	Reason   string
 }
 
 // SessionCreateOptions describes a new session for the server.
@@ -47,7 +57,8 @@ type SessionCreateOptions struct {
 // Client is the CLI's view of the engine. RemoteClient is the HTTP transport
 // to a running <binary> server.
 type Client interface {
-	Chat(ctx context.Context, prompt string, onDelta func(kind contracts.DeltaKind, text string)) (*ChatReply, error)
+	Chat(ctx context.Context, prompt string, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
+	ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error
 	SetSession(id uuid.UUID)
 	CreateSession(ctx context.Context, opts SessionCreateOptions) (*store.SessionMeta, error)
 	LoadSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, error)
@@ -232,7 +243,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 			case contracts.DeltaCompactionSummary:
 				printCompactionSummary(out, text)
 			}
-		})
+		}, nil)
 		if thinkingShown && !contentStarted {
 			cHeader.Fprintln(out, "────────")
 		}
@@ -268,6 +279,12 @@ func renderHistory(out io.Writer, records []store.Record) {
 				cHeader.Fprintln(out, "────────")
 			}
 			cAssistant.Fprintf(out, "● %s\n", m.Text())
+			for _, call := range m.ToolCalls {
+				cSystem.Fprintf(out, "  ↳ tool %s\n", call.Function.Name)
+			}
+			fmt.Fprintln(out)
+		case "tool":
+			cSystem.Fprintf(out, "  ↳ result [%s] %s\n", m.ToolCallID, m.Text())
 			fmt.Fprintln(out)
 		}
 	}
