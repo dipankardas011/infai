@@ -308,6 +308,67 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: kind, Text: text})
 	})
 
+	result, err := s.runAgent(ctx, agentLoop)
+	if err != nil {
+		return nil, err
+	}
+	compacted := false
+	if result.Status == agent.TurnNeedsCompaction {
+		s.l.Info("automatic compaction requested", "session_id", s.sessionID)
+		if result.Usage != nil {
+			s.l.Warn("automatic compaction triggered",
+				"prompt_tokens", result.Usage.PromptTokens,
+				"completion_tokens", result.Usage.CompletionTokens,
+				"total_tokens", result.Usage.TotalTokens,
+				"context_window", s.meta.ContextWindow,
+				"threshold_percent", 80,
+			)
+		}
+		systemPrompt, history, err := compactionInput(s.history)
+		if err != nil {
+			s.l.Error("automatic compaction input failed", "error", err)
+			return nil, err
+		}
+		if err := s.compactChat(ctx, systemPrompt, history); err != nil {
+			s.l.Error("automatic compaction failed", "error", err)
+			return nil, err
+		}
+		compacted = true
+		result, err = s.runAgent(ctx, agentLoop)
+		if err != nil {
+			return nil, err
+		}
+		if result.Status == agent.TurnNeedsCompaction {
+			s.l.Warn("automatic compaction requested again; stopping after one continuation", "session_id", s.sessionID)
+		}
+	}
+	s.meta.TurnCount++
+	s.meta.UpdatedAt = time.Now().UTC()
+	if err := s.store.SaveMeta(s.meta); err != nil {
+		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
+	}
+
+	contextTokens := 0
+	if !compacted && result.Usage != nil {
+		contextTokens = result.Usage.TotalTokens
+		if contextTokens <= 0 {
+			contextTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
+		}
+	}
+	return &ChatResult{
+		SessionID:        s.sessionID,
+		Status:           result.Status,
+		Reply:            lastAssistantText(result.Messages),
+		ReasoningContent: lastAssistantReasoning(result.Messages),
+		Pending:          nil, // populated by the session approval coordinator
+		Usage:            result.Usage,
+		ContextTokens:    contextTokens,
+	}, nil
+}
+
+// runAgent owns one complete agent/comms invocation and persists the messages
+// it produced before returning control to Chat.
+func (s *InfaiAgentSession) runAgent(ctx context.Context, agentLoop *agent.Agent) (agent.TurnResult, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	runCtx = actuators.WithWorkspace(runCtx, s.meta.Cwd)
 	defer cancel()
@@ -334,64 +395,17 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		cancel()
 		err = <-agentErr
 	}
-
 	if err == nil && commRunErr != nil && !errors.Is(commRunErr, context.Canceled) {
 		err = commRunErr
 	}
 
 	if result.Messages != nil {
 		s.history = result.Messages
-		if err := s.persistMessagesLocked(); err != nil {
-			return nil, err
+		if persistErr := s.persistMessagesLocked(); persistErr != nil {
+			return result, persistErr
 		}
 	}
-	if err != nil {
-		return nil, err
-	}
-	compacted := false
-	if s.shouldCompact(result.Usage) {
-		if result.Usage != nil {
-			s.l.Warn("automatic compaction triggered",
-				"prompt_tokens", result.Usage.PromptTokens,
-				"completion_tokens", result.Usage.CompletionTokens,
-				"total_tokens", result.Usage.TotalTokens,
-				"context_window", s.meta.ContextWindow,
-				"threshold_percent", 80,
-			)
-		}
-		systemPrompt, history, err := compactionInput(s.history)
-		if err != nil {
-			s.l.Error("automatic compaction input failed", "error", err)
-			return nil, err
-		}
-		if err := s.compactChat(ctx, systemPrompt, history); err != nil {
-			s.l.Error("automatic compaction failed", "error", err)
-			return nil, err
-		}
-		compacted = true
-	}
-	s.meta.TurnCount++
-	s.meta.UpdatedAt = time.Now().UTC()
-	if err := s.store.SaveMeta(s.meta); err != nil {
-		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
-	}
-
-	contextTokens := 0
-	if !compacted && result.Usage != nil {
-		contextTokens = result.Usage.TotalTokens
-		if contextTokens <= 0 {
-			contextTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
-		}
-	}
-	return &ChatResult{
-		SessionID:        s.sessionID,
-		Status:           result.Status,
-		Reply:            lastAssistantText(result.Messages),
-		ReasoningContent: lastAssistantReasoning(result.Messages),
-		Pending:          nil, // populated by the session approval coordinator
-		Usage:            result.Usage,
-		ContextTokens:    contextTokens,
-	}, nil
+	return result, err
 }
 
 // persistMessagesLocked writes history entries beyond the watermark as message
@@ -447,6 +461,7 @@ func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
 	return shouldCompact
 }
 
+// TODO: we do need to revisit to optimize the summary like storing a flattened history
 func compactionInput(history []contracts.ChatMessage) (string, []contracts.ChatMessage, error) {
 	systemPrompt, err := CompactionAgentSystemPrompt()
 	if err != nil {
@@ -596,7 +611,7 @@ func (s *InfaiAgentSession) registerNewParentAgent(systemPrompt string) (*agent.
 	if err := s.agentComms.RegisterAgent(id); err != nil {
 		return nil, err
 	}
-	s.Agents[id], err = agent.NewAgent(id, systemPrompt, agent.WithMaxTurns(100), agent.WithIAC(s.agentComms.IACChannel(id)))
+	s.Agents[id], err = agent.NewAgent(id, systemPrompt, agent.WithMaxTurns(100), agent.WithIAC(s.agentComms.IACChannel(id)), agent.WithCompactionCheck(s.shouldCompact))
 	if err != nil {
 		return nil, err
 	}

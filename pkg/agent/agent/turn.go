@@ -14,6 +14,9 @@ const (
 	// TurnPendingApproval means the loop paused at a human-in-the-loop
 	// checkpoint and must be resumed with an approval decision.
 	TurnPendingApproval
+	// TurnNeedsCompaction pauses after tool results so the session can compact
+	// before the next model request.
+	TurnNeedsCompaction
 )
 
 func (s TurnStatus) String() string {
@@ -22,6 +25,8 @@ func (s TurnStatus) String() string {
 		return "canceled"
 	case TurnPendingApproval:
 		return "pending_approval"
+	case TurnNeedsCompaction:
+		return "needs_compaction"
 	default:
 		return "done"
 	}

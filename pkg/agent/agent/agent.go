@@ -27,20 +27,22 @@ type Agent struct {
 
 	systemPrompt string
 
-	model     contracts.InfaiModelAdaptor
-	deltaHook func(contracts.DeltaKind, string)
-	Status    AgentStatus
-	MaxTurns  int
-	tools     []contracts.Tool
-	comms     *comms.IACChannel
+	model         contracts.InfaiModelAdaptor
+	deltaHook     func(contracts.DeltaKind, string)
+	Status        AgentStatus
+	MaxTurns      int
+	tools         []contracts.Tool
+	comms         *comms.IACChannel
+	shouldCompact func(*contracts.TokenUsage) bool
 }
 
 type agentOption struct {
-	maxTurns  int
-	turnHook  func(contracts.ChatMessage)
-	deltaHook func(contracts.DeltaKind, string)
-	tools     []contracts.Tool
-	comms     *comms.IACChannel
+	maxTurns      int
+	turnHook      func(contracts.ChatMessage)
+	deltaHook     func(contracts.DeltaKind, string)
+	tools         []contracts.Tool
+	comms         *comms.IACChannel
+	shouldCompact func(*contracts.TokenUsage) bool
 }
 
 type AgentOptions func(*agentOption) error
@@ -76,6 +78,13 @@ func WithTools(tools ...contracts.Tool) AgentOptions {
 	}
 }
 
+func WithCompactionCheck(check func(*contracts.TokenUsage) bool) AgentOptions {
+	return func(o *agentOption) error {
+		o.shouldCompact = check
+		return nil
+	}
+}
+
 // NewAgent creates an agent with an independent short-term context (the
 // message history built up by Invoke).
 func NewAgent(id uuid.UUID, systemPrompt string, opts ...AgentOptions) (*Agent, error) {
@@ -86,14 +95,15 @@ func NewAgent(id uuid.UUID, systemPrompt string, opts ...AgentOptions) (*Agent, 
 		}
 	}
 	return &Agent{
-		Id:           id,
-		model:        nil,
-		deltaHook:    o.deltaHook,
-		Status:       Idle,
-		MaxTurns:     o.maxTurns,
-		tools:        o.tools,
-		comms:        o.comms,
-		systemPrompt: systemPrompt,
+		Id:            id,
+		model:         nil,
+		deltaHook:     o.deltaHook,
+		Status:        Idle,
+		MaxTurns:      o.maxTurns,
+		tools:         o.tools,
+		comms:         o.comms,
+		shouldCompact: o.shouldCompact,
+		systemPrompt:  systemPrompt,
 	}, nil
 }
 
@@ -177,34 +187,14 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 				return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, err
 			}
 			messages = append(messages, toolMessages...)
+
+			if a.shouldCompact != nil && a.shouldCompact(usage) {
+				return TurnResult{Status: TurnNeedsCompaction, Messages: messages, Usage: usage}, nil
+			}
 		} else {
 			// TODO: some evaluation Certira need to be there as a WithEval() like thing.
 			break
 		}
-
-		// TODO: we need to properly handle the compaction in here to know when it reaches the limit.
-		// like now I ctrl+c,v from the session as a comment but we need to handle that.
-		// if s.shouldCompact(result.Usage) {
-		// 	if result.Usage != nil {
-		// 		s.l.Warn("automatic compaction triggered",
-		// 			"prompt_tokens", result.Usage.PromptTokens,
-		// 			"completion_tokens", result.Usage.CompletionTokens,
-		// 			"total_tokens", result.Usage.TotalTokens,
-		// 			"context_window", s.meta.ContextWindow,
-		// 			"threshold_percent", 80,
-		// 		)
-		// 	}
-		// 	systemPrompt, history, err := compactionInput(s.history)
-		// 	if err != nil {
-		// 		s.l.Error("automatic compaction input failed", "error", err)
-		// 		return nil, err
-		// 	}
-		// 	if err := s.compactChat(ctx, systemPrompt, history); err != nil {
-		// 		s.l.Error("automatic compaction failed", "error", err)
-		// 		return nil, err
-		// 	}
-		// 	compacted = true
-		// }
 	}
 
 	// Canceled on the final iteration's boundary — report it, not "done".
