@@ -2,6 +2,7 @@ package actuators
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,5 +67,72 @@ func TestReadExecutionRejectsInvalidUTF8(t *testing.T) {
 	_, err := readExecution(ctx)
 	if err == nil || !strings.Contains(err.Error(), "invalid_utf8") {
 		t.Fatalf("error = %v, want invalid_utf8", err)
+	}
+}
+
+func TestReadExecutionReadsLineRange(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := WithWorkspace(context.Background(), root)
+	ctx = WithToolCall(ctx, contracts.ToolCall{
+		Function: contracts.Function{
+			Name:      string(contracts.ReadTool),
+			Arguments: `{"path":"note.txt","offset":2,"limit":1}`,
+		},
+	})
+	output, err := readExecution(ctx)
+	if err != nil {
+		t.Fatalf("readExecution: %v", err)
+	}
+	if output != "two\n" {
+		t.Fatalf("output = %q, want %q", output, "two\n")
+	}
+}
+
+func TestReadExecutionMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := WithWorkspace(context.Background(), root)
+	ctx = WithToolCall(ctx, contracts.ToolCall{
+		Function: contracts.Function{
+			Name:      string(contracts.ReadTool),
+			Arguments: `{"path":"note.txt","metadata":true}`,
+		},
+	})
+	output, err := readExecution(ctx)
+	if err != nil {
+		t.Fatalf("readExecution: %v", err)
+	}
+	var metadata readMetadata
+	if err := json.Unmarshal([]byte(output), &metadata); err != nil {
+		t.Fatalf("metadata JSON: %v", err)
+	}
+	if !metadata.UTF8 || metadata.LineCount == nil || *metadata.LineCount != 2 {
+		t.Fatalf("metadata = %+v", metadata)
+	}
+	if metadata.Permissions != "0600" || metadata.SizeBytes == 0 || metadata.DiskSizeBytes == 0 {
+		t.Fatalf("metadata = %+v", metadata)
+	}
+}
+
+func TestReadExecutionRejectsMetadataWithRange(t *testing.T) {
+	root := t.TempDir()
+	ctx := WithWorkspace(context.Background(), root)
+	ctx = WithToolCall(ctx, contracts.ToolCall{
+		Function: contracts.Function{
+			Name:      string(contracts.ReadTool),
+			Arguments: `{"path":"note.txt","metadata":true,"limit":1}`,
+		},
+	})
+
+	_, err := readExecution(ctx)
+	if err == nil || !strings.Contains(err.Error(), "metadata cannot be combined") {
+		t.Fatalf("error = %v", err)
 	}
 }

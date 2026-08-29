@@ -3,7 +3,9 @@ package actuators
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"mime"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,25 @@ import (
 )
 
 const maxReadBytes = 1 << 20
+
+type readArguments struct {
+	Path     string `json:"path"`
+	Offset   *int   `json:"offset,omitempty"`
+	Limit    *int   `json:"limit,omitempty"`
+	Metadata bool   `json:"metadata,omitempty"`
+}
+
+type readMetadata struct {
+	Path          string `json:"path"`
+	Location      string `json:"location"`
+	Permissions   string `json:"permissions"`
+	Mode          string `json:"mode"`
+	SizeBytes     int64  `json:"size_bytes"`
+	DiskSizeBytes int64  `json:"disk_size_bytes"`
+	Format        string `json:"format"`
+	UTF8          bool   `json:"utf8"`
+	LineCount     *int   `json:"line_count,omitempty"`
+}
 
 func ReadTool() contracts.Tool {
 	return contracts.Tool{
@@ -24,6 +45,18 @@ func ReadTool() contracts.Tool {
 				"path": map[string]any{
 					"type":        "string",
 					"description": "Path relative to the workspace",
+				},
+				"offset": map[string]any{
+					"type":        "integer",
+					"description": "1-based starting line number",
+				},
+				"limit": map[string]any{
+					"type":        "integer",
+					"description": "Maximum number of lines to return",
+				},
+				"metadata": map[string]any{
+					"type":        "boolean",
+					"description": "Return file metadata instead of file contents",
 				},
 			},
 			RequiredFields:       []string{"path"},
@@ -52,9 +85,7 @@ func readExecution(ctx context.Context) (string, error) {
 		}
 	}
 
-	var args struct {
-		Path string `json:"path"`
-	}
+	var args readArguments
 	decoder := json.NewDecoder(strings.NewReader(call.Function.Arguments))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&args); err != nil || args.Path == "" {
@@ -64,6 +95,22 @@ func readExecution(ctx context.Context) (string, error) {
 			Reason:         "read requires a non-empty relative path",
 			Responsibility: ResponsibilityAgent,
 			cause:          err,
+		}
+	}
+	if args.Offset != nil && *args.Offset < 1 || args.Limit != nil && *args.Limit < 1 {
+		return "", &ExecutionError{
+			Tool:           string(contracts.ReadTool),
+			Code:           "invalid_arguments",
+			Reason:         "offset and limit must be positive line numbers",
+			Responsibility: ResponsibilityAgent,
+		}
+	}
+	if args.Metadata && (args.Offset != nil || args.Limit != nil) {
+		return "", &ExecutionError{
+			Tool:           string(contracts.ReadTool),
+			Code:           "invalid_arguments",
+			Reason:         "metadata cannot be combined with offset or limit",
+			Responsibility: ResponsibilityAgent,
 		}
 	}
 	if filepath.IsAbs(args.Path) || strings.ContainsRune(args.Path, 0) {
@@ -147,7 +194,37 @@ func readExecution(ctx context.Context) (string, error) {
 			Responsibility: ResponsibilityTool,
 		}
 	}
-	if !utf8.Valid(data) {
+	validUTF8 := utf8.Valid(data)
+	if args.Metadata {
+		format := filepath.Ext(resolved)
+		if format == "" {
+			format = mime.TypeByExtension(format)
+		}
+		if format == "" {
+			format = "unknown"
+		}
+		metadata := readMetadata{
+			Path:          args.Path,
+			Location:      resolved,
+			Permissions:   fmt.Sprintf("%#o", info.Mode().Perm()),
+			Mode:          info.Mode().String(),
+			SizeBytes:     info.Size(),
+			DiskSizeBytes: diskSizeBytes(info),
+			Format:        format,
+			UTF8:          validUTF8,
+		}
+		if validUTF8 {
+			lines := splitLines(data)
+			count := len(lines)
+			metadata.LineCount = &count
+		}
+		output, err := json.Marshal(metadata)
+		if err != nil {
+			return "", readEnvironmentError("metadata_failed", "file metadata could not be encoded", err)
+		}
+		return string(output), nil
+	}
+	if !validUTF8 {
 		return "", &ExecutionError{
 			Tool:           string(contracts.ReadTool),
 			Code:           "invalid_utf8",
@@ -155,7 +232,30 @@ func readExecution(ctx context.Context) (string, error) {
 			Responsibility: ResponsibilityTool,
 		}
 	}
-	return string(data), nil
+	lines := splitLines(data)
+	start := 0
+	if args.Offset != nil {
+		start = *args.Offset - 1
+	}
+	if start >= len(lines) {
+		return "", nil
+	}
+	end := len(lines)
+	if args.Limit != nil && start+*args.Limit < end {
+		end = start + *args.Limit
+	}
+	return strings.Join(lines[start:end], ""), nil
+}
+
+func splitLines(data []byte) []string {
+	if len(data) == 0 {
+		return nil
+	}
+	lines := strings.SplitAfter(string(data), "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 func withinDirectory(root, path string) bool {
