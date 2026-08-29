@@ -15,31 +15,13 @@ import (
 	"github.com/google/uuid"
 )
 
-type AgentComm struct {
-	From uuid.UUID
-	To   uuid.UUID
-	Msg  []byte
-}
-
-type AgentComms struct {
-	R <-chan AgentComm
-	W chan<- AgentComm
-}
-
-func FreshAgentComms() *AgentComms {
-	return &AgentComms{
-		R: make(chan AgentComm),
-		W: make(chan AgentComm),
-	}
-}
-
 // ChatResult is the outcome of one Chat call on a session.
 type ChatResult struct {
 	SessionID        uuid.UUID
 	Status           agent.TurnStatus
 	Reply            string
 	ReasoningContent string
-	Pending          *agent.ApprovalRequest
+	Pending          *ApprovalRequest
 	Usage            *contracts.TokenUsage
 	ContextTokens    int
 }

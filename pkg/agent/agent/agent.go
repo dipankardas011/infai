@@ -147,11 +147,39 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 			return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, fmt.Errorf("agent: turn %d: %w", turn, err)
 		}
 		messages = append(messages, reply)
-		if a.turnHook != nil {
-			a.turnHook(reply)
+
+		// TODO: we need to properly handle the compaction in here to know when it reaches the limit.
+		// like now I ctrl+c,v from the session as a comment but we need to handle that.
+		// if s.shouldCompact(result.Usage) {
+		// 	if result.Usage != nil {
+		// 		s.l.Warn("automatic compaction triggered",
+		// 			"prompt_tokens", result.Usage.PromptTokens,
+		// 			"completion_tokens", result.Usage.CompletionTokens,
+		// 			"total_tokens", result.Usage.TotalTokens,
+		// 			"context_window", s.meta.ContextWindow,
+		// 			"threshold_percent", 80,
+		// 		)
+		// 	}
+		// 	systemPrompt, history, err := compactionInput(s.history)
+		// 	if err != nil {
+		// 		s.l.Error("automatic compaction input failed", "error", err)
+		// 		return nil, err
+		// 	}
+		// 	if err := s.compactChat(ctx, systemPrompt, history); err != nil {
+		// 		s.l.Error("automatic compaction failed", "error", err)
+		// 		return nil, err
+		// 	}
+		// 	compacted = true
+		// }
+
+		if len(reply.ToolCalls) == 0 {
+			// TODO: some evaluation Certira need to be there as a WithEval() like thing.
+			break
 		}
 
-		break
+		if a.turnHook != nil { // TODO: lets understand what is its purpose?
+			a.turnHook(reply)
+		}
 	}
 
 	// Canceled on the final iteration's boundary — report it, not "done".

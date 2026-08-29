@@ -51,8 +51,8 @@ type InfaiAgentSession struct {
 	availableTools []contracts.Tool
 
 	// WARN: we do need to properly handle the Concurrency.
-	agentMapping  map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
-	runtime_comms map[uuid.UUID]*AgentComms        // By this when N no of children can send comms with engine and even the
+	agentMapping map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
+	agentComms   *AgentComms
 
 	sessionAgentId uuid.UUID
 
@@ -70,7 +70,7 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 		model:         models.NewOpenAICompatableAPI(p.Endpoint, model, p.APIKey),
 		store:         ss,
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
-		runtime_comms: make(map[uuid.UUID]*AgentComms),
+		agentComms:    NewAgentComms(),
 		Agents:        make(map[uuid.UUID]*agent.Agent),
 		auditorPolicy: auditor.NewAuditorPolicy(),
 	}
@@ -103,7 +103,10 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 	}
 	o.timeline = timeline
 
-	systemPrompt, err := GetBasicSystemPrompt(nil, nil)
+	o.auditorPolicy.SetPolicy(contracts.ReadTool, auditor.HumanPolicy)
+	o.availableTools = append([]contracts.Tool{}, actuators.ReadTool())
+
+	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -112,9 +115,6 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 		return nil, err
 	}
 	o.sessionAgentId = firstAgent.Id
-
-	o.auditorPolicy.SetPolicy(contracts.ReadTool, auditor.HumanPolicy)
-	o.availableTools = append([]contracts.Tool{}, actuators.ReadTool())
 
 	return o, nil
 }
@@ -130,7 +130,7 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 		l:             l,
 		model:         models.NewOpenAICompatableAPI(p.Endpoint, meta.Model, p.APIKey),
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
-		runtime_comms: make(map[uuid.UUID]*AgentComms),
+		agentComms:    NewAgentComms(),
 		Agents:        make(map[uuid.UUID]*agent.Agent),
 		sessionID:     meta.ID,
 		meta:          meta,
@@ -139,29 +139,27 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 		persisted:     len(history),
 		timeline:      timeline,
 		events:        store.NewSessionEventHub(),
+		auditorPolicy: auditor.NewAuditorPolicy(),
 	}
 
 	if err := sessionStore.SaveMeta(meta); err != nil {
 		return nil, err
 	}
-	if err := o.registerSessionAgent(); err != nil {
+
+	o.auditorPolicy.SetPolicy(contracts.ReadTool, auditor.HumanPolicy)
+	o.availableTools = append([]contracts.Tool{}, actuators.ReadTool())
+	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, nil)
+	if err != nil {
 		return nil, err
 	}
+
+	firstAgent, err := o.registerNewParentAgent(systemPrompt)
+	if err != nil {
+		return nil, err
+	}
+	o.sessionAgentId = firstAgent.Id
+
 	return o, nil
-}
-
-func (s *InfaiAgentSession) registerSessionAgent() error {
-	systemPrompt, err := GetBasicSystemPrompt(nil, nil)
-	if err != nil {
-		return err
-	}
-
-	firstAgent, err := s.registerNewParentAgent(systemPrompt)
-	if err != nil {
-		return err
-	}
-	s.sessionAgentId = firstAgent.Id
-	return nil
 }
 
 func (s *InfaiAgentSession) ID() uuid.UUID {
@@ -358,7 +356,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		Status:           result.Status,
 		Reply:            lastAssistantText(result.Messages),
 		ReasoningContent: lastAssistantReasoning(result.Messages),
-		Pending:          result.Pending,
+		Pending:          nil, // populated by the session approval coordinator
 		Usage:            result.Usage,
 		ContextTokens:    contextTokens,
 	}, nil
@@ -480,6 +478,9 @@ func (s *InfaiAgentSession) close() {
 	if s.events != nil {
 		s.events.Close()
 	}
+	if s.agentComms != nil {
+		s.agentComms.Close()
+	}
 	if s.timeline != nil {
 		_ = s.timeline.Close()
 	}
@@ -492,7 +493,9 @@ func (s *InfaiAgentSession) registerNewParentAgent(systemPrompt string) (*agent.
 	}
 
 	s.agentMapping[id] = ds.NewSet[uuid.UUID]()
-	s.runtime_comms[id] = FreshAgentComms()
+	if err := s.agentComms.RegisterAgent(id); err != nil {
+		return nil, err
+	}
 	s.Agents[id], err = agent.NewAgent(id, systemPrompt, agent.WithMaxTurns(100))
 	if err != nil {
 		return nil, err
@@ -507,7 +510,9 @@ func (s *InfaiAgentSession) registerTransientAgent(id uuid.UUID, systemPrompt st
 		return nil, err
 	}
 	s.agentMapping[id] = ds.NewSet[uuid.UUID]()
-	s.runtime_comms[id] = FreshAgentComms()
+	if err := s.agentComms.RegisterAgent(id); err != nil {
+		return nil, err
+	}
 	s.Agents[id] = transient
 	return transient, nil
 }
@@ -515,7 +520,7 @@ func (s *InfaiAgentSession) registerTransientAgent(id uuid.UUID, systemPrompt st
 func (s *InfaiAgentSession) removeAgent(id uuid.UUID) {
 	delete(s.Agents, id)
 	delete(s.agentMapping, id)
-	delete(s.runtime_comms, id)
+	s.agentComms.UnregisterAgent(id)
 }
 
 // lastAssistantText extracts the agent's answer from the full history. It

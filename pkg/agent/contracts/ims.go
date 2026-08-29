@@ -8,7 +8,6 @@ type ChatMessage struct {
 	Content          *string    `json:"content,omitempty"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	Name             *string    `json:"name,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 

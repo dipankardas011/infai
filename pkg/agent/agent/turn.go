@@ -1,9 +1,6 @@
 package agent
 
-import (
-	"github.com/dipankardas011/infai/pkg/agent/contracts"
-	"github.com/google/uuid"
-)
+import "github.com/dipankardas011/infai/pkg/agent/contracts"
 
 type TurnStatus int
 
@@ -30,20 +27,16 @@ func (s TurnStatus) String() string {
 	}
 }
 
-// ApprovalRequest is a human-in-the-loop checkpoint the agent reached. The
-// session must be resumed with a decision before the loop continues.
-type ApprovalRequest struct {
-	Id      uuid.UUID
-	Message string
-}
-
 // TurnResult is the outcome of one Invoke. Distinguish normal completion from
 // cancellation so the caller can decide whether the session stays open.
 type TurnResult struct {
 	Status   TurnStatus
 	Messages []contracts.ChatMessage
-	Pending  *ApprovalRequest
 	Usage    *contracts.TokenUsage
+
+	// PendingApprovalID identifies an approval owned by the engine/session.
+	// The agent does not own the external approval request or its transport.
+	PendingApprovalID string
 }
 
 // CompactionResult carries a continuation summary produced by the session's

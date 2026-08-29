@@ -1,8 +1,8 @@
 package server
 
 import (
-	"github.com/dipankardas011/infai/pkg/agent/agent"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/engine"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
 )
@@ -51,15 +51,15 @@ type TimelineResponse struct {
 }
 
 type ChatResponse struct {
-	SessionID        uuid.UUID              `json:"session_id"`
-	Status           string                 `json:"status"`
-	Reply            string                 `json:"reply"`
-	Model            string                 `json:"model"`
-	ContextWindow    int                    `json:"ctx_window"`
-	ReasoningContent string                 `json:"reasoning_content,omitempty"`
-	Pending          *agent.ApprovalRequest `json:"pending,omitempty"`
-	Usage            *contracts.TokenUsage  `json:"usage,omitempty"`
-	ContextTokens    int                    `json:"context_tokens"`
+	SessionID        uuid.UUID               `json:"session_id"`
+	Status           string                  `json:"status"`
+	Reply            string                  `json:"reply"`
+	Model            string                  `json:"model"`
+	ContextWindow    int                     `json:"ctx_window"`
+	ReasoningContent string                  `json:"reasoning_content,omitempty"`
+	Pending          *engine.ApprovalRequest `json:"pending,omitempty"`
+	Usage            *contracts.TokenUsage   `json:"usage,omitempty"`
+	ContextTokens    int                     `json:"context_tokens"`
 }
 
 type ChatDeltaEvent struct {
@@ -68,16 +68,16 @@ type ChatDeltaEvent struct {
 }
 
 type ChatDoneEvent struct {
-	Done             bool                   `json:"done"`
-	SessionID        uuid.UUID              `json:"session_id"`
-	Status           string                 `json:"status"`
-	Reply            string                 `json:"reply"`
-	ReasoningContent string                 `json:"reasoning_content"`
-	Model            string                 `json:"model"`
-	ContextWindow    int                    `json:"ctx_window"`
-	Pending          *agent.ApprovalRequest `json:"pending,omitempty"`
-	Usage            *contracts.TokenUsage  `json:"usage,omitempty"`
-	ContextTokens    int                    `json:"context_tokens"`
+	Done             bool                    `json:"done"`
+	SessionID        uuid.UUID               `json:"session_id"`
+	Status           string                  `json:"status"`
+	Reply            string                  `json:"reply"`
+	ReasoningContent string                  `json:"reasoning_content"`
+	Model            string                  `json:"model"`
+	ContextWindow    int                     `json:"ctx_window"`
+	Pending          *engine.ApprovalRequest `json:"pending,omitempty"`
+	Usage            *contracts.TokenUsage   `json:"usage,omitempty"`
+	ContextTokens    int                     `json:"context_tokens"`
 }
 
 type ChatErrorEvent struct {
