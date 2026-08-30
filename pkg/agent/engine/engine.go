@@ -63,7 +63,12 @@ func NewInfaiAgentEngine(bgLogger *slog.Logger, cfg *config.AgentEngineConfig) (
 	if err != nil {
 		return nil, err
 	}
-	return NewInfaiAgentEngineAt(bgLogger, providerStore, sessionStore)
+	engine, err := NewInfaiAgentEngineAt(bgLogger, providerStore, sessionStore)
+	if err != nil {
+		return nil, err
+	}
+	engine.engineCfg = cfg
+	return engine, nil
 }
 
 // NewInfaiAgentEngineAt wires an engine to explicit stores. The harness uses

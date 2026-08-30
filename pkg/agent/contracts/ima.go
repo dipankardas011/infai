@@ -47,6 +47,10 @@ const (
 	DeltaStatus DeltaKind = "status"
 	// DeltaCompactionSummary is a live-only compaction summary for the UI.
 	DeltaCompactionSummary DeltaKind = "compaction_summary"
+	// DeltaToolCall identifies a tool invocation requested by the model.
+	DeltaToolCall DeltaKind = "tool_call"
+	// DeltaToolResult identifies the completion of a tool invocation.
+	DeltaToolResult DeltaKind = "tool_result"
 )
 
 // ChatCompletion()

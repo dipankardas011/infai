@@ -242,6 +242,10 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 				cSystem.Fprintln(out, statusLabel(text))
 			case contracts.DeltaCompactionSummary:
 				printCompactionSummary(out, text)
+			case contracts.DeltaToolCall:
+				cSystem.Fprintf(out, "  ↳ tool call %s\n", text)
+			case contracts.DeltaToolResult:
+				cSystem.Fprintf(out, "  ↳ tool result %s\n", text)
 			}
 		}, nil)
 		if thinkingShown && !contentStarted {
@@ -264,6 +268,14 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 // prompt are skipped.
 func renderHistory(out io.Writer, records []store.Record) {
 	for _, rec := range records {
+		if rec.Kind == store.KindToolCall && rec.ToolCall != nil {
+			cSystem.Fprintf(out, "  ↳ tool call %s\n", toolCallRecordDisplay(rec.ToolCall))
+			continue
+		}
+		if rec.Kind == store.KindToolResult && rec.ToolResult != nil {
+			cSystem.Fprintf(out, "  ↳ tool result [%s] %s\n", rec.ToolResult.Status, rec.ToolResult.Output)
+			continue
+		}
 		if rec.Kind != store.KindMessage || rec.Message == nil {
 			continue
 		}
@@ -280,7 +292,7 @@ func renderHistory(out io.Writer, records []store.Record) {
 			}
 			cAssistant.Fprintf(out, "● %s\n", m.Text())
 			for _, call := range m.ToolCalls {
-				cSystem.Fprintf(out, "  ↳ tool %s\n", call.Function.Name)
+				cSystem.Fprintf(out, "  ↳ tool call %s\n", toolCallDisplay(call))
 			}
 			fmt.Fprintln(out)
 		case "tool":

@@ -3,8 +3,8 @@ package actuators
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"mime"
 	"os"
 	"path/filepath"
@@ -22,7 +22,6 @@ type readArguments struct {
 	Limit    *int   `json:"limit,omitempty"`
 	Metadata bool   `json:"metadata,omitempty"`
 }
-
 type readMetadata struct {
 	Path          string `json:"path"`
 	Location      string `json:"location"`
@@ -31,6 +30,7 @@ type readMetadata struct {
 	SizeBytes     int64  `json:"size_bytes"`
 	DiskSizeBytes int64  `json:"disk_size_bytes"`
 	Format        string `json:"format"`
+	MIMEType      string `json:"mime_type"`
 	UTF8          bool   `json:"utf8"`
 	LineCount     *int   `json:"line_count,omitempty"`
 }
@@ -65,188 +65,125 @@ func ReadTool() contracts.Tool {
 	}
 }
 
-func readExecution(ctx context.Context) (string, error) {
-	workspace, ok := WorkspaceFromContext(ctx)
-	if !ok {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "missing_workspace",
-			Reason:         "a workspace is required to read files",
-			Responsibility: ResponsibilitySession,
-		}
+func (m *FileManager) Read(path string, offset, limit *int, metadata bool) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if offset != nil && *offset < 1 || limit != nil && *limit < 1 {
+		return "", filesystemErr("invalid_arguments", "offset and limit must be positive line numbers", ResponsibilityAgent, nil)
 	}
-	call, ok := ToolCallFromContext(ctx)
-	if !ok {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "missing_tool_call",
-			Reason:         "the read request is missing its tool arguments",
-			Responsibility: ResponsibilitySession,
-		}
+	if metadata && (offset != nil || limit != nil) {
+		return "", filesystemErr("invalid_arguments", "metadata cannot be combined with offset or limit", ResponsibilityAgent, nil)
 	}
-
-	var args readArguments
-	decoder := json.NewDecoder(strings.NewReader(call.Function.Arguments))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&args); err != nil || args.Path == "" {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "invalid_arguments",
-			Reason:         "read requires a non-empty relative path",
-			Responsibility: ResponsibilityAgent,
-			cause:          err,
-		}
-	}
-	if args.Offset != nil && *args.Offset < 1 || args.Limit != nil && *args.Limit < 1 {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "invalid_arguments",
-			Reason:         "offset and limit must be positive line numbers",
-			Responsibility: ResponsibilityAgent,
-		}
-	}
-	if args.Metadata && (args.Offset != nil || args.Limit != nil) {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "invalid_arguments",
-			Reason:         "metadata cannot be combined with offset or limit",
-			Responsibility: ResponsibilityAgent,
-		}
-	}
-	if filepath.IsAbs(args.Path) || strings.ContainsRune(args.Path, 0) {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "invalid_path",
-			Reason:         "the path must be relative to the workspace",
-			Responsibility: ResponsibilityAgent,
-		}
-	}
-
-	root, err := filepath.Abs(workspace.Root)
+	resolved, err := m.resolve(path, true)
 	if err != nil {
-		return "", readEnvironmentError("invalid_workspace", "the workspace is invalid", err)
+		return "", err
 	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		return "", readEnvironmentError("workspace_unavailable", "the workspace is unavailable", err)
-	}
-	candidate, err := filepath.Abs(filepath.Join(root, filepath.Clean(args.Path)))
-	if err != nil {
-		return "", readEnvironmentError("invalid_path", "the path could not be resolved", err)
-	}
-	if !withinDirectory(root, candidate) {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "path_outside_workspace",
-			Reason:         "the path must remain inside the workspace",
-			Responsibility: ResponsibilityAgent,
-		}
-	}
-
-	resolved, err := filepath.EvalSymlinks(candidate)
-	if err != nil {
-		return "", readEnvironmentError("file_unavailable", "the file could not be opened", err)
-	}
-	if !withinDirectory(root, resolved) {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "symlink_outside_workspace",
-			Reason:         "the file must remain inside the workspace",
-			Responsibility: ResponsibilityAgent,
-		}
-	}
-
 	info, err := os.Stat(resolved)
 	if err != nil {
-		return "", readEnvironmentError("file_unavailable", "the file could not be inspected", err)
+		return "", filesystemErr("file_unavailable", "the file could not be inspected", ResponsibilityEnvironment, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "not_a_file",
-			Reason:         "the requested path is not a regular file",
-			Responsibility: ResponsibilityAgent,
-		}
+		return "", filesystemErr("not_a_file", "the requested path is not a regular file", ResponsibilityAgent, nil)
 	}
 	if info.Size() > maxReadBytes {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "file_too_large",
-			Reason:         "the file exceeds the read size limit",
-			Responsibility: ResponsibilityTool,
-		}
+		return "", filesystemErr("file_too_large", "the file exceeds the read size limit", ResponsibilityTool, nil)
 	}
-
-	file, err := os.Open(resolved)
+	data, err := os.ReadFile(resolved)
 	if err != nil {
-		return "", readEnvironmentError("file_unavailable", "the file could not be opened", err)
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxReadBytes+1))
-	if err != nil {
-		return "", readEnvironmentError("read_failed", "the file could not be read", err)
+		return "", filesystemErr("read_failed", "the file could not be read", ResponsibilityEnvironment, err)
 	}
 	if len(data) > maxReadBytes {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "file_too_large",
-			Reason:         "the file exceeds the read size limit",
-			Responsibility: ResponsibilityTool,
-		}
+		return "", filesystemErr("file_too_large", "the file exceeds the read size limit", ResponsibilityTool, nil)
 	}
-	validUTF8 := utf8.Valid(data)
-	if args.Metadata {
-		format := filepath.Ext(resolved)
-		if format == "" {
-			format = mime.TypeByExtension(format)
+	if metadata {
+		if utf8.Valid(data) {
+			if err := validateText(string(data), ResponsibilityTool); err != nil {
+				return "", err
+			}
 		}
-		if format == "" {
-			format = "unknown"
-		}
-		metadata := readMetadata{
-			Path:          args.Path,
-			Location:      resolved,
-			Permissions:   fmt.Sprintf("%#o", info.Mode().Perm()),
-			Mode:          info.Mode().String(),
-			SizeBytes:     info.Size(),
-			DiskSizeBytes: diskSizeBytes(info),
-			Format:        format,
-			UTF8:          validUTF8,
-		}
-		if validUTF8 {
-			lines := splitLines(data)
-			count := len(lines)
-			metadata.LineCount = &count
-		}
-		output, err := json.Marshal(metadata)
-		if err != nil {
-			return "", readEnvironmentError("metadata_failed", "file metadata could not be encoded", err)
-		}
-		return string(output), nil
+		return readMetadataJSON(path, resolved, info, data)
 	}
-	if !validUTF8 {
-		return "", &ExecutionError{
-			Tool:           string(contracts.ReadTool),
-			Code:           "invalid_utf8",
-			Reason:         "the file is not valid UTF-8 text",
-			Responsibility: ResponsibilityTool,
-		}
+	if !utf8.Valid(data) {
+		return "", filesystemErr("invalid_utf8", "the file is not valid UTF-8 text", ResponsibilityTool, nil)
 	}
+	if err := validateText(string(data), ResponsibilityTool); err != nil {
+		return "", err
+	}
+	m.snapshot(resolved, data)
 	lines := splitLines(data)
 	start := 0
-	if args.Offset != nil {
-		start = *args.Offset - 1
+	if offset != nil {
+		start = *offset - 1
 	}
 	if start >= len(lines) {
 		return "", nil
 	}
 	end := len(lines)
-	if args.Limit != nil && start+*args.Limit < end {
-		end = start + *args.Limit
+	if limit != nil && *limit < end-start {
+		end = start + *limit
 	}
 	return strings.Join(lines[start:end], ""), nil
 }
 
+func readMetadataJSON(path, resolved string, info os.FileInfo, data []byte) (string, error) {
+	extension := filepath.Ext(resolved)
+	format := strings.TrimPrefix(extension, ".")
+	if format == "" {
+		format = "unknown"
+	}
+	metadata := readMetadata{
+		Path:          path,
+		Location:      resolved,
+		Permissions:   fmt.Sprintf("%#o", info.Mode().Perm()),
+		Mode:          info.Mode().String(),
+		SizeBytes:     info.Size(),
+		DiskSizeBytes: diskSizeBytes(info),
+		Format:        format,
+		MIMEType:      mime.TypeByExtension(extension),
+		UTF8:          utf8.Valid(data),
+	}
+	if metadata.UTF8 {
+		n := len(splitLines(data))
+		metadata.LineCount = &n
+	}
+	b, err := json.Marshal(metadata)
+	return string(b), err
+}
+
+func readExecution(ctx context.Context) (string, error) {
+	var args readArguments
+	if _, err := decodeArgs(ctx, &args); err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.ReadTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.ReadTool, "invalid_arguments", "read arguments could not be decoded", ResponsibilityAgent, err)
+	}
+	if args.Path == "" {
+		return "", execErr(contracts.ReadTool, "invalid_arguments", "read requires a non-empty relative path", ResponsibilityAgent, nil)
+	}
+	if (args.Offset != nil && *args.Offset < 1) || (args.Limit != nil && *args.Limit < 1) {
+		return "", execErr(contracts.ReadTool, "invalid_arguments", "offset and limit must be positive line numbers", ResponsibilityAgent, nil)
+	}
+	if args.Metadata && (args.Offset != nil || args.Limit != nil) {
+		return "", execErr(contracts.ReadTool, "invalid_arguments", "metadata cannot be combined with offset or limit", ResponsibilityAgent, nil)
+	}
+	m := FileManagerFromContext(ctx)
+	if m == nil {
+		return "", execErr(contracts.ReadTool, "missing_file_manager", "a file manager is required to read files", ResponsibilitySession, nil)
+	}
+	out, err := m.Read(args.Path, args.Offset, args.Limit, args.Metadata)
+	if err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.ReadTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.ReadTool, "read_failed", "the file could not be read", ResponsibilityTool, err)
+	}
+	return out, nil
+}
+
+func execErr(tool contracts.ToolType, code, reason string, responsibility FailureResponsibility, cause error) error {
+	return &ExecutionError{Tool: string(tool), Code: code, Reason: reason, Responsibility: responsibility, cause: cause}
+}
 func splitLines(data []byte) []string {
 	if len(data) == 0 {
 		return nil
@@ -257,18 +194,7 @@ func splitLines(data []byte) []string {
 	}
 	return lines
 }
-
 func withinDirectory(root, path string) bool {
 	relative, err := filepath.Rel(root, path)
-	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-}
-
-func readEnvironmentError(code, reason string, cause error) error {
-	return &ExecutionError{
-		Tool:           string(contracts.ReadTool),
-		Code:           code,
-		Reason:         reason,
-		Responsibility: ResponsibilityEnvironment,
-		cause:          cause,
-	}
+	return err == nil && filepath.IsLocal(relative)
 }

@@ -55,6 +55,7 @@ type InfaiAgentSession struct {
 
 	auditorPolicy  *auditor.AuditorPolicy
 	availableTools []contracts.Tool
+	fileManager    *actuators.FileManager
 
 	// WARN: we do need to properly handle the Concurrency.
 	agentMapping    map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
@@ -87,6 +88,12 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 		Agents:        make(map[uuid.UUID]*agent.Agent),
 		auditorPolicy: auditor.NewAuditorPolicy(),
 	}
+	var err error
+	o.fileManager, err = actuators.NewFileManager(cwd)
+	if err != nil {
+		return nil, fmt.Errorf("session workspace: %w", err)
+	}
+	cwd = o.fileManager.Root()
 
 	if v, err := uuid.NewV7(); err != nil {
 		return nil, err
@@ -116,8 +123,7 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 	}
 	o.timeline = timeline
 
-	o.auditorPolicy.SetPolicy(contracts.ReadTool, auditor.HumanPolicy)
-	o.availableTools = append([]contracts.Tool{}, actuators.ReadTool())
+	o.configureFileTools()
 
 	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, nil)
 	if err != nil {
@@ -154,13 +160,19 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 		events:        store.NewSessionEventHub(),
 		auditorPolicy: auditor.NewAuditorPolicy(),
 	}
+	var err error
+	o.fileManager, err = actuators.NewFileManager(meta.Cwd)
+	if err != nil {
+		return nil, fmt.Errorf("session workspace: %w", err)
+	}
+	meta.Cwd = o.fileManager.Root()
+	o.meta = meta
 
 	if err := sessionStore.SaveMeta(meta); err != nil {
 		return nil, err
 	}
 
-	o.auditorPolicy.SetPolicy(contracts.ReadTool, auditor.HumanPolicy)
-	o.availableTools = append([]contracts.Tool{}, actuators.ReadTool())
+	o.configureFileTools()
 	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, nil)
 	if err != nil {
 		return nil, err
@@ -173,6 +185,17 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 	o.sessionAgentId = firstAgent.Id
 
 	return o, nil
+}
+
+func (s *InfaiAgentSession) configureFileTools() {
+	s.availableTools = []contracts.Tool{
+		actuators.ReadTool(),
+		actuators.ListTool(),
+		actuators.GlobTool(),
+		actuators.SearchTool(),
+		actuators.WriteTool(),
+		actuators.EditTool(),
+	}
 }
 
 func (s *InfaiAgentSession) ID() uuid.UUID {
@@ -251,7 +274,6 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 		s.l.Error("manual compaction input failed", "error", err)
 		return err
 	}
-	ctx = actuators.WithWorkspace(ctx, s.meta.Cwd)
 	if err := s.compactChat(ctx, systemPrompt, history); err != nil {
 		s.l.Error("manual compaction failed", "error", err)
 		return err
@@ -391,7 +413,6 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 // it produced before returning control to Chat.
 func (s *InfaiAgentSession) runAgent(ctx context.Context, agentLoop *agent.Agent) (agent.TurnResult, error) {
 	runCtx, cancel := context.WithCancel(ctx)
-	runCtx = actuators.WithWorkspace(runCtx, s.meta.Cwd)
 	defer cancel()
 
 	commErr := make(chan error, 1)
@@ -575,6 +596,7 @@ func (s *InfaiAgentSession) handleAgentComms(ctx context.Context) error {
 }
 
 func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentComm) error {
+	ctx = actuators.WithFileManager(ctx, s.fileManager)
 	var calls []contracts.ToolCall
 	if err := json.Unmarshal(msg.Payload, &calls); err != nil {
 		return err
@@ -593,8 +615,8 @@ func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentC
 		s.events.Publish(store.Record{
 			Kind:      store.KindDelta,
 			Timestamp: time.Now().UTC(),
-			DeltaKind: contracts.DeltaStatus,
-			Text:      fmt.Sprintf("tool: %s", call.Function.Name),
+			DeltaKind: contracts.DeltaToolCall,
+			Text:      toolCallDisplay(call),
 		})
 
 		status := string(contracts.ToolExecutionSuccess)
@@ -629,6 +651,12 @@ func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentC
 			"tool", call.Function.Name,
 			"status", status,
 		)
+		s.events.Publish(store.Record{
+			Kind:      store.KindDelta,
+			Timestamp: time.Now().UTC(),
+			DeltaKind: contracts.DeltaToolResult,
+			Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
+		})
 
 		if _, persistErr := s.timeline.AppendToHead(store.Record{
 			Kind:      store.KindToolResult,
@@ -656,6 +684,13 @@ func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentC
 		Kind:    comms.AgentCommMessage,
 		Payload: payload,
 	})
+}
+
+func toolCallDisplay(call contracts.ToolCall) string {
+	if call.Function.Arguments == "" {
+		return call.Function.Name
+	}
+	return fmt.Sprintf("%s %s", call.Function.Name, call.Function.Arguments)
 }
 
 func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uuid.UUID, call contracts.ToolCall) (string, error) {

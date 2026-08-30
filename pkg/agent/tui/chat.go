@@ -62,7 +62,7 @@ type uiEvent struct {
 
 // block is one rendered conversation entry.
 type block struct {
-	role string // "user" | "thinking" | "assistant"
+	role string // "user" | "thinking" | "assistant" | "tool"
 	text string
 }
 
@@ -218,6 +218,10 @@ func runChatTUI(ctx context.Context, c Client, sessions []store.SessionMeta, opt
 					t.appendStatus(ev.text)
 				case contracts.DeltaCompactionSummary:
 					t.appendCompactionSummary(ev.text)
+				case contracts.DeltaToolCall:
+					t.appendToolEvent("tool call", ev.text)
+				case contracts.DeltaToolResult:
+					t.appendToolEvent("tool result", ev.text)
 				default:
 					t.appendDelta(ev.kind, ev.text)
 				}
@@ -803,6 +807,10 @@ func (t *chatTUI) appendStatus(text string) {
 	t.blocks = append(t.blocks, block{role: "status", text: text})
 }
 
+func (t *chatTUI) appendToolEvent(kind, text string) {
+	t.blocks = append(t.blocks, block{role: "tool", text: kind + ": " + text})
+}
+
 func (t *chatTUI) appendCompactionSummary(summary string) {
 	t.blocks = append(t.blocks, block{role: "compaction", text: summary})
 }
@@ -830,11 +838,28 @@ func (t *chatTUI) appendError(err error) {
 func blocksFromRecords(records []store.Record) []block {
 	var blocks []block
 	for _, rec := range records {
-		if rec.Kind == store.KindCompaction && rec.Compaction != nil {
+		switch rec.Kind {
+		case store.KindCompaction:
+			if rec.Compaction == nil {
+				continue
+			}
 			blocks = append(blocks, block{role: "compaction", text: rec.Compaction.Summary})
 			continue
-		}
-		if rec.Kind != store.KindMessage || rec.Message == nil {
+		case store.KindToolCall:
+			if rec.ToolCall != nil {
+				blocks = append(blocks, block{role: "tool", text: "tool call: " + toolCallRecordDisplay(rec.ToolCall)})
+			}
+			continue
+		case store.KindToolResult:
+			if rec.ToolResult != nil {
+				blocks = append(blocks, block{role: "tool", text: "tool result: " + toolResultDisplay(rec.ToolResult)})
+			}
+			continue
+		case store.KindMessage:
+			if rec.Message == nil {
+				continue
+			}
+		default:
 			continue
 		}
 		m := rec.Message
@@ -845,10 +870,42 @@ func blocksFromRecords(records []store.Record) []block {
 			if m.ReasoningContent != "" {
 				blocks = append(blocks, block{role: "thinking", text: m.ReasoningContent})
 			}
-			blocks = append(blocks, block{role: "assistant", text: m.Text()})
+			if m.Text() != "" {
+				blocks = append(blocks, block{role: "assistant", text: m.Text()})
+			}
+			for _, call := range m.ToolCalls {
+				blocks = append(blocks, block{role: "tool", text: "tool call: " + toolCallDisplay(call)})
+			}
+		case "tool":
+			blocks = append(blocks, block{role: "tool", text: "tool result: " + m.Text()})
 		}
 	}
 	return blocks
+}
+
+func toolCallDisplay(call contracts.ToolCall) string {
+	if call.Function.Arguments == "" {
+		return call.Function.Name
+	}
+	return fmt.Sprintf("%s %s", call.Function.Name, call.Function.Arguments)
+}
+
+func toolCallRecordDisplay(call *store.ToolCallRecord) string {
+	if call.Arguments == "" {
+		return call.Name
+	}
+	return fmt.Sprintf("%s %s", call.Name, call.Arguments)
+}
+
+func toolResultDisplay(result *store.ToolResultRecord) string {
+	label := result.Status
+	if result.Error != "" {
+		return label + ": " + result.Error
+	}
+	if result.Output != "" {
+		return label + "\n" + result.Output
+	}
+	return label
 }
 
 // readKeys pushes decoded terminal input onto t.events.
@@ -1150,6 +1207,8 @@ func (t *chatTUI) renderRow(hr histRow, selected bool, a, b int) string {
 	case "compaction":
 		return cThinking.Sprint(s)
 	case "status":
+		return cSystem.Sprint(s)
+	case "tool":
 		return cSystem.Sprint(s)
 	}
 	return s
@@ -1532,6 +1591,14 @@ func (t *chatTUI) buildRows() []histRow {
 			out = append(out, histRow{plain: "✓ compaction summary:", style: "compaction"})
 			for _, l := range wrap(b.text, t.width-3) {
 				out = append(out, histRow{plain: "  " + l, style: "compaction"})
+			}
+		case "tool":
+			for _, l := range wrap(b.text, t.width-3) {
+				out = append(out, histRow{plain: "↳ " + l, style: "tool"})
+			}
+		case "status":
+			for _, l := range wrap(b.text, t.width-3) {
+				out = append(out, histRow{plain: "· " + l, style: "status"})
 			}
 		}
 	}

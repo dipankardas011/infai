@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
@@ -27,29 +29,72 @@ type ExecutionError struct {
 	cause          error
 }
 
+type filesystemError struct {
+	code           string
+	reason         string
+	responsibility FailureResponsibility
+	cause          error
+}
+
+func (e *filesystemError) Error() string { return e.reason }
+
+func (e *filesystemError) Unwrap() error { return e.cause }
+
+func filesystemErr(code, reason string, responsibility FailureResponsibility, cause error) error {
+	return &filesystemError{
+		code:           code,
+		reason:         reason,
+		responsibility: responsibility,
+		cause:          cause,
+	}
+}
+
+func validateText(value string, responsibility FailureResponsibility) error {
+	if !utf8.ValidString(value) {
+		return filesystemErr("invalid_utf8", "the value is not valid UTF-8", responsibility, nil)
+	}
+	runePosition := 0
+	for _, character := range value {
+		if character == '\r' || character == '\n' || character == '\t' {
+			runePosition++
+			continue
+		}
+		if isInvisible(character) {
+			return filesystemErr(
+				"invisible_character",
+				fmt.Sprintf("disallowed invisible character U+%04X at rune position %d", character, runePosition),
+				responsibility,
+				nil,
+			)
+		}
+		runePosition++
+	}
+	return nil
+}
+
+func isInvisible(character rune) bool {
+	return unicode.IsControl(character) || unicode.In(
+		character,
+		unicode.Cf,
+		unicode.Properties["Bidi_Control"],
+		unicode.Properties["Join_Control"],
+		unicode.Properties["Other_Default_Ignorable_Code_Point"],
+		unicode.Properties["Variation_Selector"],
+		unicode.Properties["Noncharacter_Code_Point"],
+	)
+}
+
 func (e *ExecutionError) Error() string {
 	return fmt.Sprintf("tool %q failed (%s): %s; responsibility: %s", e.Tool, e.Code, e.Reason, e.Responsibility)
 }
 
 func (e *ExecutionError) Unwrap() error { return e.cause }
 
-type Workspace struct{ Root string }
-
 type contextKey uint8
 
 const (
-	workspaceKey contextKey = iota
-	toolCallKey
+	toolCallKey contextKey = iota
 )
-
-func WithWorkspace(ctx context.Context, root string) context.Context {
-	return context.WithValue(ctx, workspaceKey, Workspace{Root: root})
-}
-
-func WorkspaceFromContext(ctx context.Context) (Workspace, bool) {
-	workspace, ok := ctx.Value(workspaceKey).(Workspace)
-	return workspace, ok && workspace.Root != ""
-}
 
 func WithToolCall(ctx context.Context, call contracts.ToolCall) context.Context {
 	return context.WithValue(ctx, toolCallKey, call)
@@ -67,6 +112,16 @@ func ExecuteToolCall(ctx context.Context, call contracts.ToolCall) (output strin
 	switch contracts.ToolType(toolName) {
 	case contracts.ReadTool:
 		output, err = readExecution(toolContext)
+	case contracts.WriteTool:
+		output, err = writeExecution(toolContext)
+	case contracts.EditTool:
+		output, err = editExecution(toolContext)
+	case contracts.ListTool:
+		output, err = listExecution(toolContext)
+	case contracts.GlobTool:
+		output, err = globExecution(toolContext)
+	case contracts.SearchTool:
+		output, err = searchExecution(toolContext)
 	default:
 		err = &ExecutionError{
 			Tool:           toolName,
@@ -79,7 +134,10 @@ func ExecuteToolCall(ctx context.Context, call contracts.ToolCall) (output strin
 		err = ctxErr
 	}
 	if err != nil {
-		if executionErr, ok := errors.AsType[*ExecutionError](err); ok {
+		var fileErr *filesystemError
+		if errors.As(err, &fileErr) {
+			err = execErr(contracts.ToolType(toolName), fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		} else if executionErr, ok := errors.AsType[*ExecutionError](err); ok {
 			err = executionErr
 		} else if ctx.Err() == nil {
 			err = &ExecutionError{
