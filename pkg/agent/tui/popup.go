@@ -11,11 +11,14 @@ import (
 // is a single-keystroke shortcut; kind colors the intent (used by approval
 // popups to distinguish allow from deny).
 type popupOption struct {
-	label  string
-	prefix string
-	key    rune
-	kind   string // "allow" | "deny" | "" (neutral)
-	style  string // timeline role styling: system, user, assistant
+	label        string
+	prefix       string
+	key          rune
+	kind         string // "allow" | "deny" | "" (neutral)
+	style        string // timeline role styling: system, user, assistant
+	marker       string // optional timeline marker, such as "▲ " or "▲▲ "
+	markerStatus string // result marker status: success or error
+	toolName     string // tool name receives the purple tool accent
 }
 
 // popup is a focus-taking overlay drawn on top of the chat. It shows a title, a
@@ -116,31 +119,23 @@ func (p *popup) lines(width, maxH int) []string {
 				break
 			}
 			o := p.opts[oi]
-			marker := "  "
-			if oi == p.sel {
-				marker = "> "
-			}
-			line := marker + o.prefix + o.label
+			keyText := ""
 			if o.key != 0 {
-				key := " [" + string(o.key) + "]"
-				avail := width - 3
-				if utf8.RuneCountInString(line)+utf8.RuneCountInString(key) > avail {
-					line = trunc(line, avail-utf8.RuneCountInString(key)-1) + "…"
-				}
-				line = padRight(line, avail-utf8.RuneCountInString(key)) + key
-			} else {
-				line = trunc(line, width-3)
-				line = padRight(line, width-3)
+				keyText = " [" + string(o.key) + "]"
 			}
+			contentWidth := max(width-3-utf8.RuneCountInString(keyText), 0)
+			prefix := trunc(o.prefix, contentWidth)
+			remaining := max(contentWidth-utf8.RuneCountInString(prefix), 0)
+			markerText := trunc(o.marker, remaining)
+			remaining = max(remaining-utf8.RuneCountInString(markerText), 0)
+			label := padRight(trunc(o.label, remaining), remaining)
 			if oi == p.sel {
-				prefix := marker + o.prefix
-				label := strings.TrimPrefix(line, prefix)
-				styled := cPopupBorder.Sprint("> ") + cThinking.Sprint(o.prefix) + timelineOptionStyle(o.style).Sprint(label)
+				styled := cPopupBorder.Sprint("> ") + cThinking.Sprint(prefix) +
+					renderTimelineMarker(o, markerText) + renderTimelineLabel(o, label) + cThinking.Sprint(keyText)
 				out = append(out, cPopupBorder.Sprint("│")+" "+styled+cPopupBorder.Sprint("│"))
 			} else {
-				prefix := "  " + o.prefix
-				label := strings.TrimPrefix(line, prefix)
-				out = append(out, cPopupBorder.Sprint("│")+" "+cThinking.Sprint(prefix)+timelineOptionStyle(o.style).Sprint(label)+cPopupBorder.Sprint("│"))
+				styled := cThinking.Sprint("  "+prefix) + renderTimelineMarker(o, markerText) + renderTimelineLabel(o, label) + cThinking.Sprint(keyText)
+				out = append(out, cPopupBorder.Sprint("│")+" "+styled+cPopupBorder.Sprint("│"))
 			}
 		}
 	} else {
@@ -162,9 +157,41 @@ func timelineOptionStyle(role string) *color.Color {
 		return cUser
 	case "assistant":
 		return cAssistant
+	case "tool_call":
+		return cToolCallText
+	case "tool_result_success", "tool_result_error":
+		return cToolResultText
 	default:
 		return cChatText
 	}
+}
+
+func renderTimelineLabel(option popupOption, label string) string {
+	style := timelineOptionStyle(option.style)
+	if option.toolName == "" {
+		return style.Sprint(label)
+	}
+	nameStart := strings.Index(label, option.toolName)
+	if nameStart < 0 {
+		return style.Sprint(label)
+	}
+	nameEnd := nameStart + len(option.toolName)
+	return style.Sprint(label[:nameStart]) + cSystem.Sprint(option.toolName) + style.Sprint(label[nameEnd:])
+}
+
+func renderTimelineMarker(option popupOption, marker string) string {
+	if marker == "" {
+		return ""
+	}
+	if option.markerStatus == "success" && utf8.RuneCountInString(marker) >= 2 {
+		runes := []rune(marker)
+		return cSystem.Sprint(string(runes[:1])) + cAssistant.Sprint(string(runes[1:2])) + cSystem.Sprint(string(runes[2:]))
+	}
+	if option.markerStatus != "" && utf8.RuneCountInString(marker) >= 2 {
+		runes := []rune(marker)
+		return cSystem.Sprint(string(runes[:1])) + cError.Sprint(string(runes[1:2])) + cSystem.Sprint(string(runes[2:]))
+	}
+	return cSystem.Sprint(marker)
 }
 
 // popContentRow renders one body line inside the box: "│ text ... │".

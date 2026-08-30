@@ -62,16 +62,22 @@ type uiEvent struct {
 
 // block is one rendered conversation entry.
 type block struct {
-	role string // "user" | "thinking" | "assistant" | "tool"
-	text string
+	role       string // "user" | "thinking" | "assistant" | "tool"
+	text       string
+	toolKind   string // "call" | "result"
+	toolStatus string
+	toolName   string
 }
 
 // histRow is one rendered, uncolored line of the conversation, tagged with
 // its style. It backs both rendering and app-level text selection.
 type histRow struct {
-	plain     string
-	style     string // "user" | "thinking" | "assistant" | "error"
-	prefixLen int    // colored chat prefix width, when present
+	plain      string
+	style      string // "user" | "thinking" | "assistant" | "error"
+	prefixLen  int    // colored chat prefix width, when present
+	toolKind   string
+	toolStatus string
+	toolName   string
 }
 
 // pos is a cell in the conversation content (row = index into rows).
@@ -656,9 +662,12 @@ func (t *chatTUI) showBranchTimeline() {
 			cursor = byID[parents[cursor.ID]]
 		}
 		options = append(options, popupOption{
-			prefix: timelineTreePrefix(event, parents, byID),
-			label:  timelineEventLabel(event),
-			style:  timelineEventRole(event),
+			prefix:       timelineTreePrefix(event, parents, byID),
+			label:        timelineEventLabel(event),
+			style:        timelineEventRole(event),
+			marker:       timelineEventMarker(event),
+			markerStatus: timelineEventMarkerStatus(event),
+			toolName:     timelineEventToolName(event),
 		})
 	}
 	t.showPopup("branch timeline", []string{"select where the next prompt should branch"}, options, func(idx int) {
@@ -741,9 +750,18 @@ func timelineEventLabel(event TimelineEvent) string {
 	if event.Record == nil {
 		return string(event.Kind) + "  blob content unavailable"
 	}
+	if event.Record.ToolCall != nil {
+		return "tool call: " + toolCallRecordDisplay(event.Record.ToolCall)
+	}
+	if event.Record.ToolResult != nil {
+		return fmt.Sprintf("tool result [%s]", event.Record.ToolResult.Status)
+	}
 	label := string(event.Record.Kind)
 	text := event.Record.Text
 	if event.Record.Message != nil {
+		if len(event.Record.Message.ToolCalls) > 0 {
+			return "tool call: " + toolCallDisplay(event.Record.Message.ToolCalls[0])
+		}
 		label = event.Record.Message.Role
 		text = event.Record.Message.Text()
 	}
@@ -774,7 +792,19 @@ func branchSelectionLabel(event TimelineEvent) string {
 }
 
 func timelineEventRole(event TimelineEvent) string {
+	if event.Kind == store.KindToolCall {
+		return "tool_call"
+	}
+	if event.Kind == store.KindToolResult {
+		if event.Record != nil && event.Record.ToolResult != nil && event.Record.ToolResult.Status == "success" {
+			return "tool_result_success"
+		}
+		return "tool_result_error"
+	}
 	if event.Record != nil && event.Record.Message != nil {
+		if len(event.Record.Message.ToolCalls) > 0 {
+			return "tool_call"
+		}
 		switch event.Record.Message.Role {
 		case "system", "user", "assistant":
 			return event.Record.Message.Role
@@ -782,6 +812,40 @@ func timelineEventRole(event TimelineEvent) string {
 	}
 	if event.Kind == store.KindCompaction {
 		return "system"
+	}
+	return ""
+}
+
+func timelineEventMarker(event TimelineEvent) string {
+	switch timelineEventRole(event) {
+	case "tool_call":
+		return "▲ "
+	case "tool_result_success", "tool_result_error":
+		return "▲▲ "
+	default:
+		return ""
+	}
+}
+
+func timelineEventMarkerStatus(event TimelineEvent) string {
+	if timelineEventRole(event) == "tool_result_success" {
+		return "success"
+	}
+	if timelineEventRole(event) == "tool_result_error" {
+		return "error"
+	}
+	return ""
+}
+
+func timelineEventToolName(event TimelineEvent) string {
+	if event.Record == nil {
+		return ""
+	}
+	if event.Record.ToolCall != nil {
+		return event.Record.ToolCall.Name
+	}
+	if event.Record.Message != nil && len(event.Record.Message.ToolCalls) > 0 {
+		return event.Record.Message.ToolCalls[0].Function.Name
 	}
 	return ""
 }
@@ -808,7 +872,27 @@ func (t *chatTUI) appendStatus(text string) {
 }
 
 func (t *chatTUI) appendToolEvent(kind, text string) {
-	t.blocks = append(t.blocks, block{role: "tool", text: kind + ": " + text})
+	toolKind := "call"
+	toolStatus := ""
+	toolName := ""
+	if fields := strings.Fields(text); len(fields) > 0 {
+		toolName = fields[0]
+	}
+	if kind == "tool result" {
+		toolKind = "result"
+		if strings.HasSuffix(text, "[success]") {
+			toolStatus = "success"
+		} else {
+			toolStatus = "error"
+		}
+	}
+	t.blocks = append(t.blocks, block{
+		role:       "tool",
+		text:       kind + ": " + text,
+		toolKind:   toolKind,
+		toolStatus: toolStatus,
+		toolName:   toolName,
+	})
 }
 
 func (t *chatTUI) appendCompactionSummary(summary string) {
@@ -847,12 +931,22 @@ func blocksFromRecords(records []store.Record) []block {
 			continue
 		case store.KindToolCall:
 			if rec.ToolCall != nil {
-				blocks = append(blocks, block{role: "tool", text: "tool call: " + toolCallRecordDisplay(rec.ToolCall)})
+				blocks = append(blocks, block{
+					role:     "tool",
+					text:     "tool call: " + toolCallRecordDisplay(rec.ToolCall),
+					toolKind: "call",
+					toolName: rec.ToolCall.Name,
+				})
 			}
 			continue
 		case store.KindToolResult:
 			if rec.ToolResult != nil {
-				blocks = append(blocks, block{role: "tool", text: "tool result: " + toolResultDisplay(rec.ToolResult)})
+				blocks = append(blocks, block{
+					role:       "tool",
+					text:       "tool result: " + toolResultDisplay(rec.ToolResult),
+					toolKind:   "result",
+					toolStatus: rec.ToolResult.Status,
+				})
 			}
 			continue
 		case store.KindMessage:
@@ -874,10 +968,20 @@ func blocksFromRecords(records []store.Record) []block {
 				blocks = append(blocks, block{role: "assistant", text: m.Text()})
 			}
 			for _, call := range m.ToolCalls {
-				blocks = append(blocks, block{role: "tool", text: "tool call: " + toolCallDisplay(call)})
+				blocks = append(blocks, block{
+					role:     "tool",
+					text:     "tool call: " + toolCallDisplay(call),
+					toolKind: "call",
+					toolName: call.Function.Name,
+				})
 			}
 		case "tool":
-			blocks = append(blocks, block{role: "tool", text: "tool result: " + m.Text()})
+			blocks = append(blocks, block{
+				role:       "tool",
+				text:       "tool result: " + m.Text(),
+				toolKind:   "result",
+				toolStatus: "success",
+			})
 		}
 	}
 	return blocks
@@ -1193,6 +1297,9 @@ func (t *chatTUI) renderRow(hr histRow, selected bool, a, b int) string {
 			s = string(runes[:lo]) + "\033[7m" + string(runes[lo:hi]) + "\033[0m" + string(runes[hi:])
 		}
 	}
+	if hr.style == "tool" && hr.toolKind != "" {
+		return renderToolRow(hr, selected, a, b)
+	}
 	switch hr.style {
 	case "user":
 		return cUser.Sprint(s)
@@ -1209,9 +1316,54 @@ func (t *chatTUI) renderRow(hr histRow, selected bool, a, b int) string {
 	case "status":
 		return cSystem.Sprint(s)
 	case "tool":
-		return cSystem.Sprint(s)
+		return cToolResultText.Sprint(s)
 	}
 	return s
+}
+
+func renderToolRow(hr histRow, selected bool, a, b int) string {
+	marker := "▲ "
+	firstMarker := cSystem
+	secondMarker := cSystem
+	if hr.toolKind == "result" {
+		marker = "▲▲ "
+		if hr.toolStatus == "success" {
+			secondMarker = cAssistant
+		} else {
+			secondMarker = cError
+		}
+	}
+
+	markerRunes := []rune(marker)
+	body := hr.plain[len(string(markerRunes)):]
+	bodyStyle := cToolCallText
+	if hr.toolKind == "result" {
+		bodyStyle = cToolResultText
+	}
+	body = renderToolText(body, hr.toolName, bodyStyle, selected, len(markerRunes), a, b)
+	if hr.toolKind != "result" {
+		return firstMarker.Sprint(string(markerRunes)) + body
+	}
+	return firstMarker.Sprint(string(markerRunes[:1])) +
+		secondMarker.Sprint(string(markerRunes[1:2])) +
+		cSystem.Sprint(string(markerRunes[2:])) + body
+}
+
+func renderToolText(text, toolName string, bodyStyle *color.Color, selected bool, offset, start, end int) string {
+	nameStart := strings.Index(text, toolName)
+	if toolName == "" || nameStart < 0 {
+		if selected {
+			return renderSelectedSegment(text, bodyStyle, offset, start, end)
+		}
+		return bodyStyle.Sprint(text)
+	}
+	nameEnd := nameStart + len(toolName)
+	if selected {
+		return renderSelectedSegment(text[:nameStart], bodyStyle, offset, start, end) +
+			renderSelectedSegment(toolName, cSystem, offset+utf8.RuneCountInString(text[:nameStart]), start, end) +
+			renderSelectedSegment(text[nameEnd:], bodyStyle, offset+utf8.RuneCountInString(text[:nameEnd]), start, end)
+	}
+	return bodyStyle.Sprint(text[:nameStart]) + cSystem.Sprint(toolName) + bodyStyle.Sprint(text[nameEnd:])
 }
 
 func renderChatRow(text string, prefixLen int, selected bool, a, b int, role string) string {
@@ -1593,8 +1745,22 @@ func (t *chatTUI) buildRows() []histRow {
 				out = append(out, histRow{plain: "  " + l, style: "compaction"})
 			}
 		case "tool":
-			for _, l := range wrap(b.text, t.width-3) {
-				out = append(out, histRow{plain: "↳ " + l, style: "tool"})
+			for i, l := range wrap(b.text, t.width-3) {
+				if i == 0 {
+					marker := "▲ "
+					if b.toolKind == "result" {
+						marker = "▲▲ "
+					}
+					out = append(out, histRow{
+						plain:      marker + l,
+						style:      "tool",
+						toolKind:   b.toolKind,
+						toolStatus: b.toolStatus,
+						toolName:   b.toolName,
+					})
+					continue
+				}
+				out = append(out, histRow{plain: "  " + l, style: "tool"})
 			}
 		case "status":
 			for _, l := range wrap(b.text, t.width-3) {

@@ -269,11 +269,18 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 func renderHistory(out io.Writer, records []store.Record) {
 	for _, rec := range records {
 		if rec.Kind == store.KindToolCall && rec.ToolCall != nil {
-			cSystem.Fprintf(out, "  ↳ tool call %s\n", toolCallRecordDisplay(rec.ToolCall))
+			cSystem.Fprint(out, "  ▲ ")
+			cToolCallText.Fprintf(out, "tool call %s\n", toolCallRecordDisplay(rec.ToolCall))
 			continue
 		}
 		if rec.Kind == store.KindToolResult && rec.ToolResult != nil {
-			cSystem.Fprintf(out, "  ↳ tool result [%s] %s\n", rec.ToolResult.Status, rec.ToolResult.Output)
+			cSystem.Fprint(out, "  ▲")
+			if rec.ToolResult.Status == "success" {
+				cAssistant.Fprint(out, "▲")
+			} else {
+				cError.Fprint(out, "▲")
+			}
+			cToolResultText.Fprintf(out, " tool result [%s] %s\n", rec.ToolResult.Status, rec.ToolResult.Output)
 			continue
 		}
 		if rec.Kind != store.KindMessage || rec.Message == nil {
@@ -292,11 +299,14 @@ func renderHistory(out io.Writer, records []store.Record) {
 			}
 			cAssistant.Fprintf(out, "● %s\n", m.Text())
 			for _, call := range m.ToolCalls {
-				cSystem.Fprintf(out, "  ↳ tool call %s\n", toolCallDisplay(call))
+				cSystem.Fprint(out, "  ▲ ")
+				cToolCallText.Fprintf(out, "tool call %s\n", toolCallDisplay(call))
 			}
 			fmt.Fprintln(out)
 		case "tool":
-			cSystem.Fprintf(out, "  ↳ result [%s] %s\n", m.ToolCallID, m.Text())
+			cSystem.Fprint(out, "  ▲")
+			cAssistant.Fprint(out, "▲")
+			cToolResultText.Fprintf(out, " tool result [%s] %s\n", m.ToolCallID, m.Text())
 			fmt.Fprintln(out)
 		}
 	}
