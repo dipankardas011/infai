@@ -34,6 +34,7 @@ func NewAuditorPolicy() *AuditorPolicy {
 			contracts.SearchTool: AllowPolicy,
 			contracts.WriteTool:  HumanPolicy,
 			contracts.EditTool:   HumanPolicy,
+			contracts.BashTool:   HumanPolicy,
 		},
 	}
 }

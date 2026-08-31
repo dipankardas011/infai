@@ -130,6 +130,8 @@ func ExecuteToolCall(ctx context.Context, call contracts.ToolCall) (output strin
 		output, err = globExecution(toolContext)
 	case contracts.SearchTool:
 		output, err = searchExecution(toolContext)
+	case contracts.BashTool:
+		output, err = bashExecution(toolContext)
 	default:
 		err = &ExecutionError{
 			Tool:           toolName,
@@ -142,8 +144,7 @@ func ExecuteToolCall(ctx context.Context, call contracts.ToolCall) (output strin
 		err = ctxErr
 	}
 	if err != nil {
-		var fileErr *filesystemError
-		if errors.As(err, &fileErr) {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
 			err = execErr(contracts.ToolType(toolName), fileErr.code, fileErr.reason, fileErr.responsibility, err)
 		} else if executionErr, ok := errors.AsType[*ExecutionError](err); ok {
 			err = executionErr

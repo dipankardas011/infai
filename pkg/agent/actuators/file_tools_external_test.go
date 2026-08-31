@@ -20,6 +20,7 @@ func TestFileToolsHaveDescriptiveSchemas(t *testing.T) {
 		actuators.ListTool(),
 		actuators.GlobTool(),
 		actuators.SearchTool(),
+		actuators.BashTool(),
 	}
 	for _, tool := range tools {
 		if tool.Name == "" || tool.Description == "" {

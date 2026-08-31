@@ -30,6 +30,7 @@ const (
 	GlobTool   ToolType = "glob"
 	ListTool   ToolType = "list"
 	SearchTool ToolType = "search"
+	BashTool   ToolType = "bash"
 )
 
 type ToolExecutionStatus string

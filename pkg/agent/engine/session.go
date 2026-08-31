@@ -195,6 +195,7 @@ func (s *InfaiAgentSession) configureFileTools() {
 		actuators.SearchTool(),
 		actuators.WriteTool(),
 		actuators.EditTool(),
+		actuators.BashTool(),
 	}
 }
 
