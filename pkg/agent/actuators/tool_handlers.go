@@ -7,6 +7,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"golang.org/x/text/unicode/runenames"
+
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
@@ -53,21 +55,25 @@ func validateText(value string, responsibility FailureResponsibility) error {
 	if !utf8.ValidString(value) {
 		return filesystemErr("invalid_utf8", "the value is not valid UTF-8", responsibility, nil)
 	}
-	runePosition := 0
+	position := 0
 	for _, character := range value {
 		if character == '\r' || character == '\n' || character == '\t' {
-			runePosition++
+			position++
 			continue
 		}
 		if isInvisible(character) {
+			description := fmt.Sprintf("U+%04X", character)
+			if name := runenames.Name(character); name != "" {
+				description += " " + name
+			}
 			return filesystemErr(
 				"invisible_character",
-				fmt.Sprintf("disallowed invisible character U+%04X at rune position %d", character, runePosition),
+				fmt.Sprintf("disallowed invisible character %s at character %d", description, position),
 				responsibility,
 				nil,
 			)
 		}
-		runePosition++
+		position++
 	}
 	return nil
 }
@@ -76,8 +82,6 @@ func isInvisible(character rune) bool {
 	return unicode.IsControl(character) || unicode.In(
 		character,
 		unicode.Cf,
-		unicode.Properties["Bidi_Control"],
-		unicode.Properties["Join_Control"],
 		unicode.Properties["Other_Default_Ignorable_Code_Point"],
 		unicode.Properties["Variation_Selector"],
 		unicode.Properties["Noncharacter_Code_Point"],
@@ -89,6 +93,10 @@ func (e *ExecutionError) Error() string {
 }
 
 func (e *ExecutionError) Unwrap() error { return e.cause }
+
+func execErr(tool contracts.ToolType, code, reason string, responsibility FailureResponsibility, cause error) error {
+	return &ExecutionError{Tool: string(tool), Code: code, Reason: reason, Responsibility: responsibility, cause: cause}
+}
 
 type contextKey uint8
 

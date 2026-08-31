@@ -9,12 +9,6 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
-func fileManager(ctx context.Context) (*FileManager, error) {
-	if m := FileManagerFromContext(ctx); m != nil {
-		return m, nil
-	}
-	return nil, filesystemErr("missing_file_manager", "a file manager is required", ResponsibilitySession, nil)
-}
 func toolSchema(name, description string, properties map[string]any, required []string) contracts.Tool {
 	return contracts.Tool{
 		Name:        name,
@@ -68,4 +62,12 @@ func mustJSON(v any) ([]byte, error) {
 		return nil, filesystemErr("output_too_large", "tool output exceeds the response size limit", ResponsibilityTool, nil)
 	}
 	return output, nil
+}
+
+func assemble(v any) (string, error) {
+	output, err := mustJSON(v)
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
 }

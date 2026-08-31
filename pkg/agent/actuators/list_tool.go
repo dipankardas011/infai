@@ -2,6 +2,7 @@ package actuators
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -9,6 +10,10 @@ import (
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
+
+type listArguments struct {
+	Path string `json:"path"`
+}
 
 func ListTool() contracts.Tool {
 	return toolSchema(
@@ -32,6 +37,33 @@ type ListEntry struct {
 }
 
 const maxDirectoryEntries = 10_000
+
+func listExecution(ctx context.Context) (string, error) {
+	var args listArguments
+	if _, err := decodeArgs(ctx, &args); err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.ListTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.ListTool, "invalid_arguments", "list arguments could not be decoded", ResponsibilityAgent, err)
+	}
+	if args.Path == "" {
+		args.Path = "."
+	}
+
+	m := FileManagerFromContext(ctx)
+	if m == nil {
+		return "", execErr(contracts.ListTool, "missing_file_manager", "a file manager is required to list directories", ResponsibilitySession, nil)
+	}
+
+	entries, err := m.List(args.Path)
+	if err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.ListTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.ListTool, "list_failed", "the directory could not be listed", ResponsibilityTool, err)
+	}
+	return assemble(entries)
+}
 
 func (m *FileManager) List(path string) ([]ListEntry, error) {
 	m.mu.Lock()
@@ -75,27 +107,4 @@ func (m *FileManager) List(path string) ([]ListEntry, error) {
 		out = append(out, item)
 	}
 	return out, nil
-}
-
-func listExecution(ctx context.Context) (string, error) {
-	var args struct {
-		Path string `json:"path"`
-	}
-	_, err := decodeArgs(ctx, &args)
-	if err != nil {
-		return "", err
-	}
-	if args.Path == "" {
-		args.Path = "."
-	}
-	m, err := fileManager(ctx)
-	if err != nil {
-		return "", err
-	}
-	entries, err := m.List(args.Path)
-	output, marshalErr := mustJSON(entries)
-	if err == nil {
-		err = marshalErr
-	}
-	return string(output), err
 }

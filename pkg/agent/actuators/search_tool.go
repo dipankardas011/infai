@@ -30,6 +30,11 @@ func SearchTool() contracts.Tool {
 	)
 }
 
+type searchArguments struct {
+	Pattern string `json:"pattern"`
+	Path    string `json:"path"`
+}
+
 type SearchResult struct {
 	Path string `json:"path"`
 	Line int    `json:"line"`
@@ -38,15 +43,38 @@ type SearchResult struct {
 
 const maxSearchOutputBytes = 1 << 20
 
+func searchExecution(ctx context.Context) (string, error) {
+	var args searchArguments
+	if _, err := decodeArgs(ctx, &args); err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.SearchTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.SearchTool, "invalid_arguments", "search arguments could not be decoded", ResponsibilityAgent, err)
+	}
+	if args.Path == "" {
+		args.Path = "."
+	}
+	if err := searchToolValidate(args); err != nil {
+		return "", err
+	}
+	m := FileManagerFromContext(ctx)
+	if m == nil {
+		return "", execErr(contracts.SearchTool, "missing_file_manager", "a file manager is required to search files", ResponsibilitySession, nil)
+	}
+	results, err := m.Search(args.Pattern, args.Path)
+	if err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.SearchTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.SearchTool, "search_failed", "the search could not be completed", ResponsibilityTool, err)
+	}
+	return assemble(results)
+}
+
 func (m *FileManager) Search(pattern, path string) ([]SearchResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if pattern == "" {
-		return nil, errors.New("search pattern must not be empty")
-	}
-	if err := validateText(pattern, ResponsibilityAgent); err != nil {
-		return nil, err
-	}
+
 	root, err := m.resolve(path, true)
 	if err != nil {
 		return nil, err
@@ -111,26 +139,14 @@ func (m *FileManager) Search(pattern, path string) ([]SearchResult, error) {
 	return results, err
 }
 
-func searchExecution(ctx context.Context) (string, error) {
-	var args struct {
-		Pattern string `json:"pattern"`
-		Path    string `json:"path"`
+func searchToolValidate(args searchArguments) error {
+	if args.Pattern == "" {
+		return execErr(contracts.SearchTool, "invalid_arguments", "search requires pattern", ResponsibilityAgent, nil)
 	}
-	_, err := decodeArgs(ctx, &args)
-	if err != nil || args.Pattern == "" {
-		return "", filesystemErr("invalid_arguments", "search requires pattern", ResponsibilityAgent, err)
+
+	if err := validateText(args.Pattern, ResponsibilityAgent); err != nil {
+		return err
 	}
-	if args.Path == "" {
-		args.Path = "."
-	}
-	m, err := fileManager(ctx)
-	if err != nil {
-		return "", err
-	}
-	results, err := m.Search(args.Pattern, args.Path)
-	output, marshalErr := mustJSON(results)
-	if err == nil {
-		err = marshalErr
-	}
-	return string(output), err
+
+	return nil
 }

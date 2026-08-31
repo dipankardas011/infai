@@ -65,50 +65,87 @@ func ReadTool() contracts.Tool {
 	}
 }
 
+func readExecution(ctx context.Context) (string, error) {
+	var args readArguments
+	if _, err := decodeArgs(ctx, &args); err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.ReadTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.ReadTool, "invalid_arguments", "read arguments could not be decoded", ResponsibilityAgent, err)
+	}
+	if err := readToolValidate(args); err != nil {
+		return "", err
+	}
+
+	m := FileManagerFromContext(ctx)
+	if m == nil {
+		return "", execErr(contracts.ReadTool, "missing_file_manager", "a file manager is required to read files", ResponsibilitySession, nil)
+	}
+
+	out, err := m.Read(args.Path, args.Offset, args.Limit, args.Metadata)
+	if err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.ReadTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.ReadTool, "read_failed", "the file could not be read", ResponsibilityTool, err)
+	}
+
+	return out, nil
+}
+
+func readToolValidate(args readArguments) error {
+	if args.Path == "" {
+		return execErr(contracts.ReadTool, "invalid_arguments", "read requires a non-empty relative path", ResponsibilityAgent, nil)
+	}
+	if (args.Offset != nil && *args.Offset < 1) || (args.Limit != nil && *args.Limit < 1) {
+		return execErr(contracts.ReadTool, "invalid_arguments", "offset and limit must be positive line numbers", ResponsibilityAgent, nil)
+	}
+	if args.Metadata && (args.Offset != nil || args.Limit != nil) {
+		return execErr(contracts.ReadTool, "invalid_arguments", "metadata cannot be combined with offset or limit", ResponsibilityAgent, nil)
+	}
+
+	return nil
+}
+
 func (m *FileManager) Read(path string, offset, limit *int, metadata bool) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if offset != nil && *offset < 1 || limit != nil && *limit < 1 {
-		return "", filesystemErr("invalid_arguments", "offset and limit must be positive line numbers", ResponsibilityAgent, nil)
-	}
-	if metadata && (offset != nil || limit != nil) {
-		return "", filesystemErr("invalid_arguments", "metadata cannot be combined with offset or limit", ResponsibilityAgent, nil)
-	}
+
 	resolved, err := m.resolve(path, true)
 	if err != nil {
 		return "", err
 	}
+
 	info, err := os.Stat(resolved)
-	if err != nil {
+	switch {
+	case err != nil:
 		return "", filesystemErr("file_unavailable", "the file could not be inspected", ResponsibilityEnvironment, err)
-	}
-	if !info.Mode().IsRegular() {
+	case !info.Mode().IsRegular():
 		return "", filesystemErr("not_a_file", "the requested path is not a regular file", ResponsibilityAgent, nil)
-	}
-	if info.Size() > maxReadBytes {
+	case info.Size() > maxReadBytes:
 		return "", filesystemErr("file_too_large", "the file exceeds the read size limit", ResponsibilityTool, nil)
 	}
+
 	data, err := os.ReadFile(resolved)
-	if err != nil {
+	switch {
+	case err != nil:
 		return "", filesystemErr("read_failed", "the file could not be read", ResponsibilityEnvironment, err)
-	}
-	if len(data) > maxReadBytes {
+	case len(data) > maxReadBytes:
 		return "", filesystemErr("file_too_large", "the file exceeds the read size limit", ResponsibilityTool, nil)
-	}
-	if metadata {
-		if utf8.Valid(data) {
-			if err := validateText(string(data), ResponsibilityTool); err != nil {
-				return "", err
-			}
+
+	case !utf8.Valid(data):
+		return "", filesystemErr("invalid_utf8", "the file is not valid UTF-8 text", ResponsibilityTool, nil)
+
+	default:
+		if err := validateText(string(data), ResponsibilityTool); err != nil {
+			return "", err
 		}
+	}
+
+	if metadata {
 		return readMetadataJSON(path, resolved, info, data)
 	}
-	if !utf8.Valid(data) {
-		return "", filesystemErr("invalid_utf8", "the file is not valid UTF-8 text", ResponsibilityTool, nil)
-	}
-	if err := validateText(string(data), ResponsibilityTool); err != nil {
-		return "", err
-	}
+
 	m.snapshot(resolved, data)
 	lines := splitLines(data)
 	start := 0
@@ -122,6 +159,7 @@ func (m *FileManager) Read(path string, offset, limit *int, metadata bool) (stri
 	if limit != nil && *limit < end-start {
 		end = start + *limit
 	}
+
 	return strings.Join(lines[start:end], ""), nil
 }
 
@@ -150,40 +188,6 @@ func readMetadataJSON(path, resolved string, info os.FileInfo, data []byte) (str
 	return string(b), err
 }
 
-func readExecution(ctx context.Context) (string, error) {
-	var args readArguments
-	if _, err := decodeArgs(ctx, &args); err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.ReadTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
-		}
-		return "", execErr(contracts.ReadTool, "invalid_arguments", "read arguments could not be decoded", ResponsibilityAgent, err)
-	}
-	if args.Path == "" {
-		return "", execErr(contracts.ReadTool, "invalid_arguments", "read requires a non-empty relative path", ResponsibilityAgent, nil)
-	}
-	if (args.Offset != nil && *args.Offset < 1) || (args.Limit != nil && *args.Limit < 1) {
-		return "", execErr(contracts.ReadTool, "invalid_arguments", "offset and limit must be positive line numbers", ResponsibilityAgent, nil)
-	}
-	if args.Metadata && (args.Offset != nil || args.Limit != nil) {
-		return "", execErr(contracts.ReadTool, "invalid_arguments", "metadata cannot be combined with offset or limit", ResponsibilityAgent, nil)
-	}
-	m := FileManagerFromContext(ctx)
-	if m == nil {
-		return "", execErr(contracts.ReadTool, "missing_file_manager", "a file manager is required to read files", ResponsibilitySession, nil)
-	}
-	out, err := m.Read(args.Path, args.Offset, args.Limit, args.Metadata)
-	if err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.ReadTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
-		}
-		return "", execErr(contracts.ReadTool, "read_failed", "the file could not be read", ResponsibilityTool, err)
-	}
-	return out, nil
-}
-
-func execErr(tool contracts.ToolType, code, reason string, responsibility FailureResponsibility, cause error) error {
-	return &ExecutionError{Tool: string(tool), Code: code, Reason: reason, Responsibility: responsibility, cause: cause}
-}
 func splitLines(data []byte) []string {
 	if len(data) == 0 {
 		return nil

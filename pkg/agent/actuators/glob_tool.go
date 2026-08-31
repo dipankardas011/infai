@@ -2,6 +2,7 @@ package actuators
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,10 @@ import (
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
+
+type globArguments struct {
+	Pattern string `json:"pattern"`
+}
 
 func GlobTool() contracts.Tool {
 	return toolSchema(
@@ -22,6 +27,31 @@ func GlobTool() contracts.Tool {
 		},
 		[]string{"pattern"},
 	)
+}
+
+func globExecution(ctx context.Context) (string, error) {
+	var args globArguments
+	if _, err := decodeArgs(ctx, &args); err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.GlobTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.GlobTool, "invalid_arguments", "glob arguments could not be decoded", ResponsibilityAgent, err)
+	}
+	if err := globToolValidate(args); err != nil {
+		return "", err
+	}
+	m := FileManagerFromContext(ctx)
+	if m == nil {
+		return "", execErr(contracts.GlobTool, "missing_file_manager", "a file manager is required to search for files", ResponsibilitySession, nil)
+	}
+	matches, err := m.Glob(args.Pattern)
+	if err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.GlobTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.GlobTool, "glob_failed", "the pattern could not be matched", ResponsibilityTool, err)
+	}
+	return assemble(matches)
 }
 
 func (m *FileManager) Glob(pattern string) ([]string, error) {
@@ -78,6 +108,29 @@ func (m *FileManager) Glob(pattern string) ([]string, error) {
 	return out, nil
 }
 
+func globMatch(pattern, path string) bool {
+	patterns := strings.Split(strings.Trim(pattern, "/"), "/")
+	paths := strings.Split(strings.Trim(path, "/"), "/")
+	if len(paths) == 1 && paths[0] == "" {
+		paths = nil
+	}
+	var match func(int, int) bool
+	match = func(pi, si int) bool {
+		if pi == len(patterns) {
+			return si == len(paths)
+		}
+		if patterns[pi] == "**" {
+			return match(pi+1, si) || si < len(paths) && match(pi, si+1)
+		}
+		if si == len(paths) {
+			return false
+		}
+		ok, err := filepath.Match(patterns[pi], paths[si])
+		return err == nil && ok && match(pi+1, si+1)
+	}
+	return match(0, 0)
+}
+
 func normalizeGlobPattern(pattern string) (string, error) {
 	segments := strings.Split(strings.Trim(filepath.ToSlash(pattern), "/"), "/")
 	clean := make([]string, 0, len(segments))
@@ -103,45 +156,9 @@ func normalizeGlobPattern(pattern string) (string, error) {
 	return strings.Join(clean, "/"), nil
 }
 
-func globMatch(pattern, path string) bool {
-	patterns := strings.Split(strings.Trim(pattern, "/"), "/")
-	paths := strings.Split(strings.Trim(path, "/"), "/")
-	if len(paths) == 1 && paths[0] == "" {
-		paths = nil
+func globToolValidate(args globArguments) error {
+	if args.Pattern == "" {
+		return execErr(contracts.GlobTool, "invalid_arguments", "glob requires pattern", ResponsibilityAgent, nil)
 	}
-	var match func(int, int) bool
-	match = func(pi, si int) bool {
-		if pi == len(patterns) {
-			return si == len(paths)
-		}
-		if patterns[pi] == "**" {
-			return match(pi+1, si) || si < len(paths) && match(pi, si+1)
-		}
-		if si == len(paths) {
-			return false
-		}
-		ok, err := filepath.Match(patterns[pi], paths[si])
-		return err == nil && ok && match(pi+1, si+1)
-	}
-	return match(0, 0)
-}
-
-func globExecution(ctx context.Context) (string, error) {
-	var args struct {
-		Pattern string `json:"pattern"`
-	}
-	_, err := decodeArgs(ctx, &args)
-	if err != nil || args.Pattern == "" {
-		return "", filesystemErr("invalid_arguments", "glob requires pattern", ResponsibilityAgent, err)
-	}
-	m, err := fileManager(ctx)
-	if err != nil {
-		return "", err
-	}
-	matches, err := m.Glob(args.Pattern)
-	output, marshalErr := mustJSON(matches)
-	if err == nil {
-		err = marshalErr
-	}
-	return string(output), err
+	return nil
 }

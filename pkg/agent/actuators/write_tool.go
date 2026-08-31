@@ -2,11 +2,21 @@ package actuators
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
+
+type writeArguments struct {
+	Path    string  `json:"path"`
+	Content *string `json:"content"`
+}
+
+type WriteResult struct {
+	Status string `json:"status"`
+}
 
 func WriteTool() contracts.Tool {
 	return toolSchema(
@@ -26,69 +36,84 @@ func WriteTool() contracts.Tool {
 	)
 }
 
+func writeExecution(ctx context.Context) (string, error) {
+	var args writeArguments
+	if _, err := decodeArgs(ctx, &args); err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.WriteTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.WriteTool, "invalid_arguments", "write arguments could not be decoded", ResponsibilityAgent, err)
+	}
+	if err := writeToolValidate(args); err != nil {
+		return "", err
+	}
+	m := FileManagerFromContext(ctx)
+	if m == nil {
+		return "", execErr(contracts.WriteTool, "missing_file_manager", "a file manager is required to write files", ResponsibilitySession, nil)
+	}
+	if err := m.Write(args.Path, *args.Content); err != nil {
+		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
+			return "", execErr(contracts.WriteTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+		}
+		return "", execErr(contracts.WriteTool, "write_failed", "the file could not be written", ResponsibilityTool, err)
+	}
+	return assemble(WriteResult{Status: "written"})
+}
+
 func (m *FileManager) Write(path, content string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := validateText(content, ResponsibilityAgent); err != nil {
-		return err
-	}
-	if len(content) > maxReadBytes {
-		return filesystemErr("content_too_large", "the content exceeds the write size limit", ResponsibilityTool, nil)
-	}
+
 	resolved, err := m.resolve(path, false)
 	if err != nil {
 		return err
 	}
 	mode := os.FileMode(0o600)
 	info, err := os.Stat(resolved)
-	if os.IsNotExist(err) {
-		// A missing final component is the only valid new-file case.
-	} else if err != nil {
+	old, readErr := os.ReadFile(resolved)
+
+	switch {
+	case err != nil && !os.IsNotExist(err):
 		return filesystemErr("write_failed", "the existing file could not be inspected", ResponsibilityEnvironment, err)
-	} else {
-		if !info.Mode().IsRegular() {
-			return filesystemErr("not_a_file", "the requested path is not a regular file", ResponsibilityAgent, nil)
-		}
-		if info.Size() > maxReadBytes {
-			return filesystemErr("file_too_large", "the existing file exceeds the write size limit", ResponsibilityTool, nil)
-		}
-		old, readErr := os.ReadFile(resolved)
-		if readErr != nil {
-			return filesystemErr("write_failed", "the existing file could not be read", ResponsibilityEnvironment, readErr)
-		}
-		if len(old) > maxReadBytes {
-			return filesystemErr("file_too_large", "the existing file exceeds the write size limit", ResponsibilityTool, nil)
-		}
-		if err = m.verify(resolved, old); err != nil {
-			return err
-		}
-		mode = info.Mode().Perm()
+	case readErr != nil && !os.IsNotExist(readErr):
+		return filesystemErr("write_failed", "the existing file could not be read", ResponsibilityEnvironment, readErr)
+	case os.IsNotExist(err):
+		// A missing final component is the only valid new-file case.
+	case !info.Mode().IsRegular():
+		return filesystemErr("not_a_file", "the requested path is not a regular file", ResponsibilityAgent, nil)
+	case info.Size() > maxReadBytes:
+		return filesystemErr("file_too_large", "the existing file exceeds the write size limit", ResponsibilityTool, nil)
+	case len(old) > maxReadBytes:
+		return filesystemErr("file_too_large", "the existing file exceeds the write size limit", ResponsibilityTool, nil)
 	}
-	data := []byte(content)
-	if err := atomicWrite(resolved, data, mode); err != nil {
+	mode = info.Mode().Perm()
+
+	if err = m.verify(resolved, old); err != nil {
+		return err
+	}
+
+	if err := atomicWrite(resolved, []byte(content), mode); err != nil {
 		return filesystemErr("write_failed", "the file could not be written", ResponsibilityEnvironment, err)
 	}
-	m.snapshot(resolved, data)
+
+	m.snapshot(resolved, []byte(content))
 	return nil
 }
 
-func writeExecution(ctx context.Context) (string, error) {
-	var args struct {
-		Path    string  `json:"path"`
-		Content *string `json:"content"`
+func writeToolValidate(args writeArguments) error {
+	if args.Path == "" || args.Content == nil {
+		return execErr(contracts.WriteTool, "invalid_arguments", "write requires path and content", ResponsibilityAgent, nil)
 	}
-	_, err := decodeArgs(ctx, &args)
-	if err != nil || args.Path == "" || args.Content == nil {
-		return "", filesystemErr("invalid_arguments", "write requires path and content", ResponsibilityAgent, err)
+
+	if err := validateText(*args.Content, ResponsibilityAgent); err != nil {
+		return err
 	}
-	m, err := fileManager(ctx)
-	if err != nil {
-		return "", err
+
+	if len(*args.Content) > maxReadBytes {
+		return filesystemErr("content_too_large", "the content exceeds the write size limit", ResponsibilityTool, nil)
 	}
-	if err := m.Write(args.Path, *args.Content); err != nil {
-		return "", err
-	}
-	return "written", nil
+
+	return nil
 }
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {
