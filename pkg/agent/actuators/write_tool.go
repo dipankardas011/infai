@@ -77,19 +77,24 @@ func (m *FileManager) Write(path, content string) error {
 		return filesystemErr("write_failed", "the existing file could not be inspected", ResponsibilityEnvironment, err)
 	case readErr != nil && !os.IsNotExist(readErr):
 		return filesystemErr("write_failed", "the existing file could not be read", ResponsibilityEnvironment, readErr)
-	case os.IsNotExist(err):
-		// A missing final component is the only valid new-file case.
-	case !info.Mode().IsRegular():
-		return filesystemErr("not_a_file", "the requested path is not a regular file", ResponsibilityAgent, nil)
-	case info.Size() > maxReadBytes:
-		return filesystemErr("file_too_large", "the existing file exceeds the write size limit", ResponsibilityTool, nil)
-	case len(old) > maxReadBytes:
-		return filesystemErr("file_too_large", "the existing file exceeds the write size limit", ResponsibilityTool, nil)
 	}
-	mode = info.Mode().Perm()
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return filesystemErr("not_a_file", "the requested path is not a regular file", ResponsibilityAgent, nil)
+		}
+		if info.Size() > maxReadBytes {
+			return filesystemErr("file_too_large", "the existing file exceeds the write size limit", ResponsibilityTool, nil)
+		}
+		if len(old) > maxReadBytes {
+			return filesystemErr("file_too_large", "the existing file exceeds the write size limit", ResponsibilityTool, nil)
+		}
+		mode = info.Mode().Perm()
 
-	if err = m.verify(resolved, old); err != nil {
-		return err
+		// A file on disk must have been read first and not changed since.
+		// A brand-new file never existed, so there is nothing to verify.
+		if err = m.verify(resolved, old); err != nil {
+			return err
+		}
 	}
 
 	if err := atomicWrite(resolved, []byte(content), mode); err != nil {
