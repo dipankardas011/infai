@@ -270,12 +270,23 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 	}
 	s.l.Info("manual compaction requested", "history_messages", len(s.history))
 
-	systemPrompt, history, err := compactionInput(s.history)
+	prevCheckpoint, err := s.timeline.LastCompactionSummary()
+	if err != nil {
+		s.l.Error("read last compaction from timeline", "error", err)
+		return err
+	}
+	toCompact, retained := planCompaction(s.history, false)
+	if len(toCompact) == 0 {
+		s.l.Info("manual compaction skipped: nothing to compact")
+		return nil
+	}
+
+	systemPrompt, history, err := compactionInput(toCompact, prevCheckpoint)
 	if err != nil {
 		s.l.Error("manual compaction input failed", "error", err)
 		return err
 	}
-	if err := s.compactChat(ctx, systemPrompt, history); err != nil {
+	if err := s.compactChat(ctx, systemPrompt, history, retained); err != nil {
 		s.l.Error("manual compaction failed", "error", err)
 		return err
 	}
@@ -368,12 +379,22 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 				"threshold_percent", 80,
 			)
 		}
-		systemPrompt, history, err := compactionInput(s.history)
+		prevCheckpoint, err := s.timeline.LastCompactionSummary()
+		if err != nil {
+			s.l.Error("read last compaction from timeline", "error", err)
+			return nil, err
+		}
+		toCompact, retained := planCompaction(s.history, true)
+		if len(toCompact) == 0 {
+			s.l.Warn("automatic compaction requested but nothing outside the retained tail")
+			return nil, nil
+		}
+		systemPrompt, history, err := compactionInput(toCompact, prevCheckpoint)
 		if err != nil {
 			s.l.Error("automatic compaction input failed", "error", err)
 			return nil, err
 		}
-		if err := s.compactChat(ctx, systemPrompt, history); err != nil {
+		if err := s.compactChat(ctx, systemPrompt, history, retained); err != nil {
 			s.l.Error("automatic compaction failed", "error", err)
 			return nil, err
 		}
@@ -466,10 +487,12 @@ func (s *InfaiAgentSession) persistMessagesLocked() error {
 	return nil
 }
 
-func (s *InfaiAgentSession) resetHistoryLocked(summary string) {
-	s.history = []contracts.ChatMessage{contracts.NewUserMessage("<context-summary>\n" + summary + "\n</context-summary>")}
+func (s *InfaiAgentSession) rebuildHistoryLocked(summary string, retained []contracts.ChatMessage) {
+	history := []contracts.ChatMessage{contracts.NewUserMessage("<context-summary>\n" + summary + "\n</context-summary>")}
+	history = append(history, retained...)
+	s.history = history
 	s.persisted = len(s.history)
-	s.l.Info("session context compacted", "session_id", s.sessionID, "context_window", s.meta.ContextWindow)
+	s.l.Info("session context compacted", "session_id", s.sessionID, "context_window", s.meta.ContextWindow, "retained", len(retained))
 }
 
 // Compact is kept as an alias for CompactChat.
@@ -504,19 +527,8 @@ func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
 	return shouldCompact
 }
 
-// TODO: we do need to revisit to optimize the summary like storing a flattened history
-func compactionInput(history []contracts.ChatMessage) (string, []contracts.ChatMessage, error) {
-	systemPrompt, err := CompactionAgentSystemPrompt()
-	if err != nil {
-		return "", nil, err
-	}
-	input := append([]contracts.ChatMessage(nil), history...)
-	input = append(input, contracts.NewUserMessage("Can you compact based on the history?"))
-	return systemPrompt, input, nil
-}
-
-func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string, history []contracts.ChatMessage) error {
-	s.l.Debug("compaction started", "input_messages", len(history))
+func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string, history []contracts.ChatMessage, retained []contracts.ChatMessage) error {
+	s.l.Debug("compaction started", "input_messages", len(history), "retained", len(retained))
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacting"})
 	result, err := s.summarize(ctx, systemPrompt, history)
 	if err != nil {
@@ -535,7 +547,7 @@ func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string
 		s.l.Error("persist compaction event failed", "error", err)
 		return err
 	}
-	s.resetHistoryLocked(result.Summary)
+	s.rebuildHistoryLocked(result.Summary, retained)
 	s.l.InfoContext(ctx, "compaction completed", "summary_chars", len(result.Summary))
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaCompactionSummary, Text: result.Summary})
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacted"})
