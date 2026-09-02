@@ -125,7 +125,7 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 
 	o.configureFileTools()
 
-	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, nil)
+	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, nil, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +173,7 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 	}
 
 	o.configureFileTools()
-	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, nil)
+	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, nil, meta.Cwd)
 	if err != nil {
 		return nil, err
 	}

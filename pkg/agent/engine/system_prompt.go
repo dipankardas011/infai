@@ -3,6 +3,9 @@ package engine
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"text/template"
 	"time"
 
@@ -14,13 +17,29 @@ import (
 // The first lines set the agent's outlook; environment/tools/skills are pure data
 // with the least influence and belong at the bottom. Rules are terse, deduped,
 // and never contradictory — a contradiction is a coin-flip for the model.
-func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill) (string, error) {
-	type systemPromptData struct {
-		AgentName string
-		DateUTC   string
-		LocalTime string
-		Skills    []contracts.Skill
-		Tools     []contracts.Tool
+const defaultAgentName = "infai"
+
+type basicPromptData struct {
+	AgentName string
+	Cwd       string
+	IsGitRepo bool
+	OS        string
+	DateUTC   string
+	LocalTime string
+	Skills    []contracts.Skill
+	Tools     []contracts.Tool
+}
+
+func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd string) (string, error) {
+	data := basicPromptData{
+		AgentName: defaultAgentName,
+		Cwd:       cwd,
+		IsGitRepo: isGitRepo(cwd),
+		OS:        runtime.GOOS,
+		DateUTC:   time.Now().UTC().Format(time.RFC3339),
+		LocalTime: time.Now().Local().Format(time.RFC3339),
+		Skills:    skills,
+		Tools:     tools,
 	}
 
 	tpl, err := template.New("basic_sys_prompt").Parse(`You are {{.AgentName}}, a software engineering and systems-design agent. You reason from evidence, never assumption. When the truth is uncertain or a decision has large consequences, you ask a targeted question with a recommended default — you never guess.
@@ -72,9 +91,9 @@ func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill) (str
 </style>
 
 <environment>
-- Primary working directory: <cwd>
-- Is a git repository: <bool>
-- OS Version: <os>
+- Primary working directory: {{.Cwd}}
+- Is a git repository: {{if .IsGitRepo}}yes{{else}}no{{end}}
+- OS: {{.OS}}
 - Today's date (UTC): {{.DateUTC}}
 - Local time: {{.LocalTime}}
 </environment>
@@ -99,17 +118,16 @@ func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill) (str
 		return "", fmt.Errorf("parse basic system prompt: %w", err)
 	}
 
-	data := systemPromptData{
-		DateUTC:   time.Now().UTC().Format(time.RFC3339),
-		LocalTime: time.Now().Local().Format(time.RFC3339),
-		Skills:    skills,
-		Tools:     tools,
-	}
-
 	var buf bytes.Buffer
 	if err := tpl.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("render basic system prompt: %w", err)
 	}
 
 	return buf.String(), nil
+}
+
+// isGitRepo reports whether cwd is itself inside a git repository.
+func isGitRepo(cwd string) bool {
+	_, err := os.Stat(filepath.Join(cwd, ".git"))
+	return err == nil
 }

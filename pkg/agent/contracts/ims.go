@@ -56,6 +56,7 @@ func NewToolMessage(callID, content string) ChatMessage {
 type Skill struct {
 	Title       string
 	Description string
+	Location    string
 }
 
 // DeepKnowledge we can store Skills
