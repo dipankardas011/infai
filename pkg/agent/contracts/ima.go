@@ -51,6 +51,8 @@ const (
 	DeltaToolCall DeltaKind = "tool_call"
 	// DeltaToolResult identifies the completion of a tool invocation.
 	DeltaToolResult DeltaKind = "tool_result"
+	// DeltaSkillLoad identifies a skill being loaded from memory into context.
+	DeltaSkillLoad DeltaKind = "skill_load"
 )
 
 // ChatCompletion()

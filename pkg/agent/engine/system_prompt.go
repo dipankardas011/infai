@@ -109,7 +109,6 @@ func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd 
   <skill>
     <name>{{.Title}}</name>
     <description>{{.Description}}</description>
-    <location>{{.Location}}</location>
   </skill>
 {{end}}
 </available_skills>

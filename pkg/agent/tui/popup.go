@@ -157,6 +157,10 @@ func timelineOptionStyle(role string) *color.Color {
 		return cUser
 	case "assistant":
 		return cAssistant
+	case "thinking":
+		return cThinking
+	case "skill":
+		return cSkill
 	case "tool_call":
 		return cToolCallText
 	case "tool_result_success", "tool_result_error":
@@ -176,7 +180,7 @@ func renderTimelineLabel(option popupOption, label string) string {
 		return style.Sprint(label)
 	}
 	nameEnd := nameStart + len(option.toolName)
-	return style.Sprint(label[:nameStart]) + cSystem.Sprint(option.toolName) + style.Sprint(label[nameEnd:])
+	return style.Sprint(label[:nameStart]) + cSkill.Sprint(option.toolName) + style.Sprint(label[nameEnd:])
 }
 
 func renderTimelineMarker(option popupOption, marker string) string {

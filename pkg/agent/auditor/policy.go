@@ -28,13 +28,14 @@ func (p PolicyDecision) String() string {
 func NewAuditorPolicy() *AuditorPolicy {
 	return &AuditorPolicy{
 		ToolMappings: map[contracts.ToolType]PolicyDecision{
-			contracts.ReadTool:   AllowPolicy,
-			contracts.ListTool:   AllowPolicy,
-			contracts.GlobTool:   AllowPolicy,
-			contracts.SearchTool: AllowPolicy,
-			contracts.WriteTool:  HumanPolicy,
-			contracts.EditTool:   HumanPolicy,
-			contracts.BashTool:   HumanPolicy,
+			contracts.ReadTool:      AllowPolicy,
+			contracts.ListTool:      AllowPolicy,
+			contracts.GlobTool:      AllowPolicy,
+			contracts.SearchTool:    AllowPolicy,
+			contracts.WriteTool:     HumanPolicy,
+			contracts.EditTool:      HumanPolicy,
+			contracts.BashTool:      HumanPolicy,
+			contracts.ReadSkillTool: AllowPolicy,
 		},
 	}
 }

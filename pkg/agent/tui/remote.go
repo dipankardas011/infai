@@ -176,6 +176,8 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 				kind = contracts.DeltaToolCall
 			case "tool_result":
 				kind = contracts.DeltaToolResult
+			case "skill_load":
+				kind = contracts.DeltaSkillLoad
 			}
 			if kind == contracts.DeltaContent {
 				reply.Reply += sseEv.Delta

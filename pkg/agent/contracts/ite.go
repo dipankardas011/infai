@@ -24,13 +24,14 @@ type ToolParameters struct {
 type ToolType string
 
 const (
-	ReadTool   ToolType = "read"
-	WriteTool  ToolType = "write"
-	EditTool   ToolType = "edit"
-	GlobTool   ToolType = "glob"
-	ListTool   ToolType = "list"
-	SearchTool ToolType = "search"
-	BashTool   ToolType = "bash"
+	ReadTool      ToolType = "read"
+	WriteTool     ToolType = "write"
+	EditTool      ToolType = "edit"
+	GlobTool      ToolType = "glob"
+	ListTool      ToolType = "list"
+	SearchTool    ToolType = "search"
+	BashTool      ToolType = "bash"
+	ReadSkillTool ToolType = "read_skill"
 )
 
 type ToolExecutionStatus string

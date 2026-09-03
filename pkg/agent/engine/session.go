@@ -17,6 +17,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/auditor"
 	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/memory"
 	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/dipankardas011/infai/pkg/ds"
@@ -53,9 +54,11 @@ type InfaiAgentSession struct {
 	persisted           int
 	pendingBranchParent uuid.UUID
 
-	auditorPolicy  *auditor.AuditorPolicy
-	availableTools []contracts.Tool
-	fileManager    *actuators.FileManager
+	auditorPolicy   *auditor.AuditorPolicy
+	availableTools  []contracts.Tool
+	availableSkills []contracts.Skill
+	fileManager     *actuators.FileManager
+	skillRegistry   *memory.SkillRegistry
 
 	// WARN: we do need to properly handle the Concurrency.
 	agentMapping    map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
@@ -124,8 +127,12 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 	o.timeline = timeline
 
 	o.configureFileTools()
+	if o.skillRegistry, err = memory.LoadSkillRegistry(cwd); err != nil {
+		return nil, fmt.Errorf("load skill registry: %w", err)
+	}
+	o.configureMemoryTools()
 
-	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, nil, cwd)
+	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, o.availableSkills, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +180,12 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 	}
 
 	o.configureFileTools()
-	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, nil, meta.Cwd)
+	if o.skillRegistry, err = memory.LoadSkillRegistry(meta.Cwd); err != nil {
+		return nil, fmt.Errorf("load skill registry: %w", err)
+	}
+	o.configureMemoryTools()
+
+	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, o.availableSkills, meta.Cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +200,10 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 }
 
 func (s *InfaiAgentSession) configureFileTools() {
-	s.availableTools = []contracts.Tool{
+	if len(s.availableTools) == 0 {
+		s.availableTools = []contracts.Tool{}
+	}
+	s.availableTools = append(s.availableTools,
 		actuators.ReadTool(),
 		actuators.ListTool(),
 		actuators.GlobTool(),
@@ -196,7 +211,21 @@ func (s *InfaiAgentSession) configureFileTools() {
 		actuators.WriteTool(),
 		actuators.EditTool(),
 		actuators.BashTool(),
+	)
+}
+
+func (s *InfaiAgentSession) configureMemoryTools() {
+	if len(s.availableTools) == 0 {
+		s.availableTools = []contracts.Tool{}
 	}
+
+	memoryTools := []contracts.Tool{}
+	memoryTools = append(memoryTools, memory.ReadSkillTool())
+	if s.skillRegistry != nil {
+		s.availableSkills = s.skillRegistry.Skills()
+	}
+
+	s.availableTools = append(s.availableTools, memoryTools...)
 }
 
 func (s *InfaiAgentSession) ID() uuid.UUID {
@@ -597,7 +626,7 @@ func (s *InfaiAgentSession) handleAgentComms(ctx context.Context) error {
 
 		switch msg.Kind {
 		case comms.AgentCommTool:
-			if err := s.handleToolComm(ctx, msg); err != nil {
+			if err := s.toolCallDispatcher(ctx, msg); err != nil {
 				return err
 			}
 		case comms.AgentCommSubagent:
@@ -608,8 +637,7 @@ func (s *InfaiAgentSession) handleAgentComms(ctx context.Context) error {
 	}
 }
 
-func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentComm) error {
-	ctx = actuators.WithFileManager(ctx, s.fileManager)
+func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.AgentComm) error {
 	var calls []contracts.ToolCall
 	if err := json.Unmarshal(msg.Payload, &calls); err != nil {
 		return err
@@ -618,6 +646,7 @@ func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentC
 	toolMessages := make([]contracts.ChatMessage, 0, len(calls))
 	for _, call := range calls {
 		policy := s.auditorPolicy.Check(contracts.ToolType(call.Function.Name))
+
 		s.l.DebugContext(ctx, "tool call received",
 			"agent_id", msg.From,
 			"call_id", call.ID,
@@ -625,38 +654,89 @@ func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentC
 			"policy", policy.String(),
 		)
 
-		s.events.Publish(store.Record{
-			Kind:      store.KindDelta,
-			Timestamp: time.Now().UTC(),
-			DeltaKind: contracts.DeltaToolCall,
-			Text:      toolCallDisplay(call),
-		})
+		if !memory.IsMemoryToolCall(contracts.ToolType(call.Function.Name)) {
+			s.events.Publish(store.Record{
+				Kind:      store.KindDelta,
+				Timestamp: time.Now().UTC(),
+				DeltaKind: contracts.DeltaToolCall,
+				Text:      toolCallDisplay(call),
+			})
+		}
 
 		status := string(contracts.ToolExecutionSuccess)
-		toolError := ""
 		var content string
-		var err error
 
-		switch policy {
-		case auditor.AllowPolicy:
-			content, err = actuators.ExecuteToolCall(ctx, call)
-		case auditor.HumanPolicy:
-			content, err = s.executeAfterApproval(ctx, msg.From, call)
-		default:
-			status = string(contracts.ToolExecutionDenied)
-			toolError = "tool execution was denied by session policy"
-			content = toolError
-		}
+		func() {
+			var err error
 
-		if err != nil {
-			if errors.Is(err, errApprovalDenied) {
+			switch policy {
+			case auditor.DenyPolicy:
 				status = string(contracts.ToolExecutionDenied)
-			} else {
-				status = string(contracts.ToolExecutionError)
+				content = "tool execution was denied by session policy"
+				s.events.Publish(store.Record{
+					Kind:      store.KindDelta,
+					Timestamp: time.Now().UTC(),
+					DeltaKind: contracts.DeltaToolResult,
+					Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
+				})
+				return
+			case auditor.HumanPolicy:
+				if err := s.executeAfterApproval(ctx, msg.From, call); err != nil {
+					if errors.Is(err, errApprovalDenied) {
+						status = string(contracts.ToolExecutionDenied)
+					} else {
+						status = string(contracts.ToolExecutionError)
+					}
+					content = err.Error()
+					s.events.Publish(store.Record{
+						Kind:      store.KindDelta,
+						Timestamp: time.Now().UTC(),
+						DeltaKind: contracts.DeltaToolResult,
+						Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
+					})
+					return
+				}
 			}
-			toolError = err.Error()
-			content = err.Error()
-		}
+
+			toolCtx := memory.WithSkillRegistry(
+				actuators.WithFileManager(ctx, s.fileManager),
+				s.skillRegistry,
+			)
+
+			if memory.IsMemoryToolCall(contracts.ToolType(call.Function.Name)) {
+				content, err = memory.ExecuteMemoryToolCall(toolCtx, call)
+				if err != nil {
+					status = string(contracts.ToolExecutionError)
+					content = err.Error()
+					s.events.Publish(store.Record{
+						Kind:      store.KindDelta,
+						Timestamp: time.Now().UTC(),
+						DeltaKind: contracts.DeltaToolResult,
+						Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
+					})
+					return
+				}
+				s.events.Publish(store.Record{
+					Kind:      store.KindDelta,
+					Timestamp: time.Now().UTC(),
+					DeltaKind: contracts.DeltaSkillLoad,
+					Text:      memory.ReadSkillNameFromCall(call),
+				})
+				return
+			}
+
+			content, err = actuators.ExecuteToolCall(toolCtx, call)
+			if err != nil {
+				status = string(contracts.ToolExecutionError)
+				content = err.Error()
+			}
+			s.events.Publish(store.Record{
+				Kind:      store.KindDelta,
+				Timestamp: time.Now().UTC(),
+				DeltaKind: contracts.DeltaToolResult,
+				Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
+			})
+		}()
 
 		s.l.DebugContext(ctx, "tool call completed",
 			"agent_id", msg.From,
@@ -664,25 +744,7 @@ func (s *InfaiAgentSession) handleToolComm(ctx context.Context, msg comms.AgentC
 			"tool", call.Function.Name,
 			"status", status,
 		)
-		s.events.Publish(store.Record{
-			Kind:      store.KindDelta,
-			Timestamp: time.Now().UTC(),
-			DeltaKind: contracts.DeltaToolResult,
-			Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
-		})
 
-		if _, persistErr := s.timeline.AppendToHead(store.Record{
-			Kind:      store.KindToolResult,
-			Timestamp: time.Now().UTC(),
-			ToolResult: &store.ToolResultRecord{
-				CallID: call.ID,
-				Status: status,
-				Output: content,
-				Error:  toolError,
-			},
-		}); persistErr != nil {
-			return fmt.Errorf("persist tool result: %w", persistErr)
-		}
 		toolMessages = append(toolMessages, contracts.NewToolMessage(call.ID, content))
 	}
 	payload, err := json.Marshal(toolMessages)
@@ -706,10 +768,10 @@ func toolCallDisplay(call contracts.ToolCall) string {
 	return fmt.Sprintf("%s %s", call.Function.Name, call.Function.Arguments)
 }
 
-func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uuid.UUID, call contracts.ToolCall) (string, error) {
+func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uuid.UUID, call contracts.ToolCall) error {
 	approvalID, err := uuid.NewV7()
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	fingerprintInput := approvalID.String() + s.sessionID.String() + agentID.String() + call.ID + call.Function.Name + call.Function.Arguments
@@ -733,7 +795,7 @@ func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uu
 	s.approvalMu.Lock()
 	if s.pendingApproval != nil {
 		s.approvalMu.Unlock()
-		return "", errors.New("another tool approval is already pending")
+		return errors.New("another tool approval is already pending")
 	}
 	s.pendingApproval = pending
 	s.approvalMu.Unlock()
@@ -774,9 +836,8 @@ func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uu
 			"decision", decision.Decision,
 		)
 		if decision.Decision != ApprovalApprove {
-			return "", errApprovalDenied
+			return errApprovalDenied
 		}
-		return actuators.ExecuteToolCall(ctx, call)
 	case <-ctx.Done():
 		s.approvalMu.Lock()
 		if s.pendingApproval == pending {
@@ -793,8 +854,10 @@ func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uu
 				Fingerprint: request.Fingerprint,
 			},
 		})
-		return "", ctx.Err()
+		return ctx.Err()
 	}
+
+	return nil
 }
 
 func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision ApprovalDecisionFromClient) error {

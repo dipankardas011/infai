@@ -246,6 +246,8 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 				cSystem.Fprintf(out, "  ↳ tool call %s\n", text)
 			case contracts.DeltaToolResult:
 				cSystem.Fprintf(out, "  ↳ tool result %s\n", text)
+			case contracts.DeltaSkillLoad:
+				cSkill.Fprintf(out, "  ✦ skill %s\n", text)
 			}
 		}, nil)
 		if thinkingShown && !contentStarted {

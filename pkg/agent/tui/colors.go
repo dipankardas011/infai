@@ -16,4 +16,5 @@ var (
 	cError          = color.New(color.FgRed)              // errors
 	cToolCallText   = color.New(color.FgHiWhite)          // tool-call text and arguments
 	cToolResultText = color.New(color.FgHiBlack)          // tool-result text and output
+	cSkill          = color.New(color.FgHiCyan)           // skill loads
 )

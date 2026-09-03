@@ -3,6 +3,7 @@ package tui
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -67,6 +68,7 @@ type block struct {
 	toolKind   string // "call" | "result"
 	toolStatus string
 	toolName   string
+	skillName  string
 }
 
 // histRow is one rendered, uncolored line of the conversation, tagged with
@@ -78,6 +80,7 @@ type histRow struct {
 	toolKind   string
 	toolStatus string
 	toolName   string
+	skillName  string
 }
 
 // pos is a cell in the conversation content (row = index into rows).
@@ -228,6 +231,8 @@ func runChatTUI(ctx context.Context, c Client, sessions []store.SessionMeta, opt
 					t.appendToolEvent("tool call", ev.text)
 				case contracts.DeltaToolResult:
 					t.appendToolEvent("tool result", ev.text)
+				case contracts.DeltaSkillLoad:
+					t.appendSkillLoad(ev.text)
 				default:
 					t.appendDelta(ev.kind, ev.text)
 				}
@@ -651,7 +656,30 @@ func (t *chatTUI) showBranchTimeline() {
 		t.redraw()
 		return
 	}
-	options := make([]popupOption, 0, len(events))
+	options, selectIDs := timelineOptions(events, parents, byID)
+	if len(options) == 0 {
+		t.appendError(fmt.Errorf("timeline is empty"))
+		t.redraw()
+		return
+	}
+	t.showPopup("branch timeline", []string{"select where the next prompt should branch"}, options, func(idx int) {
+		selected := byID[selectIDs[idx]]
+		if err := t.client.SelectBranch(t.ctx, t.session.ID, selected.ID); err != nil {
+			t.appendError(err)
+			return
+		}
+		t.blocks = append(t.blocks, block{role: "system", text: branchSelectionLabel(selected)})
+	}, func() {})
+}
+
+// timelineOptions flattens the event tree into popup rows. A reasoning-rich
+// assistant message expands into two rows — a ◈ thinking row followed by its
+// tool-call/result row — so thinking reads in sequence above the tool it led
+// to, not appended to it. selectIDs is parallel to options: both map to the
+// same event for branch selection.
+func timelineOptions(events []TimelineEvent, parents map[uuid.UUID]uuid.UUID, byID map[uuid.UUID]TimelineEvent) ([]popupOption, []uuid.UUID) {
+	var options []popupOption
+	var selectIDs []uuid.UUID
 	for _, event := range events {
 		depth := 0
 		cursor := event
@@ -661,23 +689,29 @@ func (t *chatTUI) showBranchTimeline() {
 			}
 			cursor = byID[parents[cursor.ID]]
 		}
+		prefix := timelineTreePrefix(event, parents, byID)
+
+		if record := event.Record; record != nil && record.Message != nil && record.Message.ReasoningContent != "" {
+			options = append(options, popupOption{
+				prefix: prefix,
+				label:  timelinePreview(record.Message.ReasoningContent),
+				style:  "thinking",
+				marker: "◈ ",
+			})
+			selectIDs = append(selectIDs, event.ID)
+		}
+
 		options = append(options, popupOption{
-			prefix:       timelineTreePrefix(event, parents, byID),
+			prefix:       prefix,
 			label:        timelineEventLabel(event),
 			style:        timelineEventRole(event),
 			marker:       timelineEventMarker(event),
 			markerStatus: timelineEventMarkerStatus(event),
 			toolName:     timelineEventToolName(event),
 		})
+		selectIDs = append(selectIDs, event.ID)
 	}
-	t.showPopup("branch timeline", []string{"select where the next prompt should branch"}, options, func(idx int) {
-		selected := events[idx]
-		if err := t.client.SelectBranch(t.ctx, t.session.ID, selected.ID); err != nil {
-			t.appendError(err)
-			return
-		}
-		t.blocks = append(t.blocks, block{role: "system", text: branchSelectionLabel(selected)})
-	}, func() {})
+	return options, selectIDs
 }
 
 // timelineTreeOrder lays out the event graph as a tree instead of displaying
@@ -765,14 +799,20 @@ func timelineEventLabel(event TimelineEvent) string {
 		label = event.Record.Message.Role
 		text = event.Record.Message.Text()
 	}
-	text = strings.ReplaceAll(text, "\n", " ")
-	if len(text) > 48 {
-		text = text[:48] + "..."
-	}
+	text = timelinePreview(text)
 	if text == "" {
 		text = string(event.Record.Kind)
 	}
 	return label + "  " + text
+}
+
+// timelinePreview flattens and truncates a text field for the timeline label.
+func timelinePreview(text string) string {
+	text = strings.ReplaceAll(text, "\n", " ")
+	if len(text) > 48 {
+		text = text[:48] + "..."
+	}
+	return text
 }
 
 func branchSelectionLabel(event TimelineEvent) string {
@@ -793,6 +833,9 @@ func branchSelectionLabel(event TimelineEvent) string {
 
 func timelineEventRole(event TimelineEvent) string {
 	if event.Kind == store.KindToolCall {
+		if isSkillEvent(event) {
+			return "skill"
+		}
 		return "tool_call"
 	}
 	if event.Kind == store.KindToolResult {
@@ -803,6 +846,9 @@ func timelineEventRole(event TimelineEvent) string {
 	}
 	if event.Record != nil && event.Record.Message != nil {
 		if len(event.Record.Message.ToolCalls) > 0 {
+			if isSkillTool(event.Record.Message.ToolCalls[0].Function.Name) {
+				return "skill"
+			}
 			return "tool_call"
 		}
 		switch event.Record.Message.Role {
@@ -818,6 +864,8 @@ func timelineEventRole(event TimelineEvent) string {
 
 func timelineEventMarker(event TimelineEvent) string {
 	switch timelineEventRole(event) {
+	case "skill":
+		return "✦ "
 	case "tool_call":
 		return "▲ "
 	case "tool_result_success", "tool_result_error":
@@ -848,6 +896,26 @@ func timelineEventToolName(event TimelineEvent) string {
 		return event.Record.Message.ToolCalls[0].Function.Name
 	}
 	return ""
+}
+
+// isSkillEvent reports whether the event represents a skill load rather than a
+// regular tool call. Skill loads are memory reads, not effects, so they get a
+// distinct marker/color instead of the generic tool triangle.
+func isSkillEvent(event TimelineEvent) bool {
+	if event.Record == nil {
+		return false
+	}
+	if event.Record.ToolCall != nil {
+		return isSkillTool(event.Record.ToolCall.Name)
+	}
+	if event.Record.Message != nil && len(event.Record.Message.ToolCalls) > 0 {
+		return isSkillTool(event.Record.Message.ToolCalls[0].Function.Name)
+	}
+	return false
+}
+
+func isSkillTool(name string) bool {
+	return name == string(contracts.ReadSkillTool)
 }
 
 func (t *chatTUI) appendDelta(kind contracts.DeltaKind, text string) {
@@ -899,6 +967,10 @@ func (t *chatTUI) appendCompactionSummary(summary string) {
 	t.blocks = append(t.blocks, block{role: "compaction", text: summary})
 }
 
+func (t *chatTUI) appendSkillLoad(name string) {
+	t.blocks = append(t.blocks, block{role: "skill", text: name})
+}
+
 func compactionBoundary(width int) string {
 	label := " context boundary "
 	if width <= len(label) {
@@ -921,6 +993,17 @@ func (t *chatTUI) appendError(err error) {
 // session renders its history.
 func blocksFromRecords(records []store.Record) []block {
 	var blocks []block
+	skillCallIDs := make(map[string]struct{})
+	for _, rec := range records {
+		if rec.Message == nil || rec.Message.Role != "assistant" {
+			continue
+		}
+		for _, call := range rec.Message.ToolCalls {
+			if call.Function.Name == string(contracts.ReadSkillTool) {
+				skillCallIDs[call.ID] = struct{}{}
+			}
+		}
+	}
 	for _, rec := range records {
 		switch rec.Kind {
 		case store.KindCompaction:
@@ -941,6 +1024,9 @@ func blocksFromRecords(records []store.Record) []block {
 			continue
 		case store.KindToolResult:
 			if rec.ToolResult != nil {
+				if _, ok := skillCallIDs[rec.ToolResult.CallID]; ok {
+					continue
+				}
 				blocks = append(blocks, block{
 					role:       "tool",
 					text:       "tool result: " + toolResultDisplay(rec.ToolResult),
@@ -968,6 +1054,11 @@ func blocksFromRecords(records []store.Record) []block {
 				blocks = append(blocks, block{role: "assistant", text: m.Text()})
 			}
 			for _, call := range m.ToolCalls {
+				if call.Function.Name == string(contracts.ReadSkillTool) {
+					blocks = append(blocks, block{role: "skill", text: skillNameFromCall(call)})
+					skillCallIDs[call.ID] = struct{}{}
+					continue
+				}
 				blocks = append(blocks, block{
 					role:     "tool",
 					text:     "tool call: " + toolCallDisplay(call),
@@ -976,6 +1067,9 @@ func blocksFromRecords(records []store.Record) []block {
 				})
 			}
 		case "tool":
+			if _, ok := skillCallIDs[m.ToolCallID]; ok {
+				continue
+			}
 			blocks = append(blocks, block{
 				role:       "tool",
 				text:       "tool result: " + m.Text(),
@@ -985,6 +1079,16 @@ func blocksFromRecords(records []store.Record) []block {
 		}
 	}
 	return blocks
+}
+
+func skillNameFromCall(call contracts.ToolCall) string {
+	var args struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err == nil && args.Name != "" {
+		return args.Name
+	}
+	return string(contracts.ReadSkillTool)
 }
 
 func toolCallDisplay(call contracts.ToolCall) string {
@@ -1313,6 +1417,8 @@ func (t *chatTUI) renderRow(hr histRow, selected bool, a, b int) string {
 		return cSystem.Sprint(s)
 	case "compaction":
 		return cThinking.Sprint(s)
+	case "skill":
+		return renderSkillRow(hr, selected, a, b)
 	case "status":
 		return cSystem.Sprint(s)
 	case "tool":
@@ -1349,6 +1455,24 @@ func renderToolRow(hr histRow, selected bool, a, b int) string {
 		cSystem.Sprint(string(markerRunes[2:])) + body
 }
 
+func renderSkillRow(hr histRow, selected bool, a, b int) string {
+	if hr.skillName == "" {
+		if selected {
+			return renderSelectedSegment(hr.plain, cSkill, 0, a, b)
+		}
+		return cSkill.Sprint(hr.plain)
+	}
+	marker := "✦ "
+	label := "Skill loaded: "
+	if !selected {
+		return cSkill.Sprint(marker) + cChatText.Sprint(label) + cSkill.Sprint(hr.skillName)
+	}
+	nameOffset := utf8.RuneCountInString(marker + label)
+	return renderSelectedSegment(marker, cSkill, 0, a, b) +
+		renderSelectedSegment(label, cChatText, utf8.RuneCountInString(marker), a, b) +
+		renderSelectedSegment(hr.skillName, cSkill, nameOffset, a, b)
+}
+
 func renderToolText(text, toolName string, bodyStyle *color.Color, selected bool, offset, start, end int) string {
 	nameStart := strings.Index(text, toolName)
 	if toolName == "" || nameStart < 0 {
@@ -1363,7 +1487,7 @@ func renderToolText(text, toolName string, bodyStyle *color.Color, selected bool
 			renderSelectedSegment(toolName, cSystem, offset+utf8.RuneCountInString(text[:nameStart]), start, end) +
 			renderSelectedSegment(text[nameEnd:], bodyStyle, offset+utf8.RuneCountInString(text[:nameEnd]), start, end)
 	}
-	return bodyStyle.Sprint(text[:nameStart]) + cSystem.Sprint(toolName) + bodyStyle.Sprint(text[nameEnd:])
+	return bodyStyle.Sprint(text[:nameStart]) + cSkill.Sprint(toolName) + bodyStyle.Sprint(text[nameEnd:])
 }
 
 func renderChatRow(text string, prefixLen int, selected bool, a, b int, role string) string {
@@ -1743,6 +1867,14 @@ func (t *chatTUI) buildRows() []histRow {
 			out = append(out, histRow{plain: "✓ compaction summary:", style: "compaction"})
 			for _, l := range wrap(b.text, t.width-3) {
 				out = append(out, histRow{plain: "  " + l, style: "compaction"})
+			}
+		case "skill":
+			for i, l := range wrap(b.text, t.width-3) {
+				if i == 0 {
+					out = append(out, histRow{plain: "✦ Skill loaded: " + l, style: "skill", skillName: l})
+				} else {
+					out = append(out, histRow{plain: "  " + l, style: "skill"})
+				}
 			}
 		case "tool":
 			for i, l := range wrap(b.text, t.width-3) {
