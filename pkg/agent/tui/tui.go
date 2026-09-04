@@ -355,7 +355,7 @@ func updateState(s *replState, reply *ChatReply) {
 	s.session.TurnCount++
 }
 
-// renderStatus prints the footer status bar (model, session, context, turns).
+// renderStatus prints the footer status bar (model, session, context).
 func renderStatus(out io.Writer, s *replState) {
 	if s.session.ID == uuid.Nil {
 		cHeader.Fprintln(out, "no session · edit models.json to configure providers/models")
@@ -369,7 +369,6 @@ func renderStatus(out io.Writer, s *replState) {
 		"model: " + s.session.Model,
 		"sess: " + s.session.ID.String(),
 		fmt.Sprintf("ctx: %d/%d%s", s.used, s.session.ContextWindow, pct),
-		fmt.Sprintf("turns: %d", s.session.TurnCount),
 	}, "  ·  ")
 	cHeader.Fprintln(out, line)
 }

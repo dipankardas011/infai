@@ -552,7 +552,13 @@ func (m *chatModel) View() tea.View {
 			parts[i] = fitArea(m.areas[i], parts[i])
 		}
 	}
-	base := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	visibleParts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			visibleParts = append(visibleParts, part)
+		}
+	}
+	base := lipgloss.JoinVertical(lipgloss.Left, visibleParts...)
 	if m.modal != nil && m.modal.kind != modalApproval && m.modal.kind != modalTimeline {
 		base = renderSelectionScreen(m.modal, m.width, m.height, m.styles)
 	} else if m.modal != nil {
@@ -594,6 +600,7 @@ func (m *chatModel) headerView() string {
 
 func (m *chatModel) statusView() string {
 	status := "ready"
+	style := m.styles.status
 	if m.session.ID == uuid.Nil {
 		status = "choose a session to begin"
 	} else {
@@ -601,15 +608,16 @@ func (m *chatModel) statusView() string {
 		if m.session.ContextWindow > 0 {
 			pct = m.used * 100 / m.session.ContextWindow
 		}
-		status = fmt.Sprintf("%s  ·  ctx %d%%  ·  %s  ·  %d turns", m.session.Model, pct, shortID(m.session.ID), m.session.TurnCount)
+		status = fmt.Sprintf("%s  ·  ctx %d%%  ·  %s", m.session.Model, pct, shortID(m.session.ID))
 	}
 	if m.working {
 		status = fmt.Sprintf("%s  ·  %s working %s", m.session.Model, spinnerFrame(m.workBegan), time.Since(m.workBegan).Round(time.Second))
+		style = m.styles.statusBusy
 	}
 	if !m.viewport.AtBottom() {
 		status += "  ·  viewing earlier output"
 	}
-	return fullWidth(m.styles.status, m.width, status)
+	return fullWidth(style, m.width, status)
 }
 
 func (m *chatModel) composerView() string {

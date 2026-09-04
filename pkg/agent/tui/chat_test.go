@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -47,6 +48,48 @@ func TestComposerGrowsAndTranscriptYieldsSpace(t *testing.T) {
 	}
 	if got := sumAreaHeights(m.areas); got != 24 {
 		t.Fatalf("allocated height=%d want=24", got)
+	}
+}
+
+func TestEmptyCommandMenuDoesNotReserveARow(t *testing.T) {
+	areas := layoutRows(80, 12,
+		intrinsic("header"), fill(), intrinsic("status"), intrinsic(""), intrinsic("composer"),
+	)
+	if areas[3].height != 0 {
+		t.Fatalf("empty command menu height=%d want 0", areas[3].height)
+	}
+	if areas[1].height != 9 {
+		t.Fatalf("viewport height=%d want 9", areas[1].height)
+	}
+}
+
+func TestEmptyCommandMenuDoesNotPushComposerPastTerminal(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 18})
+
+	if height := lipgloss.Height(m.View().Content); height > 18 {
+		t.Fatalf("chat view height=%d exceeds terminal height 18", height)
+	}
+}
+
+func TestWorkingStatusIsProminentAndOmitsTurns(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.width = 80
+	m.session = store.SessionMeta{ID: uuid.New(), Model: "gemma4-e2b-it", TurnCount: 7}
+	normalStatus := ansi.Strip(m.statusView())
+	if strings.Contains(normalStatus, "turn") {
+		t.Fatalf("status contains turn count: %q", normalStatus)
+	}
+	m.working = true
+	m.workBegan = time.Now()
+	workingStatus := ansi.Strip(m.statusView())
+	if !strings.Contains(workingStatus, "working") {
+		t.Fatalf("working status lacks activity label: %q", workingStatus)
+	}
+	if m.styles.statusBusy.GetForeground() != everforest.Yellow {
+		t.Fatalf("working status foreground=%v want yellow", m.styles.statusBusy.GetForeground())
 	}
 }
 

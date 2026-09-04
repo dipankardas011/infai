@@ -30,13 +30,13 @@ func layoutRows(width, height int, tracks ...rowTrack) []rowArea {
 			fills++
 			continue
 		}
-		fixed += lipgloss.Height(track.content)
+		fixed += intrinsicHeight(track.content)
 	}
 	remaining := max(height-fixed, 0)
 	heights := make([]int, len(tracks))
 	for i, track := range tracks {
 		if !track.fill {
-			heights[i] = lipgloss.Height(track.content)
+			heights[i] = intrinsicHeight(track.content)
 		}
 	}
 	for overflow := max(fixed-height, 0); overflow > 0; overflow-- {
@@ -75,6 +75,13 @@ func layoutRows(width, height int, tracks ...rowTrack) []rowArea {
 		y += h
 	}
 	return areas
+}
+
+func intrinsicHeight(content string) int {
+	if content == "" {
+		return 0
+	}
+	return lipgloss.Height(content)
 }
 
 func sumHeights(heights []int) int {
