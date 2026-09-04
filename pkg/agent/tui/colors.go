@@ -18,3 +18,18 @@ var (
 	cToolResultText = color.New(color.FgHiBlack)          // tool-result text and output
 	cSkill          = color.New(color.FgHiCyan)           // skill loads
 )
+
+func timelineRoleColor(role string) *color.Color {
+	switch role {
+	case "user":
+		return color.New(color.FgBlue)
+	case "thinking":
+		return color.New(color.FgHiBlack)
+	case "tool_call", "tool_result":
+		return color.New(color.FgHiMagenta)
+	case "skill":
+		return color.New(color.FgCyan)
+	default:
+		return color.New(color.FgHiGreen)
+	}
+}

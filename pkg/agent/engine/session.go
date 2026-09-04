@@ -250,7 +250,11 @@ func (s *InfaiAgentSession) Timeline() ([]store.Event, uuid.UUID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	events, err := s.timeline.LoadEntireTimeline()
-	return events, s.timeline.CurrentHeadEventID(), err
+	head := s.timeline.CurrentHeadEventID()
+	if s.pendingBranchParent != uuid.Nil {
+		head = s.pendingBranchParent
+	}
+	return events, head, err
 }
 
 func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) error {

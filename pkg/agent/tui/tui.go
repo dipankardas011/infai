@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/term"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/store"
@@ -124,7 +125,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 	// the TUI through floating popups, so the user never sees a plain-text
 	// numbered prompt; the whole launch is the chat interface.
 	if term.IsTerminal(os.Stdout.Fd()) {
-		return runChatTUI(ctx, c, sessions, opts)
+		return runChatTUI(ctx, c, sessions, opts, in, out)
 	}
 
 	// Non-interactive → the plain line REPL: resume the explicitly requested
@@ -504,16 +505,25 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 	if err != nil {
 		return err
 	}
-	parents := make(map[uuid.UUID]uuid.UUID, len(view.Events))
-	byID := make(map[uuid.UUID]TimelineEvent, len(view.Events))
-	options := make([]TimelineEvent, 0, len(view.Events))
-	for _, event := range view.Events {
-		parents[event.ID] = event.ParentID
-		byID[event.ID] = event
-		options = append(options, event)
-	}
-	for i, event := range options {
-		fmt.Fprintf(out, "  %d  %s%s\n", i, timelineTreePrefix(event, parents, byID), timelineEventLabel(event))
+	rows := timelineTreeRows(view.Events)
+	options := make([]TimelineEvent, 0, len(rows))
+	for _, row := range rows {
+		displays := timelineEventDisplays(row.event)
+		for displayIndex, display := range displays {
+			current := "  "
+			if row.event.ID == view.Head && displayIndex == len(displays)-1 {
+				current = "* "
+			}
+			tree, fork := row.prefix, timelineForkLabel(row.fork)
+			if displayIndex > 0 {
+				tree = row.subprefix + strings.Repeat(" ", lipgloss.Width(fork))
+				fork = ""
+			}
+			fmt.Fprintf(out, "  %d  %s%s%s", len(options), current, tree, fork)
+			timelineRoleColor(display.role).Fprintf(out, "%s:", display.role)
+			fmt.Fprintf(out, " %s\n", display.text)
+			options = append(options, row.event)
+		}
 	}
 	fmt.Fprint(out, "branch at> ")
 	if !scan.Scan() {
