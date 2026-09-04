@@ -47,6 +47,7 @@ type harnessStyles struct {
 	composer    lipgloss.Style
 	status      lipgloss.Style
 	statusBusy  lipgloss.Style
+	sessionName lipgloss.Style
 	muted       lipgloss.Style
 	userMarker  lipgloss.Style
 	assistant   lipgloss.Style
@@ -78,8 +79,9 @@ func newHarnessStyles() harnessStyles {
 		brand:       lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
 		headerMeta:  lipgloss.NewStyle().Foreground(everforest.Muted),
 		composer:    lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
-		status:      lipgloss.NewStyle().Foreground(everforest.Muted).Padding(0, 1),
-		statusBusy:  lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true).Padding(0, 1),
+		status:      lipgloss.NewStyle().Foreground(everforest.Muted),
+		statusBusy:  lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
+		sessionName: lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true),
 		muted:       lipgloss.NewStyle().Foreground(everforest.Muted),
 		userMarker:  lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
 		assistant:   lipgloss.NewStyle().Foreground(everforest.Text),

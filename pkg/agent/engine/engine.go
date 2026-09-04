@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/agent"
 	"github.com/dipankardas011/infai/pkg/agent/config"
@@ -289,15 +291,53 @@ func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 	return nil
 }
 
+// RenameSession updates the persisted display name of a session, whether it is
+// currently loaded or not. It returns the updated metadata.
+func (e *InfaiAgentEngine) RenameSession(id uuid.UUID, name string) (*store.SessionMeta, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("engine: session name is required")
+	}
+	e.mu.Lock()
+	sess, ok := e.active[id]
+	e.mu.Unlock()
+	if ok {
+		if err := sess.Rename(name); err != nil {
+			return nil, err
+		}
+		return &sess.meta, nil
+	}
+	meta, err := e.sessionStore.LoadMeta(id)
+	if err != nil {
+		return nil, err
+	}
+	meta.Name = name
+	meta.UpdatedAt = time.Now().UTC()
+	if err := e.sessionStore.SaveMeta(meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
 // ListSessions returns every saved session's meta (active or not), newest
 // first.
-func (e *InfaiAgentEngine) ListSessions() []store.SessionMeta {
+func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 	metas, err := e.sessionStore.List()
 	if err != nil {
 		e.bgLogger.Debug("list sessions failed", "error", err)
 		return nil
 	}
-	return metas
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	summaries := make([]contracts.SessionSummary, 0, len(metas))
+	for _, meta := range metas {
+		_, active := e.active[meta.ID]
+		summaries = append(summaries, contracts.SessionSummary{
+			ID: meta.ID, Name: meta.Name, Provider: meta.Provider, Model: meta.Model,
+			Cwd: meta.Cwd, CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt, Active: active,
+		})
+	}
+	return summaries
 }
 
 // GetSessionRecords returns a session's meta plus its active timeline records.

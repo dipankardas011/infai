@@ -267,6 +267,18 @@ func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) error {
 	return nil
 }
 
+// Rename persists a new display name for the session.
+func (s *InfaiAgentSession) Rename(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrSessionClosed
+	}
+	s.meta.Name = name
+	s.meta.UpdatedAt = time.Now().UTC()
+	return s.store.SaveMeta(s.meta)
+}
+
 // SetModel rebuilds the session's model adapter for the given provider and
 // model and records the change in the session meta.
 func (s *InfaiAgentSession) SetModel(p *store.Provider, name string, ctxWindow int) {
@@ -374,6 +386,13 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 	if appendErr != nil {
 		s.l.Error("persist user message", "session_id", s.sessionID, "error", appendErr)
 		return nil, fmt.Errorf("persist user message: %w", appendErr)
+	}
+	if s.meta.Name == "" {
+		s.meta.Name = sessionNameFromPrompt(prompt)
+		s.meta.UpdatedAt = time.Now().UTC()
+		if err := s.store.SaveMeta(s.meta); err != nil {
+			s.l.Error("persist session name", "session_id", s.sessionID, "error", err)
+		}
 	}
 
 	s.persisted = len(s.history)

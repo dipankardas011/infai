@@ -20,6 +20,10 @@ type SetSessionModelRequest struct {
 	Model    string `json:"model"`
 }
 
+type RenameSessionRequest struct {
+	Name string `json:"name"`
+}
+
 type ChatRequest struct {
 	Prompt string `json:"prompt"`
 }
@@ -55,6 +59,7 @@ type ChatResponse struct {
 	Status           string                  `json:"status"`
 	Reply            string                  `json:"reply"`
 	Model            string                  `json:"model"`
+	Name             string                  `json:"name,omitempty"`
 	ContextWindow    int                     `json:"ctx_window"`
 	ReasoningContent string                  `json:"reasoning_content,omitempty"`
 	Pending          *engine.ApprovalRequest `json:"pending,omitempty"`
@@ -85,6 +90,7 @@ type ChatDoneEvent struct {
 	Reply            string                  `json:"reply"`
 	ReasoningContent string                  `json:"reasoning_content"`
 	Model            string                  `json:"model"`
+	Name             string                  `json:"name,omitempty"`
 	ContextWindow    int                     `json:"ctx_window"`
 	Pending          *engine.ApprovalRequest `json:"pending,omitempty"`
 	Usage            *contracts.TokenUsage   `json:"usage,omitempty"`

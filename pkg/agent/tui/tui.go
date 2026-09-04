@@ -25,6 +25,7 @@ type ChatReply struct {
 	ReasoningContent string
 	SessionID        uuid.UUID
 	Model            string
+	Name             string
 	ContextWindow    int
 	Usage            *contracts.TokenUsage
 	ContextTokens    int
@@ -65,7 +66,8 @@ type Client interface {
 	LoadSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, error)
 	GetSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, []store.Record, error)
 	DeleteSession(ctx context.Context, id uuid.UUID) error
-	ListSessions(ctx context.Context) ([]store.SessionMeta, error)
+	RenameSession(ctx context.Context, id uuid.UUID, name string) (*store.SessionMeta, error)
+	ListSessions(ctx context.Context) ([]contracts.SessionSummary, error)
 	ListProviders(ctx context.Context) ([]store.Provider, error)
 	SetSessionModel(ctx context.Context, provider, model string) error
 	Compact(ctx context.Context) (*store.SessionMeta, error)
@@ -391,6 +393,7 @@ func runCommand(ctx context.Context, c Client, out io.Writer, s *replState, line
   /session load <uuid>           resume a saved session
   /session rm <uuid>             delete a saved session
   /new                           start a fresh session
+  /rename <name>                 rename the current session
   /ctx                           show context used vs total
   /compact                       compact the current conversation
   /timeline                      inspect and select a branch point
@@ -424,6 +427,21 @@ multi-line: end a line with \ to continue typing on the next line`)
 		}
 		return false, fmt.Errorf("usage: /model | /model <provider> <model>")
 
+	case "/rename":
+		if s.session.ID == uuid.Nil {
+			return false, fmt.Errorf("no active session")
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(line, "/rename"))
+		if name == "" {
+			return false, fmt.Errorf("usage: /rename <name>")
+		}
+		if _, err := c.RenameSession(ctx, s.session.ID, name); err != nil {
+			return false, err
+		}
+		s.session.Name = name
+		cSystem.Fprintf(out, "session renamed to %q\n", name)
+		return false, nil
+
 	case "/sessions":
 		sess, err := c.ListSessions(ctx)
 		if err != nil {
@@ -434,8 +452,11 @@ multi-line: end a line with \ to continue typing on the next line`)
 			return false, nil
 		}
 		for _, m := range sess {
-			fmt.Fprintf(out, "%-36s %-20s turns=%d updated=%s\n",
-				m.ID, m.Model, m.TurnCount, m.UpdatedAt)
+			status := "saved"
+			if m.Active {
+				status = "active"
+			}
+			fmt.Fprintf(out, "%-36s %-20s %-8s updated=%s\n", m.ID, m.Model, status, m.UpdatedAt)
 		}
 		return false, nil
 
@@ -622,7 +643,7 @@ func chooseModel(ctx context.Context, c Client, out io.Writer, scan *bufio.Scann
 // pickSession lists the engine's saved sessions and reads a numbered choice:
 // 0 starts a new session, 1..N resume an existing one. Returns uuid.Nil for a
 // new session.
-func pickSession(ctx context.Context, c Client, out io.Writer, scan *bufio.Scanner, sessions []store.SessionMeta) (uuid.UUID, error) {
+func pickSession(ctx context.Context, c Client, out io.Writer, scan *bufio.Scanner, sessions []contracts.SessionSummary) (uuid.UUID, error) {
 	cSystem.Fprintln(out, "sessions:")
 	fmt.Fprintf(out, "  %d  start a new session\n", 0)
 	for i, m := range sessions {

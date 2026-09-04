@@ -18,6 +18,7 @@ import (
 // identity.
 type SessionMeta struct {
 	ID            uuid.UUID `json:"id"`
+	Name          string    `json:"name,omitempty"`
 	Provider      string    `json:"provider"`
 	Model         string    `json:"model"`
 	Cwd           string    `json:"cwd,omitempty"`
@@ -29,6 +30,7 @@ type SessionMeta struct {
 
 type sessionFile struct {
 	ID           uuid.UUID    `json:"id"`
+	Name         string       `json:"name,omitempty"`
 	Cwd          string       `json:"cwd,omitempty"`
 	CurrentModel currentModel `json:"current_model"`
 	CreatedAt    time.Time    `json:"created_at"`
@@ -43,8 +45,9 @@ type currentModel struct {
 
 func newSessionFile(meta SessionMeta) sessionFile {
 	return sessionFile{
-		ID:  meta.ID,
-		Cwd: meta.Cwd,
+		ID:   meta.ID,
+		Name: meta.Name,
+		Cwd:  meta.Cwd,
 		CurrentModel: currentModel{
 			Provider: meta.Provider,
 			Model:    meta.Model,
@@ -57,6 +60,7 @@ func newSessionFile(meta SessionMeta) sessionFile {
 func (f sessionFile) meta() SessionMeta {
 	return SessionMeta{
 		ID:        f.ID,
+		Name:      f.Name,
 		Provider:  f.CurrentModel.Provider,
 		Model:     f.CurrentModel.Model,
 		Cwd:       f.Cwd,

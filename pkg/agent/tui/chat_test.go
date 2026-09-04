@@ -218,7 +218,7 @@ func TestSessionScreenShowsActiveAndInactiveStatus(t *testing.T) {
 	inactive := uuid.New()
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.session.ID = active
-	m.showSessions([]store.SessionMeta{
+	m.showSessions([]contracts.SessionSummary{
 		{ID: active, Model: "active-model", Cwd: "/active"},
 		{ID: inactive, Model: "saved-model", Cwd: "/saved"},
 	}, false)
@@ -229,6 +229,48 @@ func TestSessionScreenShowsActiveAndInactiveStatus(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Fatalf("session screen does not contain %q", want)
 		}
+	}
+}
+
+func TestSessionWorkspaceShowsBrandAndSections(t *testing.T) {
+	active := uuid.New()
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.session.ID = active
+	m.showSessions([]contracts.SessionSummary{
+		{ID: active, Model: "active-model", Cwd: "/active"},
+		{ID: uuid.New(), Model: "saved-model", Cwd: "/saved"},
+	}, false)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"INFAI HARNESS", "SESSION WORKSPACE", "NEW SESSION", "ACTIVE SESSIONS", "ALL SESSIONS", "active-model", "saved-model"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("session workspace does not contain %q", want)
+		}
+	}
+	if width := lipgloss.Width(m.View().Content); width > 120 {
+		t.Fatalf("session workspace width=%d exceeds terminal", width)
+	}
+	if height := lipgloss.Height(m.View().Content); height > 30 {
+		t.Fatalf("session workspace height=%d exceeds terminal", height)
+	}
+}
+
+func TestWorkingTurnDoesNotQueueInputOrOpenSessions(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.working = true
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
+	_, _ = m.Update(tea.PasteMsg{Content: "queued"})
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
+
+	if m.composer.Value() != "" {
+		t.Fatalf("working turn queued composer input %q", m.composer.Value())
+	}
+	if m.modal != nil {
+		t.Fatal("working turn opened the session workspace")
 	}
 }
 

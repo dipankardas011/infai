@@ -41,6 +41,7 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("GET /v1/sessions/{id}/timeline", s.handleGetTimeline)
 	mux.HandleFunc("POST /v1/sessions/{id}/timeline/branch", s.handleBranchTimeline)
 	mux.HandleFunc("POST /v1/sessions/{id}/load", s.handleLoadSession)
+	mux.HandleFunc("POST /v1/sessions/{id}/rename", s.handleRenameSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/model", s.handleSetSessionModel)
 	mux.HandleFunc("POST /v1/sessions/{id}/chat", s.handleChat)
 	mux.HandleFunc("POST /v1/sessions/{id}/approvals/{approvalID}", s.handleApproval)
@@ -228,6 +229,29 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, sess.Meta())
+}
+
+func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	var req RenameSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	meta, err := s.engine.RenameSession(id, req.Name)
+	if err != nil {
+		if errors.Is(err, engine.ErrSessionNotFound) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, meta)
 }
 
 func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {

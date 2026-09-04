@@ -136,6 +136,7 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 			Error            string                `json:"error"`
 			SessionID        uuid.UUID             `json:"session_id"`
 			Model            string                `json:"model"`
+			Name             string                `json:"name,omitempty"`
 			ContextWindow    int                   `json:"ctx_window"`
 			Usage            *contracts.TokenUsage `json:"usage"`
 			ContextTokens    int                   `json:"context_tokens"`
@@ -194,6 +195,7 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 			reply.SessionID = sseEv.SessionID
 			reply.Model = sseEv.Model
 			reply.ContextWindow = sseEv.ContextWindow
+			reply.Name = sseEv.Name
 			reply.Usage = sseEv.Usage
 			reply.ContextTokens = sseEv.ContextTokens
 			reply.Pending = sseEv.Pending
@@ -310,7 +312,16 @@ func (c *RemoteClient) DeleteSession(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (c *RemoteClient) ListSessions(ctx context.Context) ([]store.SessionMeta, error) {
+func (c *RemoteClient) RenameSession(ctx context.Context, id uuid.UUID, name string) (*store.SessionMeta, error) {
+	var meta store.SessionMeta
+	err := c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/rename", map[string]string{"name": name}, http.StatusOK, &meta)
+	if err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
+func (c *RemoteClient) ListSessions(ctx context.Context) ([]contracts.SessionSummary, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions", nil)
 	if err != nil {
 		return nil, err
@@ -323,7 +334,7 @@ func (c *RemoteClient) ListSessions(ctx context.Context) ([]store.SessionMeta, e
 	if resp.StatusCode != http.StatusOK {
 		return nil, readAPIError(resp)
 	}
-	var out []store.SessionMeta
+	var out []contracts.SessionSummary
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}

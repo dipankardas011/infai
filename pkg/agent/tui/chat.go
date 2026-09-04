@@ -70,7 +70,7 @@ type sessionLoadedMsg struct {
 	err     error
 }
 type sessionsListedMsg struct {
-	sessions []store.SessionMeta
+	sessions []contracts.SessionSummary
 	err      error
 }
 type providersListedMsg struct {
@@ -101,9 +101,13 @@ type branchSelectedMsg struct {
 	err   error
 }
 type approvalResolvedMsg struct{ err error }
+type renamedMsg struct {
+	meta *store.SessionMeta
+	err  error
+}
 type animationTickMsg struct{}
 
-func runChatTUI(ctx context.Context, client Client, sessions []store.SessionMeta, opts RunOptions, in io.Reader, out io.Writer) error {
+func runChatTUI(ctx context.Context, client Client, sessions []contracts.SessionSummary, opts RunOptions, in io.Reader, out io.Writer) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	model := newChatModel(runCtx, client, sessions, opts)
@@ -115,7 +119,7 @@ func runChatTUI(ctx context.Context, client Client, sessions []store.SessionMeta
 	return err
 }
 
-func newChatModel(ctx context.Context, client Client, sessions []store.SessionMeta, opts RunOptions) *chatModel {
+func newChatModel(ctx context.Context, client Client, sessions []contracts.SessionSummary, opts RunOptions) *chatModel {
 	input := textarea.New()
 	input.Prompt = "λ "
 	input.Placeholder = "Ask, plan, build..."
@@ -180,6 +184,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if msg.reply.ContextWindow > 0 {
 				m.session.ContextWindow = msg.reply.ContextWindow
+			}
+			if msg.reply.Name != "" {
+				m.session.Name = msg.reply.Name
 			}
 			if msg.reply.Pending != nil && m.modal == nil {
 				m.showApproval(msg.reply.Pending)
@@ -268,6 +275,15 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript(true)
 		}
 		return m, nil
+	case renamedMsg:
+		if msg.err != nil {
+			m.appendError(msg.err)
+		} else if msg.meta != nil {
+			m.session.Name = msg.meta.Name
+			m.blocks = append(m.blocks, block{role: "system", text: "Session renamed to " + msg.meta.Name})
+		}
+		m.refreshTranscript(true)
+		return m, nil
 	case animationTickMsg:
 		if m.working {
 			return m, animationTickCmd()
@@ -276,7 +292,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.PasteMsg:
-		if m.modal == nil {
+		if m.modal == nil && !m.working {
 			var cmd tea.Cmd
 			m.composer, cmd = m.composer.Update(msg)
 			m.updateCommandMenu()
@@ -315,6 +331,28 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.modal != nil {
 		return m, m.handleModalKey(msg)
+	}
+	if m.working {
+		switch key {
+		case "pgup":
+			m.viewport.PageUp()
+		case "pgdown":
+			m.viewport.PageDown()
+		case "ctrl+up":
+			m.viewport.ScrollUp(3)
+		case "ctrl+down":
+			m.viewport.ScrollDown(3)
+		}
+		m.reflow(false)
+		return m, nil
+	}
+	if key == "ctrl+o" {
+		m.modal = loadingModal("Loading sessions")
+		return m, listSessionsCmd(m.ctx, m.client)
+	}
+	if key == "ctrl+n" {
+		m.modal = loadingModal("Loading models")
+		return m, listProvidersCmd(m.ctx, m.client, false)
 	}
 	if m.commandMenu {
 		matches := matchingCommands(m.composer.Value())
@@ -501,6 +539,20 @@ func waitStream(ctx context.Context, stream <-chan tea.Msg) tea.Cmd {
 }
 
 func (m *chatModel) runCommand(command string) tea.Cmd {
+	if strings.HasPrefix(command, "/rename") {
+		name := strings.TrimSpace(strings.TrimPrefix(command, "/rename"))
+		if m.session.ID == uuid.Nil {
+			m.appendError(errors.New("no active session"))
+			m.refreshTranscript(true)
+			return nil
+		}
+		if name == "" {
+			m.appendError(errors.New("usage: /rename <name>"))
+			m.refreshTranscript(true)
+			return nil
+		}
+		return renameSessionCmd(m.ctx, m.client, m.session.ID, name)
+	}
 	switch command {
 	case "/model":
 		m.modal = loadingModal("Loading models")
@@ -524,8 +576,8 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		return loadTimelineCmd(m.ctx, m.client, m.session.ID)
 	case "/help":
 		m.blocks = append(m.blocks, block{role: "system", text: strings.Join([]string{
-			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll",
-			"/new · /sessions · /model · /compact · /timeline · /quit",
+			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll · Ctrl+O sessions · Ctrl+N new",
+			"/new · /sessions · /model · /compact · /timeline · /rename · /quit",
 		}, "\n")})
 		m.refreshTranscript(true)
 	case "/quit", "/exit":
@@ -599,25 +651,32 @@ func (m *chatModel) headerView() string {
 }
 
 func (m *chatModel) statusView() string {
-	status := "ready"
 	style := m.styles.status
+	rest := "ready"
+	name := ""
 	if m.session.ID == uuid.Nil {
-		status = "choose a session to begin"
+		rest = "choose a session to begin"
 	} else {
 		pct := 0
 		if m.session.ContextWindow > 0 {
 			pct = m.used * 100 / m.session.ContextWindow
 		}
-		status = fmt.Sprintf("%s  ·  ctx %d%%  ·  %s", m.session.Model, pct, shortID(m.session.ID))
+		name = m.session.Name
+		rest = fmt.Sprintf("%s  ·  ctx %d%%  ·  %s", m.session.Model, pct, shortID(m.session.ID))
 	}
 	if m.working {
-		status = fmt.Sprintf("%s  ·  %s working %s", m.session.Model, spinnerFrame(m.workBegan), time.Since(m.workBegan).Round(time.Second))
 		style = m.styles.statusBusy
+		rest = fmt.Sprintf("%s  ·  %s working %s", m.session.Model, spinnerFrame(m.workBegan), time.Since(m.workBegan).Round(time.Second))
 	}
 	if !m.viewport.AtBottom() {
-		status += "  ·  viewing earlier output"
+		rest += "  ·  viewing earlier output"
 	}
-	return fullWidth(style, m.width, status)
+	if name != "" {
+		rest = m.styles.sessionName.Render(name) + "  ·  " + style.Render(rest)
+	} else {
+		rest = style.Render(rest)
+	}
+	return fullWidth(lipgloss.NewStyle().Padding(0, 1), m.width, rest)
 }
 
 func (m *chatModel) composerView() string {
@@ -759,16 +818,20 @@ func animationTickCmd() tea.Cmd {
 	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return animationTickMsg{} })
 }
 
-func (m *chatModel) showSessions(sessions []store.SessionMeta, required bool) {
+func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required bool) {
 	options := []modalOption{{label: "Start a new session", detail: "choose a provider and model", status: "NEW", shortcut: 'n'}}
 	for i, session := range sessions {
 		status := "INACTIVE"
-		if session.ID == m.session.ID {
+		if session.Active || session.ID == m.session.ID {
 			status = "ACTIVE"
 		}
+		name := session.Name
+		if name == "" {
+			name = "Untitled session"
+		}
 		option := modalOption{
-			label:   fmt.Sprintf("%s  %s", shortID(session.ID), orModel(session.Model)),
-			detail:  humanTime(session.UpdatedAt) + "  " + session.Cwd,
+			label:   name,
+			detail:  fmt.Sprintf("%s  ·  %s  ·  %s", orModel(session.Model), humanTime(session.UpdatedAt), session.Cwd),
 			status:  status,
 			session: session.ID,
 		}
@@ -937,6 +1000,13 @@ func listSessionsCmd(ctx context.Context, client Client) tea.Cmd {
 	return func() tea.Msg {
 		sessions, err := client.ListSessions(ctx)
 		return sessionsListedMsg{sessions: sessions, err: err}
+	}
+}
+
+func renameSessionCmd(ctx context.Context, client Client, id uuid.UUID, name string) tea.Cmd {
+	return func() tea.Msg {
+		meta, err := client.RenameSession(ctx, id, name)
+		return renamedMsg{meta: meta, err: err}
 	}
 }
 

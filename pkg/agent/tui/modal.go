@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -212,6 +213,9 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 	if m == nil || width <= 0 || height <= 0 {
 		return ""
 	}
+	if m.kind == modalSessions && width >= 50 && height >= 22 {
+		return renderSessionWorkspace(m, width, height, styles)
+	}
 	contentWidth := max(width-4, 1)
 	header := styles.screenTitle.Render(strings.ToUpper(m.title))
 	if m.body != "" {
@@ -274,4 +278,162 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 		parts[i] = fitArea(tracks[i], parts[i])
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+func renderSessionWorkspace(m *modalModel, width, height int, styles harnessStyles) string {
+	header := fullWidth(lipgloss.NewStyle().Padding(1, 2), width,
+		styles.brand.Render("INFAI")+" "+styles.headerMeta.Render("HARNESS")+"\n"+
+			styles.screenTitle.Render("SESSION WORKSPACE")+"\n"+
+			styles.screenBody.Render("Start fresh, inspect active work, or resume a saved session."))
+	footerText := "n new  ·  ↑/↓ navigate sessions  ·  enter open"
+	if !m.required {
+		footerText += "  ·  esc back"
+	}
+	footer := fullWidth(lipgloss.NewStyle().Padding(0, 2), width, styles.inactive.Render(footerText))
+
+	contentHeight := max(height-lipgloss.Height(header)-lipgloss.Height(footer), 0)
+	innerWidth := max(width-4, 1)
+	var main string
+	if width >= 90 {
+		main = renderWideSessionWorkspace(m, innerWidth, contentHeight, styles)
+	} else {
+		main = renderStackedSessionWorkspace(m, innerWidth, contentHeight, styles)
+	}
+	if pad := contentHeight - lipgloss.Height(main); pad > 0 {
+		main += strings.Repeat("\n", pad)
+	}
+	body := lipgloss.NewStyle().Padding(0, 2).Render(main)
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+func renderWideSessionWorkspace(m *modalModel, width, height int, styles harnessStyles) string {
+	gap := 2
+	leftWidth := max((width-gap)*2/5, 30)
+	rightWidth := max(width-gap-leftWidth, 1)
+
+	newPanel := renderNewSessionPanel(m, leftWidth, styles)
+	leftMax := max(height-lipgloss.Height(newPanel)-6, 0)
+	active := renderActiveSessionsPanel(m, leftWidth, leftMax, styles)
+	left := newPanel + "\n" + active
+	right := renderAllSessionsPanel(m, rightWidth, height, styles)
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", gap), right)
+}
+
+func renderStackedSessionWorkspace(m *modalModel, width, height int, styles harnessStyles) string {
+	newPanel := renderNewSessionPanel(m, width, styles)
+	leftMax := max(height-lipgloss.Height(newPanel)-6, 0)
+	active := renderActiveSessionsPanel(m, width, leftMax, styles)
+	allHeight := max(height-lipgloss.Height(newPanel)-lipgloss.Height(active)-3, 6)
+	all := renderAllSessionsPanel(m, width, allHeight, styles)
+	return strings.Join([]string{newPanel, active, all}, "\n")
+}
+
+func renderNewSessionPanel(m *modalModel, width int, styles harnessStyles) string {
+	selected := m.selected == 0
+	actionStyle := styles.screenRow
+	border := everforest.SurfaceAlt
+	prefix := "  "
+	if selected {
+		actionStyle = styles.screenSel
+		border = everforest.Green
+		prefix = "› "
+	}
+	contentWidth := max(width-4, 1)
+	action := sessionRow(actionStyle, prefix+"+ New session", contentWidth)
+	hint := styles.inactive.Render(ansi.Truncate("  choose provider and model", contentWidth, "…"))
+	return renderSessionPanel("NEW SESSION", action+"\n"+hint, width, 0, border, styles)
+}
+
+func renderActiveSessionsPanel(m *modalModel, width, maxLines int, styles harnessStyles) string {
+	active := activeSessionOptions(m.options)
+	contentWidth := max(width-4, 1)
+	lines := make([]string, 0, max(maxLines, 1))
+	if len(active) == 0 {
+		lines = append(lines, styles.inactive.Render("No active sessions"))
+	} else {
+		for i, option := range active {
+			if i >= maxLines {
+				break
+			}
+			lines = append(lines, sessionRow(styles.active, "● "+option.label, contentWidth))
+		}
+	}
+	return renderSessionPanel("ACTIVE SESSIONS", strings.Join(lines, "\n"), width, 0, everforest.Aqua, styles)
+}
+
+func renderAllSessionsPanel(m *modalModel, width, height int, styles harnessStyles) string {
+	contentWidth := max(width-4, 1)
+	options := m.options
+	if len(options) > 0 {
+		options = options[1:]
+	}
+	if len(options) == 0 {
+		return renderSessionPanel("ALL SESSIONS", styles.inactive.Render("No saved sessions yet"), width, height, everforest.SurfaceAlt, styles)
+	}
+	selected := clamp(m.selected-1, 0, len(options)-1)
+	rowCap := max((height-5)/2, 1)
+	start, end := visibleRange(len(options), selected, rowCap)
+	rows := make([]string, 0, (end-start)*2+1)
+	for i := start; i < end; i++ {
+		option := options[i]
+		isSelected := m.selected == i+1
+		prefix := "  "
+		nameStyle := styles.screenRow
+		if option.status == "ACTIVE" {
+			nameStyle = styles.active
+		}
+		if isSelected {
+			prefix = "› "
+			nameStyle = styles.screenSel
+		}
+		nameLine := sessionRow(nameStyle, prefix+option.label, contentWidth)
+		detailStyle := styles.inactive
+		if isSelected {
+			detailStyle = styles.inactive.Background(everforest.SurfaceAlt)
+		}
+		detailLine := sessionRow(detailStyle, "    "+option.detail, contentWidth)
+		rows = append(rows, nameLine+"\n"+detailLine)
+	}
+	if start > 0 || end < len(options) {
+		rows = append(rows, styles.inactive.Render(fmt.Sprintf("%d-%d of %d", start+1, end, len(options))))
+	}
+	border := everforest.SurfaceAlt
+	if m.selected > 0 {
+		border = everforest.Green
+	}
+	return renderSessionPanel("ALL SESSIONS", strings.Join(rows, "\n"), width, height, border, styles)
+}
+
+func renderSessionPanel(title, body string, width, height int, border color.Color, styles harnessStyles) string {
+	content := styles.screenTitle.Render(title)
+	if body != "" {
+		content += "\n\n" + body
+	}
+	if height > 0 {
+		if pad := height - 2 - lipgloss.Height(content); pad > 0 {
+			content += strings.Repeat("\n", pad)
+		}
+	}
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(border).
+		Padding(0, 1).
+		Width(width).
+		Render(content)
+}
+
+// sessionRow renders a single line at exactly contentWidth cells so the panel
+// border stays flush and selected rows get a full-width highlight.
+func sessionRow(style lipgloss.Style, text string, contentWidth int) string {
+	return style.Width(contentWidth).Render(ansi.Truncate(text, contentWidth, "…"))
+}
+
+func activeSessionOptions(options []modalOption) []modalOption {
+	active := make([]modalOption, 0)
+	for _, option := range options {
+		if option.status == "ACTIVE" && option.session != uuid.Nil {
+			active = append(active, option)
+		}
+	}
+	return active
 }
