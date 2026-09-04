@@ -657,13 +657,11 @@ func (m *chatModel) renderTranscript() string {
 		var content string
 		switch entry.role {
 		case "user":
-			prefix := m.styles.userMarker.Render("YOU")
-			body := lipgloss.Wrap(entry.text, max(width-lipgloss.Width(prefix)-2, 1), "")
-			content = prefix + "  " + body
+			content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, entry.text, width)
 		case "assistant":
-			content = m.renderMarkdown(entry.text, width)
+			content = renderChatMarker("●", m.styles.active, lipgloss.NewStyle(), m.renderMarkdown(entry.text, max(width-2, 1)), width)
 		case "thinking":
-			content = m.styles.thinking.Width(width).Render("THINKING\n" + entry.text)
+			content = renderChatMarker("◌", m.styles.muted, m.styles.thinking, entry.text, width)
 		case "error":
 			content = m.styles.error.Width(width).Render("ERROR  " + entry.text)
 		case "system", "status":
@@ -671,13 +669,18 @@ func (m *chatModel) renderTranscript() string {
 		case "compaction":
 			content = m.styles.thinking.Width(width).Render("CONTEXT COMPACTED\n" + entry.text)
 		case "skill":
-			content = m.styles.skill.Width(width).Render("✦ Skill loaded: " + entry.text)
+			content = renderChatMarker("✦", m.styles.skill, m.styles.skill, entry.text, width)
 		case "tool":
 			marker := "▲"
+			markerStyle := m.styles.system
 			if entry.toolKind == "result" {
-				marker = "▲▲"
+				marker = "▼"
+				markerStyle = m.styles.active
+				if entry.toolStatus != "success" {
+					markerStyle = m.styles.error
+				}
 			}
-			content = m.styles.tool.Width(width).Render(marker + " " + entry.text)
+			content = renderToolMarker(marker, markerStyle, m.styles.tool, entry.toolName, entry.text, width)
 		}
 		if strings.TrimSpace(content) != "" {
 			rendered = append(rendered, strings.Trim(content, "\n"))
@@ -687,6 +690,40 @@ func (m *chatModel) renderTranscript() string {
 		return m.styles.muted.Render("\nStart with a question, a task, or / for commands.")
 	}
 	return strings.Join(rendered, "\n\n")
+}
+
+func renderChatMarker(marker string, markerStyle, bodyStyle lipgloss.Style, text string, width int) string {
+	indent := lipgloss.Width(marker) + 1
+	bodyWidth := max(width-indent, 1)
+	lines := strings.Split(strings.Trim(lipgloss.Wrap(text, bodyWidth, ""), "\n"), "\n")
+	for i := range lines {
+		lines[i] = bodyStyle.Render(lines[i])
+		if i == 0 {
+			lines[i] = markerStyle.Render(marker) + " " + lines[i]
+		} else {
+			lines[i] = strings.Repeat(" ", indent) + lines[i]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderToolMarker(marker string, markerStyle, bodyStyle lipgloss.Style, name, text string, width int) string {
+	detail := strings.TrimSpace(text)
+	if name != "" && (detail == name || strings.HasPrefix(detail, name+" ") || strings.HasPrefix(detail, name+"\n")) {
+		detail = strings.TrimSpace(strings.TrimPrefix(detail, name))
+	}
+	body := strings.TrimSpace(name + " " + detail)
+	indent := lipgloss.Width(marker) + 1
+	lines := strings.Split(strings.Trim(lipgloss.Wrap(body, max(width-indent, 1), ""), "\n"), "\n")
+	for i := range lines {
+		if i == 0 {
+			rest := strings.TrimPrefix(lines[i], name)
+			lines[i] = markerStyle.Render(marker) + " " + markerStyle.Bold(true).Render(name) + bodyStyle.Render(rest)
+			continue
+		}
+		lines[i] = strings.Repeat(" ", indent) + bodyStyle.Render(lines[i])
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *chatModel) renderMarkdown(markdown string, width int) string {
@@ -870,7 +907,7 @@ func (m *chatModel) appendToolEvent(kind, text string) {
 	if fields := strings.Fields(text); len(fields) > 0 {
 		name = fields[0]
 	}
-	m.blocks = append(m.blocks, block{role: "tool", text: "tool " + kind + ": " + text, toolKind: kind, toolStatus: status, toolName: name})
+	m.blocks = append(m.blocks, block{role: "tool", text: text, toolKind: kind, toolStatus: status, toolName: name})
 }
 
 func (m *chatModel) appendError(err error) {
@@ -958,11 +995,16 @@ func resolveApprovalCmd(ctx context.Context, client Client, approval *Approval, 
 func blocksFromRecords(records []store.Record) []block {
 	var blocks []block
 	skillCallIDs := make(map[string]struct{})
+	toolCallNames := make(map[string]string)
 	for _, record := range records {
+		if record.ToolCall != nil {
+			toolCallNames[record.ToolCall.ID] = record.ToolCall.Name
+		}
 		if record.Message == nil || record.Message.Role != "assistant" {
 			continue
 		}
 		for _, call := range record.Message.ToolCalls {
+			toolCallNames[call.ID] = call.Function.Name
 			if isSkillTool(call.Function.Name) {
 				skillCallIDs[call.ID] = struct{}{}
 			}
@@ -976,12 +1018,12 @@ func blocksFromRecords(records []store.Record) []block {
 			}
 		case store.KindToolCall:
 			if record.ToolCall != nil {
-				blocks = append(blocks, block{role: "tool", text: "tool call: " + toolCallRecordDisplay(record.ToolCall), toolKind: "call", toolName: record.ToolCall.Name})
+				blocks = append(blocks, block{role: "tool", text: toolCallRecordDisplay(record.ToolCall), toolKind: "call", toolName: record.ToolCall.Name})
 			}
 		case store.KindToolResult:
 			if record.ToolResult != nil {
 				if _, skill := skillCallIDs[record.ToolResult.CallID]; !skill {
-					blocks = append(blocks, block{role: "tool", text: "tool result: " + toolResultDisplay(record.ToolResult), toolKind: "result", toolStatus: record.ToolResult.Status})
+					blocks = append(blocks, block{role: "tool", text: toolResultDisplay(record.ToolResult), toolKind: "result", toolStatus: record.ToolResult.Status, toolName: toolCallNames[record.ToolResult.CallID]})
 				}
 			}
 		case store.KindMessage:
@@ -1004,11 +1046,11 @@ func blocksFromRecords(records []store.Record) []block {
 						blocks = append(blocks, block{role: "skill", text: skillNameFromCall(call)})
 						continue
 					}
-					blocks = append(blocks, block{role: "tool", text: "tool call: " + toolCallDisplay(call), toolKind: "call", toolName: call.Function.Name})
+					blocks = append(blocks, block{role: "tool", text: toolCallDisplay(call), toolKind: "call", toolName: call.Function.Name})
 				}
 			case "tool":
 				if _, skill := skillCallIDs[message.ToolCallID]; !skill {
-					blocks = append(blocks, block{role: "tool", text: "tool result: " + message.Text(), toolKind: "result", toolStatus: "success"})
+					blocks = append(blocks, block{role: "tool", text: message.Text(), toolKind: "result", toolStatus: "success", toolName: toolCallNames[message.ToolCallID]})
 				}
 			}
 		}

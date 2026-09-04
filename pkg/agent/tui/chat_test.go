@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
@@ -55,11 +56,45 @@ func TestTranscriptPreservesUnicodeAndMarkdown(t *testing.T) {
 	m.blocks = []block{{role: "assistant", text: "## 概要\n\nUse `界面` with cafe\u0301."}}
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 48, Height: 16})
 
-	content := m.View().Content
+	content := ansi.Strip(m.View().Content)
 	for _, want := range []string{"概要", "界面", "cafe\u0301"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("view does not contain %q", want)
 		}
+	}
+}
+
+func TestTranscriptUsesCompactRoleMarkers(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.blocks = []block{
+		{role: "user", text: "question"},
+		{role: "thinking", text: "reasoning"},
+		{role: "skill", text: "green-software"},
+		{role: "tool", toolKind: "call", toolName: "search", text: `search {"path":"."}`},
+		{role: "tool", toolKind: "result", toolStatus: "success", toolName: "search", text: "search success"},
+		{role: "assistant", text: "answer"},
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
+
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"● question", "◌ reasoning", "✦ green-software", `▲ search {"path":"."}`, "▼ search success", "● answer"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("chat transcript does not contain %q", want)
+		}
+	}
+	for _, unwanted := range []string{"YOU", "THINKING", "Skill loaded:", "tool call:", "tool result:"} {
+		if strings.Contains(content, unwanted) {
+			t.Fatalf("chat transcript still contains %q", unwanted)
+		}
+	}
+}
+
+func TestToolNameUsesMarkerEmphasis(t *testing.T) {
+	styles := newHarnessStyles()
+	rendered := renderToolMarker("▲", styles.system, styles.tool, "search", `search {"path":"."}`, 60)
+	if !strings.Contains(rendered, styles.system.Bold(true).Render("search")) {
+		t.Fatal("tool name does not use the emphasized marker style")
 	}
 }
 
@@ -417,10 +452,13 @@ func TestBlocksFromRecordsShowsToolCallsAndResults(t *testing.T) {
 	if len(blocks) != 2 {
 		t.Fatalf("blocks=%d want 2: %#v", len(blocks), blocks)
 	}
-	if blocks[0].role != "tool" || blocks[0].text != `tool call: read {"path":"README.md"}` {
+	if blocks[0].role != "tool" || blocks[0].text != `read {"path":"README.md"}` {
 		t.Fatalf("tool call block=%#v", blocks[0])
 	}
-	if blocks[1].role != "tool" || blocks[1].text != "tool result: success\n{\"content\":\"hello\"}" {
+	if blocks[1].role != "tool" || blocks[1].text != "success\n{\"content\":\"hello\"}" {
 		t.Fatalf("tool result block=%#v", blocks[1])
+	}
+	if blocks[1].toolName != "read" {
+		t.Fatalf("tool result name=%q want read", blocks[1].toolName)
 	}
 }
