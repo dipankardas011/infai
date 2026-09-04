@@ -111,10 +111,6 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 	state := &replState{}
 	scanner := bufio.NewScanner(in)
 
-	// Startup header.
-	fmt.Fprintln(out, "infai agent")
-	cSystem.Fprintln(out, "  /help shortcuts · /model switch model · /sessions list · /quit exit")
-
 	// Fail fast on an unreachable server, and pick what to do on launch.
 	sessions, err := c.ListSessions(ctx)
 	if err != nil {
@@ -130,6 +126,9 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 
 	// Non-interactive → the plain line REPL: resume the explicitly requested
 	// session, or let the user pick one (or a new session) by number.
+	fmt.Fprintln(out, "infai agent")
+	cSystem.Fprintln(out, "  /help shortcuts · /model switch model · /sessions list · /quit exit")
+
 	var resume uuid.UUID
 	if opts.SessionID != uuid.Nil {
 		resume = opts.SessionID
@@ -393,8 +392,8 @@ func runCommand(ctx context.Context, c Client, out io.Writer, s *replState, line
   /session rm <uuid>             delete a saved session
   /new                           start a fresh session
   /ctx                           show context used vs total
-	  /compact                       compact the current conversation
-  /branch-timeline               inspect and select a branch point
+  /compact                       compact the current conversation
+  /timeline                      inspect and select a branch point
   /pwd                           show the session working directory
   /quit, /exit                   leave
 
@@ -478,7 +477,7 @@ multi-line: end a line with \ to continue typing on the next line`)
 		}
 		return false, nil
 
-	case "/branch-timeline":
+	case "/timeline":
 		return false, runBranchTimeline(ctx, c, out, s, scan)
 
 	case "/pwd":

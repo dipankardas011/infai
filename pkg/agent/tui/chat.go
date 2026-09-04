@@ -519,13 +519,13 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		}
 		m.working, m.workBegan = true, time.Now()
 		return tea.Batch(compactCmd(m.ctx, m.client, m.session.ID), animationTickCmd())
-	case "/branch-timeline":
+	case "/timeline":
 		m.modal = loadingModal("Loading timeline")
 		return loadTimelineCmd(m.ctx, m.client, m.session.ID)
 	case "/help":
 		m.blocks = append(m.blocks, block{role: "system", text: strings.Join([]string{
 			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll",
-			"/new · /sessions · /model · /compact · /branch-timeline · /quit",
+			"/new · /sessions · /model · /compact · /timeline · /quit",
 		}, "\n")})
 		m.refreshTranscript(true)
 	case "/quit", "/exit":

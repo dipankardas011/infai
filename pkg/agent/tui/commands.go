@@ -17,7 +17,7 @@ var harnessCommands = []commandSpec{
 	{name: "/sessions", help: "open another session"},
 	{name: "/model", help: "switch the active model"},
 	{name: "/compact", help: "compact conversation context"},
-	{name: "/branch-timeline", help: "branch from an earlier event"},
+	{name: "/timeline", help: "branch from an earlier event"},
 	{name: "/help", help: "show keyboard help"},
 	{name: "/quit", help: "leave the harness"},
 }

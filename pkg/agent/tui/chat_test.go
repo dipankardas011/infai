@@ -193,7 +193,7 @@ func TestSlashOpensComposerCompletionInsteadOfModal(t *testing.T) {
 	if m.modal != nil {
 		t.Fatal("slash completion opened a modal")
 	}
-	if content := m.View().Content; !strings.Contains(content, "/branch-timeline") {
+	if content := m.View().Content; !strings.Contains(content, "/timeline") {
 		t.Fatal("command completion is not rendered beside the composer")
 	}
 }
