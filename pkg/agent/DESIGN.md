@@ -1,6 +1,6 @@
 # infai Agent Engine — Design Decisions & Next Steps
 
-Status: active (primitive loop working; tool/subagent layer is next)
+Status: active (tool loop, persistence, retries, and cancellation are working; subagents are next)
 Scope: `pkg/agent/*`
 
 This document records the decisions we reached together and the next build steps.
@@ -39,24 +39,52 @@ accepts arbitrary `bash -c`.
 - Preserve `reasoning_content` on the wire (DeepSeek requires it for tool turns;
   vLLM degrades without it).
 - Never send a `thinking` message field (not in the OpenAI message schema).
+- Tool execution status is harness metadata on persisted role=`tool` messages.
+  The model receives the standard role/content/tool_call_id fields; the adapter
+  strips `status` before sending the request.
 
 ### D5. Sessions are passive state in a registry.
-Sessions live server-side and survive client disconnects. No per-session
-goroutines are held; close via ctx cancel + registry removal.
+Sessions live server-side and remain registered after a client disconnects. No
+per-session goroutines are held between turns; an active chat inherits the HTTP/TUI context
+and can be canceled by the client. The user message is persisted before model
+execution; incomplete streamed output is not persisted.
 
-## 3. Tool & permission layer (next milestone)
+### D6. Tool execution and durable transcript
+The agent emits assistant messages containing `tool_calls`. The session executes
+those calls through policy and the tool dispatcher, then returns role=`tool`
+messages linked by `tool_call_id`. The full assistant/tool message history is
+persisted as `KindMessage` records. Tool results also retain a harness `status`
+field (`success`, `denied`, or `error`) in the persisted message; it is removed
+from provider requests. Legacy standalone `KindToolResult` records remain
+readable for existing timelines.
 
-### D6. ToolEngine is a central place (like `engine`).
+### D7. LLM endpoint retries
+The OpenAI-compatible adapter retries transient transport failures and selected
+HTTP failures for up to ten total attempts. Backoff starts at five seconds,
+doubles, and caps at one minute. `Retry-After` is honored within that cap.
+Retry waits use the request context, so cancellation interrupts both network
+requests and backoff. A five-minute response-header timeout limits endpoint
+startup; streamed responses have no fixed whole-request timeout.
+
+### D8. TUI cancellation
+While a turn is active, the first `Esc` arms cancellation and the second `Esc`
+cancels the turn context. Cancellation propagates through the HTTP stream,
+server, agent, and model request. Live deltas already displayed remain in the
+TUI, but partial assistant output is not added to the durable timeline.
+
+## 3. Tool & permission layer
+
+### D9. ToolEngine is a central place (like `engine`).
 Given a session + a requested `ToolCall`, it grants access to that specific tool
 against the session's policy, executes it, and returns a result.
 
-### D7. AccessControl is middleware over every tool call.
+### D10. AccessControl is middleware over every tool call.
 A **pure function** `authorize(ctx, sessionPolicy, toolCall) → decision`
 (allow / deny / ask), wrapped as middleware in the tool path. Pattern borrowed
 from Authzed, but **not** the system — no SpiceDB/Zanzibar, no policy DSL. A
 policy is a Go struct / JSON table. It must be I/O-free and unit-testable.
 
-### D8. The workspace is an explicit capability, not process cwd.
+### D11. The workspace is an explicit capability, not process cwd.
 claude-code/opencode get isolation "for free" because the process is born in the
 cwd. A long-lived multi-session server cannot rely on its own cwd, so:
 - Session creation declares a `workspace` root (TUI passes cwd — same UX).
@@ -71,23 +99,25 @@ cwd. A long-lived multi-session server cannot rely on its own cwd, so:
   self-corrects (nemoclaw's "try allowed, report failure mode"). Only `ask`
   ops go to a human.
 
-### D9. Bash is a special tool: ask-by-default.
+### D12. Bash is a special tool: ask-by-default.
 Bash always risks escaping an allowlist (the `grep`/`find` → `bash -c` class of
 escape). Policy = per-session allowlist of **full argv** (an allowed `git` does
 not allow `git push`), plus an `*` fallback meaning **always ask the human**.
 Everything else is a direct code-path tool.
 
-### D10. Scratchpad: runtime-only working memory per agent.
-Not persisted. Carries tool-call coordination across one turn: write-before-read
-tracking, consecutive-error counts, retry budgets.
+### D13. Session checklist: durable task state.
+`task_checklist` is session-owned memory, not per-agent state. Every successful
+operation returns the complete checklist. The state is reconstructed on resume,
+branch selection, and compaction from persisted tool messages, with the
+compaction checkpoint as the fallback baseline.
 
-### D11. Validate hooks → completion gate → agent profile.
+### D14. Validate hooks → completion gate → agent profile.
 When the agent says "done", the harness runs the session's validation
 (`go build && go vet`, `pnpm run dev`, …) and feeds the result back so the
 agent iterates or gives up. policy + allowed tools + validate + system prompt +
 pinned model = a **versioned agent profile**.
 
-### D12. Composite tools (pipes) — sequence, not byte streams.
+### D15. Composite tools (pipes) — sequence, not byte streams.
 Bash's pipes are compositional; tools should be too. But tools speak structured
 JSON, not raw byte streams, so a pipe composite feeds **structured output into a
 matching input schema**:
@@ -136,26 +166,22 @@ SubagentResult {
 }
 ```
 
-## 5. Fire-and-forget concurrent tool calls
+## 5. Tool execution
 
-The model's turn ends when it emits `[tool_1, tool_2, tool_3]` in one response.
-The harness fans them out and waits — the model does not wait for them.
+The model's turn emits one assistant message containing zero or more tool calls.
+The harness currently executes calls sequentially in request order and returns
+one role=`tool` message per call. Subagent execution is not implemented yet.
 
-- Each call runs under its own `context.WithTimeout(ctx, toolTimeout)`.
-- A `WaitGroup`/collector waits for **all**, then results are appended **keyed
-  by `tool_call_id` in the request order** (never goroutine-completion order).
-- Result envelope:
+- Results are appended keyed by `tool_call_id` in request order.
+- Persisted result message:
 
 ```
-ToolCallResult { CallID, Status: success|error|timeout|canceled, Output, Error }
+ChatMessage { Role: "tool", ToolCallID, Content, Status: success|denied|error }
 ```
 
-- A timeout kills *that* call, not the batch. The model sees the timeout result
-  and decides (retry / adjust / give up).
-- **The timeout clock starts AFTER approval.** Approval (`ask`) is untimed (a
-  human takes as long as they take); the timer starts on actual execution.
-- Default harness timeout: **5m**, overridable per call (caller's ctx feeds it).
-- Parent cancellation tears down the whole fan-out via `ctx`.
+- Tool errors and denials are returned in the role=`tool` content and recorded
+  with their harness status. Approval is handled before execution.
+- Parent cancellation tears down the active tool/model loop via `ctx`.
 
 ## 6. Workflow engine (vision — next big milestone)
 
@@ -164,7 +190,7 @@ agents *and* deterministic systems. Deterministic where it's great, LLM where
 it's great — always a combination. Not stuck in HITL: headless, CI-friendly,
 OTel-observable (per-node spans).
 
-### D13. One abstraction: `Node` + `State`
+### D16. One abstraction: `Node` + `State`
 ```
 Node  := { Name, Kind, input/output field mappings }
 State := map[string]any     // structured data flowing between nodes
@@ -190,14 +216,14 @@ release.yaml:
   deploy:  {kind: step,   cmd: "infai deploy",     after: gate}
 ```
 
-### D14. Plumbing
+### D17. Plumbing
 `infai --workflow=release.yaml` (client) → POSTs workflow → server runs it as a
 session → SSE streams node events (agent deltas + node status, unified) → exit
 code = pass/fail. Approvals resolve via policy or record as blocked (headless).
 Same server = usable as a GitHub Actions service. OTel per-node spans = the
 LangSmith analogue.
 
-### D15. Build path: deterministic-first
+### D18. Build path: deterministic-first
 Steps + sequence + parallel + branch run with **zero LLM** (testable graph
 runner) *first*; then `agent` becomes "just another node kind". The graph model
 subsumes earlier layers: composite tool = 2-node sequence, subagent = agent
@@ -235,41 +261,40 @@ node, bash command = step node.
 
 ## 9. Next steps (build order)
 
-**Done:** provider registry + session persistence (`pkg/agent/store`), slash-command
-CLI with live status header, recorder multi-writer (stream → user + transcript).
+**Done:** provider registry, timeline-backed session persistence, slash-command
+CLI with live status header, streaming model/tool loop, tool policy checks,
+structured tool status, context-aware endpoint retries, and double-Esc TUI
+cancellation.
 
 Storage layout (`$XDG_CONFIG_HOME/infai/harness`):
 - `models.json` — provider registry (name/base_url/model/api_key/ctx_window/
   default + lazily fetched available models from the provider's `/v1/models`).
-- `sessions/<uuid>.jsonl` — one append-only transcript per session. Kinds:
-  `meta`, `message`, `tool_call`, `tool_result`, `usage`, `delta` (delta is
-  live-only — it fans out to the user sink but never lands in the file).
-- The session's `SessionEventHub` is the live broadcaster: one `Publish()` fans out to the
-  live sink (SSE response / stdout) and persists the durable transcript.
+- `sessions/<uuid>/chunks/*.jsonl` — append-only timeline chunks per session.
+  Current durable kinds include `message`, `compaction`, and approval events;
+  `delta` is live-only. Older sessions may also contain standalone
+  `tool_result` records.
+- The session's `SessionEventHub` is a live broadcaster only. Durable messages
+  are appended directly to the timeline.
 - Session meta records the model used, last-use method (cli/ui/server) and cwd.
-- Tool-call schema + recording path are wired; the tool loop (AccessControl)
-  is the remaining producer.
+- Tool-call execution, policy checks, result messages, and status persistence
+  are wired. Subagent orchestration remains deferred.
 
 1. `Tool` contract + registry — `Tool`, `ToolCall`, `ToolResult`, `ToolRegistry`
    (each tool declares its capability + schema). Pure types next to `contracts`.
 2. AccessControl — policy model (allow/deny/ask per capability + path/host
    constraints) + `authorize()` pure function + middleware.
-3. ToolEngine — executes an *authorized* call: runs the tool impl under
-   ctx/timeout, returns `ToolResult`, records to scratchpad.
-4. Scratchpad — in-memory per-session helper.
-5. **Loop integration (the big one)** — `Invoke` grows a tool step: model
-   proposes `ToolCall` → AccessControl → fan-out concurrent execution
-   (section 5) → append results → loop until no calls. Includes the
-   `ToolCallResult` timeout envelope.
-6. Bash tool — ask-by-default + session allowlist.
-7. Validate gate — run checks on "done", feed results back, iterate.
-8. Profile manifest — policy + tools + validate + system prompt + model,
+3. ToolEngine — further separate tool execution from session orchestration.
+4. **Loop integration follow-up** — add per-tool timeout envelopes and
+   concurrency only when the tool/subagent requirements need them.
+5. Bash tool — ask-by-default + session allowlist.
+6. Validate gate — run checks on "done", feed results back, iterate.
+7. Profile manifest — policy + tools + validate + system prompt + model,
    versioned.
-9. Subagent spawn — single-turn child loop, `Done`/`Blocked` result, approval
+8. Subagent spawn — single-turn child loop, `Done`/`Blocked` result, approval
    routed via parent.
-10. HITL plumbing — wire `TurnPendingApproval` → session → TUI approve/deny →
-    resume.
-11. **Workflow engine** (section 6) — deterministic-first: `Node`/`State`
+9. HITL plumbing — wire `TurnPendingApproval` → session → TUI approve/deny →
+   resume.
+10. **Workflow engine** (section 6) — deterministic-first: `Node`/`State`
     abstraction, `step` + `sequence`/`parallel`/`branch`/`loop`, then `agent`
     as a node kind, then `--workflow` client flag + headless/CI mode + OTel.
 
