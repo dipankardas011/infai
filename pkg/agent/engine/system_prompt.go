@@ -75,6 +75,7 @@ func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd 
 <tool_discipline>
 - Prefer the dedicated tool over Bash; reserve Bash for shell and system operations.
 - Independent tool calls in parallel; dependent calls strictly sequential.
+- Use task_checklist for multi-step work. Keep exactly one item in_progress while working and update it as work completes. A harness-provided <task_checklist> block is a session checkpoint, not a user request; later successful task_checklist results supersede it.
 - Use subagents for broad research or heavy output to protect your context — and never duplicate their work. Launch independent subagents together in one message and continue useful work while they run; block on a subagent only when your next step depends on its result. The main agent plans and reasons; subagents execute.
 - Read a file before proposing changes to it.
 </tool_discipline>

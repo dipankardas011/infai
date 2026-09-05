@@ -12,6 +12,7 @@ type contextKey uint8
 const (
 	toolCallKey contextKey = iota
 	skillRegistryKey
+	taskChecklistKey
 )
 
 // WithToolCall carries the originating tool call so executors can read its args.
@@ -36,6 +37,15 @@ func SkillRegistryFromContext(ctx context.Context) *SkillRegistry {
 	return registry
 }
 
+func WithTaskChecklist(ctx context.Context, checklist *TaskChecklist) context.Context {
+	return context.WithValue(ctx, taskChecklistKey, checklist)
+}
+
+func TaskChecklistFromContext(ctx context.Context) *TaskChecklist {
+	checklist, _ := ctx.Value(taskChecklistKey).(*TaskChecklist)
+	return checklist
+}
+
 // ExecuteMemoryToolCall dispatches memory-owned tools (skills today; episodic
 // memory later) — the memory-package analog of actuators.ExecuteToolCall.
 func ExecuteMemoryToolCall(ctx context.Context, call contracts.ToolCall) (string, error) {
@@ -43,6 +53,8 @@ func ExecuteMemoryToolCall(ctx context.Context, call contracts.ToolCall) (string
 	switch contracts.ToolType(call.Function.Name) {
 	case contracts.ReadSkillTool:
 		return readSkillExecution(toolContext)
+	case contracts.TaskChecklistTool:
+		return taskChecklistExecution(toolContext)
 	default:
 		// TODO: unify error shape with actuators (single ExecutionError type in a
 		// shared package) instead of a plain fmt.Errorf.
@@ -52,7 +64,7 @@ func ExecuteMemoryToolCall(ctx context.Context, call contracts.ToolCall) (string
 
 func IsMemoryToolCall(c contracts.ToolType) bool {
 	switch c {
-	case contracts.ReadSkillTool:
+	case contracts.ReadSkillTool, contracts.TaskChecklistTool:
 		return true
 	default:
 		return false

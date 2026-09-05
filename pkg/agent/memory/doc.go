@@ -5,6 +5,8 @@
 // loaded on demand through the read_skill tool (see read_skill.go). The engine
 // never touches skill files directly — it routes read_skill calls here through
 // ExecuteMemoryToolCall.
+// A task checklist is a session runtime projection reconstructed from the
+// durable timeline on resume and branch changes.
 //
 // TODO: episodic memory — auto-accumulated facts ("we hit bug X, fixed with Y")
 // retrieved by similarity, complementing the deterministic skill layer.

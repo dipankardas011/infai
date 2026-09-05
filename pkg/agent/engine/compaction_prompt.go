@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"fmt"
 	"strings"
+	"text/template"
 	"unicode/utf8"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -65,11 +67,10 @@ Rules:
 
 // BuildCompactionInstruction returns the user-prompt half of compaction: the
 // 7 Ws checkpoint structure the summarizer must output, in order. It is
-// appended after the conversation history. Pass a non-empty previousSummary to
-// add the merge block (prior checkpoint is preserved/dropped/overridden on
-// conflict — the conversation wins).
-func BuildCompactionInstruction(previousSummary string) string {
-	const instruction = `Condense the conversation above into a continuation checkpoint covering the 7 Ws. Output exactly this structure, in order, with terse bullets ("(none)" when empty):
+// appended after the conversation history. The task checklist, when provided,
+// is placed last because it is authoritative over narrative summaries.
+func BuildCompactionInstruction(previousSummary, taskChecklist string) (string, error) {
+	tpl, err := template.New("compaction_instruction").Parse(`Condense the conversation above into a continuation checkpoint covering the 7 Ws. Output exactly this structure, in order, with terse bullets ("(none)" when empty):
 
 ## Why - Goal
 - [the user's objective; quote verbatim where exact wording matters]
@@ -91,21 +92,34 @@ func BuildCompactionInstruction(previousSummary string) string {
 
 ## How - Next
 1. [the immediate next action, directly in line with the most recent request; "(none)" if concluded]
-2. [known follow-ups; "(none)"]`
-
-	if previousSummary == "" {
-		return instruction
-	}
-
-	return instruction + `
+2. [known follow-ups; "(none)"]
+{{with .PreviousSummary}}
 
 A prior checkpoint already exists:
 
 <prior-summary>
-` + previousSummary + `
+{{.}}
 </prior-summary>
 
-Merge it into the new checkpoint: preserve everything still true, drop what is finished or stale, and where the conversation conflicts with the prior checkpoint, the conversation wins.`
+Merge it into the new checkpoint: preserve everything still true, drop what is finished or stale, and where the conversation conflicts with the prior checkpoint, the conversation wins.
+{{end}}
+{{with .TaskChecklist}}
+
+The harness-provided task checklist below is authoritative. Use it when describing current state and next actions. Do not invent, remove, rename, or change the status of its items. An empty items array means no checklist work remains.
+
+{{.}}
+{{end}}`)
+	if err != nil {
+		return "", fmt.Errorf("parse compaction instruction template: %w", err)
+	}
+	var instruction strings.Builder
+	if err := tpl.Execute(&instruction, struct {
+		PreviousSummary string
+		TaskChecklist   string
+	}{previousSummary, taskChecklist}); err != nil {
+		return "", fmt.Errorf("render compaction instruction: %w", err)
+	}
+	return instruction.String(), nil
 }
 
 // SerializeForCompaction condenses the prefix for the summarizer. The prefix is
@@ -170,14 +184,32 @@ func SerializeForCompaction(history []contracts.ChatMessage) string {
 
 // compactionInput assembles the summarizer's request: the serialized toCompact
 // messages wrapped in <conversation> tags, followed by the 7 Ws instruction.
-func compactionInput(toCompact []contracts.ChatMessage, prevCheckpoint string) (string, []contracts.ChatMessage, error) {
+func compactionInput(toCompact []contracts.ChatMessage, prevCheckpoint, taskChecklist string) (string, []contracts.ChatMessage, error) {
 	systemPrompt, err := CompactionAgentSystemPrompt()
 	if err != nil {
 		return "", nil, err
 	}
 	transcript := SerializeForCompaction(toCompact)
-	prompt := "<conversation>\n" + transcript + "\n</conversation>\n\n" + BuildCompactionInstruction(prevCheckpoint)
-	return systemPrompt, []contracts.ChatMessage{contracts.NewUserMessage(prompt)}, nil
+	instruction, err := BuildCompactionInstruction(prevCheckpoint, taskChecklist)
+	if err != nil {
+		return "", nil, err
+	}
+	tpl, err := template.New("compaction_input").Parse(`<conversation>
+{{.Transcript}}
+</conversation>
+
+{{.Instruction}}`)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse compaction input template: %w", err)
+	}
+	var prompt strings.Builder
+	if err := tpl.Execute(&prompt, struct {
+		Transcript  string
+		Instruction string
+	}{transcript, instruction}); err != nil {
+		return "", nil, fmt.Errorf("render compaction input: %w", err)
+	}
+	return systemPrompt, []contracts.ChatMessage{contracts.NewUserMessage(prompt.String())}, nil
 }
 
 // truncateRunes caps a string at n runes, marking the cut.

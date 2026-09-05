@@ -45,6 +45,24 @@ type Function struct {
 	Arguments string `json:"arguments"`
 }
 
+type TaskStatus string
+
+const (
+	TaskPending    TaskStatus = "pending"
+	TaskInProgress TaskStatus = "in_progress"
+	TaskCompleted  TaskStatus = "completed"
+)
+
+type TaskChecklistItem struct {
+	Title       string     `json:"title"`
+	Description string     `json:"description"`
+	Status      TaskStatus `json:"status"`
+}
+
+type TaskChecklistState struct {
+	Items []TaskChecklistItem `json:"items"`
+}
+
 // Text returns the message content, or "" when the message carried none.
 func (m ChatMessage) Text() string {
 	if m.Content == nil {

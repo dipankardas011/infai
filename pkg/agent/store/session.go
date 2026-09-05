@@ -85,9 +85,7 @@ const (
 )
 
 // ToolCallRecord is what the model requested; ToolResultRecord is what it got
-// back. The tool loop is not wired yet — these records exist so the parent
-// context history (tool calls + their outputs) survives in the timeline
-// once the loop lands.
+// back.
 type ToolCallRecord struct {
 	ID        string `json:"id"`
 	Type      string `json:"type"`
@@ -105,7 +103,8 @@ type ToolResultRecord struct {
 // CompactionRecord marks a point where the active model context was replaced
 // by a continuation summary. Earlier timeline events remain untouched.
 type CompactionRecord struct {
-	Summary string `json:"summary"`
+	Summary       string                        `json:"summary"`
+	TaskChecklist *contracts.TaskChecklistState `json:"task_checklist,omitempty"`
 }
 
 type ApprovalEvent struct {

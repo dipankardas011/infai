@@ -6,10 +6,14 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/actuators"
@@ -59,6 +63,7 @@ type InfaiAgentSession struct {
 	availableSkills []contracts.Skill
 	fileManager     *actuators.FileManager
 	skillRegistry   *memory.SkillRegistry
+	taskChecklist   *memory.TaskChecklist
 
 	// WARN: we do need to properly handle the Concurrency.
 	agentMapping    map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
@@ -90,6 +95,7 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 		agentComms:    comms.NewAgentComms(),
 		Agents:        make(map[uuid.UUID]*agent.Agent),
 		auditorPolicy: auditor.NewAuditorPolicy(),
+		taskChecklist: memory.NewTaskChecklist(),
 	}
 	var err error
 	o.fileManager, err = actuators.NewFileManager(cwd)
@@ -166,6 +172,7 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 		timeline:      timeline,
 		events:        store.NewSessionEventHub(),
 		auditorPolicy: auditor.NewAuditorPolicy(),
+		taskChecklist: memory.NewTaskChecklist(),
 	}
 	var err error
 	o.fileManager, err = actuators.NewFileManager(meta.Cwd)
@@ -195,6 +202,13 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 		return nil, err
 	}
 	o.sessionAgentId = firstAgent.Id
+	state, err := getLatestTaskChecklist(o.timeline, o.timeline.CurrentHeadEventID())
+	if err != nil {
+		return nil, fmt.Errorf("reconstruct task checklist: %w", err)
+	}
+	if err := o.taskChecklist.Restore(state); err != nil {
+		return nil, fmt.Errorf("restore task checklist: %w", err)
+	}
 
 	return o, nil
 }
@@ -220,7 +234,7 @@ func (s *InfaiAgentSession) configureMemoryTools() {
 	}
 
 	memoryTools := []contracts.Tool{}
-	memoryTools = append(memoryTools, memory.ReadSkillTool())
+	memoryTools = append(memoryTools, memory.ReadSkillTool(), memory.TaskChecklistTool())
 	if s.skillRegistry != nil {
 		s.availableSkills = s.skillRegistry.Skills()
 	}
@@ -261,6 +275,13 @@ func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, err := s.timeline.LoadEvent(eventID); err != nil {
+		return err
+	}
+	checklist, err := getLatestTaskChecklist(s.timeline, eventID)
+	if err != nil {
+		return err
+	}
+	if err := s.taskChecklist.Restore(checklist); err != nil {
 		return err
 	}
 	s.pendingBranchParent = eventID
@@ -313,6 +334,9 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 	if s.closed {
 		return ErrSessionClosed
 	}
+	if s.pendingBranchParent != uuid.Nil { // Avoids manual compaction when the BranchParent is under Dirty Write of branch switch
+		return errors.New("session: submit a message on the selected branch before compacting")
+	}
 	s.l.Info("manual compaction requested", "history_messages", len(s.history))
 
 	prevCheckpoint, err := s.timeline.LastCompactionSummary()
@@ -326,12 +350,17 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 		return nil
 	}
 
-	systemPrompt, history, err := compactionInput(toCompact, prevCheckpoint)
+	checklist := s.taskChecklist.Snapshot()
+	checklistContext, err := taskChecklistContextForCompaction(checklist)
+	if err != nil {
+		return err
+	}
+	systemPrompt, history, err := compactionInput(toCompact, prevCheckpoint, checklistContext)
 	if err != nil {
 		s.l.Error("manual compaction input failed", "error", err)
 		return err
 	}
-	if err := s.compactChat(ctx, systemPrompt, history, retained); err != nil {
+	if err := s.compactChat(ctx, systemPrompt, history, retained, checklist, checklistContext); err != nil {
 		s.l.Error("manual compaction failed", "error", err)
 		return err
 	}
@@ -362,6 +391,13 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		}
 		history, err := timelineHistory(s.timeline, events)
 		if err != nil {
+			return nil, err
+		}
+		checklist, err := getLatestTaskChecklist(s.timeline, s.pendingBranchParent)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.taskChecklist.Restore(checklist); err != nil {
 			return nil, err
 		}
 		s.history = history
@@ -441,12 +477,17 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 			s.l.Warn("automatic compaction requested but nothing outside the retained tail")
 			return nil, nil
 		}
-		systemPrompt, history, err := compactionInput(toCompact, prevCheckpoint)
+		checklist := s.taskChecklist.Snapshot()
+		checklistContext, err := taskChecklistContextForCompaction(checklist)
+		if err != nil {
+			return nil, err
+		}
+		systemPrompt, history, err := compactionInput(toCompact, prevCheckpoint, checklistContext)
 		if err != nil {
 			s.l.Error("automatic compaction input failed", "error", err)
 			return nil, err
 		}
-		if err := s.compactChat(ctx, systemPrompt, history, retained); err != nil {
+		if err := s.compactChat(ctx, systemPrompt, history, retained, checklist, checklistContext); err != nil {
 			s.l.Error("automatic compaction failed", "error", err)
 			return nil, err
 		}
@@ -525,8 +566,7 @@ func (s *InfaiAgentSession) runAgent(ctx context.Context, agentLoop *agent.Agent
 }
 
 // persistMessagesLocked writes history entries beyond the watermark as message
-// records, deriving tool-call and tool-result records when present. Caller
-// holds s.mu.
+// records. Caller holds s.mu.
 func (s *InfaiAgentSession) persistMessagesLocked() error {
 	for i := s.persisted; i < len(s.history); i++ {
 		m := s.history[i]
@@ -539,12 +579,17 @@ func (s *InfaiAgentSession) persistMessagesLocked() error {
 	return nil
 }
 
-func (s *InfaiAgentSession) rebuildHistoryLocked(summary string, retained []contracts.ChatMessage) {
-	history := []contracts.ChatMessage{contracts.NewUserMessage("<context-summary>\n" + summary + "\n</context-summary>")}
+func (s *InfaiAgentSession) rebuildHistoryLocked(summary string, retained []contracts.ChatMessage, checklistContext string) error {
+	contextMessage, err := continuationContext(summary, checklistContext)
+	if err != nil {
+		return err
+	}
+	history := []contracts.ChatMessage{contracts.NewUserMessage(contextMessage)}
 	history = append(history, retained...)
 	s.history = history
 	s.persisted = len(s.history)
 	s.l.Info("session context compacted", "session_id", s.sessionID, "context_window", s.meta.ContextWindow, "retained", len(retained))
+	return nil
 }
 
 // Compact is kept as an alias for CompactChat.
@@ -579,7 +624,7 @@ func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
 	return shouldCompact
 }
 
-func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string, history []contracts.ChatMessage, retained []contracts.ChatMessage) error {
+func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string, history []contracts.ChatMessage, retained []contracts.ChatMessage, checklist contracts.TaskChecklistState, checklistContext string) error {
 	s.l.Debug("compaction started", "input_messages", len(history), "retained", len(retained))
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacting"})
 	result, err := s.summarize(ctx, systemPrompt, history)
@@ -594,12 +639,14 @@ func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string
 	}
 	if _, err := s.timeline.AppendToHead(store.Record{
 		Kind: store.KindCompaction, Timestamp: time.Now().UTC(),
-		Compaction: &store.CompactionRecord{Summary: result.Summary},
+		Compaction: &store.CompactionRecord{Summary: result.Summary, TaskChecklist: &checklist},
 	}); err != nil {
 		s.l.Error("persist compaction event failed", "error", err)
 		return err
 	}
-	s.rebuildHistoryLocked(result.Summary, retained)
+	if err := s.rebuildHistoryLocked(result.Summary, retained, checklistContext); err != nil {
+		return fmt.Errorf("rebuild compacted session history: %w", err)
+	}
 	s.l.InfoContext(ctx, "compaction completed", "summary_chars", len(result.Summary))
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaCompactionSummary, Text: result.Summary})
 	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacted"})
@@ -668,7 +715,8 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 
 	toolMessages := make([]contracts.ChatMessage, 0, len(calls))
 	for _, call := range calls {
-		policy := s.auditorPolicy.Check(contracts.ToolType(call.Function.Name))
+		toolType := contracts.ToolType(call.Function.Name)
+		policy := s.auditorPolicy.Check(toolType)
 
 		s.l.DebugContext(ctx, "tool call received",
 			"agent_id", msg.From,
@@ -677,20 +725,18 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 			"policy", policy.String(),
 		)
 
-		if !memory.IsMemoryToolCall(contracts.ToolType(call.Function.Name)) {
+		status := string(contracts.ToolExecutionSuccess)
+		var content string
+
+		func() {
+			var err error
+
 			s.events.Publish(store.Record{
 				Kind:      store.KindDelta,
 				Timestamp: time.Now().UTC(),
 				DeltaKind: contracts.DeltaToolCall,
 				Text:      toolCallDisplay(call),
 			})
-		}
-
-		status := string(contracts.ToolExecutionSuccess)
-		var content string
-
-		func() {
-			var err error
 
 			switch policy {
 			case auditor.DenyPolicy:
@@ -721,12 +767,15 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 				}
 			}
 
-			toolCtx := memory.WithSkillRegistry(
-				actuators.WithFileManager(ctx, s.fileManager),
-				s.skillRegistry,
+			toolCtx := memory.WithTaskChecklist(
+				memory.WithSkillRegistry(
+					actuators.WithFileManager(
+						ctx, s.fileManager,
+					), s.skillRegistry,
+				), s.taskChecklist,
 			)
 
-			if memory.IsMemoryToolCall(contracts.ToolType(call.Function.Name)) {
+			if memory.IsMemoryToolCall(toolType) {
 				content, err = memory.ExecuteMemoryToolCall(toolCtx, call)
 				if err != nil {
 					status = string(contracts.ToolExecutionError)
@@ -739,12 +788,21 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 					})
 					return
 				}
-				s.events.Publish(store.Record{
-					Kind:      store.KindDelta,
-					Timestamp: time.Now().UTC(),
-					DeltaKind: contracts.DeltaSkillLoad,
-					Text:      memory.ReadSkillNameFromCall(call),
-				})
+				if contracts.IsToolTypeSkill(toolType) {
+					s.events.Publish(store.Record{
+						Kind:      store.KindDelta,
+						Timestamp: time.Now().UTC(),
+						DeltaKind: contracts.DeltaSkillLoad,
+						Text:      memory.ReadSkillNameFromCall(call),
+					})
+				} else {
+					s.events.Publish(store.Record{
+						Kind:      store.KindDelta,
+						Timestamp: time.Now().UTC(),
+						DeltaKind: contracts.DeltaToolResult,
+						Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
+					})
+				}
 				return
 			}
 
@@ -996,7 +1054,22 @@ func timelineHistory(timeline *store.Timeline, events []store.Event) ([]contract
 			}
 		case store.KindCompaction:
 			if record.Compaction != nil {
-				history = append(history, contracts.NewUserMessage("<context-summary>\n"+record.Compaction.Summary+"\n</context-summary>"))
+				checklist := contracts.TaskChecklistState{Items: []contracts.TaskChecklistItem{}}
+				if record.Compaction.TaskChecklist != nil {
+					checklist = *record.Compaction.TaskChecklist
+				}
+				if err := memory.ValidateTaskChecklistState(checklist); err != nil {
+					return nil, fmt.Errorf("invalid compacted task checklist: %w", err)
+				}
+				checklistContext, err := taskChecklistContextForCompaction(checklist)
+				if err != nil {
+					return nil, err
+				}
+				content, err := continuationContext(record.Compaction.Summary, checklistContext)
+				if err != nil {
+					return nil, err
+				}
+				history = append(history, contracts.NewUserMessage(content))
 			}
 		}
 	}
@@ -1017,4 +1090,104 @@ func timelineRecords(timeline *store.Timeline, events []store.Event) ([]store.Re
 		records = append(records, *record)
 	}
 	return records, nil
+}
+
+func getLatestTaskChecklist(timeline *store.Timeline, head uuid.UUID) (contracts.TaskChecklistState, error) {
+	state := contracts.TaskChecklistState{Items: []contracts.TaskChecklistItem{}}
+	if head == uuid.Nil {
+		return state, nil
+	}
+	events, err := timeline.LoadActiveContextAt(head)
+	if err != nil {
+		return state, err
+	}
+	records, err := timelineRecords(timeline, events)
+	if err != nil {
+		return state, err
+	}
+
+	toolResults := make(map[string]string)
+	for _, record := range slices.Backward(records) {
+		switch record.Kind {
+		case store.KindMessage:
+			if record.Message == nil {
+				continue
+			}
+			message := record.Message
+			if message.Role == "tool" {
+				toolResults[message.ToolCallID] = message.Text()
+				continue
+			}
+			if message.Role != "assistant" {
+				continue
+			}
+			for _, call := range slices.Backward(message.ToolCalls) {
+
+				output, ok := toolResults[call.ID]
+				if !ok {
+					continue
+				}
+				delete(toolResults, call.ID)
+				if call.Function.Name != string(contracts.TaskChecklistTool) {
+					continue
+				}
+				checklist, err := memory.DecodeTaskChecklistState(output)
+				if err == nil {
+					return checklist, nil
+				}
+			}
+
+		case store.KindCompaction:
+			if record.Compaction == nil || record.Compaction.TaskChecklist == nil {
+				return state, nil
+			}
+			if err := memory.ValidateTaskChecklistState(*record.Compaction.TaskChecklist); err != nil {
+				return state, fmt.Errorf("invalid compacted task checklist: %w", err)
+			}
+			return *record.Compaction.TaskChecklist, nil
+		}
+	}
+
+	return state, nil
+}
+
+func taskChecklistContextForCompaction(state contracts.TaskChecklistState) (string, error) {
+	data, err := json.Marshal(state)
+	if err != nil {
+		return "", fmt.Errorf("encode task checklist context: %w", err)
+	}
+	var escaped strings.Builder
+	if err := xml.EscapeText(&escaped, data); err != nil {
+		return "", fmt.Errorf("escape task checklist context: %w", err)
+	}
+	tpl, err := template.New("task_checklist_context").Parse(`<task_checklist source="harness">
+{{.}}
+</task_checklist>`)
+	if err != nil {
+		return "", fmt.Errorf("parse task checklist context template: %w", err)
+	}
+	var output strings.Builder
+	if err := tpl.Execute(&output, escaped.String()); err != nil {
+		return "", fmt.Errorf("render task checklist context: %w", err)
+	}
+	return output.String(), nil
+}
+
+func continuationContext(summary, checklist string) (string, error) {
+	tpl, err := template.New("continuation_context").Parse(`<context-summary>
+{{.Summary}}
+</context-summary>
+
+{{.Checklist}}`)
+	if err != nil {
+		return "", fmt.Errorf("parse continuation context template: %w", err)
+	}
+	var output strings.Builder
+	if err := tpl.Execute(&output, struct {
+		Summary   string
+		Checklist string
+	}{summary, checklist}); err != nil {
+		return "", fmt.Errorf("render continuation context: %w", err)
+	}
+	return output.String(), nil
 }

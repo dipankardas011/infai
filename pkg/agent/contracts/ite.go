@@ -24,15 +24,25 @@ type ToolParameters struct {
 type ToolType string
 
 const (
-	ReadTool      ToolType = "read"
-	WriteTool     ToolType = "write"
-	EditTool      ToolType = "edit"
-	GlobTool      ToolType = "glob"
-	ListTool      ToolType = "list"
-	SearchTool    ToolType = "search"
-	BashTool      ToolType = "bash"
-	ReadSkillTool ToolType = "read_skill"
+	ReadTool          ToolType = "read"
+	WriteTool         ToolType = "write"
+	EditTool          ToolType = "edit"
+	GlobTool          ToolType = "glob"
+	ListTool          ToolType = "list"
+	SearchTool        ToolType = "search"
+	BashTool          ToolType = "bash"
+	ReadSkillTool     ToolType = "read_skill"
+	TaskChecklistTool ToolType = "task_checklist"
 )
+
+func IsToolTypeSkill(t ToolType) bool {
+	switch t {
+	case ReadSkillTool:
+		return true
+	default:
+		return false
+	}
+}
 
 type ToolExecutionStatus string
 
