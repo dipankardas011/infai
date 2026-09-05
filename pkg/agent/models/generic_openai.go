@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,18 +17,24 @@ import (
 )
 
 type genericOpenAICompatableAPI struct {
-	baseURL string
-	model   string
-	apiKey  string
-	client  *http.Client
+	baseURL       string
+	model         string
+	apiKey        string
+	client        *http.Client
+	maxAttempts   int
+	retryBase     time.Duration
+	retryMaxDelay time.Duration
 }
 
 func NewOpenAICompatableAPI(baseURL, model, apiKey string) *genericOpenAICompatableAPI {
 	return &genericOpenAICompatableAPI{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		model:   model,
-		apiKey:  apiKey,
-		client:  &http.Client{Timeout: 5 * time.Minute},
+		baseURL:       strings.TrimRight(baseURL, "/"),
+		model:         model,
+		apiKey:        apiKey,
+		client:        &http.Client{Timeout: 5 * time.Minute},
+		maxAttempts:   10,
+		retryBase:     5 * time.Second,
+		retryMaxDelay: time.Minute,
 	}
 }
 
@@ -92,25 +101,11 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 		return contracts.ChatMessage{}, nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/chat/completions", bytes.NewReader(raw))
-	if err != nil {
-		return contracts.ChatMessage{}, nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if o.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+o.apiKey)
-	}
-
-	resp, err := o.client.Do(req)
+	resp, err := o.sendChatRequest(ctx, raw, opts)
 	if err != nil {
 		return contracts.ChatMessage{}, nil, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return contracts.ChatMessage{}, nil, fmt.Errorf("openai compatible api: status %d: %s", resp.StatusCode, string(body))
-	}
 
 	if opts != nil && opts.Stream {
 		return o.readStream(ctx, resp.Body, opts)
@@ -130,6 +125,119 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 	}
 
 	return reply, parsed.Usage, nil
+}
+
+func (o *genericOpenAICompatableAPI) sendChatRequest(ctx context.Context, body []byte, opts *contracts.GenerateOptions) (*http.Response, error) {
+	maxAttempts := o.maxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if o.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+o.apiKey)
+		}
+
+		resp, err := o.client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if attempt == maxAttempts || !isRetryableTransportError(err) {
+				return nil, fmt.Errorf("openai compatible api: request failed after %d attempt(s): %w", attempt, err)
+			}
+			if err := o.waitForRetry(ctx, attempt, 0, opts); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			return resp, nil
+		}
+
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		_ = resp.Body.Close()
+		statusErr := fmt.Errorf("openai compatible api: status %d: %s", resp.StatusCode, string(responseBody))
+		if attempt == maxAttempts || !isRetryableStatus(resp.StatusCode) {
+			return nil, statusErr
+		}
+		if err := o.waitForRetry(ctx, attempt, retryAfter, opts); err != nil {
+			return nil, err
+		}
+	}
+	return nil, errors.New("openai compatible api: retry loop exhausted")
+}
+
+func (o *genericOpenAICompatableAPI) waitForRetry(ctx context.Context, attempt int, retryAfter time.Duration, opts *contracts.GenerateOptions) error {
+	delay := o.retryBase
+	if delay <= 0 {
+		delay = 5 * time.Second
+	}
+	maxDelay := o.retryMaxDelay
+	if maxDelay <= 0 {
+		maxDelay = time.Minute
+	}
+	for i := 1; i < attempt; i++ {
+		if delay >= maxDelay>>1 {
+			delay = maxDelay
+			break
+		}
+		delay *= 2
+	}
+	if retryAfter > delay {
+		delay = retryAfter
+	}
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+	if opts != nil && opts.OnDelta != nil {
+		opts.OnDelta(contracts.DeltaStatus, fmt.Sprintf("LLM endpoint unavailable; retrying in %s (attempt %d/%d)", delay, attempt+1, o.maxAttempts))
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isRetryableStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooEarly, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func isRetryableTransportError(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	when, err := http.ParseTime(value)
+	if err != nil || !when.After(now) {
+		return 0
+	}
+	return when.Sub(now)
 }
 
 type openAIStreamChunk struct {

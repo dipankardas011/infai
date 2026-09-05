@@ -13,9 +13,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// SessionMeta is the runtime session metadata. ContextWindow and TurnCount are
-// intentionally not persisted; they are runtime/display values, not session
-// identity.
+// SessionMeta is the runtime session metadata. ContextWindow is a
+// runtime/display value and is not persisted.
 type SessionMeta struct {
 	ID            uuid.UUID `json:"id"`
 	Name          string    `json:"name,omitempty"`
@@ -25,7 +24,6 @@ type SessionMeta struct {
 	ContextWindow int       `json:"context_window,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
-	TurnCount     int       `json:"-"`
 }
 
 type sessionFile struct {

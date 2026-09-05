@@ -200,7 +200,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 
 	e.active[id] = sess
 
-	e.bgLogger.Info("session loaded", "session_id", id, "provider", p.Name, "turns", meta.TurnCount)
+	e.bgLogger.Info("session loaded", "session_id", id, "provider", p.Name)
 	return sess, nil
 }
 

@@ -500,7 +500,6 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 			s.l.Warn("automatic compaction requested again; stopping after one continuation", "session_id", s.sessionID)
 		}
 	}
-	s.meta.TurnCount++
 	s.meta.UpdatedAt = time.Now().UTC()
 	if err := s.store.SaveMeta(s.meta); err != nil {
 		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
@@ -513,11 +512,17 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 			contextTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
 		}
 	}
+	reply := ""
+	reasoning := ""
+	if result.Status != agent.TurnCanceled {
+		reply = lastAssistantText(result.Messages)
+		reasoning = lastAssistantReasoning(result.Messages)
+	}
 	return &ChatResult{
 		SessionID:        s.sessionID,
 		Status:           result.Status,
-		Reply:            lastAssistantText(result.Messages),
-		ReasoningContent: lastAssistantReasoning(result.Messages),
+		Reply:            reply,
+		ReasoningContent: reasoning,
 		Pending:          nil, // populated by the session approval coordinator
 		Usage:            result.Usage,
 		ContextTokens:    contextTokens,

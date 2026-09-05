@@ -48,10 +48,13 @@ type chatModel struct {
 	commandMenu      bool
 	commandSelection int
 
-	working   bool
-	workBegan time.Time
-	stream    chan tea.Msg
-	initCmd   tea.Cmd
+	working     bool
+	workBegan   time.Time
+	workStatus  string
+	cancelArmed bool
+	turnCancel  context.CancelFunc
+	stream      chan tea.Msg
+	initCmd     tea.Cmd
 }
 
 type streamDeltaMsg struct {
@@ -166,6 +169,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.reflow(true)
 		return m, nil
 	case streamDeltaMsg:
+		if msg.kind == contracts.DeltaStatus {
+			m.workStatus = statusLabel(msg.text)
+		}
 		m.appendDelta(msg.kind, msg.text)
 		m.refreshTranscript(true)
 		return m, waitStream(m.ctx, m.stream)
@@ -173,12 +179,19 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleApprovalUpdate(msg.update)
 		return m, waitStream(m.ctx, m.stream)
 	case turnDoneMsg:
+		if m.turnCancel != nil {
+			m.turnCancel()
+			m.turnCancel = nil
+		}
 		m.working = false
-		if msg.err != nil {
+		m.cancelArmed = false
+		m.workStatus = ""
+		if errors.Is(msg.err, context.Canceled) || msg.reply != nil && msg.reply.Status == "canceled" {
+			m.appendDelta(contracts.DeltaStatus, "generation canceled")
+		} else if msg.err != nil {
 			m.appendError(msg.err)
 		} else if msg.reply != nil {
 			m.used = msg.reply.ContextTokens
-			m.session.TurnCount++
 			if msg.reply.Model != "" {
 				m.session.Model = msg.reply.Model
 			}
@@ -328,6 +341,17 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	if key == "ctrl+c" {
 		return m, tea.Quit
+	}
+	if m.working && key == "esc" {
+		if !m.cancelArmed {
+			m.cancelArmed = true
+			m.workStatus = "press esc again to cancel"
+		} else if m.turnCancel != nil {
+			m.workStatus = "canceling"
+			m.turnCancel()
+		}
+		m.reflow(false)
+		return m, nil
 	}
 	if m.modal != nil {
 		return m, m.handleModalKey(msg)
@@ -502,9 +526,13 @@ func (m *chatModel) submit() tea.Cmd {
 	m.blocks = append(m.blocks, block{role: "user", text: prompt})
 	m.working = true
 	m.workBegan = time.Now()
+	m.workStatus = "working"
+	m.cancelArmed = false
 	m.refreshTranscript(true)
 	m.stream = make(chan tea.Msg, 256)
 	stream := m.stream
+	turnCtx, cancel := context.WithCancel(m.ctx)
+	m.turnCancel = cancel
 	emit := func(message tea.Msg) bool {
 		select {
 		case stream <- message:
@@ -514,7 +542,7 @@ func (m *chatModel) submit() tea.Cmd {
 		}
 	}
 	go func() {
-		reply, err := m.client.Chat(m.ctx, prompt, func(kind contracts.DeltaKind, text string) {
+		reply, err := m.client.Chat(turnCtx, prompt, func(kind contracts.DeltaKind, text string) {
 			emit(streamDeltaMsg{kind: kind, text: text})
 		}, func(update ApprovalUpdate) {
 			emit(streamApprovalMsg{update: update})
@@ -666,7 +694,11 @@ func (m *chatModel) statusView() string {
 	}
 	if m.working {
 		style = m.styles.statusBusy
-		rest = fmt.Sprintf("%s  ·  %s working %s", m.session.Model, spinnerFrame(m.workBegan), time.Since(m.workBegan).Round(time.Second))
+		workStatus := m.workStatus
+		if workStatus == "" {
+			workStatus = "working"
+		}
+		rest = fmt.Sprintf("%s  ·  %s %s %s", m.session.Model, spinnerFrame(m.workBegan), workStatus, time.Since(m.workBegan).Round(time.Second))
 	}
 	if !m.viewport.AtBottom() {
 		rest += "  ·  viewing earlier output"

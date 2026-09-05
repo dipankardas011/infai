@@ -23,6 +23,7 @@ import (
 type ChatReply struct {
 	Reply            string
 	ReasoningContent string
+	Status           string
 	SessionID        uuid.UUID
 	Model            string
 	Name             string
@@ -353,7 +354,6 @@ func updateState(s *replState, reply *ChatReply) {
 	if reply.SessionID != uuid.Nil {
 		s.session.ID = reply.SessionID
 	}
-	s.session.TurnCount++
 }
 
 // renderStatus prints the footer status bar (model, session, context).

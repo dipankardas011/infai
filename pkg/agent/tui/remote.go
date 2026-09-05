@@ -82,7 +82,11 @@ func (c *RemoteClient) Chat(ctx context.Context, prompt string, onDelta func(kin
 		return nil, fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
 	}
 
-	return c.readStream(resp.Body, onDelta, onApproval)
+	reply, err := c.readStream(resp.Body, onDelta, onApproval)
+	if err != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return reply, err
 }
 
 func (c *RemoteClient) ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error {
@@ -118,9 +122,13 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 	dec := models.NewDecoder(body)
 
 	var reply ChatReply
+	done := false
 	for {
 		ev, err := dec.Decode()
 		if err == io.EOF {
+			if !done {
+				return nil, io.ErrUnexpectedEOF
+			}
 			break
 		}
 		if err != nil {
@@ -133,6 +141,7 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 			Done             bool                  `json:"done"`
 			Reply            string                `json:"reply"`
 			ReasoningContent string                `json:"reasoning_content"`
+			Status           string                `json:"status"`
 			Error            string                `json:"error"`
 			SessionID        uuid.UUID             `json:"session_id"`
 			Model            string                `json:"model"`
@@ -190,8 +199,10 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 			}
 		}
 		if sseEv.Done {
+			done = true
 			reply.Reply = sseEv.Reply
 			reply.ReasoningContent = sseEv.ReasoningContent
+			reply.Status = sseEv.Status
 			reply.SessionID = sseEv.SessionID
 			reply.Model = sseEv.Model
 			reply.ContextWindow = sseEv.ContextWindow

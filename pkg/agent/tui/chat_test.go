@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -77,7 +78,7 @@ func TestWorkingStatusIsProminentAndOmitsTurns(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.width = 80
-	m.session = store.SessionMeta{ID: uuid.New(), Model: "gemma4-e2b-it", TurnCount: 7}
+	m.session = store.SessionMeta{ID: uuid.New(), Model: "gemma4-e2b-it"}
 	normalStatus := ansi.Strip(m.statusView())
 	if strings.Contains(normalStatus, "turn") {
 		t.Fatalf("status contains turn count: %q", normalStatus)
@@ -260,11 +261,22 @@ func TestWorkingTurnDoesNotQueueInputOrOpenSessions(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.working = true
+	turnCtx, cancel := context.WithCancel(context.Background())
+	m.turnCancel = cancel
 	_ = m.composer.Focus()
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
 	_, _ = m.Update(tea.PasteMsg{Content: "queued"})
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
+	escape := tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
+	_, _ = m.Update(escape)
+	if turnCtx.Err() != nil {
+		t.Fatal("first escape canceled the working turn")
+	}
+	_, _ = m.Update(escape)
+	if !errors.Is(turnCtx.Err(), context.Canceled) {
+		t.Fatal("second escape did not cancel the working turn")
+	}
 
 	if m.composer.Value() != "" {
 		t.Fatalf("working turn queued composer input %q", m.composer.Value())
