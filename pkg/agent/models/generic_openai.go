@@ -27,11 +27,13 @@ type genericOpenAICompatableAPI struct {
 }
 
 func NewOpenAICompatableAPI(baseURL, model, apiKey string) *genericOpenAICompatableAPI {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 5 * time.Minute
 	return &genericOpenAICompatableAPI{
 		baseURL:       strings.TrimRight(baseURL, "/"),
 		model:         model,
 		apiKey:        apiKey,
-		client:        &http.Client{Timeout: 5 * time.Minute},
+		client:        &http.Client{Transport: transport},
 		maxAttempts:   10,
 		retryBase:     5 * time.Second,
 		retryMaxDelay: time.Minute,
@@ -144,6 +146,9 @@ func (o *genericOpenAICompatableAPI) sendChatRequest(ctx context.Context, body [
 
 		resp, err := o.client.Do(req)
 		if err != nil {
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
@@ -159,10 +164,16 @@ func (o *genericOpenAICompatableAPI) sendChatRequest(ctx context.Context, body [
 			return resp, nil
 		}
 
-		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
-		_ = resp.Body.Close()
+		closeErr := resp.Body.Close()
 		statusErr := fmt.Errorf("openai compatible api: status %d: %s", resp.StatusCode, string(responseBody))
+		if readErr != nil {
+			statusErr = fmt.Errorf("%w: read response body: %v", statusErr, readErr)
+		}
+		if closeErr != nil {
+			statusErr = fmt.Errorf("%w: close response body: %v", statusErr, closeErr)
+		}
 		if attempt == maxAttempts || !isRetryableStatus(resp.StatusCode) {
 			return nil, statusErr
 		}
