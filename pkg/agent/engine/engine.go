@@ -386,10 +386,10 @@ func (e *InfaiAgentEngine) GetTimeline(id uuid.UUID) (store.SessionMeta, []store
 	return meta, events, timeline.CurrentHeadEventID(), err
 }
 
-func (e *InfaiAgentEngine) SelectBranch(id, eventID uuid.UUID) error {
+func (e *InfaiAgentEngine) SelectBranch(id, eventID uuid.UUID) (contracts.TaskChecklistState, error) {
 	sess, ok := e.Session(id)
 	if !ok {
-		return ErrSessionNotFound
+		return contracts.TaskChecklistState{}, ErrSessionNotFound
 	}
 	return sess.SelectBranch(eventID)
 }

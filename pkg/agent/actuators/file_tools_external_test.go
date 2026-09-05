@@ -57,6 +57,13 @@ func TestWriteToolRequiresReadForExistingFiles(t *testing.T) {
 	writeFile(t, root, "note.txt", "before")
 	m := manager(t, root)
 
+	execute(t, m, contracts.WriteTool, map[string]any{
+		"path": "new.txt", "content": "created without a prior read",
+	})
+	if got := readFile(t, filepath.Join(root, "new.txt")); got != "created without a prior read" {
+		t.Fatalf("new file content = %q", got)
+	}
+
 	err := executeError(t, m, contracts.WriteTool, map[string]any{
 		"path": "note.txt", "content": "after",
 	})

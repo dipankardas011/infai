@@ -69,18 +69,17 @@ func (m *FileManager) Write(path, content string) error {
 		return err
 	}
 	mode := os.FileMode(0o600)
-	info, err := os.Stat(resolved)
-	old, readErr := os.ReadFile(resolved)
-
-	switch {
-	case err != nil && !os.IsNotExist(err):
-		return filesystemErr("write_failed", "the existing file could not be inspected", ResponsibilityEnvironment, err)
-	case readErr != nil && !os.IsNotExist(readErr):
-		return filesystemErr("write_failed", "the existing file could not be read", ResponsibilityEnvironment, readErr)
+	info, statErr := os.Stat(resolved)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return filesystemErr("write_failed", "the existing file could not be inspected", ResponsibilityEnvironment, statErr)
 	}
-	if err == nil {
+	if statErr == nil {
 		if !info.Mode().IsRegular() {
 			return filesystemErr("not_a_file", "the requested path is not a regular file", ResponsibilityAgent, nil)
+		}
+		old, readErr := os.ReadFile(resolved)
+		if readErr != nil {
+			return filesystemErr("write_failed", "the existing file could not be read", ResponsibilityEnvironment, readErr)
 		}
 		if info.Size() > maxReadBytes {
 			return filesystemErr("file_too_large", "the existing file exceeds the write size limit", ResponsibilityTool, nil)

@@ -53,6 +53,8 @@ const (
 	DeltaToolResult DeltaKind = "tool_result"
 	// DeltaSkillLoad identifies a skill being loaded from memory into context.
 	DeltaSkillLoad DeltaKind = "skill_load"
+	// DeltaTaskChecklist carries the current structured task checklist state.
+	DeltaTaskChecklist DeltaKind = "task_checklist"
 )
 
 // ChatCompletion()

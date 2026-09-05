@@ -44,6 +44,7 @@ type chatModel struct {
 	areas            []rowArea
 	viewport         viewport.Model
 	composer         textarea.Model
+	checklist        contracts.TaskChecklistState
 	modal            *modalModel
 	commandMenu      bool
 	commandSelection int
@@ -100,8 +101,9 @@ type timelineLoadedMsg struct {
 	err  error
 }
 type branchSelectedMsg struct {
-	event TimelineEvent
-	err   error
+	event     TimelineEvent
+	checklist contracts.TaskChecklistState
+	err       error
 }
 type approvalResolvedMsg struct{ err error }
 type renamedMsg struct {
@@ -171,6 +173,10 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case streamDeltaMsg:
 		if msg.kind == contracts.DeltaStatus {
 			m.workStatus = statusLabel(msg.text)
+		} else if msg.kind == contracts.DeltaTaskChecklist {
+			if state, err := decodeTaskChecklist(msg.text); err == nil {
+				m.checklist = state
+			}
 		}
 		m.appendDelta(msg.kind, msg.text)
 		m.refreshTranscript(true)
@@ -216,6 +222,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.session = *msg.meta
 		m.client.SetSession(msg.meta.ID)
 		m.blocks = blocksFromRecords(msg.records)
+		m.checklist = taskChecklistFromRecords(msg.records)
 		m.modal = nil
 		m.refreshTranscript(true)
 		return m, nil
@@ -241,6 +248,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.session = *msg.meta
 		m.client.SetSession(msg.meta.ID)
 		m.blocks = nil
+		m.checklist = contracts.TaskChecklistState{}
 		m.used = 0
 		m.modal = nil
 		m.refreshTranscript(true)
@@ -263,6 +271,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.session = *msg.meta
 			m.used = 0
 			m.blocks = blocksFromRecords(msg.records)
+			m.checklist = taskChecklistFromRecords(msg.records)
 		}
 		m.refreshTranscript(true)
 		return m, nil
@@ -277,6 +286,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.appendError(msg.err)
 		} else {
+			m.checklist = msg.checklist
 			m.blocks = append(m.blocks, block{role: "system", text: branchSelectionLabel(msg.event)})
 		}
 		m.modal = nil
@@ -708,7 +718,43 @@ func (m *chatModel) statusView() string {
 	} else {
 		rest = style.Render(rest)
 	}
+	if checklist := m.taskChecklistView(max(m.width-2, 1)); checklist != "" {
+		rest = checklist + "\n" + rest
+	}
 	return fullWidth(lipgloss.NewStyle().Padding(0, 1), m.width, rest)
+}
+
+func (m *chatModel) taskChecklistView(width int) string {
+	if len(m.checklist.Items) == 0 {
+		return ""
+	}
+	completed := 0
+	for _, item := range m.checklist.Items {
+		if item.Status == contracts.TaskCompleted {
+			completed++
+		}
+	}
+	lines := []string{m.styles.system.Bold(true).Render(fmt.Sprintf("TASKS  %d/%d complete", completed, len(m.checklist.Items)))}
+	visible := min(len(m.checklist.Items), 4)
+	for _, item := range m.checklist.Items[:visible] {
+		marker := "○"
+		style := m.styles.inactive
+		switch item.Status {
+		case contracts.TaskInProgress:
+			marker, style = "◐", m.styles.statusBusy
+		case contracts.TaskCompleted:
+			marker, style = "✓", m.styles.active
+		}
+		line := marker + " " + item.Title
+		if item.Description != "" {
+			line += "  ·  " + item.Description
+		}
+		lines = append(lines, style.Render(truncateLine(line, width)))
+	}
+	if len(m.checklist.Items) > visible {
+		lines = append(lines, m.styles.muted.Render(fmt.Sprintf("… %d more", len(m.checklist.Items)-visible)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *chatModel) composerView() string {
@@ -1010,6 +1056,9 @@ func (m *chatModel) appendToolEvent(kind, text string) {
 	if fields := strings.Fields(text); len(fields) > 0 {
 		name = fields[0]
 	}
+	if isChecklistTool(name) {
+		return
+	}
 	m.blocks = append(m.blocks, block{role: "tool", text: text, toolKind: kind, toolStatus: status, toolName: name})
 }
 
@@ -1084,8 +1133,8 @@ func loadTimelineCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
 
 func selectBranchCmd(ctx context.Context, client Client, sessionID uuid.UUID, event TimelineEvent) tea.Cmd {
 	return func() tea.Msg {
-		err := client.SelectBranch(ctx, sessionID, event.ID)
-		return branchSelectedMsg{event: event, err: err}
+		checklist, err := client.SelectBranch(ctx, sessionID, event.ID)
+		return branchSelectedMsg{event: event, checklist: checklist, err: err}
 	}
 }
 
@@ -1127,12 +1176,13 @@ func blocksFromRecords(records []store.Record) []block {
 				blocks = append(blocks, block{role: "compaction", text: record.Compaction.Summary})
 			}
 		case store.KindToolCall:
-			if record.ToolCall != nil {
+			if record.ToolCall != nil && !isChecklistTool(record.ToolCall.Name) {
 				blocks = append(blocks, block{role: "tool", text: toolCallRecordDisplay(record.ToolCall), toolKind: "call", toolName: record.ToolCall.Name})
 			}
 		case store.KindToolResult:
 			if record.ToolResult != nil {
-				if _, skill := skillCallIDs[record.ToolResult.CallID]; !skill {
+				toolName := toolCallNames[record.ToolResult.CallID]
+				if _, skill := skillCallIDs[record.ToolResult.CallID]; !skill && !isChecklistTool(toolName) {
 					blocks = append(blocks, block{role: "tool", text: toolResultDisplay(record.ToolResult), toolKind: "result", toolStatus: record.ToolResult.Status, toolName: toolCallNames[record.ToolResult.CallID]})
 				}
 			}
@@ -1156,11 +1206,19 @@ func blocksFromRecords(records []store.Record) []block {
 						blocks = append(blocks, block{role: "skill", text: skillNameFromCall(call)})
 						continue
 					}
+					if isChecklistTool(call.Function.Name) {
+						continue
+					}
 					blocks = append(blocks, block{role: "tool", text: toolCallDisplay(call), toolKind: "call", toolName: call.Function.Name})
 				}
 			case "tool":
-				if _, skill := skillCallIDs[message.ToolCallID]; !skill {
-					blocks = append(blocks, block{role: "tool", text: message.Text(), toolKind: "result", toolStatus: "success", toolName: toolCallNames[message.ToolCallID]})
+				toolName := toolCallNames[message.ToolCallID]
+				if _, skill := skillCallIDs[message.ToolCallID]; !skill && !isChecklistTool(toolName) {
+					status := string(message.Status)
+					if status == "" {
+						status = string(contracts.ToolExecutionSuccess)
+					}
+					blocks = append(blocks, block{role: "tool", text: message.Text(), toolKind: "result", toolStatus: status, toolName: toolCallNames[message.ToolCallID]})
 				}
 			}
 		}
@@ -1179,6 +1237,53 @@ func skillNameFromCall(call contracts.ToolCall) string {
 }
 
 func isSkillTool(name string) bool { return name == string(contracts.ReadSkillTool) }
+
+func isChecklistTool(name string) bool { return name == string(contracts.TaskChecklistTool) }
+
+func decodeTaskChecklist(text string) (contracts.TaskChecklistState, error) {
+	var state contracts.TaskChecklistState
+	err := json.Unmarshal([]byte(text), &state)
+	return state, err
+}
+
+func taskChecklistFromRecords(records []store.Record) contracts.TaskChecklistState {
+	state := contracts.TaskChecklistState{}
+	toolNames := make(map[string]string)
+	for _, record := range records {
+		if record.ToolCall != nil {
+			toolNames[record.ToolCall.ID] = record.ToolCall.Name
+		}
+		if record.Message != nil && record.Message.Role == "assistant" {
+			for _, call := range record.Message.ToolCalls {
+				toolNames[call.ID] = call.Function.Name
+			}
+		}
+	}
+	for _, record := range records {
+		if record.Compaction != nil && record.Compaction.TaskChecklist != nil {
+			state = *record.Compaction.TaskChecklist
+		}
+		if record.ToolResult != nil && isChecklistTool(toolNames[record.ToolResult.CallID]) {
+			if next, err := decodeTaskChecklist(record.ToolResult.Output); err == nil {
+				state = next
+			}
+		}
+		if record.Message != nil && record.Message.Role == "tool" && isChecklistTool(toolNames[record.Message.ToolCallID]) {
+			if next, err := decodeTaskChecklist(record.Message.Text()); err == nil {
+				state = next
+			}
+		}
+	}
+	return state
+}
+
+func truncateLine(value string, width int) string {
+	if width < 2 || lipgloss.Width(value) <= width {
+		return value
+	}
+	runes := []rune(value)
+	return string(runes[:min(len(runes), width-1)]) + "…"
+}
 
 func toolCallDisplay(call contracts.ToolCall) string {
 	if call.Function.Arguments == "" {
@@ -1301,6 +1406,9 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 	}
 	if event.Record.ToolCall != nil {
 		call := event.Record.ToolCall
+		if isChecklistTool(call.Name) {
+			return []timelineDisplay{{role: "system", text: "task checklist updated"}}
+		}
 		if isSkillTool(call.Name) {
 			var args struct {
 				Name string `json:"name"`
@@ -1313,6 +1421,9 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 		return []timelineDisplay{{role: "tool_call", text: singleLine(toolCallRecordDisplay(call))}}
 	}
 	if event.Record.ToolResult != nil {
+		if _, err := decodeTaskChecklist(event.Record.ToolResult.Output); err == nil {
+			return []timelineDisplay{{role: "system", text: "task checklist updated"}}
+		}
 		return []timelineDisplay{{role: "tool_result", text: singleLine(toolResultDisplay(event.Record.ToolResult))}}
 	}
 	if event.Record.Message != nil {
@@ -1321,6 +1432,9 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 			return []timelineDisplay{{role: "user", text: singleLine(message.Text())}}
 		}
 		if message.Role == "tool" {
+			if _, err := decodeTaskChecklist(message.Text()); err == nil {
+				return []timelineDisplay{{role: "system", text: "task checklist updated"}}
+			}
 			return []timelineDisplay{{role: "tool_result", text: singleLine(message.Text())}}
 		}
 		displays := make([]timelineDisplay, 0, 2+len(message.ToolCalls))
@@ -1333,6 +1447,9 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 		for _, call := range message.ToolCalls {
 			if isSkillTool(call.Function.Name) {
 				displays = append(displays, timelineDisplay{role: "skill", text: skillNameFromCall(call)})
+				continue
+			}
+			if isChecklistTool(call.Function.Name) {
 				continue
 			}
 			displays = append(displays, timelineDisplay{role: "tool_call", text: singleLine(toolCallDisplay(call))})

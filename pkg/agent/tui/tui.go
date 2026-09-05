@@ -73,7 +73,7 @@ type Client interface {
 	SetSessionModel(ctx context.Context, provider, model string) error
 	Compact(ctx context.Context) (*store.SessionMeta, error)
 	GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error)
-	SelectBranch(ctx context.Context, id, eventID uuid.UUID) error
+	SelectBranch(ctx context.Context, id, eventID uuid.UUID) (contracts.TaskChecklistState, error)
 }
 
 type TimelineEvent struct {
@@ -251,6 +251,16 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 				cSystem.Fprintf(out, "  ↳ tool result %s\n", text)
 			case contracts.DeltaSkillLoad:
 				cSkill.Fprintf(out, "  ✦ skill %s\n", text)
+			case contracts.DeltaTaskChecklist:
+				if state, err := decodeTaskChecklist(text); err == nil {
+					completed := 0
+					for _, item := range state.Items {
+						if item.Status == contracts.TaskCompleted {
+							completed++
+						}
+					}
+					cSystem.Fprintf(out, "  tasks %d/%d complete\n", completed, len(state.Items))
+				}
 			}
 		}, nil)
 		if thinkingShown && !contentStarted {
@@ -552,7 +562,7 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 	if err != nil || idx < 0 || idx >= len(options) {
 		return fmt.Errorf("invalid timeline selection")
 	}
-	if err := c.SelectBranch(ctx, s.session.ID, options[idx].ID); err != nil {
+	if _, err := c.SelectBranch(ctx, s.session.ID, options[idx].ID); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, branchSelectionLabel(options[idx]))

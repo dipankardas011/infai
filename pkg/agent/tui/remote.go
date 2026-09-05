@@ -188,6 +188,8 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 				kind = contracts.DeltaToolResult
 			case "skill_load":
 				kind = contracts.DeltaSkillLoad
+			case "task_checklist":
+				kind = contracts.DeltaTaskChecklist
 			}
 			if kind == contracts.DeltaContent {
 				reply.Reply += sseEv.Delta
@@ -303,8 +305,12 @@ func (c *RemoteClient) GetTimeline(ctx context.Context, id uuid.UUID) (*Timeline
 	return &out, nil
 }
 
-func (c *RemoteClient) SelectBranch(ctx context.Context, id, eventID uuid.UUID) error {
-	return c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/timeline/branch", map[string]uuid.UUID{"event_id": eventID}, http.StatusOK, &struct{}{})
+func (c *RemoteClient) SelectBranch(ctx context.Context, id, eventID uuid.UUID) (contracts.TaskChecklistState, error) {
+	var response struct {
+		TaskChecklist contracts.TaskChecklistState `json:"task_checklist"`
+	}
+	err := c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/timeline/branch", map[string]uuid.UUID{"event_id": eventID}, http.StatusOK, &response)
+	return response.TaskChecklist, err
 }
 
 func (c *RemoteClient) DeleteSession(ctx context.Context, id uuid.UUID) error {

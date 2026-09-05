@@ -202,7 +202,8 @@ func (s *Server) handleBranchTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("event_id is required"))
 		return
 	}
-	if err := s.engine.SelectBranch(id, req.EventID); err != nil {
+	checklist, err := s.engine.SelectBranch(id, req.EventID)
+	if err != nil {
 		if errors.Is(err, engine.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
@@ -210,7 +211,7 @@ func (s *Server) handleBranchTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"event_id": req.EventID, "selected": true})
+	s.writeJSON(w, http.StatusOK, map[string]any{"event_id": req.EventID, "selected": true, "task_checklist": checklist})
 }
 
 func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {

@@ -271,21 +271,21 @@ func (s *InfaiAgentSession) Timeline() ([]store.Event, uuid.UUID, error) {
 	return events, head, err
 }
 
-func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) error {
+func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) (contracts.TaskChecklistState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, err := s.timeline.LoadEvent(eventID); err != nil {
-		return err
+		return contracts.TaskChecklistState{}, err
 	}
 	checklist, err := getLatestTaskChecklist(s.timeline, eventID)
 	if err != nil {
-		return err
+		return contracts.TaskChecklistState{}, err
 	}
 	if err := s.taskChecklist.Restore(checklist); err != nil {
-		return err
+		return contracts.TaskChecklistState{}, err
 	}
 	s.pendingBranchParent = eventID
-	return nil
+	return checklist, nil
 }
 
 // Rename persists a new display name for the session.
@@ -404,6 +404,9 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		s.persisted = len(history)
 		parentID = s.pendingBranchParent
 		s.pendingBranchParent = uuid.Nil
+	}
+	if err := s.publishTaskChecklist(); err != nil {
+		return nil, err
 	}
 
 	s.history = append(s.history, contracts.NewUserMessage(prompt))
@@ -527,6 +530,20 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		Usage:            result.Usage,
 		ContextTokens:    contextTokens,
 	}, nil
+}
+
+func (s *InfaiAgentSession) publishTaskChecklist() error {
+	content, err := json.Marshal(s.taskChecklist.Snapshot())
+	if err != nil {
+		return fmt.Errorf("encode task checklist delta: %w", err)
+	}
+	s.events.Publish(store.Record{
+		Kind:      store.KindDelta,
+		Timestamp: time.Now().UTC(),
+		DeltaKind: contracts.DeltaTaskChecklist,
+		Text:      string(content),
+	})
+	return nil
 }
 
 // runAgent owns one complete agent/comms invocation and persists the messages
@@ -751,7 +768,7 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 					Kind:      store.KindDelta,
 					Timestamp: time.Now().UTC(),
 					DeltaKind: contracts.DeltaToolResult,
-					Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
+					Text:      toolResultEventText(call.Function.Name, status, content),
 				})
 				return
 			case auditor.HumanPolicy:
@@ -766,7 +783,7 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 						Kind:      store.KindDelta,
 						Timestamp: time.Now().UTC(),
 						DeltaKind: contracts.DeltaToolResult,
-						Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
+						Text:      toolResultEventText(call.Function.Name, status, content),
 					})
 					return
 				}
@@ -789,7 +806,7 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 						Kind:      store.KindDelta,
 						Timestamp: time.Now().UTC(),
 						DeltaKind: contracts.DeltaToolResult,
-						Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
+						Text:      toolResultEventText(call.Function.Name, status, content),
 					})
 					return
 				}
@@ -799,6 +816,13 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 						Timestamp: time.Now().UTC(),
 						DeltaKind: contracts.DeltaSkillLoad,
 						Text:      memory.ReadSkillNameFromCall(call),
+					})
+				} else if toolType == contracts.TaskChecklistTool {
+					s.events.Publish(store.Record{
+						Kind:      store.KindDelta,
+						Timestamp: time.Now().UTC(),
+						DeltaKind: contracts.DeltaTaskChecklist,
+						Text:      content,
 					})
 				} else {
 					s.events.Publish(store.Record{
@@ -820,7 +844,7 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 				Kind:      store.KindDelta,
 				Timestamp: time.Now().UTC(),
 				DeltaKind: contracts.DeltaToolResult,
-				Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
+				Text:      toolResultEventText(call.Function.Name, status, content),
 			})
 		}()
 
@@ -845,6 +869,14 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 		Kind:    comms.AgentCommMessage,
 		Payload: payload,
 	})
+}
+
+func toolResultEventText(name string, status contracts.ToolExecutionStatus, content string) string {
+	result := fmt.Sprintf("%s [%s]", name, status)
+	if status != contracts.ToolExecutionSuccess && content != "" {
+		result += ": " + content
+	}
+	return result
 }
 
 func toolCallDisplay(call contracts.ToolCall) string {
