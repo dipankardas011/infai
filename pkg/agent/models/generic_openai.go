@@ -57,9 +57,13 @@ type openAIChatResponse struct {
 }
 
 func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) (contracts.ChatMessage, *contracts.TokenUsage, error) {
+	wireMessages := append([]contracts.ChatMessage(nil), messages...)
+	for i := range wireMessages {
+		wireMessages[i].Status = "" // NOTE: to avoid sending the status as openai api doesn't have one.
+	}
 	reqBody := openAIChatRequest{
 		Model:    o.model,
-		Messages: messages,
+		Messages: wireMessages,
 	}
 	for _, tool := range tools {
 		reqBody.Tools = append(reqBody.Tools, openAITool{

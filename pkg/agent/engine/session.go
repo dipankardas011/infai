@@ -725,7 +725,7 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 			"policy", policy.String(),
 		)
 
-		status := string(contracts.ToolExecutionSuccess)
+		status := contracts.ToolExecutionSuccess
 		var content string
 
 		func() {
@@ -740,7 +740,7 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 
 			switch policy {
 			case auditor.DenyPolicy:
-				status = string(contracts.ToolExecutionDenied)
+				status = contracts.ToolExecutionDenied
 				content = "tool execution was denied by session policy"
 				s.events.Publish(store.Record{
 					Kind:      store.KindDelta,
@@ -752,9 +752,9 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 			case auditor.HumanPolicy:
 				if err := s.executeAfterApproval(ctx, msg.From, call); err != nil {
 					if errors.Is(err, errApprovalDenied) {
-						status = string(contracts.ToolExecutionDenied)
+						status = contracts.ToolExecutionDenied
 					} else {
-						status = string(contracts.ToolExecutionError)
+						status = contracts.ToolExecutionError
 					}
 					content = err.Error()
 					s.events.Publish(store.Record{
@@ -778,7 +778,7 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 			if memory.IsMemoryToolCall(toolType) {
 				content, err = memory.ExecuteMemoryToolCall(toolCtx, call)
 				if err != nil {
-					status = string(contracts.ToolExecutionError)
+					status = contracts.ToolExecutionError
 					content = err.Error()
 					s.events.Publish(store.Record{
 						Kind:      store.KindDelta,
@@ -808,7 +808,7 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 
 			content, err = actuators.ExecuteToolCall(toolCtx, call)
 			if err != nil {
-				status = string(contracts.ToolExecutionError)
+				status = contracts.ToolExecutionError
 				content = err.Error()
 			}
 			s.events.Publish(store.Record{
@@ -826,7 +826,7 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 			"status", status,
 		)
 
-		toolMessages = append(toolMessages, contracts.NewToolMessage(call.ID, content))
+		toolMessages = append(toolMessages, contracts.NewToolMessage(call.ID, content, status))
 	}
 	payload, err := json.Marshal(toolMessages)
 	if err != nil {
@@ -1115,6 +1115,9 @@ func getLatestTaskChecklist(timeline *store.Timeline, head uuid.UUID) (contracts
 			}
 			message := record.Message
 			if message.Role == "tool" {
+				if message.Status != contracts.ToolExecutionSuccess {
+					continue
+				}
 				toolResults[message.ToolCallID] = message.Text()
 				continue
 			}
