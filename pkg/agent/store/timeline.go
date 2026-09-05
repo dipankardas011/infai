@@ -319,6 +319,41 @@ func (t *Timeline) LoadActiveBranchContext() ([]Event, error) {
 	return t.loadActiveAncestryLocked(t.head)
 }
 
+// LastCompactionSummary returns the Summary of the most recent compaction in
+// the active branch, or "" when none exists.
+func (t *Timeline) LastCompactionSummary() (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	head := t.head
+	seen := make(map[uuid.UUID]struct{})
+	for head != rootEventID {
+		if _, ok := seen[head]; ok {
+			return "", fmt.Errorf("timeline: parent cycle at event %d", head)
+		}
+		seen[head] = struct{}{}
+		loc, ok := t.index[head]
+		if !ok {
+			return "", fmt.Errorf("timeline: parent event %d not found", head)
+		}
+		event, err := t.readAt(head, loc)
+		if err != nil {
+			return "", err
+		}
+		if event.Kind == KindCompaction {
+			record, err := t.resolveRecord(event)
+			if err != nil {
+				return "", err
+			}
+			if record.Compaction != nil {
+				return record.Compaction.Summary, nil
+			}
+			return "", nil
+		}
+		head = event.ParentID
+	}
+	return "", nil
+}
+
 // LoadActiveContextAt loads active context for a temporary branch parent.
 // Ordinary session access should use LoadActiveContext, which
 // reads the timeline's internal HEAD.

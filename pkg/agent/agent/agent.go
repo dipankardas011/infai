@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/google/uuid"
 )
@@ -25,17 +27,22 @@ type Agent struct {
 
 	systemPrompt string
 
-	model     contracts.InfaiModelAdaptor
-	turnHook  func(contracts.ChatMessage)
-	deltaHook func(contracts.DeltaKind, string)
-	Status    AgentStatus
-	MaxTurns  int
+	model         contracts.InfaiModelAdaptor
+	deltaHook     func(contracts.DeltaKind, string)
+	Status        AgentStatus
+	MaxTurns      int
+	tools         []contracts.Tool
+	comms         *comms.IACChannel
+	shouldCompact func(*contracts.TokenUsage) bool
 }
 
 type agentOption struct {
-	maxTurns  int
-	turnHook  func(contracts.ChatMessage)
-	deltaHook func(contracts.DeltaKind, string)
+	maxTurns      int
+	turnHook      func(contracts.ChatMessage)
+	deltaHook     func(contracts.DeltaKind, string)
+	tools         []contracts.Tool
+	comms         *comms.IACChannel
+	shouldCompact func(*contracts.TokenUsage) bool
 }
 
 type AgentOptions func(*agentOption) error
@@ -50,9 +57,9 @@ func WithMaxTurns(maxTurns int) AgentOptions {
 	}
 }
 
-func WithTurnHook(hook func(contracts.ChatMessage)) AgentOptions {
+func WithIAC(comms *comms.IACChannel) AgentOptions {
 	return func(o *agentOption) error {
-		o.turnHook = hook
+		o.comms = comms
 		return nil
 	}
 }
@@ -60,6 +67,20 @@ func WithTurnHook(hook func(contracts.ChatMessage)) AgentOptions {
 func WithDeltaHook(hook func(contracts.DeltaKind, string)) AgentOptions {
 	return func(o *agentOption) error {
 		o.deltaHook = hook
+		return nil
+	}
+}
+
+func WithTools(tools ...contracts.Tool) AgentOptions {
+	return func(o *agentOption) error {
+		o.tools = append([]contracts.Tool(nil), tools...)
+		return nil
+	}
+}
+
+func WithCompactionCheck(check func(*contracts.TokenUsage) bool) AgentOptions {
+	return func(o *agentOption) error {
+		o.shouldCompact = check
 		return nil
 	}
 }
@@ -74,13 +95,15 @@ func NewAgent(id uuid.UUID, systemPrompt string, opts ...AgentOptions) (*Agent, 
 		}
 	}
 	return &Agent{
-		Id:           id,
-		model:        nil,
-		turnHook:     o.turnHook,
-		deltaHook:    o.deltaHook,
-		Status:       Idle,
-		MaxTurns:     o.maxTurns,
-		systemPrompt: systemPrompt,
+		Id:            id,
+		model:         nil,
+		deltaHook:     o.deltaHook,
+		Status:        Idle,
+		MaxTurns:      o.maxTurns,
+		tools:         o.tools,
+		comms:         o.comms,
+		shouldCompact: o.shouldCompact,
+		systemPrompt:  systemPrompt,
 	}, nil
 }
 
@@ -126,7 +149,7 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 		requestMessages = append(requestMessages, contracts.NewSystemMessage(a.systemPrompt))
 		requestMessages = append(requestMessages, messages...)
 
-		reply, u, err := a.model.Generate(ctx, requestMessages, &goOpts)
+		reply, u, err := a.model.Generate(ctx, requestMessages, a.tools, &goOpts)
 		usage = u
 		if err != nil {
 			if ctx.Err() != nil {
@@ -137,11 +160,41 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 			return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, fmt.Errorf("agent: turn %d: %w", turn, err)
 		}
 		messages = append(messages, reply)
-		if a.turnHook != nil {
-			a.turnHook(reply)
-		}
 
-		break
+		if len(reply.ToolCalls) > 0 {
+			if a.comms == nil {
+				return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, errors.New("agent: inter-agent communication is not configured")
+			}
+			payload, err := json.Marshal(reply.ToolCalls)
+			if err != nil {
+				return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, err
+			}
+			if err := a.comms.Send(ctx, comms.AgentComm{
+				ID:      uuid.New(),
+				From:    a.Id,
+				Kind:    comms.AgentCommTool,
+				Payload: payload,
+			}); err != nil {
+				return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, err
+			}
+
+			response, err := a.comms.Receive(ctx)
+			if err != nil {
+				return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, err
+			}
+			var toolMessages []contracts.ChatMessage
+			if err := json.Unmarshal(response.Payload, &toolMessages); err != nil {
+				return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, err
+			}
+			messages = append(messages, toolMessages...)
+
+			if a.shouldCompact != nil && a.shouldCompact(usage) {
+				return TurnResult{Status: TurnNeedsCompaction, Messages: messages, Usage: usage}, nil
+			}
+		} else {
+			// TODO: some evaluation Certira need to be there as a WithEval() like thing.
+			break
+		}
 	}
 
 	// Canceled on the final iteration's boundary — report it, not "done".

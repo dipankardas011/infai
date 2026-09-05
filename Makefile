@@ -41,6 +41,10 @@ inference-install: ## Install inference into GOBIN
 agent-run: ## Run the agent
 	$(call go-run, ./cmd/agent)
 
+.PHONY: agent-build
+agent-build: ## Compile the agent binary into ./$(BUILD_DIR)
+	$(call go-build,$(BINARY),./cmd/agent)
+
 .PHONY: test
 test: ## Run all tests
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) test ./...

@@ -11,7 +11,7 @@ import "context"
 type InfaiModelAdaptor interface {
 	// Generate returns the next assistant message for the given history plus
 	// the request's token usage (nil when the provider reports none).
-	Generate(ctx context.Context, messages []ChatMessage, opts *GenerateOptions) (ChatMessage, *TokenUsage, error)
+	Generate(ctx context.Context, messages []ChatMessage, tools []Tool, opts *GenerateOptions) (ChatMessage, *TokenUsage, error)
 }
 
 // TokenUsage is the provider-reported token accounting for one request.
@@ -47,6 +47,14 @@ const (
 	DeltaStatus DeltaKind = "status"
 	// DeltaCompactionSummary is a live-only compaction summary for the UI.
 	DeltaCompactionSummary DeltaKind = "compaction_summary"
+	// DeltaToolCall identifies a tool invocation requested by the model.
+	DeltaToolCall DeltaKind = "tool_call"
+	// DeltaToolResult identifies the completion of a tool invocation.
+	DeltaToolResult DeltaKind = "tool_result"
+	// DeltaSkillLoad identifies a skill being loaded from memory into context.
+	DeltaSkillLoad DeltaKind = "skill_load"
+	// DeltaTaskChecklist carries the current structured task checklist state.
+	DeltaTaskChecklist DeltaKind = "task_checklist"
 )
 
 // ChatCompletion()

@@ -1,15 +1,34 @@
 package contracts
 
-// ChatMessage is the single source of truth for chat messages and is
-// serialized directly as the OpenAI-compatible wire format. Adapters must
-// not define their own parallel message types.
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// SessionSummary combines persisted identity with engine-owned runtime state
+// for session-list API consumers.
+type SessionSummary struct {
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name,omitempty"`
+	Provider  string    `json:"provider"`
+	Model     string    `json:"model"`
+	Cwd       string    `json:"cwd,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Active    bool      `json:"active"`
+}
+
+// ChatMessage is the single source of truth for chat messages.
+// NOTE: Adapters remove harness-only fields such as Status before sending the OpenAI wire format.
 type ChatMessage struct {
-	Role             string     `json:"role"`
-	Content          *string    `json:"content,omitempty"`
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	Name             *string    `json:"name,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	Role             string              `json:"role"`
+	Content          *string             `json:"content,omitempty"`
+	ReasoningContent string              `json:"reasoning_content,omitempty"`
+	Name             *string             `json:"name,omitempty"`
+	ToolCallID       string              `json:"tool_call_id,omitempty"`
+	ToolCalls        []ToolCall          `json:"tool_calls,omitempty"`
+	Status           ToolExecutionStatus `json:"status,omitempty"`
 }
 
 // ToolCall is a function-call the model requested. Schema is defined now;
@@ -24,6 +43,24 @@ type ToolCall struct {
 type Function struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+}
+
+type TaskStatus string
+
+const (
+	TaskPending    TaskStatus = "pending"
+	TaskInProgress TaskStatus = "in_progress"
+	TaskCompleted  TaskStatus = "completed"
+)
+
+type TaskChecklistItem struct {
+	Title       string     `json:"title"`
+	Description string     `json:"description"`
+	Status      TaskStatus `json:"status"`
+}
+
+type TaskChecklistState struct {
+	Items []TaskChecklistItem `json:"items"`
 }
 
 // Text returns the message content, or "" when the message carried none.
@@ -46,12 +83,17 @@ func NewAssistantMessage(content string) ChatMessage {
 	return ChatMessage{Role: "assistant", Content: &content}
 }
 
+func NewToolMessage(callID, content string, status ToolExecutionStatus) ChatMessage {
+	return ChatMessage{Role: "tool", ToolCallID: callID, Content: &content, Status: status}
+}
+
 // Skill is a capability the model can apply (knowledge/memory), described
 // for the system prompt. Skills live with memory because they are learned
 // capabilities rather than executable actions.
 type Skill struct {
 	Title       string
 	Description string
+	Location    string
 }
 
 // DeepKnowledge we can store Skills
