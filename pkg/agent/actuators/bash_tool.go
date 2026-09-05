@@ -137,8 +137,8 @@ func (m *FileManager) Bash(ctx context.Context, command, workdir string, timeout
 
 	output, err := cmd.CombinedOutput()
 	result := BashResult{Output: string(output)}
-	if len(result.Output) > maxToolOutputBytes {
-		result.Output = result.Output[:maxToolOutputBytes]
+	if len(result.Output) > maxToolContentBytes {
+		result.Output = result.Output[:maxToolContentBytes]
 		result.Truncated = true
 	}
 	if runCtx.Err() == context.DeadlineExceeded {

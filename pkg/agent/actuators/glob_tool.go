@@ -96,7 +96,7 @@ func (m *FileManager) Glob(pattern string) ([]string, error) {
 			}
 			out = append(out, relative)
 			if len(out) > maxDirectoryEntries {
-				return filesystemErr("too_many_matches", "the glob matched too many paths", ResponsibilityTool, nil)
+				return filesystemErr("too_many_matches", "the glob matched too many paths; narrow the pattern or directory", ResponsibilityTool, nil)
 			}
 		}
 		return nil

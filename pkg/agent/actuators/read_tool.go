@@ -160,7 +160,11 @@ func (m *FileManager) Read(path string, offset, limit *int, metadata bool) (stri
 		end = start + *limit
 	}
 
-	return strings.Join(lines[start:end], ""), nil
+	output := strings.Join(lines[start:end], "")
+	if len(output) > maxToolContentBytes {
+		return "", filesystemErr("read_output_too_large", "the requested text is too large; provide offset and limit to read a smaller range", ResponsibilityTool, nil)
+	}
+	return output, nil
 }
 
 func readMetadataJSON(path, resolved string, info os.FileInfo, data []byte) (string, error) {

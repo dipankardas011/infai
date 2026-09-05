@@ -36,7 +36,7 @@ type ListEntry struct {
 	Symlink string `json:"symlink,omitempty"`
 }
 
-const maxDirectoryEntries = 10_000
+const maxDirectoryEntries = 500
 
 func listExecution(ctx context.Context) (string, error) {
 	var args listArguments
@@ -82,7 +82,7 @@ func (m *FileManager) List(path string) ([]ListEntry, error) {
 		return nil, err
 	}
 	if len(entries) > maxDirectoryEntries {
-		return nil, filesystemErr("directory_too_large", "the directory contains too many entries", ResponsibilityTool, nil)
+		return nil, filesystemErr("directory_too_large", "the directory contains too many entries; list a narrower directory", ResponsibilityTool, nil)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	out := make([]ListEntry, 0, len(entries))

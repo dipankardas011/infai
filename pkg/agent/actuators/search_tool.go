@@ -41,7 +41,7 @@ type SearchResult struct {
 	Text string `json:"text"`
 }
 
-const maxSearchOutputBytes = 1 << 20
+const maxSearchOutputBytes = maxToolContentBytes
 
 func searchExecution(ctx context.Context) (string, error) {
 	var args searchArguments
@@ -125,7 +125,7 @@ func (m *FileManager) Search(pattern, path string) ([]SearchResult, error) {
 				}
 				outputBytes += len(line)
 				if len(results) >= maxDirectoryEntries || outputBytes > maxSearchOutputBytes {
-					return filesystemErr("search_too_large", "the search produced too much output", ResponsibilityTool, nil)
+					return filesystemErr("search_too_large", "the search produced too much output; narrow the path or pattern", ResponsibilityTool, nil)
 				}
 				results = append(results, SearchResult{
 					Path: filepath.ToSlash(relative),

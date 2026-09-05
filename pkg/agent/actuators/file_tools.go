@@ -51,7 +51,12 @@ func decodeArgs(ctx context.Context, dst any) (contracts.ToolCall, error) {
 	return c, nil
 }
 
-const maxToolOutputBytes = 1 << 20
+// Tool results are inserted directly into the next model request. Keep the
+// serialized result small enough to leave room for instructions and history.
+const (
+	maxToolOutputBytes  = 32 << 10
+	maxToolContentBytes = 24 << 10
+)
 
 func mustJSON(v any) ([]byte, error) {
 	output, err := json.Marshal(v)
@@ -59,7 +64,7 @@ func mustJSON(v any) ([]byte, error) {
 		return nil, filesystemErr("output_encoding_failed", "tool output could not be encoded", ResponsibilityTool, err)
 	}
 	if len(output) > maxToolOutputBytes {
-		return nil, filesystemErr("output_too_large", "tool output exceeds the response size limit", ResponsibilityTool, nil)
+		return nil, filesystemErr("output_too_large", "tool output is too large; narrow the path or pattern and request fewer results", ResponsibilityTool, nil)
 	}
 	return output, nil
 }

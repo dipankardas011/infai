@@ -20,8 +20,9 @@ import (
 // skillsDir is the conventional skill root under both the home and project dirs.
 const skillsDir = ".agents/skills"
 
-// maxSkillBytes bounds SKILL.md reads at scan and load time.
-const maxSkillBytes = 1 << 20 // 1 MiB, matching the actuator read cap
+// maxSkillBytes bounds SKILL.md reads at scan and load time. Skill contents
+// are returned directly to the model, so they use the tool response budget.
+const maxSkillBytes = 24 << 10
 
 var skillNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
