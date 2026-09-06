@@ -11,4 +11,10 @@
     <param name="path">/dipankardas011/infai/releases/download/infaiw-v@VERSION@/infaiw_@VERSION@_linux_arm64.tar.gz</param>
     <param name="filename">infaiw_@VERSION@_linux_arm64.tar.gz</param>
   </service>
+  <service name="download_url">
+    <param name="protocol">https</param>
+    <param name="host">github.com</param>
+    <param name="path">/dipankardas011/infai/releases/download/infaiw-v@VERSION@/infaiw_@VERSION@.orig.tar.gz</param>
+    <param name="filename">infaiw_@VERSION@.orig.tar.gz</param>
+  </service>
 </services>

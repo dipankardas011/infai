@@ -6,9 +6,8 @@
 override_dh_auto_install:
 	install -d debian/infaiw/usr/bin
 	case "$(DEB_HOST_GNU_CPU)" in \
-	  x86_64) archive=infaiw_@VERSION@_linux_amd64.tar.gz ;; \
-	  aarch64) archive=infaiw_@VERSION@_linux_arm64.tar.gz ;; \
+	  x86_64) binary=infaiw-amd64 ;; \
+	  aarch64) binary=infaiw-arm64 ;; \
 	  *) echo "Unsupported architecture: $(DEB_HOST_GNU_CPU)" >&2; exit 1 ;; \
 	esac; \
-	tar -xzf "$$archive" -O infaiw > debian/infaiw/usr/bin/infaiw
-	chmod 0755 debian/infaiw/usr/bin/infaiw
+	install -m 0755 "$$binary" debian/infaiw/usr/bin/infaiw

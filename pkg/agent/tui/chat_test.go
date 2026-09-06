@@ -52,6 +52,15 @@ func TestComposerGrowsAndTranscriptYieldsSpace(t *testing.T) {
 	}
 }
 
+func TestChecklistDeltaIsNotRenderedAsTranscriptText(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.appendDelta(contracts.DeltaTaskChecklist, `{"items":[]}`)
+
+	if len(m.blocks) != 0 {
+		t.Fatalf("checklist delta created %d transcript blocks", len(m.blocks))
+	}
+}
+
 func TestEmptyCommandMenuDoesNotReserveARow(t *testing.T) {
 	areas := layoutRows(80, 12,
 		intrinsic("header"), fill(), intrinsic("status"), intrinsic(""), intrinsic("composer"),

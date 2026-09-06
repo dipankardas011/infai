@@ -1031,6 +1031,9 @@ func (m *chatModel) appendDelta(kind contracts.DeltaKind, text string) {
 	case contracts.DeltaSkillLoad:
 		m.blocks = append(m.blocks, block{role: "skill", text: text})
 		return
+	case contracts.DeltaTaskChecklist:
+		// Checklist state is rendered in the header, never as transcript text.
+		return
 	}
 	if len(m.blocks) > 0 && m.blocks[len(m.blocks)-1].role == role && role != "status" {
 		m.blocks[len(m.blocks)-1].text += text
