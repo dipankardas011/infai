@@ -50,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           source_dir="$RUNNER_TEMP/infaiw-${{ steps.release.outputs.version }}"
-          source_archive="$RUNNER_TEMP/infaiw_${{ steps.release.outputs.version }}.orig.tar.gz"
+          source_archive="$RUNNER_TEMP/infaiw-${{ steps.release.outputs.version }}.tar.gz"
           mkdir -p "$source_dir"
           tar -xzf "dist/infaiw_${{ steps.release.outputs.version }}_linux_amd64.tar.gz" -C "$source_dir"
           mv "$source_dir/infaiw" "$source_dir/infaiw-amd64"

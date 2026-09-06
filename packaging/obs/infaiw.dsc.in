@@ -6,5 +6,5 @@ Version: @VERSION@-0
 Maintainer: Dipankar Das <dipankardas011@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.6.2
-# DEBTRANSFORM-RELEASE: 0
-# DEBTRANSFORM-TAR: infaiw_@VERSION@.orig.tar.gz
+Debtransform-Release: 0
+Debtransform-Tar: infaiw-@VERSION@.tar.gz
