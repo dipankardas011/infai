@@ -59,6 +59,7 @@ jobs:
           mv "$source_dir/infai" "$source_dir/infai-arm64"
           tar -czf "$source_archive" -C "$RUNNER_TEMP" "infai-${version}"
           gh release upload "$GITHUB_REF_NAME" "$source_archive" --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
 
       - name: Update OBS package metadata
         shell: bash
