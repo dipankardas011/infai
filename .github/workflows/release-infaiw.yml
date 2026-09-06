@@ -75,6 +75,8 @@ jobs:
             git checkout origin/main -- .obs packaging/obs
           fi
 
+          git checkout origin/main -- .obs packaging/obs
+
           for template in packaging/obs/*.in; do
             output="${template%.in}"
             sed "s/@VERSION@/${VERSION}/g" "$template" > "$output"
