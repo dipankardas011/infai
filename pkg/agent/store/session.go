@@ -13,22 +13,22 @@ import (
 	"github.com/google/uuid"
 )
 
-// SessionMeta is the runtime session metadata. ContextWindow and TurnCount are
-// intentionally not persisted; they are runtime/display values, not session
-// identity.
+// SessionMeta is the runtime session metadata. ContextWindow is a
+// runtime/display value and is not persisted.
 type SessionMeta struct {
 	ID            uuid.UUID `json:"id"`
+	Name          string    `json:"name,omitempty"`
 	Provider      string    `json:"provider"`
 	Model         string    `json:"model"`
 	Cwd           string    `json:"cwd,omitempty"`
 	ContextWindow int       `json:"context_window,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
-	TurnCount     int       `json:"-"`
 }
 
 type sessionFile struct {
 	ID           uuid.UUID    `json:"id"`
+	Name         string       `json:"name,omitempty"`
 	Cwd          string       `json:"cwd,omitempty"`
 	CurrentModel currentModel `json:"current_model"`
 	CreatedAt    time.Time    `json:"created_at"`
@@ -43,8 +43,9 @@ type currentModel struct {
 
 func newSessionFile(meta SessionMeta) sessionFile {
 	return sessionFile{
-		ID:  meta.ID,
-		Cwd: meta.Cwd,
+		ID:   meta.ID,
+		Name: meta.Name,
+		Cwd:  meta.Cwd,
 		CurrentModel: currentModel{
 			Provider: meta.Provider,
 			Model:    meta.Model,
@@ -57,6 +58,7 @@ func newSessionFile(meta SessionMeta) sessionFile {
 func (f sessionFile) meta() SessionMeta {
 	return SessionMeta{
 		ID:        f.ID,
+		Name:      f.Name,
 		Provider:  f.CurrentModel.Provider,
 		Model:     f.CurrentModel.Model,
 		Cwd:       f.Cwd,
@@ -74,12 +76,14 @@ const (
 	KindToolCall   RecordKind = "tool_call"
 	KindToolResult RecordKind = "tool_result"
 	KindCompaction RecordKind = "compaction"
+
+	KindApprovalRequested RecordKind = "approval_requested"
+	KindApprovalResolved  RecordKind = "approval_resolved"
+	KindApprovalCanceled  RecordKind = "approval_canceled"
 )
 
 // ToolCallRecord is what the model requested; ToolResultRecord is what it got
-// back. The tool loop is not wired yet — these records exist so the parent
-// context history (tool calls + their outputs) survives in the timeline
-// once the loop lands.
+// back.
 type ToolCallRecord struct {
 	ID        string `json:"id"`
 	Type      string `json:"type"`
@@ -97,7 +101,18 @@ type ToolResultRecord struct {
 // CompactionRecord marks a point where the active model context was replaced
 // by a continuation summary. Earlier timeline events remain untouched.
 type CompactionRecord struct {
-	Summary string `json:"summary"`
+	Summary       string                        `json:"summary"`
+	TaskChecklist *contracts.TaskChecklistState `json:"task_checklist,omitempty"`
+}
+
+type ApprovalEvent struct {
+	ID          uuid.UUID           `json:"id"`
+	SessionID   uuid.UUID           `json:"session_id"`
+	AgentID     uuid.UUID           `json:"agent_id"`
+	Fingerprint string              `json:"fingerprint"`
+	ToolCall    *contracts.ToolCall `json:"tool_call,omitempty"`
+	Decision    string              `json:"decision,omitempty"`
+	Reason      string              `json:"reason,omitempty"`
 }
 
 // Record is one durable event in a session timeline. Deltas are live-only and
@@ -111,6 +126,7 @@ type Record struct {
 	ToolCall   *ToolCallRecord        `json:"tool_call,omitempty"`
 	ToolResult *ToolResultRecord      `json:"tool_result,omitempty"`
 	Compaction *CompactionRecord      `json:"compaction,omitempty"`
+	Approval   *ApprovalEvent         `json:"approval,omitempty"`
 }
 
 // SessionStore reads and writes session timelines under harness/sessions,

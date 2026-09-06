@@ -1,0 +1,34 @@
+version: 2
+
+project_name: infaiw
+
+before:
+  hooks:
+    - go mod tidy
+
+snapshot:
+  version_template: "{{ .Env.INFAIW_VERSION }}"
+
+builds:
+  - id: infaiw
+    main: ./cmd/agent
+    binary: infaiw
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X "github.com/dipankardas011/infai/internal/config.version={{ .Version }}"
+
+archives:
+  - name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+
+checksum:
+  name_template: "infaiw_checksums.txt"
+
+changelog:
+  disable: true
+  sort: asc

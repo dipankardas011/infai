@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	internalconfig "github.com/dipankardas011/infai/internal/config"
 	"github.com/dipankardas011/infai/pkg/agent/config"
 	"github.com/dipankardas011/infai/pkg/agent/engine"
 	"github.com/dipankardas011/infai/pkg/agent/server"
@@ -38,8 +39,9 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:           "agent",
-		Short:         "infai agent engine",
+		Use:           "infaiw",
+		Short:         "infai workflow and agent engine",
+		Version:       internalconfig.Version(),
 		RunE:          runTUI,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/agent"
 	"github.com/dipankardas011/infai/pkg/agent/config"
@@ -15,31 +17,13 @@ import (
 	"github.com/google/uuid"
 )
 
-type AgentComm struct {
-	From uuid.UUID
-	To   uuid.UUID
-	Msg  []byte
-}
-
-type AgentComms struct {
-	R <-chan AgentComm
-	W chan<- AgentComm
-}
-
-func FreshAgentComms() *AgentComms {
-	return &AgentComms{
-		R: make(chan AgentComm),
-		W: make(chan AgentComm),
-	}
-}
-
 // ChatResult is the outcome of one Chat call on a session.
 type ChatResult struct {
 	SessionID        uuid.UUID
 	Status           agent.TurnStatus
 	Reply            string
 	ReasoningContent string
-	Pending          *agent.ApprovalRequest
+	Pending          *ApprovalRequest
 	Usage            *contracts.TokenUsage
 	ContextTokens    int
 }
@@ -81,7 +65,12 @@ func NewInfaiAgentEngine(bgLogger *slog.Logger, cfg *config.AgentEngineConfig) (
 	if err != nil {
 		return nil, err
 	}
-	return NewInfaiAgentEngineAt(bgLogger, providerStore, sessionStore)
+	engine, err := NewInfaiAgentEngineAt(bgLogger, providerStore, sessionStore)
+	if err != nil {
+		return nil, err
+	}
+	engine.engineCfg = cfg
+	return engine, nil
 }
 
 // NewInfaiAgentEngineAt wires an engine to explicit stores. The harness uses
@@ -211,7 +200,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 
 	e.active[id] = sess
 
-	e.bgLogger.Info("session loaded", "session_id", id, "provider", p.Name, "turns", meta.TurnCount)
+	e.bgLogger.Info("session loaded", "session_id", id, "provider", p.Name)
 	return sess, nil
 }
 
@@ -262,6 +251,14 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string
 	return sess.Chat(ctx, prompt, opts)
 }
 
+func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, decision ApprovalDecisionFromClient) error {
+	sess, ok := e.Session(id)
+	if !ok {
+		return ErrSessionNotFound
+	}
+	return sess.ResolveApproval(approvalID, decision)
+}
+
 // CompactSession creates a continuation checkpoint for an active session.
 func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) error {
 	e.mu.Lock()
@@ -294,15 +291,53 @@ func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 	return nil
 }
 
+// RenameSession updates the persisted display name of a session, whether it is
+// currently loaded or not. It returns the updated metadata.
+func (e *InfaiAgentEngine) RenameSession(id uuid.UUID, name string) (*store.SessionMeta, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("engine: session name is required")
+	}
+	e.mu.Lock()
+	sess, ok := e.active[id]
+	e.mu.Unlock()
+	if ok {
+		if err := sess.Rename(name); err != nil {
+			return nil, err
+		}
+		return &sess.meta, nil
+	}
+	meta, err := e.sessionStore.LoadMeta(id)
+	if err != nil {
+		return nil, err
+	}
+	meta.Name = name
+	meta.UpdatedAt = time.Now().UTC()
+	if err := e.sessionStore.SaveMeta(meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
 // ListSessions returns every saved session's meta (active or not), newest
 // first.
-func (e *InfaiAgentEngine) ListSessions() []store.SessionMeta {
+func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 	metas, err := e.sessionStore.List()
 	if err != nil {
 		e.bgLogger.Debug("list sessions failed", "error", err)
 		return nil
 	}
-	return metas
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	summaries := make([]contracts.SessionSummary, 0, len(metas))
+	for _, meta := range metas {
+		_, active := e.active[meta.ID]
+		summaries = append(summaries, contracts.SessionSummary{
+			ID: meta.ID, Name: meta.Name, Provider: meta.Provider, Model: meta.Model,
+			Cwd: meta.Cwd, CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt, Active: active,
+		})
+	}
+	return summaries
 }
 
 // GetSessionRecords returns a session's meta plus its active timeline records.
@@ -351,10 +386,10 @@ func (e *InfaiAgentEngine) GetTimeline(id uuid.UUID) (store.SessionMeta, []store
 	return meta, events, timeline.CurrentHeadEventID(), err
 }
 
-func (e *InfaiAgentEngine) SelectBranch(id, eventID uuid.UUID) error {
+func (e *InfaiAgentEngine) SelectBranch(id, eventID uuid.UUID) (contracts.TaskChecklistState, error) {
 	sess, ok := e.Session(id)
 	if !ok {
-		return ErrSessionNotFound
+		return contracts.TaskChecklistState{}, ErrSessionNotFound
 	}
 	return sess.SelectBranch(eventID)
 }

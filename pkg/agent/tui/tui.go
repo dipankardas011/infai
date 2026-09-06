@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/term"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/store"
@@ -22,8 +23,10 @@ import (
 type ChatReply struct {
 	Reply            string
 	ReasoningContent string
+	Status           string
 	SessionID        uuid.UUID
 	Model            string
+	Name             string
 	ContextWindow    int
 	Usage            *contracts.TokenUsage
 	ContextTokens    int
@@ -33,8 +36,18 @@ type ChatReply struct {
 // Approval is a human-in-the-loop checkpoint the agent reached; the turn
 // pauses until the user decides.
 type Approval struct {
-	ID      uuid.UUID
-	Message string
+	ID          uuid.UUID
+	SessionID   uuid.UUID
+	Fingerprint string
+	Message     string
+	ToolCall    *contracts.ToolCall
+}
+
+type ApprovalUpdate struct {
+	Type     string
+	Approval *Approval
+	Decision string
+	Reason   string
 }
 
 // SessionCreateOptions describes a new session for the server.
@@ -47,18 +60,20 @@ type SessionCreateOptions struct {
 // Client is the CLI's view of the engine. RemoteClient is the HTTP transport
 // to a running <binary> server.
 type Client interface {
-	Chat(ctx context.Context, prompt string, onDelta func(kind contracts.DeltaKind, text string)) (*ChatReply, error)
+	Chat(ctx context.Context, prompt string, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
+	ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error
 	SetSession(id uuid.UUID)
 	CreateSession(ctx context.Context, opts SessionCreateOptions) (*store.SessionMeta, error)
 	LoadSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, error)
 	GetSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, []store.Record, error)
 	DeleteSession(ctx context.Context, id uuid.UUID) error
-	ListSessions(ctx context.Context) ([]store.SessionMeta, error)
+	RenameSession(ctx context.Context, id uuid.UUID, name string) (*store.SessionMeta, error)
+	ListSessions(ctx context.Context) ([]contracts.SessionSummary, error)
 	ListProviders(ctx context.Context) ([]store.Provider, error)
 	SetSessionModel(ctx context.Context, provider, model string) error
 	Compact(ctx context.Context) (*store.SessionMeta, error)
 	GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error)
-	SelectBranch(ctx context.Context, id, eventID uuid.UUID) error
+	SelectBranch(ctx context.Context, id, eventID uuid.UUID) (contracts.TaskChecklistState, error)
 }
 
 type TimelineEvent struct {
@@ -99,10 +114,6 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 	state := &replState{}
 	scanner := bufio.NewScanner(in)
 
-	// Startup header.
-	fmt.Fprintln(out, "infai agent")
-	cSystem.Fprintln(out, "  /help shortcuts · /model switch model · /sessions list · /quit exit")
-
 	// Fail fast on an unreachable server, and pick what to do on launch.
 	sessions, err := c.ListSessions(ctx)
 	if err != nil {
@@ -113,11 +124,14 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 	// the TUI through floating popups, so the user never sees a plain-text
 	// numbered prompt; the whole launch is the chat interface.
 	if term.IsTerminal(os.Stdout.Fd()) {
-		return runChatTUI(ctx, c, sessions, opts)
+		return runChatTUI(ctx, c, sessions, opts, in, out)
 	}
 
 	// Non-interactive → the plain line REPL: resume the explicitly requested
 	// session, or let the user pick one (or a new session) by number.
+	fmt.Fprintln(out, "infai agent")
+	cSystem.Fprintln(out, "  /help shortcuts · /model switch model · /sessions list · /quit exit")
+
 	var resume uuid.UUID
 	if opts.SessionID != uuid.Nil {
 		resume = opts.SessionID
@@ -231,8 +245,24 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 				cSystem.Fprintln(out, statusLabel(text))
 			case contracts.DeltaCompactionSummary:
 				printCompactionSummary(out, text)
+			case contracts.DeltaToolCall:
+				cSystem.Fprintf(out, "  ↳ tool call %s\n", text)
+			case contracts.DeltaToolResult:
+				cSystem.Fprintf(out, "  ↳ tool result %s\n", text)
+			case contracts.DeltaSkillLoad:
+				cSkill.Fprintf(out, "  ✦ skill %s\n", text)
+			case contracts.DeltaTaskChecklist:
+				if state, err := decodeTaskChecklist(text); err == nil {
+					completed := 0
+					for _, item := range state.Items {
+						if item.Status == contracts.TaskCompleted {
+							completed++
+						}
+					}
+					cSystem.Fprintf(out, "  tasks %d/%d complete\n", completed, len(state.Items))
+				}
 			}
-		})
+		}, nil)
 		if thinkingShown && !contentStarted {
 			cHeader.Fprintln(out, "────────")
 		}
@@ -253,6 +283,21 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 // prompt are skipped.
 func renderHistory(out io.Writer, records []store.Record) {
 	for _, rec := range records {
+		if rec.Kind == store.KindToolCall && rec.ToolCall != nil {
+			cSystem.Fprint(out, "  ▲ ")
+			cToolCallText.Fprintf(out, "tool call %s\n", toolCallRecordDisplay(rec.ToolCall))
+			continue
+		}
+		if rec.Kind == store.KindToolResult && rec.ToolResult != nil {
+			cSystem.Fprint(out, "  ▲")
+			if rec.ToolResult.Status == "success" {
+				cAssistant.Fprint(out, "▲")
+			} else {
+				cError.Fprint(out, "▲")
+			}
+			cToolResultText.Fprintf(out, " tool result [%s] %s\n", rec.ToolResult.Status, rec.ToolResult.Output)
+			continue
+		}
 		if rec.Kind != store.KindMessage || rec.Message == nil {
 			continue
 		}
@@ -268,6 +313,15 @@ func renderHistory(out io.Writer, records []store.Record) {
 				cHeader.Fprintln(out, "────────")
 			}
 			cAssistant.Fprintf(out, "● %s\n", m.Text())
+			for _, call := range m.ToolCalls {
+				cSystem.Fprint(out, "  ▲ ")
+				cToolCallText.Fprintf(out, "tool call %s\n", toolCallDisplay(call))
+			}
+			fmt.Fprintln(out)
+		case "tool":
+			cSystem.Fprint(out, "  ▲")
+			cAssistant.Fprint(out, "▲")
+			cToolResultText.Fprintf(out, " tool result [%s] %s\n", m.ToolCallID, m.Text())
 			fmt.Fprintln(out)
 		}
 	}
@@ -310,10 +364,9 @@ func updateState(s *replState, reply *ChatReply) {
 	if reply.SessionID != uuid.Nil {
 		s.session.ID = reply.SessionID
 	}
-	s.session.TurnCount++
 }
 
-// renderStatus prints the footer status bar (model, session, context, turns).
+// renderStatus prints the footer status bar (model, session, context).
 func renderStatus(out io.Writer, s *replState) {
 	if s.session.ID == uuid.Nil {
 		cHeader.Fprintln(out, "no session · edit models.json to configure providers/models")
@@ -327,7 +380,6 @@ func renderStatus(out io.Writer, s *replState) {
 		"model: " + s.session.Model,
 		"sess: " + s.session.ID.String(),
 		fmt.Sprintf("ctx: %d/%d%s", s.used, s.session.ContextWindow, pct),
-		fmt.Sprintf("turns: %d", s.session.TurnCount),
 	}, "  ·  ")
 	cHeader.Fprintln(out, line)
 }
@@ -351,9 +403,10 @@ func runCommand(ctx context.Context, c Client, out io.Writer, s *replState, line
   /session load <uuid>           resume a saved session
   /session rm <uuid>             delete a saved session
   /new                           start a fresh session
+  /rename <name>                 rename the current session
   /ctx                           show context used vs total
-	  /compact                       compact the current conversation
-  /branch-timeline               inspect and select a branch point
+  /compact                       compact the current conversation
+  /timeline                      inspect and select a branch point
   /pwd                           show the session working directory
   /quit, /exit                   leave
 
@@ -384,6 +437,21 @@ multi-line: end a line with \ to continue typing on the next line`)
 		}
 		return false, fmt.Errorf("usage: /model | /model <provider> <model>")
 
+	case "/rename":
+		if s.session.ID == uuid.Nil {
+			return false, fmt.Errorf("no active session")
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(line, "/rename"))
+		if name == "" {
+			return false, fmt.Errorf("usage: /rename <name>")
+		}
+		if _, err := c.RenameSession(ctx, s.session.ID, name); err != nil {
+			return false, err
+		}
+		s.session.Name = name
+		cSystem.Fprintf(out, "session renamed to %q\n", name)
+		return false, nil
+
 	case "/sessions":
 		sess, err := c.ListSessions(ctx)
 		if err != nil {
@@ -394,8 +462,11 @@ multi-line: end a line with \ to continue typing on the next line`)
 			return false, nil
 		}
 		for _, m := range sess {
-			fmt.Fprintf(out, "%-36s %-20s turns=%d updated=%s\n",
-				m.ID, m.Model, m.TurnCount, m.UpdatedAt)
+			status := "saved"
+			if m.Active {
+				status = "active"
+			}
+			fmt.Fprintf(out, "%-36s %-20s %-8s updated=%s\n", m.ID, m.Model, status, m.UpdatedAt)
 		}
 		return false, nil
 
@@ -437,7 +508,7 @@ multi-line: end a line with \ to continue typing on the next line`)
 		}
 		return false, nil
 
-	case "/branch-timeline":
+	case "/timeline":
 		return false, runBranchTimeline(ctx, c, out, s, scan)
 
 	case "/pwd":
@@ -463,16 +534,25 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 	if err != nil {
 		return err
 	}
-	parents := make(map[uuid.UUID]uuid.UUID, len(view.Events))
-	byID := make(map[uuid.UUID]TimelineEvent, len(view.Events))
-	options := make([]TimelineEvent, 0, len(view.Events))
-	for _, event := range view.Events {
-		parents[event.ID] = event.ParentID
-		byID[event.ID] = event
-		options = append(options, event)
-	}
-	for i, event := range options {
-		fmt.Fprintf(out, "  %d  %s%s\n", i, timelineTreePrefix(event, parents, byID), timelineEventLabel(event))
+	rows := timelineTreeRows(view.Events)
+	options := make([]TimelineEvent, 0, len(rows))
+	for _, row := range rows {
+		displays := timelineEventDisplays(row.event)
+		for displayIndex, display := range displays {
+			current := "  "
+			if row.event.ID == view.Head && displayIndex == len(displays)-1 {
+				current = "* "
+			}
+			tree, fork := row.prefix, timelineForkLabel(row.fork)
+			if displayIndex > 0 {
+				tree = row.subprefix + strings.Repeat(" ", lipgloss.Width(fork))
+				fork = ""
+			}
+			fmt.Fprintf(out, "  %d  %s%s%s", len(options), current, tree, fork)
+			timelineRoleColor(display.role).Fprintf(out, "%s:", display.role)
+			fmt.Fprintf(out, " %s\n", display.text)
+			options = append(options, row.event)
+		}
 	}
 	fmt.Fprint(out, "branch at> ")
 	if !scan.Scan() {
@@ -482,7 +562,7 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 	if err != nil || idx < 0 || idx >= len(options) {
 		return fmt.Errorf("invalid timeline selection")
 	}
-	if err := c.SelectBranch(ctx, s.session.ID, options[idx].ID); err != nil {
+	if _, err := c.SelectBranch(ctx, s.session.ID, options[idx].ID); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, branchSelectionLabel(options[idx]))
@@ -573,7 +653,7 @@ func chooseModel(ctx context.Context, c Client, out io.Writer, scan *bufio.Scann
 // pickSession lists the engine's saved sessions and reads a numbered choice:
 // 0 starts a new session, 1..N resume an existing one. Returns uuid.Nil for a
 // new session.
-func pickSession(ctx context.Context, c Client, out io.Writer, scan *bufio.Scanner, sessions []store.SessionMeta) (uuid.UUID, error) {
+func pickSession(ctx context.Context, c Client, out io.Writer, scan *bufio.Scanner, sessions []contracts.SessionSummary) (uuid.UUID, error) {
 	cSystem.Fprintln(out, "sessions:")
 	fmt.Fprintf(out, "  %d  start a new session\n", 0)
 	for i, m := range sessions {
