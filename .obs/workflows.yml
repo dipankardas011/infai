@@ -6,4 +6,7 @@ infaiw_release:
         project: home:dipankardas:infai
         package: infaiw
   filters:
-    event: tag_push
+    event: push
+    branches:
+      only:
+        - obs-packaging
