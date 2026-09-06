@@ -37,25 +37,12 @@ Download a pre-built binary from the [Releases](https://github.com/dipankardas01
 
 Builds are available for Linux (amd64, arm64) and macOS (amd64, arm64).
 
-### infaiw Harness (Linux)
+### Linux packages
 
-Install the `infaiw` agent and workflow harness through the
-[openSUSE Software portal](https://software.opensuse.org/download.html?project=home%3Adipankardas%3Ainfai&package=infaiw).
-The portal provides repository setup instructions for Debian, Ubuntu, Fedora,
-and openSUSE.
-
-The harness uses a server/client architecture:
-
-```bash
-infaiw server  # run the policy-controlled agent server
-infaiw         # attach the terminal client
-```
-
-The server is the execution host for model requests, tools, sessions, and
-subagents. Tool access is granted by the harness through named, policy-checked
-code paths; the model cannot execute arbitrary shell commands. See the
-[agent engine design](pkg/agent/DESIGN.md) for the architecture and security
-decisions.
+Install `infai` from the
+[openSUSE Software portal](https://software.opensuse.org/download.html?project=home%3Adipankardas%3Ainfai&package=infai).
+Repository setup instructions are available for Debian, Ubuntu, Fedora, and
+openSUSE.
 
 ### From source
 
