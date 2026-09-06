@@ -1,0 +1,20 @@
+<services>
+  <service name="download_url">
+    <param name="protocol">https</param>
+    <param name="host">github.com</param>
+    <param name="path">/dipankardas011/infai/releases/download/infaiw-v0.1.7/infaiw_0.1.7_linux_amd64.tar.gz</param>
+    <param name="filename">infaiw_0.1.7_linux_amd64.tar.gz</param>
+  </service>
+  <service name="download_url">
+    <param name="protocol">https</param>
+    <param name="host">github.com</param>
+    <param name="path">/dipankardas011/infai/releases/download/infaiw-v0.1.7/infaiw_0.1.7_linux_arm64.tar.gz</param>
+    <param name="filename">infaiw_0.1.7_linux_arm64.tar.gz</param>
+  </service>
+  <service name="download_url">
+    <param name="protocol">https</param>
+    <param name="host">github.com</param>
+    <param name="path">/dipankardas011/infai/releases/download/infaiw-v0.1.7/infaiw-0.1.7.tar.gz</param>
+    <param name="filename">infaiw-0.1.7.tar.gz</param>
+  </service>
+</services>

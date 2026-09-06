@@ -1,0 +1,12 @@
+Source: infaiw
+Section: utils
+Priority: optional
+Maintainer: Dipankar Das <dipankardas011@users.noreply.github.com>
+Standards-Version: 4.6.2
+Homepage: https://github.com/dipankardas011/infai
+Build-Depends: debhelper-compat (= 13)
+
+Package: infaiw
+Architecture: any
+Description: Agent and workflow engine for infai
+ Agent and workflow engine for infai.
