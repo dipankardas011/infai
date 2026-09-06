@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_install:
+	install -d debian/infaiw/usr/bin
+	case "$(DEB_HOST_GNU_CPU)" in \
+	  x86_64) archive=infaiw_@VERSION@_linux_amd64.tar.gz ;; \
+	  aarch64) archive=infaiw_@VERSION@_linux_arm64.tar.gz ;; \
+	  *) echo "Unsupported architecture: $(DEB_HOST_GNU_CPU)" >&2; exit 1 ;; \
+	esac; \
+	tar -xzf "$$archive" -O infaiw > debian/infaiw/usr/bin/infaiw
+	chmod 0755 debian/infaiw/usr/bin/infaiw
