@@ -1,0 +1,9 @@
+version: '1.0'
+
+infaiw_release:
+  steps:
+    - trigger_services:
+        project: home:dipankardas:infai
+        package: infaiw
+  filters:
+    event: tag_push
