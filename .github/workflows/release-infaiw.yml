@@ -49,15 +49,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          source_dir="$RUNNER_TEMP/infaiw_${{ steps.release.outputs.version }}_debian_source"
+          source_dir="$RUNNER_TEMP/infaiw-${{ steps.release.outputs.version }}"
+          source_archive="$RUNNER_TEMP/infaiw_${{ steps.release.outputs.version }}.orig.tar.gz"
           mkdir -p "$source_dir"
           tar -xzf "dist/infaiw_${{ steps.release.outputs.version }}_linux_amd64.tar.gz" -C "$source_dir"
           mv "$source_dir/infaiw" "$source_dir/infaiw-amd64"
           tar -xzf "dist/infaiw_${{ steps.release.outputs.version }}_linux_arm64.tar.gz" -C "$source_dir"
           mv "$source_dir/infaiw" "$source_dir/infaiw-arm64"
-          tar -czf "dist/infaiw_${{ steps.release.outputs.version }}.orig.tar.gz" -C "$source_dir" .
+          tar -czf "$source_archive" -C "$RUNNER_TEMP" "infaiw-${{ steps.release.outputs.version }}"
 
-          assets=(dist/infaiw_*.tar.gz dist/infaiw_checksums.txt)
+          assets=(dist/infaiw_*.tar.gz dist/infaiw_checksums.txt "$source_archive")
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
           else
