@@ -37,3 +37,55 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+      - name: Publish OBS source archive
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid infai release tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+          source_dir="$RUNNER_TEMP/infai-${version}"
+          source_archive="$RUNNER_TEMP/infai-${version}.tar.gz"
+          mkdir -p "$source_dir"
+          tar -xzf "dist/infai_${version}_linux_amd64.tar.gz" -C "$source_dir"
+          mv "$source_dir/infai" "$source_dir/infai-amd64"
+          tar -xzf "dist/infai_${version}_linux_arm64.tar.gz" -C "$source_dir"
+          mv "$source_dir/infai" "$source_dir/infai-arm64"
+          tar -czf "$source_archive" -C "$RUNNER_TEMP" "infai-${version}"
+          gh release upload "$GITHUB_REF_NAME" "$source_archive" --clobber
+
+      - name: Update OBS package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          git fetch origin main
+          git fetch origin obs-infai:refs/remotes/origin/obs-infai || true
+          if git show-ref --verify --quiet refs/remotes/origin/obs-infai; then
+            git checkout -B obs-infai origin/obs-infai
+          else
+            git checkout --orphan obs-infai
+            git rm -rf .
+          fi
+
+          git checkout origin/main -- .obs packaging/obs-infai
+          for template in packaging/obs-infai/*.in; do
+            output="${template%.in}"
+            sed "s/@VERSION@/${version}/g" "$template" > "$output"
+          done
+          chmod +x packaging/obs-infai/debian.rules
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .obs packaging/obs-infai
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore(obs): update infai to ${version}"
+          git push origin HEAD:obs-infai

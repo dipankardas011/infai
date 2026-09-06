@@ -9,4 +9,15 @@ infaiw_release:
     event: push
     branches:
       only:
-        - obs-packaging
+        - obs-infaiw
+
+infai_release:
+  steps:
+    - trigger_services:
+        project: home:dipankardas:infai
+        package: infai
+  filters:
+    event: push
+    branches:
+      only:
+        - obs-infai

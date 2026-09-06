@@ -76,11 +76,11 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          git fetch origin obs-packaging:refs/remotes/origin/obs-packaging || true
-          if git show-ref --verify --quiet refs/remotes/origin/obs-packaging; then
-            git checkout -B obs-packaging origin/obs-packaging
+          git fetch origin obs-infaiw:refs/remotes/origin/obs-infaiw || true
+          if git show-ref --verify --quiet refs/remotes/origin/obs-infaiw; then
+            git checkout -B obs-infaiw origin/obs-infaiw
           else
-            git checkout --orphan obs-packaging
+            git checkout --orphan obs-infaiw
             git rm -rf .
             git checkout origin/main -- .obs packaging/obs
           fi
@@ -100,7 +100,7 @@ jobs:
             exit 0
           fi
           git commit -m "chore(obs): update infaiw to ${VERSION}"
-          git push origin HEAD:obs-packaging
+          git push origin HEAD:obs-infaiw
 
       - name: Check out Homebrew tap
         uses: actions/checkout@v6
