@@ -49,7 +49,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          source_dir="dist/infaiw_${{ steps.release.outputs.version }}_debian_source"
+          source_dir="$RUNNER_TEMP/infaiw_${{ steps.release.outputs.version }}_debian_source"
           mkdir -p "$source_dir"
           tar -xzf "dist/infaiw_${{ steps.release.outputs.version }}_linux_amd64.tar.gz" -C "$source_dir"
           mv "$source_dir/infaiw" "$source_dir/infaiw-amd64"
