@@ -1,0 +1,20 @@
+<services>
+  <service name="download_url">
+    <param name="protocol">https</param>
+    <param name="host">github.com</param>
+    <param name="path">/dipankardas011/infai/releases/download/v0.24.1/infai_0.24.1_linux_amd64.tar.gz</param>
+    <param name="filename">infai_0.24.1_linux_amd64.tar.gz</param>
+  </service>
+  <service name="download_url">
+    <param name="protocol">https</param>
+    <param name="host">github.com</param>
+    <param name="path">/dipankardas011/infai/releases/download/v0.24.1/infai_0.24.1_linux_arm64.tar.gz</param>
+    <param name="filename">infai_0.24.1_linux_arm64.tar.gz</param>
+  </service>
+  <service name="download_url">
+    <param name="protocol">https</param>
+    <param name="host">github.com</param>
+    <param name="path">/dipankardas011/infai/releases/download/v0.24.1/infai-0.24.1.tar.gz</param>
+    <param name="filename">infai-0.24.1.tar.gz</param>
+  </service>
+</services>

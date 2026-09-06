@@ -1,0 +1,23 @@
+version: '1.0'
+
+infaiw_release:
+  steps:
+    - trigger_services:
+        project: home:dipankardas:infai
+        package: infaiw
+  filters:
+    event: push
+    branches:
+      only:
+        - obs-infaiw
+
+infai_release:
+  steps:
+    - trigger_services:
+        project: home:dipankardas:infai
+        package: infai
+  filters:
+    event: push
+    branches:
+      only:
+        - obs-infai

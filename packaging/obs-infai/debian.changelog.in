@@ -1,0 +1,5 @@
+infai (@VERSION@-0) unstable; urgency=low
+
+  * Package upstream release @VERSION@.
+
+ -- Dipankar Das <dipankardas011@users.noreply.github.com>  Sun, 06 Sep 2026 00:00:00 +0000
