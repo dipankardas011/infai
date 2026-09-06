@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
@@ -67,21 +66,11 @@ func ReadSkillNameFromCall(call contracts.ToolCall) string {
 	return string(contracts.ReadSkillTool)
 }
 
-// readSkill returns the raw SKILL.md body for the named skill. The stored
-// location is canonical (symlink-resolved at scan); it is re-checked so a
-// later symlink swap cannot redirect the read outside the registry.
+// readSkill returns the immutable SKILL.md body captured at session startup.
 func (r *SkillRegistry) readSkill(name string) (string, error) {
-	skill, ok := r.byName[name]
+	content, ok := r.contents[name]
 	if !ok {
 		return "", fmt.Errorf("unknown skill %q", name)
 	}
-	info, err := os.Lstat(skill.Location)
-	if err != nil || !info.Mode().IsRegular() {
-		return "", fmt.Errorf("skill %q no longer a regular file", name)
-	}
-	content, err := readCapped(skill.Location)
-	if err != nil {
-		return "", fmt.Errorf("read skill %q: %w", name, err)
-	}
-	return string(content), nil
+	return content, nil
 }

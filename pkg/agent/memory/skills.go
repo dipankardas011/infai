@@ -31,7 +31,8 @@ var skillNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // skill wins over the home one. ReadSkill resolves names against this map only,
 // so a skill call can never read an arbitrary file.
 type SkillRegistry struct {
-	byName map[string]contracts.Skill
+	byName   map[string]contracts.Skill
+	contents map[string]string
 }
 
 // LoadSkillRegistry scans <home>/.agents/skills then <project>/.agents/skills.
@@ -42,7 +43,10 @@ func LoadSkillRegistry(projectDir string) (*SkillRegistry, error) {
 		return nil, fmt.Errorf("resolve home dir for skills: %w", err)
 	}
 
-	r := &SkillRegistry{byName: make(map[string]contracts.Skill)}
+	r := &SkillRegistry{
+		byName:   make(map[string]contracts.Skill),
+		contents: make(map[string]string),
+	}
 	seen := make(map[string]struct{})
 	for _, root := range []string{homeDir, projectDir} {
 		if root == "" {
@@ -95,6 +99,7 @@ func (r *SkillRegistry) scanRoot(root string) error {
 			Description: strings.TrimSpace(fm.Description),
 			Location:    path,
 		}
+		r.contents[name] = string(content)
 	}
 	return nil
 }
@@ -178,21 +183,7 @@ func (r *SkillRegistry) Skills() []contracts.Skill {
 	return out
 }
 
-// ReadSkill returns the raw SKILL.md body for the named skill. The stored
-// location is canonical (symlink-resolved at scan); it is re-checked so a
-// later symlink swap cannot redirect the read outside the registry.
+// ReadSkill returns the SKILL.md body captured when the registry was loaded.
 func (r *SkillRegistry) ReadSkill(name string) (string, error) {
-	skill, ok := r.byName[name]
-	if !ok {
-		return "", fmt.Errorf("unknown skill %q", name)
-	}
-	info, err := os.Lstat(skill.Location)
-	if err != nil || !info.Mode().IsRegular() {
-		return "", fmt.Errorf("skill %q no longer a regular file", name)
-	}
-	content, err := readCapped(skill.Location)
-	if err != nil {
-		return "", fmt.Errorf("read skill %q: %w", name, err)
-	}
-	return string(content), nil
+	return r.readSkill(name)
 }
