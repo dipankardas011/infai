@@ -7,37 +7,12 @@ import (
 	"charm.land/glamour/v2/ansi"
 	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
+	agentstyle "github.com/dipankardas011/infai/pkg/agent/style"
 )
 
 // Everforest Dark is the harness's only visual theme. Keeping it in code makes
 // every component share the same semantic colors without a theme subsystem.
-var everforest = struct {
-	Background color.Color
-	Surface    color.Color
-	SurfaceAlt color.Color
-	Text       color.Color
-	Muted      color.Color
-	Red        color.Color
-	Orange     color.Color
-	Yellow     color.Color
-	Green      color.Color
-	Aqua       color.Color
-	Blue       color.Color
-	Purple     color.Color
-}{
-	Background: lipgloss.Color("#272e33"),
-	Surface:    lipgloss.Color("#2e383c"),
-	SurfaceAlt: lipgloss.Color("#374145"),
-	Text:       lipgloss.Color("#d3c6aa"),
-	Muted:      lipgloss.Color("#859289"),
-	Red:        lipgloss.Color("#e67e80"),
-	Orange:     lipgloss.Color("#e69875"),
-	Yellow:     lipgloss.Color("#dbbc7f"),
-	Green:      lipgloss.Color("#a7c080"),
-	Aqua:       lipgloss.Color("#83c092"),
-	Blue:       lipgloss.Color("#7fbbb3"),
-	Purple:     lipgloss.Color("#d699b6"),
-}
+var everforest = agentstyle.Everforest
 
 type harnessStyles struct {
 	app         lipgloss.Style
@@ -123,15 +98,15 @@ func styleTextarea(input *textarea.Model) {
 func everforestMarkdownStyle() ansi.StyleConfig {
 	cfg := styles.DarkStyleConfig
 	margin := uint(0)
-	text := "#d3c6aa"
-	muted := "#859289"
-	green := "#a7c080"
-	aqua := "#83c092"
-	blue := "#7fbbb3"
-	purple := "#d699b6"
-	red := "#e67e80"
-	yellow := "#dbbc7f"
-	surface := "#2e383c"
+	text := agentstyle.TextHex
+	muted := agentstyle.MutedHex
+	green := agentstyle.GreenHex
+	aqua := agentstyle.AquaHex
+	blue := agentstyle.BlueHex
+	purple := agentstyle.PurpleHex
+	red := agentstyle.RedHex
+	yellow := agentstyle.YellowHex
+	surface := agentstyle.SurfaceHex
 
 	cfg.Document.Margin = &margin
 	cfg.Document.Color = &text

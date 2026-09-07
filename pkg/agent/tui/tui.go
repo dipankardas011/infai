@@ -369,7 +369,7 @@ func updateState(s *replState, reply *ChatReply) {
 // renderStatus prints the footer status bar (model, session, context).
 func renderStatus(out io.Writer, s *replState) {
 	if s.session.ID == uuid.Nil {
-		cHeader.Fprintln(out, "no session · edit models.json to configure providers/models")
+		cHeader.Fprintln(out, "no session · run `infaiw provider login` to configure a provider")
 		return
 	}
 	pct := ""
@@ -419,12 +419,12 @@ multi-line: end a line with \ to continue typing on the next line`)
 			return false, err
 		}
 		if len(provs) == 0 {
-			fmt.Fprintln(out, "no providers configured — add providers/models in models.json and restart the server")
+			fmt.Fprintln(out, "no providers configured - run `infaiw provider login`")
 			return false, nil
 		}
 		for _, p := range provs {
-			fmt.Fprintf(out, "%-16s %-28s %-8s models: %s\n",
-				p.Name, p.Endpoint, p.APIType, strings.Join(p.ModelNames(), ", "))
+			fmt.Fprintf(out, "%-16s %-28s models: %s\n",
+				p.ID, p.BaseEndpoint, strings.Join(p.ModelNames(), ", "))
 		}
 		return false, nil
 
@@ -619,11 +619,11 @@ func chooseModel(ctx context.Context, c Client, out io.Writer, scan *bufio.Scann
 	var opts []option
 	for _, p := range providers {
 		for _, name := range p.ModelNames() {
-			opts = append(opts, option{p.Name, name})
+			opts = append(opts, option{p.ID, name})
 		}
 	}
 	if len(opts) == 0 {
-		return "", "", fmt.Errorf("no models configured — add models in models.json and restart the server")
+		return "", "", fmt.Errorf("no models configured - run `infaiw provider login` or `infaiw provider model add`")
 	}
 
 	// Align the model column so the provider reads as a table.

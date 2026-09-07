@@ -267,8 +267,9 @@ structured tool status, context-aware endpoint retries, and double-Esc TUI
 cancellation.
 
 Storage layout (`$XDG_CONFIG_HOME/infai/harness`):
-- `models.json` — provider registry (name/base_url/model/api_key/ctx_window/
-  default + lazily fetched available models from the provider's `/v1/models`).
+- `models.toml` — provider registry keyed by provider ID (auth, custom base-endpoint
+  overrides, and model settings). Cataloged API/base-endpoint/model metadata comes
+  from `providers.json`; live availability comes from the provider's `/models`.
 - `sessions/<uuid>/chunks/*.jsonl` — append-only timeline chunks per session.
   Current durable kinds include `message`, `compaction`, and approval events;
   `delta` is live-only. Older sessions may also contain standalone

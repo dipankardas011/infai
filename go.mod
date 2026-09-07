@@ -17,6 +17,7 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.18.0
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.42
+	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/shirou/gopsutil/v4 v4.26.3
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
@@ -59,7 +60,6 @@ require (
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
-	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect

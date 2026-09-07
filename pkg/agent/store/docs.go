@@ -2,24 +2,32 @@
 //
 // # Provider registry
 //
-// models.json is hand-edited and read-only from the app's point of view. The
-// ProviderStore loads it once and serves it in memory:
+// ProviderStore keeps a provider-neutral registry in models.toml. A missing
+// file represents an empty registry. Files are decoded strictly, and successful
+// mutations validate the complete registry before atomically replacing the
+// file. Registry files use mode 0600 and their directory uses mode 0700.
 //
-//	{
-//	  "providers": {
-//	    "local-llama": {
-//	      "endpoint": "http://127.0.0.1:8080",
-//	      "api_type": "openai",
-//	      "models": {
-//	        "qwen2.5-7b": { "name": "qwen2.5-7b-instruct", "context_window": 32768 }
-//	      }
-//	    }
-//	  }
-//	}
+// Provider IDs and model slugs are TOML map keys. Catalog providers obtain
+// their API protocol and base endpoint from providers.json. Only custom
+// providers store a base_endpoint override. A model's optional name is its
+// exact API ID; when omitted, its map key is used. There is no default.
 //
-// The provider name is the map key; the model key is what the UI shows and its
-// optional "name" field is the exact id sent to the provider's API (falls back
-// to the key). No defaults, no hot reload: edits are picked up on restart.
+//	[providers.local]
+//	base_endpoint = "http://127.0.0.1:8080"
+//
+//	[providers.local.auth]
+//	type = "bearer"
+//	token = "secret"
+//
+//	[providers.local.models.qwen]
+//	name = "qwen2.5-7b-instruct"
+//	context_length = 32768
+//	thinking_modes = ["off", "medium", "high"]
+//	reasoning_effort = "medium"
+//
+// Authentication is persisted in TOML but omitted from Provider's JSON
+// representation so provider API responses do not disclose credentials.
+// Reload picks up validated hand edits without restarting the process.
 //
 // # Session timelines
 //
@@ -48,7 +56,7 @@
 //
 // # Layers
 //
-//	SessionStore  — list/delete/open timelines (session.go)
-//	SessionEventHub — per-session live sink broadcaster (session_event_hub.go)
-//	ProviderStore — read-only provider/model registry (models.go)
+//	SessionStore     - list/delete/open timelines (session.go)
+//	SessionEventHub  - per-session live sink broadcaster (session_event_hub.go)
+//	ProviderStore    - mutable provider/model registry (models.go)
 package store

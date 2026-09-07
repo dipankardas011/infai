@@ -925,11 +925,11 @@ func (m *chatModel) showModels(providers []store.Provider, switching bool) {
 	var options []modalOption
 	for _, provider := range providers {
 		for _, model := range provider.ModelNames() {
-			options = append(options, modalOption{label: model + "  @ " + provider.Name, provider: provider.Name, model: model})
+			options = append(options, modalOption{label: model + "  @ " + provider.ID, provider: provider.ID, model: model})
 		}
 	}
 	if len(options) == 0 {
-		m.showNotice("No models configured", "Add a provider and model to models.json, then restart the server.", false)
+		m.showNotice("No models configured", "Run `infaiw provider login` or `infaiw provider model add`, then restart the server.", false)
 		return
 	}
 	m.modal = &modalModel{kind: modalModels, title: "Choose a model", body: "The model is applied to this session.", options: options, switching: switching}

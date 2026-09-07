@@ -13,6 +13,7 @@ import (
 	internalconfig "github.com/dipankardas011/infai/internal/config"
 	"github.com/dipankardas011/infai/pkg/agent/config"
 	"github.com/dipankardas011/infai/pkg/agent/engine"
+	"github.com/dipankardas011/infai/pkg/agent/providercli"
 	"github.com/dipankardas011/infai/pkg/agent/server"
 	"github.com/dipankardas011/infai/pkg/agent/tui"
 	"github.com/google/uuid"
@@ -50,6 +51,7 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().IntVar(&port, "port", 6000, "agent server port to attach to")
 	cmd.Flags().StringVar(&sessionID, "session", "", "resume a saved session by uuid")
 	cmd.AddCommand(newServerCmd())
+	cmd.AddCommand(providercli.NewCommand(os.Stdin, os.Stdout, os.Stderr))
 	return cmd
 }
 

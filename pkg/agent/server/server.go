@@ -31,7 +31,7 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 		mux.HandleFunc("GET /healthz", s.handleHealthz)
 	}
 
-	// providers (read-only; the registry is configured via models.json)
+	// providers (read-only over HTTP; provider commands manage models.toml)
 	mux.HandleFunc("GET /v1/providers", s.handleListProviders)
 
 	// sessions

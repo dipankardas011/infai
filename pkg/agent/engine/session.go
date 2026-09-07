@@ -22,7 +22,6 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/memory"
-	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/dipankardas011/infai/pkg/ds"
 	"github.com/google/uuid"
@@ -82,14 +81,22 @@ type pendingApproval struct {
 }
 
 // NewSession creates a fresh session bound to the given provider and model.
-func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, cwd string, ss *store.SessionStore) (*InfaiAgentSession, error) {
+func NewSession(l *slog.Logger, p contracts.LLMProvider, model string, ctxWindow int, cwd string, ss *store.SessionStore) (*InfaiAgentSession, error) {
 	if p == nil {
 		return nil, ErrNoProvider
 	}
 
+	id, err := uuid.NewV7()
+	if err != nil {
+		return nil, err
+	}
+	modelAdaptor, err := p.NewModel(model, id.String())
+	if err != nil {
+		return nil, fmt.Errorf("session model: %w", err)
+	}
 	o := &InfaiAgentSession{
 		l:             l,
-		model:         models.NewOpenAICompatableAPI(p.Endpoint, model, p.APIKey),
+		model:         modelAdaptor,
 		store:         ss,
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
 		agentComms:    comms.NewAgentComms(),
@@ -97,23 +104,18 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 		auditorPolicy: auditor.NewAuditorPolicy(),
 		taskChecklist: memory.NewTaskChecklist(),
 	}
-	var err error
 	o.fileManager, err = actuators.NewFileManager(cwd)
 	if err != nil {
 		return nil, fmt.Errorf("session workspace: %w", err)
 	}
 	cwd = o.fileManager.Root()
 
-	if v, err := uuid.NewV7(); err != nil {
-		return nil, err
-	} else {
-		o.sessionID = v
-	}
+	o.sessionID = id
 
 	now := time.Now().UTC()
 	o.meta = store.SessionMeta{
 		ID:            o.sessionID,
-		Provider:      p.Name,
+		Provider:      p.ID(),
 		Model:         model,
 		Cwd:           cwd,
 		ContextWindow: ctxWindow,
@@ -153,14 +155,18 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 
 // NewResumedSession rebuilds a session from the active timeline ancestry. The
 // caller resolves lazy blob records before constructing the chat history.
-func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta, history []contracts.ChatMessage, timeline *store.Timeline, sessionStore *store.SessionStore) (*InfaiAgentSession, error) {
+func NewResumedSession(l *slog.Logger, p contracts.LLMProvider, meta store.SessionMeta, history []contracts.ChatMessage, timeline *store.Timeline, sessionStore *store.SessionStore) (*InfaiAgentSession, error) {
 	if p == nil {
 		return nil, ErrNoProvider
 	}
 
+	modelAdaptor, err := p.NewModel(meta.Model, meta.ID.String())
+	if err != nil {
+		return nil, fmt.Errorf("resume session model: %w", err)
+	}
 	o := &InfaiAgentSession{
 		l:             l,
-		model:         models.NewOpenAICompatableAPI(p.Endpoint, meta.Model, p.APIKey),
+		model:         modelAdaptor,
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
 		agentComms:    comms.NewAgentComms(),
 		Agents:        make(map[uuid.UUID]*agent.Agent),
@@ -174,7 +180,6 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 		auditorPolicy: auditor.NewAuditorPolicy(),
 		taskChecklist: memory.NewTaskChecklist(),
 	}
-	var err error
 	o.fileManager, err = actuators.NewFileManager(meta.Cwd)
 	if err != nil {
 		return nil, fmt.Errorf("session workspace: %w", err)
@@ -302,27 +307,32 @@ func (s *InfaiAgentSession) Rename(name string) error {
 
 // SetModel rebuilds the session's model adapter for the given provider and
 // model and records the change in the session meta.
-func (s *InfaiAgentSession) SetModel(p *store.Provider, name string, ctxWindow int) {
+func (s *InfaiAgentSession) SetModel(p contracts.LLMProvider, name string, ctxWindow int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.setModelLocked(p, name, ctxWindow)
+	return s.setModelLocked(p, name, ctxWindow)
 }
 
-func (s *InfaiAgentSession) setModelLocked(p *store.Provider, name string, ctxWindow int) {
+func (s *InfaiAgentSession) setModelLocked(p contracts.LLMProvider, name string, ctxWindow int) error {
 	if p == nil {
-		return
+		return ErrNoProvider
 	}
-	s.model = models.NewOpenAICompatableAPI(p.Endpoint, name, p.APIKey)
+	modelAdaptor, err := p.NewModel(name, s.sessionID.String())
+	if err != nil {
+		return fmt.Errorf("set session model: %w", err)
+	}
+	s.model = modelAdaptor
 	if a := s.Agents[s.sessionAgentId]; a != nil {
 		a.SetModel(s.model)
 	}
-	s.meta.Provider = p.Name
+	s.meta.Provider = p.ID()
 	s.meta.Model = name
 	s.meta.ContextWindow = ctxWindow
 	s.meta.UpdatedAt = time.Now().UTC()
 	if err := s.store.SaveMeta(s.meta); err != nil {
-		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
+		return fmt.Errorf("persist session metadata: %w", err)
 	}
+	return nil
 }
 
 // CompactChat generates and persists a continuation summary, advances the
