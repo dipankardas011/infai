@@ -1,22 +1,63 @@
 {
-  "providers": [
-    {
-      "id": "llamacpp",
-      "name": "llama.cpp",
-      "kind": "llamacpp",
-      "metrics_prefix": "llamacpp",
-      "engine_kinds": [
-        "llamacpp"
-      ]
-    },
-    {
-      "id": "vllm",
-      "name": "vLLM",
-      "kind": "vllm",
-      "metrics_prefix": "vllm",
-      "engine_kinds": [
-        "vllm"
-      ]
+  "providers": {
+    "deepseek": {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "base_endpoint": "https://api.deepseek.com",
+      "api": "openai-completions",
+      "models": {
+        "deepseek-v4-flash": {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
+          "context_length": 1000000,
+          "thinkingLevelMap": {
+            "minimal": null,
+            "low": "low",
+            "medium": null,
+            "high": "high",
+            "max": "max"
+          },
+          "input": [
+            "text",
+            "image"
+          ],
+          "reasoning": true
+        },
+        "deepseek-v4-pro": {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro",
+          "context_length": 1000000,
+          "input": [
+            "text",
+            "image"
+          ],
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": "high",
+            "max": "max"
+          }
+        },
+        "deepseek-v4-flash-vision-exp": {
+          "id": "deepseek-v4-flash-vision-exp",
+          "name": "DeepSeek V4 Flash Vision Exp",
+          "context_length": 1000000,
+          "input": [
+            "text",
+            "image"
+          ],
+          "thinkingLevelMap": {
+            "minimal": null,
+            "low": "low",
+            "medium": null,
+            "high": "high",
+            "max": "max"
+          },
+          "reasoning": true
+        }
+      }
     }
-  ]
+  }
 }
