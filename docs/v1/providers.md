@@ -1,0 +1,28 @@
+---
+permalink: /v1/providers
+layout: null
+---
+{% raw %}
+{
+  "providers": [
+    {
+      "id": "llamacpp",
+      "name": "llama.cpp",
+      "kind": "llamacpp",
+      "metrics_prefix": "llamacpp",
+      "engine_kinds": [
+        "llamacpp"
+      ]
+    },
+    {
+      "id": "vllm",
+      "name": "vLLM",
+      "kind": "vllm",
+      "metrics_prefix": "vllm",
+      "engine_kinds": [
+        "vllm"
+      ]
+    }
+  ]
+}
+{% endraw %}
