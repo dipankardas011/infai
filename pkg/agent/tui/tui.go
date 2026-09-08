@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/term"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
 )
@@ -69,7 +70,7 @@ type Client interface {
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	RenameSession(ctx context.Context, id uuid.UUID, name string) (*store.SessionMeta, error)
 	ListSessions(ctx context.Context) ([]contracts.SessionSummary, error)
-	ListProviders(ctx context.Context) ([]store.Provider, error)
+	ListAllProviderModels(ctx context.Context) ([]glue.ListModelOutput, error)
 	SetSessionModel(ctx context.Context, provider, model string) error
 	Compact(ctx context.Context) (*store.SessionMeta, error)
 	GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error)
@@ -396,7 +397,7 @@ func runCommand(ctx context.Context, c Client, out io.Writer, s *replState, line
 	case "/help":
 		fmt.Fprintln(out, `commands:
   /help                          show this help
-  /providers                     list configured providers and their models
+  /models                        list configured provider models
   /model                         pick a model from a numbered list
   /model <provider> <model>      switch the session to a provider's model
   /sessions                      list saved sessions
@@ -413,18 +414,18 @@ func runCommand(ctx context.Context, c Client, out io.Writer, s *replState, line
 multi-line: end a line with \ to continue typing on the next line`)
 		return false, nil
 
-	case "/providers":
-		provs, err := c.ListProviders(ctx)
+	case "/models":
+		providerModels, err := c.ListAllProviderModels(ctx)
 		if err != nil {
 			return false, err
 		}
-		if len(provs) == 0 {
+		if len(providerModels) == 0 {
 			fmt.Fprintln(out, "no providers configured — add providers/models in models.json and restart the server")
 			return false, nil
 		}
-		for _, p := range provs {
-			fmt.Fprintf(out, "%-16s %-28s %-8s models: %s\n",
-				p.Name, p.Endpoint, p.APIType, strings.Join(p.ModelNames(), ", "))
+		for _, model := range providerModels {
+			fmt.Fprintf(out, "%-20s @ %-16s id=%-24s context=%d thinking=%s\n",
+				model.ModelName, model.ProviderName, model.ModelID, model.ContextWindow, strings.Join(model.ThinkingModels, ","))
 		}
 		return false, nil
 
@@ -608,7 +609,7 @@ func setModelFor(ctx context.Context, c Client, out io.Writer, s *replState, pro
 // chooseModel lists every configured model@provider and reads a numbered
 // selection from the input stream, returning the chosen provider and model.
 func chooseModel(ctx context.Context, c Client, out io.Writer, scan *bufio.Scanner) (string, string, error) {
-	providers, err := c.ListProviders(ctx)
+	providerModels, err := c.ListAllProviderModels(ctx)
 	if err != nil {
 		return "", "", err
 	}
@@ -617,10 +618,8 @@ func chooseModel(ctx context.Context, c Client, out io.Writer, scan *bufio.Scann
 		provider, model string
 	}
 	var opts []option
-	for _, p := range providers {
-		for _, name := range p.ModelNames() {
-			opts = append(opts, option{p.Name, name})
-		}
+	for _, model := range providerModels {
+		opts = append(opts, option{model.ProviderName, model.ModelID})
 	}
 	if len(opts) == 0 {
 		return "", "", fmt.Errorf("no models configured — add models in models.json and restart the server")

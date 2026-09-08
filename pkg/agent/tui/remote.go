@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
@@ -218,10 +219,10 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 	return &reply, nil
 }
 
-// ---- providers (read-only) ----
+// ---- providers ----
 
-func (c *RemoteClient) ListProviders(ctx context.Context) ([]store.Provider, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/providers", nil)
+func (c *RemoteClient) ListAllProviderModels(ctx context.Context) ([]glue.ListModelOutput, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/models", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -233,11 +234,40 @@ func (c *RemoteClient) ListProviders(ctx context.Context) ([]store.Provider, err
 	if resp.StatusCode != http.StatusOK {
 		return nil, readAPIError(resp)
 	}
-	var out []store.Provider
+	var out []glue.ListModelOutput
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+func (c *RemoteClient) LoginProvider(ctx context.Context, providerID contracts.ProviderSlug) error {
+	return c.providerAction(ctx, "/v1/providers/login", glue.LoginProviderInput{ProviderID: providerID})
+}
+
+func (c *RemoteClient) LogoutProvider(ctx context.Context, providerID contracts.ProviderSlug) error {
+	return c.providerAction(ctx, "/v1/providers/logout", glue.LogoutProviderInput{ProviderID: providerID})
+}
+
+func (c *RemoteClient) providerAction(ctx context.Context, path string, input any) error {
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return readAPIError(resp)
+	}
+	return nil
 }
 
 // ---- sessions ----

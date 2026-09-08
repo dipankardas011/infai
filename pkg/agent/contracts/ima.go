@@ -87,24 +87,12 @@ const (
 	ModalityAudio LLMSupportedModality = "audio"
 )
 
-type ThinkingLevels string
-
-const (
-	OffThinking     ThinkingLevels = "off"
-	MinimalThinking ThinkingLevels = "minimal"
-	LowThinking     ThinkingLevels = "low"
-	MediumThinking  ThinkingLevels = "medium"
-	HighThinking    ThinkingLevels = "high"
-	XHighThinking   ThinkingLevels = "xhigh"
-	MaxThinking     ThinkingLevels = "max"
-)
-
 type LLMProviderAuthMethod string
 
 const (
-	OAuth2    LLMProviderAuthMethod = "oauth2"
-	APIKey    LLMProviderAuthMethod = "api_key"
-	NoneAuthh LLMProviderAuthMethod = "none"
+	OAuth2   LLMProviderAuthMethod = "oauth2"
+	APIKey   LLMProviderAuthMethod = "api_key"
+	NoneAuth LLMProviderAuthMethod = "none"
 )
 
 type LLMProviderConfiguration struct {
@@ -127,12 +115,54 @@ type LLMProviderAuth struct {
 	BearerToken *string `json:"bearer_token,omitempty"`
 }
 
+type ThinkingLevels struct {
+	// True means we can make it Off even though the provider has Thinking available
+	// False means we cannot get no thinking
+	NoThinking bool `json:"can_be_off"`
+
+	// If its nil it means not supported
+	// Value means what it means interms of the model provider the enum value of that provider
+	Minimal *string `json:"minimal"`
+	Low     *string `json:"low"`
+	Medium  *string `json:"medium"`
+	High    *string `json:"high"`
+	XHigh   *string `json:"xhigh"`
+	Max     *string `json:"max"`
+}
+
 type LLMModelConfiguration struct {
-	Id                string                    `json:"id"`
-	Name              string                    `json:"name"`
-	MaxContextLength  uint64                    `json:"max_context_window"`
-	MaxOutputTokens   uint64                    `json:"max_output_tokens"`
-	Modality          []LLMSupportedModality    `json:"modality"`
-	AvailableThinking bool                      `json:"available_thinking"`
-	ThinkingLevelMap  map[ThinkingLevels]string `json:"thinking_level_map"`
+	Id                string                 `json:"id"`
+	Name              string                 `json:"name"`
+	MaxContextLength  uint64                 `json:"max_context_window"`
+	MaxOutputTokens   uint64                 `json:"max_output_tokens"`
+	Modality          []LLMSupportedModality `json:"modality"`
+	AvailableThinking bool                   `json:"available_thinking"`
+	ThinkingLevels    ThinkingLevels         `json:"thinking_levels"`
+}
+
+func (m LLMModelConfiguration) AvailableThinkingPatterns() []string {
+	if !m.AvailableThinking {
+		return nil
+	}
+
+	patterns := make([]string, 0, 7)
+	if m.ThinkingLevels.NoThinking {
+		patterns = append(patterns, "off")
+	}
+	for _, level := range []struct {
+		name  string
+		value *string
+	}{
+		{"minimal", m.ThinkingLevels.Minimal},
+		{"low", m.ThinkingLevels.Low},
+		{"medium", m.ThinkingLevels.Medium},
+		{"high", m.ThinkingLevels.High},
+		{"xhigh", m.ThinkingLevels.XHigh},
+		{"max", m.ThinkingLevels.Max},
+	} {
+		if level.value != nil {
+			patterns = append(patterns, level.name)
+		}
+	}
+	return patterns
 }

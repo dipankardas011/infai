@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/engine"
+	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
 )
@@ -31,8 +32,10 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 		mux.HandleFunc("GET /healthz", s.handleHealthz)
 	}
 
-	// providers (read-only; the registry is configured via models.json)
-	mux.HandleFunc("GET /v1/providers", s.handleListProviders)
+	// providers
+	mux.HandleFunc("POST /v1/providers/login", s.handleProviderLogin)
+	mux.HandleFunc("POST /v1/providers/logout", s.handleProviderLogout)
+	mux.HandleFunc("GET /v1/models", s.handleListModels)
 
 	// sessions
 	mux.HandleFunc("POST /v1/sessions", s.handleCreateSession)
@@ -122,8 +125,42 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 // ---- providers ----
 
-func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
-	s.writeJSON(w, http.StatusOK, s.engine.ListProviders())
+func (s *Server) handleProviderLogin(w http.ResponseWriter, r *http.Request) {
+	var input glue.LoginProviderInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.engine.LoginProvider(r.Context(), input); err != nil {
+		if errors.Is(err, engine.ErrProviderLoggedIn) {
+			s.writeError(w, http.StatusConflict, err)
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleProviderLogout(w http.ResponseWriter, r *http.Request) {
+	var input glue.LogoutProviderInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.engine.LogoutProvider(input); err != nil {
+		if errors.Is(err, engine.ErrProviderNotLoggedIn) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListModels(w http.ResponseWriter, _ *http.Request) {
+	s.writeJSON(w, http.StatusOK, s.engine.ListAllProviderModels())
 }
 
 // ---- sessions ----

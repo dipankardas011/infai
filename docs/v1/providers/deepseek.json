@@ -11,7 +11,8 @@
             "text"
         ],
         "available_thinking": true,
-        "thinking_level_map": {
+        "thinking_levels": {
+            "can_be_off": true,
             "minimal": null,
             "low": "low",
             "medium": null,
@@ -31,7 +32,8 @@
             "text"
         ],
         "available_thinking": true,
-        "thinking_level_map": {
+        "thinking_levels": {
+            "can_be_off": true,
             "minimal": null,
             "low": null,
             "medium": null,
@@ -51,7 +53,8 @@
             "text"
         ],
         "available_thinking": true,
-        "thinking_level_map": {
+        "thinking_levels": {
+            "can_be_off": true,
             "minimal": null,
             "low": "low",
             "medium": null,

@@ -17,6 +17,7 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
 )
@@ -78,7 +79,7 @@ type sessionsListedMsg struct {
 	err      error
 }
 type providersListedMsg struct {
-	providers []store.Provider
+	providers []glue.ListModelOutput
 	switching bool
 	err       error
 }
@@ -921,12 +922,14 @@ func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required b
 	m.modal = &modalModel{kind: modalSessions, title: "Sessions", body: "Start fresh or resume a saved session. The attached session is marked active.", options: options, required: required}
 }
 
-func (m *chatModel) showModels(providers []store.Provider, switching bool) {
+func (m *chatModel) showModels(models []glue.ListModelOutput, switching bool) {
 	var options []modalOption
-	for _, provider := range providers {
-		for _, model := range provider.ModelNames() {
-			options = append(options, modalOption{label: model + "  @ " + provider.Name, provider: provider.Name, model: model})
-		}
+	for _, model := range models {
+		options = append(options, modalOption{
+			label:    fmt.Sprintf("%s (%s) @ %d", model.ModelName, model.ProviderName, model.ContextWindow),
+			provider: model.ProviderName,
+			model:    model.ModelID,
+		})
 	}
 	if len(options) == 0 {
 		m.showNotice("No models configured", "Add a provider and model to models.json, then restart the server.", false)
@@ -1096,7 +1099,7 @@ func renameSessionCmd(ctx context.Context, client Client, id uuid.UUID, name str
 
 func listProvidersCmd(ctx context.Context, client Client, switching bool) tea.Cmd {
 	return func() tea.Msg {
-		providers, err := client.ListProviders(ctx)
+		providers, err := client.ListAllProviderModels(ctx)
 		return providersListedMsg{providers: providers, switching: switching, err: err}
 	}
 }

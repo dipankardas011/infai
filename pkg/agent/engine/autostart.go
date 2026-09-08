@@ -2,7 +2,7 @@ package engine
 
 import (
 	"context"
-	"maps"
+	"fmt"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/models"
@@ -20,14 +20,25 @@ func (e *InfaiAgentEngine) LoadConfiguredProviders(ctx context.Context) error {
 
 	fetchConfigurationFromInfai := ds.NewSet[contracts.ProviderSlug]()
 
-	for _, providerConfig := range providerStore.Providers {
-		if providerConfig.Id != contracts.OpenAIGeneric {
+	for providerName, providerConfig := range providerStore.Providers {
+		switch providerConfig.Id {
+		case contracts.OpenAIGeneric:
+		case contracts.Codex, contracts.DeepSeek:
 			fetchConfigurationFromInfai.Add(providerConfig.Id)
+		default:
+			return fmt.Errorf("provider %q has unsupported ID %q", providerName, providerConfig.Id)
 		}
 	}
 
 	if fetchConfigurationFromInfai.Size() == 0 {
-		maps.Copy(e.providers.Providers, providerStore.Providers)
+		for providerName, providerConfig := range providerStore.Providers {
+			if err := validateProvider(providerName, providerConfig); err != nil {
+				return err
+			}
+		}
+		e.mu.Lock()
+		e.providers = providerStore
+		e.mu.Unlock()
 		return nil
 	}
 
@@ -36,18 +47,30 @@ func (e *InfaiAgentEngine) LoadConfiguredProviders(ctx context.Context) error {
 		return err
 	}
 
-	e.providers.Providers = make(map[string]contracts.LLMProviderConfiguration)
+	providers := make(map[string]contracts.LLMProviderConfiguration, len(providerStore.Providers))
 	for providerName, providerConfig := range providerStore.Providers {
 		v := providerConfig
 
 		if providerConfig.Id != contracts.OpenAIGeneric {
-			v.BaseEndpoint = infaiManagedWellKnownProviders[providerConfig.Id].BaseEndpoint
-			v.APIType = infaiManagedWellKnownProviders[providerConfig.Id].APIType
-			maps.Copy(v.Models, infaiManagedWellKnownProviders[providerConfig.Id].Models)
+			managed, ok := infaiManagedWellKnownProviders[providerConfig.Id]
+			if !ok {
+				return fmt.Errorf("provider %q was not returned by the Infai catalog", providerConfig.Id)
+			}
+			v.BaseEndpoint = managed.BaseEndpoint
+			v.APIType = managed.APIType
+			v.Models = managed.Models
 		}
 
-		e.providers.Providers[providerName] = v
+		providers[providerName] = v
 	}
+	for providerName, providerConfig := range providers {
+		if err := validateProvider(providerName, providerConfig); err != nil {
+			return err
+		}
+	}
+	e.mu.Lock()
+	e.providers.Providers = providers
+	e.mu.Unlock()
 
 	return nil
 }

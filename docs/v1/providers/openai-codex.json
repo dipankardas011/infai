@@ -11,7 +11,8 @@
             "text"
         ],
         "available_thinking": true,
-        "thinking_level_map": {
+        "thinking_levels": {
+            "can_be_off": true,
             "xhigh": "xhigh",
             "minimal": "low"
         }
@@ -29,7 +30,8 @@
             "image"
         ],
         "available_thinking": true,
-        "thinking_level_map": {
+        "thinking_levels": {
+            "can_be_off": true,
             "xhigh": "xhigh",
             "minimal": "low"
         }
@@ -47,7 +49,8 @@
             "image"
         ],
         "available_thinking": true,
-        "thinking_level_map": {
+        "thinking_levels": {
+            "can_be_off": true,
             "xhigh": "xhigh",
             "minimal": "low"
         }
@@ -65,7 +68,8 @@
             "image"
         ],
         "available_thinking": true,
-        "thinking_level_map": {
+        "thinking_levels": {
+            "can_be_off": true,
             "xhigh": "xhigh",
             "minimal": "low"
         }
@@ -83,7 +87,8 @@
             "image"
         ],
         "available_thinking": true,
-        "thinking_level_map": {
+        "thinking_levels": {
+            "can_be_off": true,
             "xhigh": "xhigh",
             "max": "max",
             "minimal": "low"
@@ -102,7 +107,8 @@
             "image"
         ],
         "available_thinking": true,
-        "thinking_level_map": {
+        "thinking_levels": {
+            "can_be_off": true,
             "xhigh": "xhigh",
             "max": "max",
             "minimal": "low"
@@ -121,7 +127,8 @@
             "image"
         ],
         "available_thinking": true,
-        "thinking_level_map": {
+        "thinking_levels": {
+            "can_be_off": true,
             "xhigh": "xhigh",
             "max": "max",
             "minimal": "low"
@@ -140,8 +147,8 @@
             "image"
         ],
         "available_thinking": true,
-        "thinking_level_map": {
-            "off": null,
+        "thinking_levels": {
+            "can_be_off": false,
             "minimal": "low",
             "low": "low",
             "medium": "medium",

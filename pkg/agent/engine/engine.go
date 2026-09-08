@@ -95,20 +95,11 @@ func NewInfaiAgentEngineAt(bgLogger *slog.Logger, sessionStore *store.SessionSto
 
 	return &InfaiAgentEngine{
 		bgLogger:     bgLogger,
+		providers:    contracts.LLMProviders{Providers: make(map[string]contracts.LLMProviderConfiguration)},
 		sessionStore: sessionStore,
 		active:       make(map[uuid.UUID]*InfaiAgentSession),
 		stopCh:       make(chan struct{}),
 	}, nil
-}
-
-// ---- Provider management ----
-
-func (e *InfaiAgentEngine) ListProviders() []store.Provider {
-	return e.modelProviderStore.List()
-}
-
-func (e *InfaiAgentEngine) Provider(name string) (store.Provider, bool) {
-	return e.modelProviderStore.Get(name)
 }
 
 // ---- Sessions ----
@@ -133,7 +124,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	if opts.Provider == "" {
 		return nil, errors.New("engine: provider is required")
 	}
-	p, ok := e.modelProviderStore.Get(opts.Provider)
+	p, ok := e.Provider(opts.Provider)
 	if !ok {
 		return nil, fmt.Errorf("engine: provider %q not configured", opts.Provider)
 	}
@@ -196,7 +187,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		return nil, err
 	}
 
-	p, ok := e.modelProviderStore.Get(meta.Provider)
+	p, ok := e.Provider(meta.Provider)
 	if !ok {
 		_ = timeline.Close()
 		return nil, ErrNoProvider
@@ -234,7 +225,7 @@ func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelName
 	if !ok {
 		return nil, ErrSessionNotFound
 	}
-	p, ok := e.modelProviderStore.Get(providerName)
+	p, ok := e.Provider(providerName)
 	if !ok {
 		return nil, ErrNoProvider
 	}

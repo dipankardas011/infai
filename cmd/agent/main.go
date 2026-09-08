@@ -50,6 +50,7 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().IntVar(&port, "port", 6000, "agent server port to attach to")
 	cmd.Flags().StringVar(&sessionID, "session", "", "resume a saved session by uuid")
 	cmd.AddCommand(newServerCmd())
+	cmd.AddCommand(newProviderCmd())
 	return cmd
 }
 
@@ -61,6 +62,47 @@ func newServerCmd() *cobra.Command {
 		Short: "run the agent engine HTTP server (env-only configuration)",
 		RunE:  runServer,
 	}
+}
+
+func newProviderCmd() *cobra.Command {
+	provider := &cobra.Command{
+		Use:     "provider",
+		Aliases: []string{"providers"},
+		Short:   "manage model provider credentials",
+		Args:    cobra.NoArgs,
+	}
+	provider.AddCommand(
+		&cobra.Command{
+			Use:     "list",
+			Aliases: []string{"ls"},
+			Short:   "list configured provider models",
+			Args:    cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				return tui.RunProviderList(cmd.Context(), providerClient(), cmd.OutOrStdout())
+			},
+		},
+		&cobra.Command{
+			Use:   "login",
+			Short: "log in to a managed provider",
+			Args:  cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				return tui.RunProviderLogin(cmd.Context(), providerClient(), cmd.InOrStdin(), cmd.OutOrStdout())
+			},
+		},
+		&cobra.Command{
+			Use:   "logout",
+			Short: "log out from a managed provider",
+			Args:  cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				return tui.RunProviderLogout(cmd.Context(), providerClient(), cmd.InOrStdin(), cmd.OutOrStdout())
+			},
+		},
+	)
+	return provider
+}
+
+func providerClient() *tui.RemoteClient {
+	return tui.NewRemoteClient(fmt.Sprintf("http://%s:%d", host, port))
 }
 
 func newLogger(level string) *slog.Logger {

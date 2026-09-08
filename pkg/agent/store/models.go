@@ -3,7 +3,6 @@ package store
 import (
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 
@@ -110,19 +109,12 @@ func LoadProviders() (contracts.LLMProviders, error) {
 	}
 
 	for providerName, p := range f.Providers {
-		var provider_id contracts.ProviderSlug
-		if providerName == string(contracts.Codex) || providerName == string(contracts.DeepSeek) {
-			provider_id = contracts.ProviderSlug(providerName)
-		} else {
-			provider_id = contracts.OpenAIGeneric
-		}
-
 		v := contracts.LLMProviderConfiguration{
-			Id:   provider_id,
+			Id:   p.Id,
 			Auth: p.Auth,
 		}
 
-		if provider_id == contracts.OpenAIGeneric {
+		if p.Id == contracts.OpenAIGeneric {
 			if p.BaseEndpoint != nil {
 				v.BaseEndpoint = *p.BaseEndpoint
 			}
@@ -130,9 +122,7 @@ func LoadProviders() (contracts.LLMProviders, error) {
 				v.APIType = *p.APIType
 			}
 
-			if p.Models != nil {
-				maps.Copy(v.Models, p.Models)
-			}
+			v.Models = p.Models
 		}
 
 		ret.Providers[providerName] = v
@@ -147,19 +137,12 @@ func PersistProviders(o contracts.LLMProviders) error {
 	}
 
 	for providerName, p := range o.Providers {
-		var provider_id contracts.ProviderSlug
-		if providerName == string(contracts.Codex) || providerName == string(contracts.DeepSeek) {
-			provider_id = contracts.ProviderSlug(providerName)
-		} else {
-			provider_id = contracts.OpenAIGeneric
-		}
-
 		v := storageProvider{
-			Id:   provider_id,
+			Id:   p.Id,
 			Auth: p.Auth,
 		}
 
-		if provider_id == contracts.OpenAIGeneric {
+		if p.Id == contracts.OpenAIGeneric {
 			if p.BaseEndpoint != "" {
 				v.BaseEndpoint = &p.BaseEndpoint
 			}
@@ -168,7 +151,7 @@ func PersistProviders(o contracts.LLMProviders) error {
 			}
 
 			if len(p.Models) > 0 {
-				maps.Copy(v.Models, p.Models)
+				v.Models = p.Models
 			}
 		}
 
