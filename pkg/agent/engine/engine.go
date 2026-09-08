@@ -74,8 +74,8 @@ func NewInfaiAgentEngine(bgLogger *slog.Logger, cfg *config.AgentEngineConfig) (
 
 	select {
 	case <-ctx.Done():
-		bgLogger.ErrorContext(ctx, "Failed to get LoadConfiguredProviders", "reason", ctx.Err())
-		return nil, ctx.Err()
+		bgLogger.ErrorContext(ctx, "Failed to get LoadConfiguredProviders", "reason", context.Cause(ctx))
+		return nil, context.Cause(ctx)
 	case errChan := <-loadingProviderErr:
 		if errChan != nil {
 			bgLogger.ErrorContext(ctx, "Failed to get LoadConfiguredProviders", "reason", errChan)

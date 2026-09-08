@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -22,6 +23,10 @@ type infaiManagedProviderConfig struct {
 }
 
 func GetAllInfaiManagedProviderConfigs(ctx context.Context, providerIDs []contracts.ProviderSlug) (map[contracts.ProviderSlug]contracts.LLMProviderConfiguration, error) {
+	if slices.Contains(providerIDs, contracts.OpenAIGeneric) {
+		return nil, fmt.Errorf("the contract is wrong the providerIds cannot contain openaigeneric providerId")
+	}
+
 	type accumulateProvider struct {
 		V infaiManagedProviderConfigs
 		E error
