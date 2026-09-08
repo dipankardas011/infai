@@ -1,6 +1,9 @@
 package contracts
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // InfaiModelAdaptor is the primitive model contract. The agent feeds it the
 // running conversation and it returns the next assistant message.
@@ -57,4 +60,79 @@ const (
 	DeltaTaskChecklist DeltaKind = "task_checklist"
 )
 
-// ChatCompletion()
+type LLMProviders struct {
+	// Key can be a userDefined as well as provider Slug (when user chooses deepseek/codex) else for a generic one they can add whatever they feel like
+	Providers map[string]LLMProviderConfiguration `json:"providers"`
+}
+
+type ProviderSlug string
+
+const (
+	DeepSeek      ProviderSlug = "deepseek"
+	Codex         ProviderSlug = "openai-codex"
+	OpenAIGeneric ProviderSlug = "openai-generic"
+)
+
+type ProviderAPIType string
+
+const (
+	OpenAICompatableAPI ProviderAPIType = "openai-completions"
+)
+
+type LLMSupportedModality string
+
+const (
+	ModalityText  LLMSupportedModality = "text"
+	ModalityImage LLMSupportedModality = "image"
+	ModalityAudio LLMSupportedModality = "audio"
+)
+
+type ThinkingLevels string
+
+const (
+	OffThinking     ThinkingLevels = "off"
+	MinimalThinking ThinkingLevels = "minimal"
+	LowThinking     ThinkingLevels = "low"
+	MediumThinking  ThinkingLevels = "medium"
+	HighThinking    ThinkingLevels = "high"
+	XHighThinking   ThinkingLevels = "xhigh"
+	MaxThinking     ThinkingLevels = "max"
+)
+
+type LLMProviderAuthMethod string
+
+const (
+	OAuth2    LLMProviderAuthMethod = "oauth2"
+	APIKey    LLMProviderAuthMethod = "api_key"
+	NoneAuthh LLMProviderAuthMethod = "none"
+)
+
+type LLMProviderConfiguration struct {
+	Id           ProviderSlug                     `json:"id"`
+	BaseEndpoint string                           `json:"base_endpoint"`
+	APIType      ProviderAPIType                  `json:"api_type"`
+	Auth         LLMProviderAuth                  `json:"auth"`
+	Models       map[string]LLMModelConfiguration `json:"models"`
+}
+
+type LLMProviderAuth struct {
+	Method LLMProviderAuthMethod `json:"method"`
+
+	// OAuth2
+	ClientId     *string    `json:"client_id,omitempty"`
+	ClientSecret *string    `json:"client_secret,omitempty"`
+	TTLToken     *time.Time `json:"ttl_token,omitempty"`
+
+	// APIKey
+	BearerToken *string `json:"bearer_token,omitempty"`
+}
+
+type LLMModelConfiguration struct {
+	Id                string                    `json:"id"`
+	Name              string                    `json:"name"`
+	MaxContextLength  uint64                    `json:"max_context_window"`
+	MaxOutputTokens   uint64                    `json:"max_output_tokens"`
+	Modality          []LLMSupportedModality    `json:"modality"`
+	AvailableThinking bool                      `json:"available_thinking"`
+	ThinkingLevelMap  map[ThinkingLevels]string `json:"thinking_level_map"`
+}

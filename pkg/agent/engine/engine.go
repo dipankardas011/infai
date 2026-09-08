@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -44,10 +43,8 @@ type InfaiAgentEngine struct {
 	bgLogger  *slog.Logger
 	engineCfg *config.AgentEngineConfig
 
-	_ *sql.DB
-
-	modelProviderStore *store.ProviderStore
-	sessionStore       *store.SessionStore
+	providers    contracts.LLMProviders
+	sessionStore *store.SessionStore
 
 	mu     sync.Mutex
 	active map[uuid.UUID]*InfaiAgentSession
@@ -57,34 +54,50 @@ type InfaiAgentEngine struct {
 }
 
 func NewInfaiAgentEngine(bgLogger *slog.Logger, cfg *config.AgentEngineConfig) (*InfaiAgentEngine, error) {
-	providerStore, err := store.OpenProviderStore()
-	if err != nil {
-		return nil, err
-	}
 	sessionStore, err := store.OpenSessionStore()
 	if err != nil {
 		return nil, err
 	}
-	engine, err := NewInfaiAgentEngineAt(bgLogger, providerStore, sessionStore)
+	engine, err := NewInfaiAgentEngineAt(bgLogger, sessionStore)
 	if err != nil {
 		return nil, err
 	}
 	engine.engineCfg = cfg
+
+	ctx, cancel := context.WithTimeoutCause(context.Background(), time.Minute, fmt.Errorf("toke > 1minute to get provider configs"))
+	defer cancel()
+	loadingProviderErr := make(chan error, 1)
+
+	go func() {
+		loadingProviderErr <- engine.LoadConfiguredProviders(ctx)
+	}()
+
+	select {
+	case <-ctx.Done():
+		bgLogger.ErrorContext(ctx, "Failed to get LoadConfiguredProviders", "reason", ctx.Err())
+		return nil, ctx.Err()
+	case errChan := <-loadingProviderErr:
+		if errChan != nil {
+			bgLogger.ErrorContext(ctx, "Failed to get LoadConfiguredProviders", "reason", errChan)
+			return nil, errChan
+		}
+	}
+
 	return engine, nil
 }
 
 // NewInfaiAgentEngineAt wires an engine to explicit stores. The harness uses
 // the config-driven constructor; tests inject sandboxed stores here.
-func NewInfaiAgentEngineAt(bgLogger *slog.Logger, providerStore *store.ProviderStore, sessionStore *store.SessionStore) (*InfaiAgentEngine, error) {
-	if providerStore == nil || sessionStore == nil {
+func NewInfaiAgentEngineAt(bgLogger *slog.Logger, sessionStore *store.SessionStore) (*InfaiAgentEngine, error) {
+	if sessionStore == nil {
 		return nil, errors.New("engine: stores required")
 	}
+
 	return &InfaiAgentEngine{
-		bgLogger:           bgLogger,
-		modelProviderStore: providerStore,
-		sessionStore:       sessionStore,
-		active:             make(map[uuid.UUID]*InfaiAgentSession),
-		stopCh:             make(chan struct{}),
+		bgLogger:     bgLogger,
+		sessionStore: sessionStore,
+		active:       make(map[uuid.UUID]*InfaiAgentSession),
+		stopCh:       make(chan struct{}),
 	}, nil
 }
 

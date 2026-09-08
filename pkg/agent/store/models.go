@@ -3,137 +3,177 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
-	"sort"
+	"path/filepath"
+
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
-// Model describes a single model a provider serves, keyed by Name in the
-// provider's Models map. Name is the exact id sent to the provider's API; the
-// map key is what the UI shows, and when a file entry omits Name it falls back
-// to the key.
-type Model struct {
-	Name          string `json:"name,omitempty"`
-	ContextWindow int    `json:"context_window"`
+type providerStore struct {
+	Providers map[string]storageProvider `json:"providers"`
 }
 
-// Provider describes an inference backend the harness can talk to. Name is the
-// map key in models.json and is filled from it on load. APIType is "openai"
-// (the default) or "anthropic".
-type Provider struct {
-	Name     string           `json:"name"`
-	Endpoint string           `json:"endpoint"`
-	APIType  string           `json:"api_type,omitempty"`
-	APIKey   string           `json:"api_key,omitempty"`
-	Models   map[string]Model `json:"models,omitempty"`
+type storageProvider struct {
+	Id   contracts.ProviderSlug    `json:"id"`
+	Auth contracts.LLMProviderAuth `json:"auth"`
+
+	APIType      *contracts.ProviderAPIType                 `json:"api_type,omitempty"`
+	BaseEndpoint *string                                    `json:"base_endpoint,omitempty"`
+	Models       map[string]contracts.LLMModelConfiguration `json:"models,omitempty"`
 }
 
-// ModelNames returns the provider's model keys, sorted.
-func (p Provider) ModelNames() []string {
-	names := make([]string, 0, len(p.Models))
-	for name := range p.Models {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// Model returns the model for a key (or its effective API name), with Name
-// filled in when the file left it empty.
-func (p Provider) Model(name string) (Model, bool) {
-	if m, ok := p.Models[name]; ok {
-		if m.Name == "" {
-			m.Name = name
-		}
-		return m, true
-	}
-	for _, m := range p.Models {
-		if m.Name == name {
-			return m, true
-		}
-	}
-	return Model{}, false
-}
-
-// ProviderStore loads the provider registry (models.json) and serves it
-// read-only. Providers and models are configured by editing models.json
-// directly, so the store never writes.
-type ProviderStore struct {
-	providers map[string]Provider
-}
-
-// OpenProviderStore loads the registry from models.json under the harness
-// root. A missing file yields an empty registry.
-func OpenProviderStore() (*ProviderStore, error) {
+func readIt() (*providerStore, error) {
 	root, err := Root()
 	if err != nil {
 		return nil, err
 	}
+
 	if err := EnsureDir(root); err != nil {
 		return nil, err
 	}
-	return NewProviderStore(root + "/models.json")
-}
 
-// NewProviderStore loads a provider registry from an explicit path. Used by
-// the harness and by tests that want a sandboxed location.
-func NewProviderStore(path string) (*ProviderStore, error) {
-	p := &ProviderStore{}
-	if err := p.load(path); err != nil {
-		return nil, err
-	}
-	return p, nil
-}
+	path := filepath.Join(root, "models.json")
 
-func (p *ProviderStore) load(path string) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			p.providers = map[string]Provider{}
-			return nil
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("store: read models: %w", err)
 		}
-		return fmt.Errorf("store: read models: %w", err)
+
+		f := &providerStore{
+			Providers: make(map[string]storageProvider),
+		}
+
+		if err := writeIt(f); err != nil {
+			return nil, err
+		}
+
+		return f, nil
 	}
 
-	var f struct {
-		Providers map[string]Provider `json:"providers"`
-	}
+	var f providerStore
+
 	if err := json.Unmarshal(b, &f); err != nil {
-		return fmt.Errorf("store: parse models: %w", err)
+		return nil, fmt.Errorf("store: parse models: %w", err)
 	}
 
-	providers := make(map[string]Provider, len(f.Providers))
-	for name, prov := range f.Providers {
-		prov.Name = name
-		if prov.APIType == "" {
-			prov.APIType = "openai"
-		}
-		providers[name] = prov
+	// Defensive handling for files like:
+	// {}
+	// or
+	// {"providers": null}
+	if f.Providers == nil {
+		f.Providers = make(map[string]storageProvider)
 	}
-	p.providers = providers
+
+	return &f, nil
+}
+
+func writeIt(f *providerStore) error {
+	root, err := Root()
+	if err != nil {
+		return err
+	}
+
+	if err := EnsureDir(root); err != nil {
+		return err
+	}
+
+	if f.Providers == nil {
+		f.Providers = make(map[string]storageProvider)
+	}
+
+	b, err := json.Marshal(f)
+	if err != nil {
+		return fmt.Errorf("store: marshal models: %w", err)
+	}
+
+	if err := os.WriteFile(
+		filepath.Join(root, "models.json"),
+		b,
+		0600,
+	); err != nil {
+		return fmt.Errorf("store: write models: %w", err)
+	}
+
 	return nil
 }
 
-func sortedNames(provs map[string]Provider) []string {
-	names := make([]string, 0, len(provs))
-	for name := range provs {
-		names = append(names, name)
+func LoadProviders() (contracts.LLMProviders, error) {
+	ret := contracts.LLMProviders{
+		Providers: make(map[string]contracts.LLMProviderConfiguration),
 	}
-	sort.Strings(names)
-	return names
+
+	f, err := readIt()
+	if err != nil {
+		return ret, err
+	}
+
+	for providerName, p := range f.Providers {
+		var provider_id contracts.ProviderSlug
+		if providerName == string(contracts.Codex) || providerName == string(contracts.DeepSeek) {
+			provider_id = contracts.ProviderSlug(providerName)
+		} else {
+			provider_id = contracts.OpenAIGeneric
+		}
+
+		v := contracts.LLMProviderConfiguration{
+			Id:   provider_id,
+			Auth: p.Auth,
+		}
+
+		if provider_id == contracts.OpenAIGeneric {
+			if p.BaseEndpoint != nil {
+				v.BaseEndpoint = *p.BaseEndpoint
+			}
+			if p.APIType != nil {
+				v.APIType = *p.APIType
+			}
+
+			if p.Models != nil {
+				maps.Copy(v.Models, p.Models)
+			}
+		}
+
+		ret.Providers[providerName] = v
+	}
+
+	return ret, nil
 }
 
-// List returns every configured provider, sorted by name.
-func (p *ProviderStore) List() []Provider {
-	names := sortedNames(p.providers)
-	out := make([]Provider, 0, len(names))
-	for _, name := range names {
-		out = append(out, p.providers[name])
+func PersistProviders(o contracts.LLMProviders) error {
+	f := &providerStore{
+		Providers: make(map[string]storageProvider),
 	}
-	return out
-}
 
-// Get returns the named provider.
-func (p *ProviderStore) Get(name string) (Provider, bool) {
-	prov, ok := p.providers[name]
-	return prov, ok
+	for providerName, p := range o.Providers {
+		var provider_id contracts.ProviderSlug
+		if providerName == string(contracts.Codex) || providerName == string(contracts.DeepSeek) {
+			provider_id = contracts.ProviderSlug(providerName)
+		} else {
+			provider_id = contracts.OpenAIGeneric
+		}
+
+		v := storageProvider{
+			Id:   provider_id,
+			Auth: p.Auth,
+		}
+
+		if provider_id == contracts.OpenAIGeneric {
+			if p.BaseEndpoint != "" {
+				v.BaseEndpoint = &p.BaseEndpoint
+			}
+			if p.APIType != "" {
+				v.APIType = &p.APIType
+			}
+
+			if len(p.Models) > 0 {
+				maps.Copy(v.Models, p.Models)
+			}
+		}
+
+		f.Providers[providerName] = v
+	}
+
+	return writeIt(f)
 }
