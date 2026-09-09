@@ -86,11 +86,19 @@ func TestEmptyCommandMenuDoesNotPushComposerPastTerminal(t *testing.T) {
 func TestWorkingStatusIsProminentAndOmitsTurns(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
-	m.width = 80
-	m.session = store.SessionMeta{ID: uuid.New(), Model: "gemma4-e2b-it"}
+	m.width = 120
+	sessionID := uuid.New()
+	m.session = store.SessionMeta{ID: sessionID, Provider: "infai", Model: "gemma4-e2b-it"}
+	m.thinking = contracts.ThinkingLow
+	m.used, m.contextWindow = 6, 100
 	normalStatus := ansi.Strip(m.statusView())
 	if strings.Contains(normalStatus, "turn") {
 		t.Fatalf("status contains turn count: %q", normalStatus)
+	}
+	for _, want := range []string{"gemma4-e2b-it (infai)", "thinking low", "[█░░░░░░░░░] 6%", sessionID.String()} {
+		if !strings.Contains(normalStatus, want) {
+			t.Fatalf("status lacks %q: %q", want, normalStatus)
+		}
 	}
 	m.working = true
 	m.workBegan = time.Now()

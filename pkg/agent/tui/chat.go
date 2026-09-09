@@ -727,43 +727,56 @@ func (m *chatModel) headerView() string {
 }
 
 func (m *chatModel) statusView() string {
-	style := m.styles.status
-	rest := "ready"
+	separator := m.styles.status.Render("  ·  ")
+	rest := m.styles.status.Render("ready")
 	name := ""
 	if m.session.ID == uuid.Nil {
-		rest = "choose a session to begin"
+		rest = m.styles.status.Render("choose a session to begin")
 	} else {
 		pct := 0
 		if m.contextWindow > 0 {
-			pct = int(m.used * 100 / m.contextWindow)
+			pct = min(int(m.used*100/m.contextWindow), 100)
 		}
 		name = m.session.Name
 		thinking := m.thinking
 		if thinking == "" {
 			thinking = "default"
 		}
-		rest = fmt.Sprintf("%s  ·  thinking %s  ·  ctx %d%%  ·  %s", m.session.Model, thinking, pct, shortID(m.session.ID))
+		rest = strings.Join([]string{
+			m.styles.status.Render(fmt.Sprintf("%s (%s)", m.session.Model, m.session.Provider)),
+			m.styles.active.Render("thinking " + string(thinking)),
+			m.styles.status.Render("ctx ") + contextProgressBar(m.styles, pct, 10) + m.styles.status.Render(fmt.Sprintf(" %d%%", pct)),
+			m.styles.status.Render(m.session.ID.String()),
+		}, separator)
 	}
 	if m.working {
-		style = m.styles.statusBusy
 		workStatus := m.workStatus
 		if workStatus == "" {
 			workStatus = "working"
 		}
-		rest = fmt.Sprintf("%s  ·  %s %s %s", m.session.Model, spinnerFrame(m.workBegan), workStatus, time.Since(m.workBegan).Round(time.Second))
+		rest = m.styles.statusBusy.Render(fmt.Sprintf("%s  ·  %s %s %s", m.session.Model, spinnerFrame(m.workBegan), workStatus, time.Since(m.workBegan).Round(time.Second)))
 	}
 	if !m.viewport.AtBottom() {
-		rest += "  ·  viewing earlier output"
+		rest += separator + m.styles.status.Render("viewing earlier output")
 	}
 	if name != "" {
-		rest = m.styles.sessionName.Render(name) + "  ·  " + style.Render(rest)
-	} else {
-		rest = style.Render(rest)
+		rest = m.styles.sessionName.Render(name) + separator + rest
 	}
 	if checklist := m.taskChecklistView(max(m.width-2, 1)); checklist != "" {
 		rest = checklist + "\n" + rest
 	}
 	return fullWidth(lipgloss.NewStyle().Padding(0, 1), m.width, rest)
+}
+
+func contextProgressBar(styles harnessStyles, percent, width int) string {
+	filled := percent * width / 100
+	if percent > 0 && filled == 0 {
+		filled = 1
+	}
+	filled = min(max(filled, 0), width)
+	empty := width - filled
+	return styles.active.Render("["+strings.Repeat("█", filled)) +
+		lipgloss.NewStyle().Foreground(everforest.SurfaceAlt).Render(strings.Repeat("░", empty)+"]")
 }
 
 func (m *chatModel) taskChecklistView(width int) string {

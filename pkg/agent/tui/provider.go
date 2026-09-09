@@ -141,6 +141,7 @@ type providerMenuModel struct {
 	selected    string
 	canceled    bool
 	width       int
+	height      int
 }
 
 func (m *providerMenuModel) Init() tea.Cmd { return nil }
@@ -149,6 +150,7 @@ func (m *providerMenuModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "up", "k":
@@ -184,8 +186,8 @@ func (m *providerMenuModel) View() tea.View {
 	}
 	lines = append(lines, "", styles.muted.Render("↑/↓ select  •  Enter confirm  •  Esc cancel"))
 	content := styles.menu.Padding(1, 2).Render(strings.Join(lines, "\n"))
-	if m.width > 0 {
-		content = lipgloss.PlaceHorizontal(m.width, lipgloss.Left, content)
+	if m.width > 0 && m.height > 0 {
+		content = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 	}
 	view := tea.NewView(content)
 	view.AltScreen = true
