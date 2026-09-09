@@ -36,9 +36,10 @@ type chatModel struct {
 	client Client
 	styles harnessStyles
 
-	session store.SessionMeta
-	used    int
-	blocks  []block
+	session       store.SessionMeta
+	contextWindow uint64
+	used          uint64
+	blocks        []block
 
 	width            int
 	height           int
@@ -70,7 +71,7 @@ type turnDoneMsg struct {
 	err   error
 }
 type sessionLoadedMsg struct {
-	meta    *store.SessionMeta
+	output  *glue.SessionOutput
 	records []store.Record
 	err     error
 }
@@ -84,13 +85,12 @@ type providersListedMsg struct {
 	err       error
 }
 type sessionCreatedMsg struct {
-	meta *store.SessionMeta
-	err  error
+	output *glue.SessionOutput
+	err    error
 }
 type modelSetMsg struct {
-	provider string
-	model    string
-	err      error
+	output *glue.SessionOutput
+	err    error
 }
 type compactedMsg struct {
 	meta    *store.SessionMeta
@@ -203,7 +203,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.session.Model = msg.reply.Model
 			}
 			if msg.reply.ContextWindow > 0 {
-				m.session.ContextWindow = msg.reply.ContextWindow
+				m.contextWindow = msg.reply.ContextWindow
 			}
 			if msg.reply.Name != "" {
 				m.session.Name = msg.reply.Name
@@ -220,8 +220,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.showNotice("Could not open session", msg.err.Error(), true)
 			return m, nil
 		}
-		m.session = *msg.meta
-		m.client.SetSession(msg.meta.ID)
+		m.session = msg.output.SessionMeta
+		m.contextWindow = msg.output.ContextWindow
+		m.client.SetSession(msg.output.ID)
 		m.blocks = blocksFromRecords(msg.records)
 		m.checklist = taskChecklistFromRecords(msg.records)
 		m.modal = nil
@@ -246,8 +247,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.showNotice("Could not create session", msg.err.Error(), false)
 			return m, nil
 		}
-		m.session = *msg.meta
-		m.client.SetSession(msg.meta.ID)
+		m.session = msg.output.SessionMeta
+		m.contextWindow = msg.output.ContextWindow
+		m.client.SetSession(msg.output.ID)
 		m.blocks = nil
 		m.checklist = contracts.TaskChecklistState{}
 		m.used = 0
@@ -258,8 +260,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.appendError(msg.err)
 		} else {
-			m.session.Provider, m.session.Model = msg.provider, msg.model
-			m.blocks = append(m.blocks, block{role: "system", text: "Model switched to " + msg.model + " @ " + msg.provider})
+			m.session = msg.output.SessionMeta
+			m.contextWindow = msg.output.ContextWindow
+			m.blocks = append(m.blocks, block{role: "system", text: "Model switched to " + msg.output.Model + " @ " + msg.output.Provider})
 		}
 		m.modal = nil
 		m.refreshTranscript(true)
@@ -697,8 +700,8 @@ func (m *chatModel) statusView() string {
 		rest = "choose a session to begin"
 	} else {
 		pct := 0
-		if m.session.ContextWindow > 0 {
-			pct = m.used * 100 / m.session.ContextWindow
+		if m.contextWindow > 0 {
+			pct = int(m.used * 100 / m.contextWindow)
 		}
 		name = m.session.Name
 		rest = fmt.Sprintf("%s  ·  ctx %d%%  ·  %s", m.session.Model, pct, shortID(m.session.ID))
@@ -1079,7 +1082,7 @@ func loadSessionCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
 			return sessionLoadedMsg{err: err}
 		}
 		_, records, err := client.GetSession(ctx, id)
-		return sessionLoadedMsg{meta: meta, records: records, err: err}
+		return sessionLoadedMsg{output: meta, records: records, err: err}
 	}
 }
 
@@ -1108,14 +1111,14 @@ func createSessionCmd(ctx context.Context, client Client, provider, model string
 	return func() tea.Msg {
 		cwd, _ := os.Getwd()
 		meta, err := client.CreateSession(ctx, SessionCreateOptions{Provider: provider, Model: model, Cwd: cwd})
-		return sessionCreatedMsg{meta: meta, err: err}
+		return sessionCreatedMsg{output: meta, err: err}
 	}
 }
 
 func setModelCmd(ctx context.Context, client Client, provider, model string) tea.Cmd {
 	return func() tea.Msg {
-		err := client.SetSessionModel(ctx, provider, model)
-		return modelSetMsg{provider: provider, model: model, err: err}
+		output, err := client.SetSessionModel(ctx, provider, model)
+		return modelSetMsg{output: output, err: err}
 	}
 }
 

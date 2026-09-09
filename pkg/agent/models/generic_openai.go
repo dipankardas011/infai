@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +18,8 @@ import (
 )
 
 type genericOpenAICompatableAPI struct {
-	b contracts.ProvisionedModel
+	b        contracts.ProvisionedModel
+	endpoint *url.URL
 
 	client        *http.Client
 	maxAttempts   int
@@ -26,12 +28,17 @@ type genericOpenAICompatableAPI struct {
 }
 
 func NewOpenAICompatableAPI(b contracts.ProvisionedModel) (*genericOpenAICompatableAPI, error) {
+	baseEndpoint, err := url.Parse(b.BaseEndpoint())
+	if err != nil || !baseEndpoint.IsAbs() || baseEndpoint.Host == "" {
+		return nil, fmt.Errorf("openai compatible api: invalid base endpoint %q", b.BaseEndpoint())
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 
 	transport.ResponseHeaderTimeout = 5 * time.Minute
 
 	return &genericOpenAICompatableAPI{
 		b:             b,
+		endpoint:      baseEndpoint.JoinPath("chat", "completions"),
 		client:        &http.Client{Transport: transport},
 		maxAttempts:   10,
 		retryBase:     5 * time.Second,
@@ -74,7 +81,7 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 		wireMessages[i].Status = "" // NOTE: to avoid sending the status as openai api doesn't have one.
 	}
 	reqBody := openAIChatRequest{
-		Model:    o.model,
+		Model:    o.b.Model().Id,
 		Messages: wireMessages,
 	}
 	for _, tool := range tools {
@@ -136,13 +143,21 @@ func (o *genericOpenAICompatableAPI) sendChatRequest(ctx context.Context, body [
 		maxAttempts = 1
 	}
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/chat/completions", bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.endpoint.String(), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if o.apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+o.apiKey)
+		auth := o.b.Auth()
+		switch auth.Method {
+		case contracts.NoneAuth:
+		case contracts.APIKey:
+			if auth.BearerToken == nil || strings.TrimSpace(*auth.BearerToken) == "" {
+				return nil, errors.New("openai compatible api: API key is required")
+			}
+			req.Header.Set("Authorization", "Bearer "+*auth.BearerToken)
+		default:
+			return nil, fmt.Errorf("openai compatible api: unsupported auth method %q", auth.Method)
 		}
 
 		resp, err := o.client.Do(req)

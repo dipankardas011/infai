@@ -147,9 +147,9 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 			SessionID        uuid.UUID             `json:"session_id"`
 			Model            string                `json:"model"`
 			Name             string                `json:"name,omitempty"`
-			ContextWindow    int                   `json:"ctx_window"`
+			ContextWindow    uint64                `json:"ctx_window"`
 			Usage            *contracts.TokenUsage `json:"usage"`
-			ContextTokens    int                   `json:"context_tokens"`
+			ContextTokens    uint64                `json:"context_tokens"`
 			Pending          *Approval             `json:"pending"`
 			Type             string                `json:"type"`
 			ID               uuid.UUID             `json:"id"`
@@ -272,22 +272,22 @@ func (c *RemoteClient) providerAction(ctx context.Context, path string, input an
 
 // ---- sessions ----
 
-func (c *RemoteClient) CreateSession(ctx context.Context, opts SessionCreateOptions) (*store.SessionMeta, error) {
-	var meta store.SessionMeta
-	err := c.postJSONInto(ctx, "/v1/sessions", opts, http.StatusCreated, &meta)
+func (c *RemoteClient) CreateSession(ctx context.Context, opts SessionCreateOptions) (*glue.SessionOutput, error) {
+	var out glue.SessionOutput
+	err := c.postJSONInto(ctx, "/v1/sessions", opts, http.StatusCreated, &out)
 	if err != nil {
 		return nil, err
 	}
-	return &meta, nil
+	return &out, nil
 }
 
-func (c *RemoteClient) LoadSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, error) {
-	var meta store.SessionMeta
-	err := c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/load", struct{}{}, http.StatusOK, &meta)
+func (c *RemoteClient) LoadSession(ctx context.Context, id uuid.UUID) (*glue.SessionOutput, error) {
+	var out glue.SessionOutput
+	err := c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/load", struct{}{}, http.StatusOK, &out)
 	if err != nil {
 		return nil, err
 	}
-	return &meta, nil
+	return &out, nil
 }
 
 // GetSession fetches a session's meta and active timeline records so a resumed
@@ -388,8 +388,10 @@ func (c *RemoteClient) ListSessions(ctx context.Context) ([]contracts.SessionSum
 	return out, nil
 }
 
-func (c *RemoteClient) SetSessionModel(ctx context.Context, provider, model string) error {
-	return c.postJSON(ctx, "/v1/sessions/"+c.SessionID().String()+"/model", map[string]string{"provider": provider, "model": model}, http.StatusOK)
+func (c *RemoteClient) SetSessionModel(ctx context.Context, provider, model string) (*glue.SessionOutput, error) {
+	var out glue.SessionOutput
+	err := c.postJSONInto(ctx, "/v1/sessions/"+c.SessionID().String()+"/model", map[string]string{"provider": provider, "model": model}, http.StatusOK, &out)
+	return &out, err
 }
 
 func (c *RemoteClient) Compact(ctx context.Context) (*store.SessionMeta, error) {

@@ -185,7 +185,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.writeJSON(w, http.StatusCreated, sess.Meta())
+	s.writeJSON(w, http.StatusCreated, glue.SessionOutput{
+		SessionMeta:   sess.Meta(),
+		ContextWindow: sess.CurrentSessionModelContextWindow(),
+	})
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
@@ -266,7 +269,10 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, sess.Meta())
+	s.writeJSON(w, http.StatusOK, glue.SessionOutput{
+		SessionMeta:   sess.Meta(),
+		ContextWindow: sess.CurrentSessionModelContextWindow(),
+	})
 }
 
 func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
@@ -321,7 +327,10 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, sess.Meta())
+	s.writeJSON(w, http.StatusOK, glue.SessionOutput{
+		SessionMeta:   sess.Meta(),
+		ContextWindow: sess.CurrentSessionModelContextWindow(),
+	})
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -408,7 +417,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			Reply:            res.Reply,
 			ReasoningContent: res.ReasoningContent,
 			Model:            meta.Model,
-			ContextWindow:    meta.ContextWindow,
+			ContextWindow:    sess.CurrentSessionModelContextWindow(),
 			Pending:          res.Pending,
 			Usage:            res.Usage,
 			ContextTokens:    res.ContextTokens,
@@ -425,7 +434,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		Status:           res.Status.String(),
 		Reply:            res.Reply,
 		Model:            meta.Model,
-		ContextWindow:    meta.ContextWindow,
+		ContextWindow:    sess.CurrentSessionModelContextWindow(),
 		ReasoningContent: res.ReasoningContent,
 		Pending:          res.Pending,
 		Usage:            res.Usage,

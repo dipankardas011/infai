@@ -247,6 +247,12 @@ func (s *InfaiAgentSession) Meta() store.SessionMeta {
 	return s.meta
 }
 
+func (s *InfaiAgentSession) CurrentSessionModelContextWindow() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.model.GetModelSpecs().Model().MaxContextLength
+}
+
 // EventHub exposes the session's live broadcaster so the server can attach the
 // live SSE sink per request.
 func (s *InfaiAgentSession) EventHub() *store.SessionEventHub {
