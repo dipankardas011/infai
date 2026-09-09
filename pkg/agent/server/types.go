@@ -25,7 +25,8 @@ type RenameSessionRequest struct {
 }
 
 type ChatRequest struct {
-	Prompt string `json:"prompt"`
+	Prompt   string                       `json:"prompt"`
+	Thinking contracts.InfaiThinkingLevel `json:"thinking"`
 }
 
 type BranchRequest struct {

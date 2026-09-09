@@ -28,7 +28,9 @@ type ChatResult struct {
 }
 
 // ChatOptions carries per-chat knobs.
-type ChatOptions struct{}
+type ChatOptions struct {
+	Thinking contracts.InfaiThinkingLevel
+}
 
 var (
 	ErrSessionNotFound    = errors.New("session not found")
@@ -283,6 +285,11 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string
 	e.mu.Unlock()
 	if !ok {
 		return nil, ErrSessionNotFound
+	}
+	if sess.CurrentThinkingPattern() != opts.Thinking {
+		if err := sess.SetThinkingPattern(opts.Thinking); err != nil {
+			return nil, err
+		}
 	}
 	return sess.Chat(ctx, prompt, opts)
 }

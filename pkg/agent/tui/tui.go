@@ -61,7 +61,7 @@ type SessionCreateOptions struct {
 // Client is the CLI's view of the engine. RemoteClient is the HTTP transport
 // to a running <binary> server.
 type Client interface {
-	Chat(ctx context.Context, prompt string, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
+	Chat(ctx context.Context, prompt string, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
 	ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error
 	SetSession(id uuid.UUID)
 	CreateSession(ctx context.Context, opts SessionCreateOptions) (*glue.SessionOutput, error)
@@ -103,6 +103,7 @@ type RunOptions struct {
 type replState struct {
 	session       store.SessionMeta
 	contextWindow uint64
+	thinking      contracts.InfaiThinkingLevel
 	used          uint64 // accumulated prompt+completion tokens across the run
 }
 
@@ -152,6 +153,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 		c.SetSession(meta.ID)
 		state.session = meta.SessionMeta
 		state.contextWindow = meta.ContextWindow
+		state.thinking = meta.Thinking
 	} else {
 		// New session: pick the provider/model now, not on the first message.
 		meta, err := ensureSession(ctx, c, out, scanner, opts)
@@ -161,6 +163,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 		}
 		state.session = meta.SessionMeta
 		state.contextWindow = meta.ContextWindow
+		state.thinking = meta.Thinking
 	}
 
 	// Resumed session: print the history first, then drop into the loop.
@@ -221,6 +224,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 			}
 			state.session = meta.SessionMeta
 			state.contextWindow = meta.ContextWindow
+			state.thinking = meta.Thinking
 			fmt.Fprintf(out, "\nnew session %s.\n", meta.ID)
 		}
 
@@ -229,7 +233,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 
 		thinkingShown := false
 		contentStarted := false
-		reply, err := c.Chat(ctx, prompt, func(kind contracts.DeltaKind, text string) {
+		reply, err := c.Chat(ctx, prompt, state.thinking, func(kind contracts.DeltaKind, text string) {
 			switch kind {
 			case contracts.DeltaReasoning:
 				if !thinkingShown {
@@ -428,8 +432,12 @@ multi-line: end a line with \ to continue typing on the next line`)
 			return false, nil
 		}
 		for _, model := range providerModels {
+			thinking := make([]string, len(model.ThinkingLevels))
+			for i, level := range model.ThinkingLevels {
+				thinking[i] = string(level)
+			}
 			fmt.Fprintf(out, "%-20s @ %-16s id=%-24s context=%d thinking=%s\n",
-				model.ModelName, model.ProviderName, model.ModelID, model.ContextWindow, strings.Join(model.ThinkingModels, ","))
+				model.ModelName, model.ProviderName, model.ModelID, model.ContextWindow, strings.Join(thinking, ","))
 		}
 		return false, nil
 
@@ -485,6 +493,7 @@ multi-line: end a line with \ to continue typing on the next line`)
 		}
 		s.session = meta.SessionMeta
 		s.contextWindow = meta.ContextWindow
+		s.thinking = meta.Thinking
 		s.used = 0
 		fmt.Fprintf(out, "new session %s\n", meta.ID)
 		return false, nil
@@ -606,6 +615,7 @@ func setModelFor(ctx context.Context, c Client, out io.Writer, s *replState, pro
 	}
 	s.session = output.SessionMeta
 	s.contextWindow = output.ContextWindow
+	s.thinking = output.Thinking
 	fmt.Fprintf(out, "session model set to %s @ %s\n", model, provider)
 	return nil
 }
@@ -714,6 +724,7 @@ func runSessionCmd(ctx context.Context, c Client, out io.Writer, s *replState, a
 		c.SetSession(meta.ID)
 		s.session = meta.SessionMeta
 		s.contextWindow = meta.ContextWindow
+		s.thinking = meta.Thinking
 		fmt.Fprintf(out, "resumed session %s\n", id)
 		return false, nil
 

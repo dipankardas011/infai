@@ -2,6 +2,8 @@ package contracts
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"time"
 )
 
@@ -23,17 +25,55 @@ type ProvisionedModel struct {
 	apiType      ProviderAPIType
 	auth         LLMProviderAuth
 	model        LLMModelConfiguration
+	thinking     InfaiThinkingLevel
 }
 
 func NewProvisionedModel(providerId ProviderSlug, providerName string, baseEndpoint string, apiType ProviderAPIType, auth LLMProviderAuth, model LLMModelConfiguration) ProvisionedModel {
 	return ProvisionedModel{providerId: providerId, providerName: providerName, baseEndpoint: baseEndpoint, apiType: apiType, auth: auth, model: model}
 }
-func (model ProvisionedModel) ProviderSlug() ProviderSlug   { return model.providerId }
-func (model ProvisionedModel) ProviderName() string         { return model.providerName }
-func (model ProvisionedModel) BaseEndpoint() string         { return model.baseEndpoint }
-func (model ProvisionedModel) APIType() ProviderAPIType     { return model.apiType }
-func (model ProvisionedModel) Auth() LLMProviderAuth        { return model.auth }
-func (model ProvisionedModel) Model() LLMModelConfiguration { return model.model }
+func (model ProvisionedModel) ProviderSlug() ProviderSlug          { return model.providerId }
+func (model ProvisionedModel) ProviderName() string                { return model.providerName }
+func (model ProvisionedModel) BaseEndpoint() string                { return model.baseEndpoint }
+func (model ProvisionedModel) APIType() ProviderAPIType            { return model.apiType }
+func (model ProvisionedModel) Auth() LLMProviderAuth               { return model.auth }
+func (model ProvisionedModel) Model() LLMModelConfiguration        { return model.model }
+func (model ProvisionedModel) ThinkingPattern() InfaiThinkingLevel { return model.thinking }
+
+func (model ProvisionedModel) WithThinkingPattern(pattern InfaiThinkingLevel) (ProvisionedModel, error) {
+	if pattern == "" {
+		model.thinking = ""
+		return model, nil
+	}
+	if slices.Contains(model.model.AvailableThinkingPatterns(), pattern) {
+		model.thinking = pattern
+		return model, nil
+	}
+	return ProvisionedModel{}, fmt.Errorf("thinking pattern %q is not supported by model %q", pattern, model.model.Id)
+}
+
+func (model ProvisionedModel) ThinkingLevelValue() (string, bool) {
+	var value *string
+	switch model.thinking {
+	case ThinkingOff:
+		value = model.model.ThinkingLevels.Off
+	case ThinkingMinimal:
+		value = model.model.ThinkingLevels.Minimal
+	case ThinkingLow:
+		value = model.model.ThinkingLevels.Low
+	case ThinkingMedium:
+		value = model.model.ThinkingLevels.Medium
+	case ThinkingHigh:
+		value = model.model.ThinkingLevels.High
+	case ThinkingXHigh:
+		value = model.model.ThinkingLevels.XHigh
+	case ThinkingMax:
+		value = model.model.ThinkingLevels.Max
+	}
+	if value == nil {
+		return "", false
+	}
+	return *value, true
+}
 
 // TokenUsage is the provider-reported token accounting for one request.
 type TokenUsage struct {
@@ -44,9 +84,7 @@ type TokenUsage struct {
 
 // GenerateOptions carries per-request provider knobs.
 type GenerateOptions struct {
-	Temperature          float64
-	ThinkingBudgetTokens int
-	ReasoningEffort      string
+	Temperature float64
 
 	// Stream asks the adapter to stream output as it is generated. Deltas
 	// (typed by DeltaKind, in stream order) are delivered to OnDelta; the
@@ -133,12 +171,9 @@ type LLMProviderAuth struct {
 }
 
 type ThinkingLevels struct {
-	// True means we can make it Off even though the provider has Thinking available
-	// False means we cannot get no thinking
-	NoThinking bool `json:"can_be_off"`
-
 	// If its nil it means not supported
 	// Value means what it means interms of the model provider the enum value of that provider
+	Off     *string `json:"off"`
 	Minimal *string `json:"minimal"`
 	Low     *string `json:"low"`
 	Medium  *string `json:"medium"`
@@ -146,6 +181,20 @@ type ThinkingLevels struct {
 	XHigh   *string `json:"xhigh"`
 	Max     *string `json:"max"`
 }
+
+// InfaiThinkingLevel is a provider-independent thinking selection.
+// ThinkingLevels maps these values to provider wire values.
+type InfaiThinkingLevel string
+
+const (
+	ThinkingOff     InfaiThinkingLevel = "off"
+	ThinkingMinimal InfaiThinkingLevel = "minimal"
+	ThinkingLow     InfaiThinkingLevel = "low"
+	ThinkingMedium  InfaiThinkingLevel = "medium"
+	ThinkingHigh    InfaiThinkingLevel = "high"
+	ThinkingXHigh   InfaiThinkingLevel = "xhigh"
+	ThinkingMax     InfaiThinkingLevel = "max"
+)
 
 type LLMModelConfiguration struct {
 	Id                string                 `json:"id"`
@@ -157,25 +206,23 @@ type LLMModelConfiguration struct {
 	ThinkingLevels    ThinkingLevels         `json:"thinking_levels"`
 }
 
-func (m LLMModelConfiguration) AvailableThinkingPatterns() []string {
+func (m LLMModelConfiguration) AvailableThinkingPatterns() []InfaiThinkingLevel {
 	if !m.AvailableThinking {
 		return nil
 	}
 
-	patterns := make([]string, 0, 7)
-	if m.ThinkingLevels.NoThinking {
-		patterns = append(patterns, "off")
-	}
+	patterns := make([]InfaiThinkingLevel, 0, 7)
 	for _, level := range []struct {
-		name  string
+		name  InfaiThinkingLevel
 		value *string
 	}{
-		{"minimal", m.ThinkingLevels.Minimal},
-		{"low", m.ThinkingLevels.Low},
-		{"medium", m.ThinkingLevels.Medium},
-		{"high", m.ThinkingLevels.High},
-		{"xhigh", m.ThinkingLevels.XHigh},
-		{"max", m.ThinkingLevels.Max},
+		{ThinkingOff, m.ThinkingLevels.Off},
+		{ThinkingMinimal, m.ThinkingLevels.Minimal},
+		{ThinkingLow, m.ThinkingLevels.Low},
+		{ThinkingMedium, m.ThinkingLevels.Medium},
+		{ThinkingHigh, m.ThinkingLevels.High},
+		{ThinkingXHigh, m.ThinkingLevels.XHigh},
+		{ThinkingMax, m.ThinkingLevels.Max},
 	} {
 		if level.value != nil {
 			patterns = append(patterns, level.name)

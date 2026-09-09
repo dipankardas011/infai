@@ -253,6 +253,18 @@ func (s *InfaiAgentSession) CurrentSessionModelContextWindow() uint64 {
 	return s.model.GetModelSpecs().Model().MaxContextLength
 }
 
+func (s *InfaiAgentSession) AvailableThinkingPatterns() []contracts.InfaiThinkingLevel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.model.GetModelSpecs().Model().AvailableThinkingPatterns()
+}
+
+func (s *InfaiAgentSession) CurrentThinkingPattern() contracts.InfaiThinkingLevel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.model.GetModelSpecs().ThinkingPattern()
+}
+
 // EventHub exposes the session's live broadcaster so the server can attach the
 // live SSE sink per request.
 func (s *InfaiAgentSession) EventHub() *store.SessionEventHub {
@@ -320,6 +332,27 @@ func (s *InfaiAgentSession) SetModel(choosenModel contracts.ProvisionedModel) er
 	s.meta.UpdatedAt = time.Now().UTC()
 	if err := s.store.SaveMeta(s.meta); err != nil {
 		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
+	}
+	return nil
+}
+
+func (s *InfaiAgentSession) SetThinkingPattern(pattern contracts.InfaiThinkingLevel) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrSessionClosed
+	}
+	provisioned, err := s.model.GetModelSpecs().WithThinkingPattern(pattern)
+	if err != nil {
+		return err
+	}
+	model, err := models.ProvisionModelClient(provisioned)
+	if err != nil {
+		return err
+	}
+	s.model = model
+	if a := s.Agents[s.sessionAgentId]; a != nil {
+		a.SetModel(model)
 	}
 	return nil
 }

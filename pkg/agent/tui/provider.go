@@ -88,8 +88,8 @@ func RunProviderList(ctx context.Context, client ProviderManagementClient, out i
 		return nil
 	}
 	for _, model := range models {
-		thinking := make([]string, len(model.ThinkingModels))
-		for i, level := range model.ThinkingModels {
+		thinking := make([]string, len(model.ThinkingLevels))
+		for i, level := range model.ThinkingLevels {
 			thinking[i] = string(level)
 		}
 		row := fmt.Sprintf("%-24s  %-16s  ctx %-9d  %s", model.ModelName, model.ProviderName, model.ContextWindow, strings.Join(thinking, ", "))
@@ -119,9 +119,7 @@ func renderGenericProviderHelp(out io.Writer) error {
           "max_output_tokens": 8192,
           "modality": ["text"],
           "available_thinking": false,
-          "thinking_levels": {
-            "can_be_off": false
-          }
+          "thinking_levels": {}
         }
       }
     }

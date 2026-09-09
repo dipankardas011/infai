@@ -568,3 +568,14 @@ func TestBlocksFromRecordsShowsToolCallsAndResults(t *testing.T) {
 		t.Fatalf("tool result name=%q want read", blocks[1].toolName)
 	}
 }
+
+func TestCycleThinking(t *testing.T) {
+	m := &chatModel{availableThinking: []contracts.InfaiThinkingLevel{contracts.ThinkingOff, contracts.ThinkingLow, contracts.ThinkingHigh}}
+
+	for _, want := range []contracts.InfaiThinkingLevel{contracts.ThinkingOff, contracts.ThinkingLow, contracts.ThinkingHigh, ""} {
+		m.cycleThinking()
+		if got := m.thinking; got != want {
+			t.Fatalf("cycleThinking() = %q, want %q", got, want)
+		}
+	}
+}

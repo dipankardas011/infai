@@ -186,8 +186,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusCreated, glue.SessionOutput{
-		SessionMeta:   sess.Meta(),
-		ContextWindow: sess.CurrentSessionModelContextWindow(),
+		SessionMeta:       sess.Meta(),
+		ContextWindow:     sess.CurrentSessionModelContextWindow(),
+		Thinking:          sess.CurrentThinkingPattern(),
+		AvailableThinking: sess.AvailableThinkingPatterns(),
 	})
 }
 
@@ -270,8 +272,10 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, glue.SessionOutput{
-		SessionMeta:   sess.Meta(),
-		ContextWindow: sess.CurrentSessionModelContextWindow(),
+		SessionMeta:       sess.Meta(),
+		ContextWindow:     sess.CurrentSessionModelContextWindow(),
+		Thinking:          sess.CurrentThinkingPattern(),
+		AvailableThinking: sess.AvailableThinkingPatterns(),
 	})
 }
 
@@ -328,8 +332,10 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, glue.SessionOutput{
-		SessionMeta:   sess.Meta(),
-		ContextWindow: sess.CurrentSessionModelContextWindow(),
+		SessionMeta:       sess.Meta(),
+		ContextWindow:     sess.CurrentSessionModelContextWindow(),
+		Thinking:          sess.CurrentThinkingPattern(),
+		AvailableThinking: sess.AvailableThinkingPatterns(),
 	})
 }
 
@@ -358,7 +364,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	stream := r.URL.Query().Get("stream") == "true" || strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 
-	var opts engine.ChatOptions
+	opts := engine.ChatOptions{Thinking: req.Thinking}
 	if stream {
 		if _, ok := w.(http.Flusher); !ok {
 			s.writeError(w, http.StatusBadRequest, errors.New("streaming not supported"))

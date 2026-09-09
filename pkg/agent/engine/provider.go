@@ -32,7 +32,7 @@ func (e *InfaiAgentEngine) ListAllProviderModels() []glue.ListModelOutput {
 				ModelID:        model.Id,
 				ProviderName:   providerName,
 				ContextWindow:  model.MaxContextLength,
-				ThinkingModels: model.AvailableThinkingPatterns(),
+				ThinkingLevels: model.AvailableThinkingPatterns(),
 			})
 		}
 	}

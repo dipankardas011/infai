@@ -85,6 +85,11 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 		Messages:  wireMessages,
 		MaxTokens: o.b.Model().MaxOutputTokens,
 	}
+	if o.b.ThinkingPattern() != "" {
+		if value, ok := o.b.ThinkingLevelValue(); ok {
+			reqBody.ReasoningEffort = value
+		}
+	}
 	for _, tool := range tools {
 		reqBody.Tools = append(reqBody.Tools, openAITool{
 			Type:     "function",
@@ -94,9 +99,6 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 	if opts != nil {
 		if opts.Temperature != 0 {
 			reqBody.Temperature = opts.Temperature
-		}
-		if opts.ReasoningEffort != "" {
-			reqBody.ReasoningEffort = opts.ReasoningEffort
 		}
 		if opts.Stream {
 			reqBody.Stream = true

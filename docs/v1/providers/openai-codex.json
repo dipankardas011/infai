@@ -12,7 +12,7 @@
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "can_be_off": true,
+            "off": "none",
             "xhigh": "xhigh",
             "minimal": "low"
         }
@@ -31,7 +31,7 @@
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "can_be_off": true,
+            "off": "none",
             "xhigh": "xhigh",
             "minimal": "low"
         }
@@ -50,7 +50,7 @@
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "can_be_off": true,
+            "off": "none",
             "xhigh": "xhigh",
             "minimal": "low"
         }
@@ -69,7 +69,7 @@
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "can_be_off": true,
+            "off": "none",
             "xhigh": "xhigh",
             "minimal": "low"
         }
@@ -88,7 +88,7 @@
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "can_be_off": true,
+            "off": "none",
             "xhigh": "xhigh",
             "max": "max",
             "minimal": "low"
@@ -108,7 +108,7 @@
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "can_be_off": true,
+            "off": "none",
             "xhigh": "xhigh",
             "max": "max",
             "minimal": "low"
@@ -128,7 +128,7 @@
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "can_be_off": true,
+            "off": "none",
             "xhigh": "xhigh",
             "max": "max",
             "minimal": "low"
@@ -148,7 +148,6 @@
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "can_be_off": false,
             "minimal": "low",
             "low": "low",
             "medium": "medium",

@@ -36,10 +36,12 @@ type chatModel struct {
 	client Client
 	styles harnessStyles
 
-	session       store.SessionMeta
-	contextWindow uint64
-	used          uint64
-	blocks        []block
+	session           store.SessionMeta
+	contextWindow     uint64
+	thinking          contracts.InfaiThinkingLevel
+	availableThinking []contracts.InfaiThinkingLevel
+	used              uint64
+	blocks            []block
 
 	width            int
 	height           int
@@ -222,6 +224,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.session = msg.output.SessionMeta
 		m.contextWindow = msg.output.ContextWindow
+		m.thinking = msg.output.Thinking
+		m.availableThinking = msg.output.AvailableThinking
 		m.client.SetSession(msg.output.ID)
 		m.blocks = blocksFromRecords(msg.records)
 		m.checklist = taskChecklistFromRecords(msg.records)
@@ -249,6 +253,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.session = msg.output.SessionMeta
 		m.contextWindow = msg.output.ContextWindow
+		m.thinking = msg.output.Thinking
+		m.availableThinking = msg.output.AvailableThinking
 		m.client.SetSession(msg.output.ID)
 		m.blocks = nil
 		m.checklist = contracts.TaskChecklistState{}
@@ -262,6 +268,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.session = msg.output.SessionMeta
 			m.contextWindow = msg.output.ContextWindow
+			m.thinking = msg.output.Thinking
+			m.availableThinking = msg.output.AvailableThinking
 			m.blocks = append(m.blocks, block{role: "system", text: "Model switched to " + msg.output.Model + " @ " + msg.output.Provider})
 		}
 		m.modal = nil
@@ -392,6 +400,10 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.modal = loadingModal("Loading models")
 		return m, listProvidersCmd(m.ctx, m.client, false)
 	}
+	if key == "ctrl+t" {
+		m.cycleThinking()
+		return m, nil
+	}
 	if m.commandMenu {
 		matches := matchingCommands(m.composer.Value())
 		switch key {
@@ -452,6 +464,27 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.updateCommandMenu()
 	m.reflow(false)
 	return m, cmd
+}
+
+func (m *chatModel) cycleThinking() {
+	if len(m.availableThinking) == 0 {
+		m.showNotice("Thinking unavailable", "The current model does not support configurable thinking.", false)
+		return
+	}
+	next := m.availableThinking[0]
+	for i, pattern := range m.availableThinking {
+		if pattern != m.thinking {
+			continue
+		}
+		if i+1 < len(m.availableThinking) {
+			next = m.availableThinking[i+1]
+		} else {
+			next = ""
+		}
+		break
+	}
+	m.thinking = next
+	m.reflow(false)
 }
 
 func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
@@ -545,6 +578,7 @@ func (m *chatModel) submit() tea.Cmd {
 	m.refreshTranscript(true)
 	m.stream = make(chan tea.Msg, 256)
 	stream := m.stream
+	thinking := m.thinking
 	turnCtx, cancel := context.WithCancel(m.ctx)
 	m.turnCancel = cancel
 	emit := func(message tea.Msg) bool {
@@ -556,7 +590,7 @@ func (m *chatModel) submit() tea.Cmd {
 		}
 	}
 	go func() {
-		reply, err := m.client.Chat(turnCtx, prompt, func(kind contracts.DeltaKind, text string) {
+		reply, err := m.client.Chat(turnCtx, prompt, thinking, func(kind contracts.DeltaKind, text string) {
 			emit(streamDeltaMsg{kind: kind, text: text})
 		}, func(update ApprovalUpdate) {
 			emit(streamApprovalMsg{update: update})
@@ -618,7 +652,7 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		return loadTimelineCmd(m.ctx, m.client, m.session.ID)
 	case "/help":
 		m.blocks = append(m.blocks, block{role: "system", text: strings.Join([]string{
-			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll · Ctrl+O sessions · Ctrl+N new",
+			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll · Ctrl+O sessions · Ctrl+N new · Ctrl+T thinking",
 			"/new · /sessions · /model · /compact · /timeline · /rename · /quit",
 		}, "\n")})
 		m.refreshTranscript(true)
@@ -704,7 +738,11 @@ func (m *chatModel) statusView() string {
 			pct = int(m.used * 100 / m.contextWindow)
 		}
 		name = m.session.Name
-		rest = fmt.Sprintf("%s  ·  ctx %d%%  ·  %s", m.session.Model, pct, shortID(m.session.ID))
+		thinking := m.thinking
+		if thinking == "" {
+			thinking = "default"
+		}
+		rest = fmt.Sprintf("%s  ·  thinking %s  ·  ctx %d%%  ·  %s", m.session.Model, thinking, pct, shortID(m.session.ID))
 	}
 	if m.working {
 		style = m.styles.statusBusy
