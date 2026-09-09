@@ -24,7 +24,7 @@ type ChatResult struct {
 	ReasoningContent string
 	Pending          *ApprovalRequest
 	Usage            *contracts.TokenUsage
-	ContextTokens    int
+	ContextTokens    uint64
 }
 
 // ChatOptions carries per-chat knobs.
@@ -124,23 +124,32 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	if opts.Provider == "" {
 		return nil, errors.New("engine: provider is required")
 	}
-	p, ok := e.Provider(opts.Provider)
-	if !ok {
-		return nil, fmt.Errorf("engine: provider %q not configured", opts.Provider)
-	}
-	if p.APIType != "" && p.APIType != "openai" {
-		return nil, fmt.Errorf("engine: unsupported api_type %q for provider %q", p.APIType, p.Name)
-	}
 	if opts.Model == "" {
 		return nil, errors.New("engine: model is required")
 	}
-	m, ok := p.Model(opts.Model)
-	if !ok {
-		return nil, fmt.Errorf("engine: provider %q has no model %q", p.Name, opts.Model)
-	}
-	ctxWindow := m.ContextWindow
 
-	sess, err := NewSession(e.bgLogger.WithGroup("session"), &p, m.Name, ctxWindow, opts.Cwd, e.sessionStore)
+	providerConfig, ok := e.Provider(opts.Provider)
+	if !ok {
+		return nil, fmt.Errorf("engine: provider %q not configured", opts.Provider)
+	}
+	modelConfig, ok := providerConfig.Models[opts.Model]
+	if !ok {
+		return nil, fmt.Errorf("engine: model %q not configured for provider %q", opts.Model, opts.Provider)
+	}
+
+	sess, err := NewSession(
+		e.bgLogger.WithGroup("session"),
+		contracts.NewProvisionedModel(
+			providerConfig.Id,
+			opts.Provider,
+			providerConfig.BaseEndpoint,
+			providerConfig.APIType,
+			providerConfig.Auth,
+			modelConfig,
+		),
+		opts.Cwd,
+		e.sessionStore,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +158,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	e.active[sess.sessionID] = sess
 	e.mu.Unlock()
 
-	e.bgLogger.Info("session created", "session_id", sess.sessionID, "provider", p.Name, "model", m.Name)
+	e.bgLogger.Info("session created", "session_id", sess.sessionID, "provider", opts.Provider, "model", modelConfig.Id)
 	return sess, nil
 }
 
@@ -187,16 +196,27 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		return nil, err
 	}
 
-	p, ok := e.Provider(meta.Provider)
+	providerConfig, ok := e.providers.Providers[meta.Provider]
 	if !ok {
 		_ = timeline.Close()
 		return nil, ErrNoProvider
 	}
-	if model, ok := p.Model(meta.Model); ok {
-		meta.ContextWindow = model.ContextWindow
+	modelConfig, ok := providerConfig.Models[meta.Model]
+	if !ok {
+		return nil, fmt.Errorf("engine: model %q not configured for provider %q", meta.Model, meta.Provider)
 	}
 
-	sess, err := NewResumedSession(e.bgLogger.WithGroup("session"), &p, meta, history, timeline, e.sessionStore)
+	sess, err := NewResumedSession(
+		e.bgLogger.WithGroup("session"),
+		contracts.NewProvisionedModel(
+			providerConfig.Id,
+			meta.Provider,
+			providerConfig.BaseEndpoint,
+			providerConfig.APIType,
+			providerConfig.Auth,
+			modelConfig,
+		),
+		meta, history, timeline, e.sessionStore)
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -204,7 +224,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 
 	e.active[id] = sess
 
-	e.bgLogger.Info("session loaded", "session_id", id, "provider", p.Name)
+	e.bgLogger.Info("session loaded", "session_id", id, "provider", meta.Provider)
 	return sess, nil
 }
 
@@ -218,29 +238,41 @@ func (e *InfaiAgentEngine) Session(id uuid.UUID) (*InfaiAgentSession, bool) {
 
 // SetSessionModel switches an active session to another provider's model. An
 // empty modelName keeps the provider's configured model.
-func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelName string) (*InfaiAgentSession, error) {
+func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId string) (*InfaiAgentSession, error) {
 	e.mu.Lock()
 	sess, ok := e.active[id]
 	e.mu.Unlock()
 	if !ok {
 		return nil, ErrSessionNotFound
 	}
-	p, ok := e.Provider(providerName)
+	providerConfig, ok := e.Provider(providerName)
 	if !ok {
 		return nil, ErrNoProvider
 	}
-	if p.APIType != "" && p.APIType != "openai" {
-		return nil, fmt.Errorf("engine: unsupported api_type %q for provider %q", p.APIType, p.Name)
+	if providerConfig.APIType != contracts.OpenAICompatableAPI {
+		return nil, fmt.Errorf("engine: unsupported api_type %q for provider %q", providerConfig.APIType, providerName)
 	}
-	if modelName == "" {
+	if modelId == "" {
 		return nil, errors.New("engine: model is required")
 	}
-	m, ok := p.Model(modelName)
+
+	modelConfig, ok := providerConfig.Models[modelId]
 	if !ok {
-		return nil, fmt.Errorf("engine: provider %q has no model %q", providerName, modelName)
+		return nil, fmt.Errorf("engine: model %q not configured for provider %q", modelId, providerName)
 	}
-	sess.SetModel(&p, m.Name, m.ContextWindow)
-	e.bgLogger.Info("session model set", "session_id", id, "provider", providerName, "model", modelName)
+
+	if err := sess.SetModel(contracts.NewProvisionedModel(
+		providerConfig.Id,
+		providerName,
+		providerConfig.BaseEndpoint,
+		providerConfig.APIType,
+		providerConfig.Auth,
+		modelConfig,
+	)); err != nil {
+		return nil, err
+	}
+
+	e.bgLogger.Info("session model set", "session_id", id, "provider", providerName, "model", modelId)
 	return sess, nil
 }
 

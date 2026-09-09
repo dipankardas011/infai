@@ -82,14 +82,12 @@ type pendingApproval struct {
 }
 
 // NewSession creates a fresh session bound to the given provider and model.
-func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, cwd string, ss *store.SessionStore) (*InfaiAgentSession, error) {
-	if p == nil {
-		return nil, ErrNoProvider
-	}
+func NewSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, cwd string, ss *store.SessionStore) (*InfaiAgentSession, error) {
+	model, err := models.ProvisionModelClient(choosenModel)
 
 	o := &InfaiAgentSession{
 		l:             l,
-		model:         models.NewOpenAICompatableAPI(p.Endpoint, model, p.APIKey),
+		model:         model,
 		store:         ss,
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
 		agentComms:    comms.NewAgentComms(),
@@ -97,7 +95,7 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 		auditorPolicy: auditor.NewAuditorPolicy(),
 		taskChecklist: memory.NewTaskChecklist(),
 	}
-	var err error
+
 	o.fileManager, err = actuators.NewFileManager(cwd)
 	if err != nil {
 		return nil, fmt.Errorf("session workspace: %w", err)
@@ -112,13 +110,12 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 
 	now := time.Now().UTC()
 	o.meta = store.SessionMeta{
-		ID:            o.sessionID,
-		Provider:      p.Name,
-		Model:         model,
-		Cwd:           cwd,
-		ContextWindow: ctxWindow,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:        o.sessionID,
+		Provider:  o.model.GetModelSpecs().ProviderName(),
+		Model:     o.model.GetModelSpecs().Model().Id,
+		Cwd:       cwd,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
 	o.events = store.NewSessionEventHub()
@@ -153,14 +150,12 @@ func NewSession(l *slog.Logger, p *store.Provider, model string, ctxWindow int, 
 
 // NewResumedSession rebuilds a session from the active timeline ancestry. The
 // caller resolves lazy blob records before constructing the chat history.
-func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta, history []contracts.ChatMessage, timeline *store.Timeline, sessionStore *store.SessionStore) (*InfaiAgentSession, error) {
-	if p == nil {
-		return nil, ErrNoProvider
-	}
+func NewResumedSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, meta store.SessionMeta, history []contracts.ChatMessage, timeline *store.Timeline, sessionStore *store.SessionStore) (*InfaiAgentSession, error) {
+	model, err := models.ProvisionModelClient(choosenModel)
 
 	o := &InfaiAgentSession{
 		l:             l,
-		model:         models.NewOpenAICompatableAPI(p.Endpoint, meta.Model, p.APIKey),
+		model:         model,
 		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
 		agentComms:    comms.NewAgentComms(),
 		Agents:        make(map[uuid.UUID]*agent.Agent),
@@ -174,7 +169,7 @@ func NewResumedSession(l *slog.Logger, p *store.Provider, meta store.SessionMeta
 		auditorPolicy: auditor.NewAuditorPolicy(),
 		taskChecklist: memory.NewTaskChecklist(),
 	}
-	var err error
+
 	o.fileManager, err = actuators.NewFileManager(meta.Cwd)
 	if err != nil {
 		return nil, fmt.Errorf("session workspace: %w", err)
@@ -302,27 +297,25 @@ func (s *InfaiAgentSession) Rename(name string) error {
 
 // SetModel rebuilds the session's model adapter for the given provider and
 // model and records the change in the session meta.
-func (s *InfaiAgentSession) SetModel(p *store.Provider, name string, ctxWindow int) {
+func (s *InfaiAgentSession) SetModel(choosenModel contracts.ProvisionedModel) error {
+	model, err := models.ProvisionModelClient(choosenModel)
+	if err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.setModelLocked(p, name, ctxWindow)
-}
-
-func (s *InfaiAgentSession) setModelLocked(p *store.Provider, name string, ctxWindow int) {
-	if p == nil {
-		return
-	}
-	s.model = models.NewOpenAICompatableAPI(p.Endpoint, name, p.APIKey)
+	s.model = model
 	if a := s.Agents[s.sessionAgentId]; a != nil {
 		a.SetModel(s.model)
 	}
-	s.meta.Provider = p.Name
-	s.meta.Model = name
-	s.meta.ContextWindow = ctxWindow
+	s.meta.Provider = model.GetModelSpecs().ProviderName()
+	s.meta.Model = model.GetModelSpecs().Model().Id
 	s.meta.UpdatedAt = time.Now().UTC()
 	if err := s.store.SaveMeta(s.meta); err != nil {
 		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
 	}
+	return nil
 }
 
 // CompactChat generates and persists a continuation summary, advances the
@@ -466,7 +459,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 				"prompt_tokens", result.Usage.PromptTokens,
 				"completion_tokens", result.Usage.CompletionTokens,
 				"total_tokens", result.Usage.TotalTokens,
-				"context_window", s.meta.ContextWindow,
+				"context_window", s.model.GetModelSpecs().Model().MaxContextLength,
 				"threshold_percent", 80,
 			)
 		}
@@ -508,7 +501,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
 	}
 
-	contextTokens := 0
+	contextTokens := uint64(0)
 	if !compacted && result.Usage != nil {
 		contextTokens = result.Usage.TotalTokens
 		if contextTokens <= 0 {
@@ -610,7 +603,7 @@ func (s *InfaiAgentSession) rebuildHistoryLocked(summary string, retained []cont
 	history = append(history, retained...)
 	s.history = history
 	s.persisted = len(s.history)
-	s.l.Info("session context compacted", "session_id", s.sessionID, "context_window", s.meta.ContextWindow, "retained", len(retained))
+	s.l.Info("session context compacted", "session_id", s.sessionID, "context_window", s.model.GetModelSpecs().Model().MaxContextLength, "retained", len(retained))
 	return nil
 }
 
@@ -620,10 +613,10 @@ func (s *InfaiAgentSession) Compact(ctx context.Context) error {
 }
 
 func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
-	if usage == nil || s.meta.ContextWindow <= 0 {
+	if usage == nil || s.model.GetModelSpecs().Model().MaxContextLength <= 0 {
 		s.l.Debug("automatic compaction not evaluated",
 			"has_usage", usage != nil,
-			"context_window", s.meta.ContextWindow,
+			"context_window", s.model.GetModelSpecs().Model().MaxContextLength,
 		)
 		return false
 	}
@@ -631,14 +624,14 @@ func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
 	if used <= 0 {
 		used = usage.PromptTokens + usage.CompletionTokens
 	}
-	threshold := s.meta.ContextWindow * 80 / 100
-	shouldCompact := used >= threshold
+	threshold := float64(s.model.GetModelSpecs().Model().MaxContextLength) * float64(0.8)
+	shouldCompact := float64(used) >= threshold
 	s.l.Debug("automatic compaction evaluated",
 		"used_tokens", used,
 		"prompt_tokens", usage.PromptTokens,
 		"completion_tokens", usage.CompletionTokens,
 		"total_tokens", usage.TotalTokens,
-		"context_window", s.meta.ContextWindow,
+		"context_window", s.model.GetModelSpecs().Model().MaxContextLength,
 		"threshold_tokens", threshold,
 		"threshold_percent", 80,
 		"should_compact", shouldCompact,

@@ -307,6 +307,11 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("provider is required"))
 		return
 	}
+	if req.Model == "" {
+		s.writeError(w, http.StatusBadRequest, errors.New("model is required"))
+		return
+	}
+
 	sess, err := s.engine.SetSessionModel(id, req.Provider, req.Model)
 	if err != nil {
 		if errors.Is(err, engine.ErrSessionNotFound) {

@@ -7,21 +7,39 @@ import (
 
 // InfaiModelAdaptor is the primitive model contract. The agent feeds it the
 // running conversation and it returns the next assistant message.
-//
-// The "proper" saga (InitializeSession, EstablishRESTConnection, ListModels,
-// streaming, cost tracking, …) comes back on top of this once the primitive
-// loop is proven out.
 type InfaiModelAdaptor interface {
 	// Generate returns the next assistant message for the given history plus
 	// the request's token usage (nil when the provider reports none).
 	Generate(ctx context.Context, messages []ChatMessage, tools []Tool, opts *GenerateOptions) (ChatMessage, *TokenUsage, error)
+
+	GetModelSpecs() ProvisionedModel
 }
+
+// Model provider cannot override Readonly!
+type ProvisionedModel struct {
+	providerId   ProviderSlug
+	providerName string
+	baseEndpoint string
+	apiType      ProviderAPIType
+	auth         LLMProviderAuth
+	model        LLMModelConfiguration
+}
+
+func NewProvisionedModel(providerId ProviderSlug, providerName string, baseEndpoint string, apiType ProviderAPIType, auth LLMProviderAuth, model LLMModelConfiguration) ProvisionedModel {
+	return ProvisionedModel{providerId: providerId, providerName: providerName, baseEndpoint: baseEndpoint, apiType: apiType, auth: auth, model: model}
+}
+func (model ProvisionedModel) ProviderSlug() ProviderSlug   { return model.providerId }
+func (model ProvisionedModel) ProviderName() string         { return model.providerName }
+func (model ProvisionedModel) BaseEndpoint() string         { return model.baseEndpoint }
+func (model ProvisionedModel) APIType() ProviderAPIType     { return model.apiType }
+func (model ProvisionedModel) Auth() LLMProviderAuth        { return model.auth }
+func (model ProvisionedModel) Model() LLMModelConfiguration { return model.model }
 
 // TokenUsage is the provider-reported token accounting for one request.
 type TokenUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens     uint64 `json:"prompt_tokens"`
+	CompletionTokens uint64 `json:"completion_tokens"`
+	TotalTokens      uint64 `json:"total_tokens"`
 }
 
 // GenerateOptions carries per-request provider knobs.

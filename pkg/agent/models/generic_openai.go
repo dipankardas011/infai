@@ -17,27 +17,26 @@ import (
 )
 
 type genericOpenAICompatableAPI struct {
-	baseURL       string
-	model         string
-	apiKey        string
+	b contracts.ProvisionedModel
+
 	client        *http.Client
 	maxAttempts   int
 	retryBase     time.Duration
 	retryMaxDelay time.Duration
 }
 
-func NewOpenAICompatableAPI(baseURL, model, apiKey string) *genericOpenAICompatableAPI {
+func NewOpenAICompatableAPI(b contracts.ProvisionedModel) (*genericOpenAICompatableAPI, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+
 	transport.ResponseHeaderTimeout = 5 * time.Minute
+
 	return &genericOpenAICompatableAPI{
-		baseURL:       strings.TrimRight(baseURL, "/"),
-		model:         model,
-		apiKey:        apiKey,
+		b:             b,
 		client:        &http.Client{Transport: transport},
 		maxAttempts:   10,
 		retryBase:     5 * time.Second,
 		retryMaxDelay: time.Minute,
-	}
+	}, nil
 }
 
 type openAIChatRequest struct {
@@ -66,6 +65,8 @@ type openAIChatResponse struct {
 	} `json:"choices"`
 	Usage *contracts.TokenUsage `json:"usage"`
 }
+
+func (o *genericOpenAICompatableAPI) GetModelSpecs() contracts.ProvisionedModel { return o.b }
 
 func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) (contracts.ChatMessage, *contracts.TokenUsage, error) {
 	wireMessages := append([]contracts.ChatMessage(nil), messages...)
