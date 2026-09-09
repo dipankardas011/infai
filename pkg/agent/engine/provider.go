@@ -140,5 +140,10 @@ func validateProvider(name string, provider contracts.LLMProviderConfiguration) 
 	default:
 		return fmt.Errorf("provider %q has unsupported ID %q", name, provider.Id)
 	}
+	for modelName, model := range provider.Models {
+		if model.DefaultTemperature != nil && (*model.DefaultTemperature < 0 || *model.DefaultTemperature > 2) {
+			return fmt.Errorf("model %q for provider %q has temperature outside the OpenAI-compatible range 0..2", modelName, name)
+		}
+	}
 	return nil
 }

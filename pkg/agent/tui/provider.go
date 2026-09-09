@@ -117,6 +117,7 @@ func renderGenericProviderHelp(out io.Writer) error {
           "name": "Local Model",
           "max_context_window": 64000,
           "max_output_tokens": 8192,
+          "default_temperature": 0.2,
           "modality": ["text"],
           "available_thinking": false,
           "thinking_levels": {}

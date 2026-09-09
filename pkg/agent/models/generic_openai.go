@@ -50,7 +50,7 @@ type openAIChatRequest struct {
 	Model           string                  `json:"model"`
 	Messages        []contracts.ChatMessage `json:"messages"`
 	MaxTokens       uint64                  `json:"max_tokens,omitempty"`
-	Temperature     float64                 `json:"temperature,omitempty"`
+	Temperature     *float64                `json:"temperature,omitempty"`
 	ReasoningEffort string                  `json:"reasoning_effort,omitempty"`
 	Stream          bool                    `json:"stream,omitempty"`
 	StreamOptions   *openAIStreamOptions    `json:"stream_options,omitempty"`
@@ -81,9 +81,10 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 		wireMessages[i].Status = "" // NOTE: to avoid sending the status as openai api doesn't have one.
 	}
 	reqBody := openAIChatRequest{
-		Model:     o.b.Model().Id,
-		Messages:  wireMessages,
-		MaxTokens: o.b.Model().MaxOutputTokens,
+		Model:       o.b.Model().Id,
+		Messages:    wireMessages,
+		MaxTokens:   o.b.Model().MaxOutputTokens,
+		Temperature: o.b.Model().DefaultTemperature,
 	}
 	if o.b.ThinkingPattern() != "" {
 		if value, ok := o.b.ThinkingLevelValue(); ok {
@@ -97,9 +98,6 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 		})
 	}
 	if opts != nil {
-		if opts.Temperature != 0 {
-			reqBody.Temperature = opts.Temperature
-		}
 		if opts.Stream {
 			reqBody.Stream = true
 			reqBody.StreamOptions = &openAIStreamOptions{IncludeUsage: true}

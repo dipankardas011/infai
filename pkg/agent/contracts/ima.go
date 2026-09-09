@@ -84,8 +84,6 @@ type TokenUsage struct {
 
 // GenerateOptions carries per-request provider knobs.
 type GenerateOptions struct {
-	Temperature float64
-
 	// Stream asks the adapter to stream output as it is generated. Deltas
 	// (typed by DeltaKind, in stream order) are delivered to OnDelta; the
 	// full message is still returned as usual.
@@ -197,13 +195,14 @@ const (
 )
 
 type LLMModelConfiguration struct {
-	Id                string                 `json:"id"`
-	Name              string                 `json:"name"`
-	MaxContextLength  uint64                 `json:"max_context_window"`
-	MaxOutputTokens   uint64                 `json:"max_output_tokens"`
-	Modality          []LLMSupportedModality `json:"modality"`
-	AvailableThinking bool                   `json:"available_thinking"`
-	ThinkingLevels    ThinkingLevels         `json:"thinking_levels"`
+	Id                 string                 `json:"id"`
+	Name               string                 `json:"name"`
+	MaxContextLength   uint64                 `json:"max_context_window"`
+	MaxOutputTokens    uint64                 `json:"max_output_tokens"`
+	DefaultTemperature *float64               `json:"default_temperature"`
+	Modality           []LLMSupportedModality `json:"modality"`
+	AvailableThinking  bool                   `json:"available_thinking"`
+	ThinkingLevels     ThinkingLevels         `json:"thinking_levels"`
 }
 
 func (m LLMModelConfiguration) AvailableThinkingPatterns() []InfaiThinkingLevel {

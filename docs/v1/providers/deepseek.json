@@ -7,6 +7,7 @@
         "name": "DeepSeek V4 Flash",
         "max_context_window": 1000000,
         "max_output_tokens": 384000,
+        "default_temperature": null,
         "modality": [
             "text"
         ],
@@ -28,6 +29,7 @@
         "name": "DeepSeek V4 Pro",
         "max_context_window": 1000000,
         "max_output_tokens": 384000,
+        "default_temperature": null,
         "modality": [
             "text"
         ],
@@ -49,6 +51,7 @@
         "name": "DeepSeek V4 Flash Vision Exp",
         "max_context_window": 1000000,
         "max_output_tokens": 384000,
+        "default_temperature": null,
         "modality": [
             "text"
         ],
