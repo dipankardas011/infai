@@ -171,6 +171,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.scrollApproval(0)
 		m.reflow(true)
 		return m, nil
 	case streamDeltaMsg:
@@ -336,6 +337,15 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
+		if m.modal != nil && m.modal.kind == modalApproval {
+			switch msg.Mouse().Button {
+			case tea.MouseWheelUp:
+				m.scrollApproval(-3)
+			case tea.MouseWheelDown:
+				m.scrollApproval(3)
+			}
+			return m, nil
+		}
 		if m.modal == nil {
 			mouse := msg.Mouse()
 			if len(m.areas) > 1 && (mouse.Y < m.areas[1].y || mouse.Y >= m.areas[1].y+m.areas[1].height) {
@@ -490,12 +500,28 @@ func (m *chatModel) cycleThinking() {
 func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
 	switch key {
-	case "up", "k":
+	case "up", "left", "k", "h":
 		m.modal.move(-1)
-	case "down", "j", "tab":
+	case "down", "right", "j", "l", "tab":
 		m.modal.move(1)
 	case "shift+tab":
 		m.modal.move(-1)
+	case "pgup":
+		if m.modal.kind == modalApproval {
+			m.scrollApproval(-8)
+		}
+	case "pgdown":
+		if m.modal.kind == modalApproval {
+			m.scrollApproval(8)
+		}
+	case "ctrl+up":
+		if m.modal.kind == modalApproval {
+			m.scrollApproval(-1)
+		}
+	case "ctrl+down":
+		if m.modal.kind == modalApproval {
+			m.scrollApproval(1)
+		}
 	case "esc":
 		if !m.modal.required {
 			m.modal = nil
@@ -513,6 +539,14 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+func (m *chatModel) scrollApproval(delta int) {
+	if m.modal == nil || m.modal.kind != modalApproval || m.width <= 0 || m.height <= 0 {
+		return
+	}
+	maxOffset := approvalMaxBodyOffset(m.modal, m.width, m.height, m.styles)
+	m.modal.bodyOffset = clamp(m.modal.bodyOffset+delta, 0, maxOffset)
 }
 
 func (m *chatModel) activateModal(index int) tea.Cmd {
@@ -998,17 +1032,121 @@ func (m *chatModel) showCommands() {
 }
 
 func (m *chatModel) showApproval(approval *Approval) {
-	body := approval.Message
-	if body == "" && approval.ToolCall != nil {
-		body = fmt.Sprintf("%s\n%s", approval.ToolCall.Function.Name, approval.ToolCall.Function.Arguments)
+	title, body := "Approval required", approval.Message
+	if approval.ToolCall != nil {
+		title, body = formatApprovalToolCall(*approval.ToolCall)
+		if approval.Message != "" {
+			body = approval.Message + "\n\n" + body
+		}
 	}
 	m.modal = &modalModel{
-		kind: modalApproval, title: "Approval required", body: body, required: true, approval: approval,
+		kind: modalApproval, title: title, body: body, required: true, approval: approval,
 		options: []modalOption{
-			{label: "Allow this operation", shortcut: 'a', decision: "approve"},
-			{label: "Deny this operation", shortcut: 'd', decision: "deny"},
+			{label: "Allow", shortcut: 'a', decision: "approve"},
+			{label: "Deny", shortcut: 'd', decision: "deny"},
 		},
 	}
+}
+
+func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
+	switch contracts.ToolType(call.Function.Name) {
+	case contracts.BashTool:
+		var args struct {
+			Command string `json:"command"`
+			Workdir string `json:"workdir"`
+			Timeout *int   `json:"timeout"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+			return "Bash tool call", prettyToolArguments(call.Function.Arguments)
+		}
+		workdir := args.Workdir
+		if workdir == "" {
+			workdir = "workspace root"
+		}
+		metadata := []string{"The following bash script will be executed.", "", "WORKING DIRECTORY  " + workdir}
+		if args.Timeout != nil {
+			metadata = append(metadata, fmt.Sprintf("TIMEOUT            %d seconds", *args.Timeout))
+		}
+		metadata = append(metadata, "", "SCRIPT", args.Command)
+		return "Bash tool call", strings.Join(metadata, "\n")
+
+	case contracts.WriteTool:
+		var args struct {
+			Path    string  `json:"path"`
+			Content *string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+			return "Write file", prettyToolArguments(call.Function.Arguments)
+		}
+		content := "<missing content>"
+		lineCount, byteCount := 0, 0
+		if args.Content != nil {
+			content = *args.Content
+			byteCount = len([]byte(content))
+			if content != "" {
+				lineCount = strings.Count(content, "\n") + 1
+			}
+		}
+		body := fmt.Sprintf("TARGET  %s\nEFFECT  Replace complete file contents\nSIZE    %d lines, %d bytes\n\nNEW CONTENT\n%s",
+			args.Path, lineCount, byteCount, numberedContent(content))
+		return "Write file", body
+
+	case contracts.EditTool:
+		var args struct {
+			Path       string  `json:"path"`
+			OldString  *string `json:"old_string"`
+			NewString  *string `json:"new_string"`
+			ReplaceAll bool    `json:"replace_all"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+			return "Edit file", prettyToolArguments(call.Function.Arguments)
+		}
+		mode := "first exact match"
+		if args.ReplaceAll {
+			mode = "every exact match"
+		}
+		oldText, newText := "<missing old text>", "<missing new text>"
+		if args.OldString != nil {
+			oldText = *args.OldString
+		}
+		if args.NewString != nil {
+			newText = *args.NewString
+		}
+		body := fmt.Sprintf("TARGET  %s\nMODE    Replace %s\n\nBEFORE\n%s\n\nAFTER\n%s",
+			args.Path, mode, prefixedContent("- ", oldText), prefixedContent("+ ", newText))
+		return "Edit file", body
+	}
+
+	return strings.ReplaceAll(call.Function.Name, "_", " ") + " tool call", prettyToolArguments(call.Function.Arguments)
+}
+
+func prettyToolArguments(arguments string) string {
+	var decoded any
+	if err := json.Unmarshal([]byte(arguments), &decoded); err != nil {
+		return arguments
+	}
+	formatted, err := json.MarshalIndent(decoded, "", "  ")
+	if err != nil {
+		return arguments
+	}
+	return string(formatted)
+}
+
+func numberedContent(content string) string {
+	lines := strings.Split(content, "\n")
+	width := len(fmt.Sprintf("%d", len(lines)))
+	for i := range lines {
+		lines[i] = fmt.Sprintf("%*d  %s", width, i+1, lines[i])
+	}
+	return strings.Join(lines, "\n")
+}
+
+func prefixedContent(prefix, content string) string {
+	lines := strings.Split(content, "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *chatModel) handleApprovalUpdate(update ApprovalUpdate) {

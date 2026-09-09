@@ -362,10 +362,102 @@ func TestApprovalOverlayKeepsTranscriptVisible(t *testing.T) {
 	m.showApproval(&Approval{Message: "Run this command?"})
 
 	content := m.View().Content
-	for _, want := range []string{"transcript remains visible", "APPROVAL REQUIRED", "Run this command?"} {
+	for _, want := range []string{"transcript remains visible", "APPROVAL REQUIRED", "Run this command?", "[A]llow", "[D]eny"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("approval view does not contain %q", want)
 		}
+	}
+}
+
+func TestApprovalModalPinsActionsWhileBodyScrolls(t *testing.T) {
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("review line %02d", i+1)
+	}
+	modal := &modalModel{
+		kind: modalApproval, title: "Approval required", body: strings.Join(lines, "\n"),
+		options: []modalOption{
+			{label: "Allow", shortcut: 'a'},
+			{label: "Deny", shortcut: 'd'},
+		},
+	}
+	rendered := ansi.Strip(renderModal(modal, 70, 12, newHarnessStyles()))
+	for _, want := range []string{"review line 01", "[A]llow", "[D]eny", "review lines 1-"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("approval modal lacks %q: %q", want, rendered)
+		}
+	}
+
+	modal.bodyOffset = 8
+	rendered = ansi.Strip(renderModal(modal, 70, 12, newHarnessStyles()))
+	if strings.Contains(rendered, "review line 01") || !strings.Contains(rendered, "review line 09") {
+		t.Fatalf("approval body did not scroll: %q", rendered)
+	}
+}
+
+func TestApprovalReviewScrollControls(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.width, m.height = 70, 12
+	m.modal = &modalModel{kind: modalApproval, title: "Approval", body: strings.Repeat("review line\n", 30)}
+
+	_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown}))
+	if m.modal.bodyOffset != 3 {
+		t.Fatalf("mouse wheel body offset=%d want 3", m.modal.bodyOffset)
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if m.modal.bodyOffset != 11 {
+		t.Fatalf("page down body offset=%d want 11", m.modal.bodyOffset)
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.modal.bodyOffset != 3 {
+		t.Fatalf("page up body offset=%d want 3", m.modal.bodyOffset)
+	}
+	for range 100 {
+		_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown}))
+	}
+	maxOffset := approvalMaxBodyOffset(m.modal, m.width, m.height, m.styles)
+	if m.modal.bodyOffset != maxOffset {
+		t.Fatalf("overscroll body offset=%d want bounded maximum %d", m.modal.bodyOffset, maxOffset)
+	}
+	_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelUp}))
+	if m.modal.bodyOffset != max(maxOffset-3, 0) {
+		t.Fatalf("reverse scroll body offset=%d did not move immediately from maximum %d", m.modal.bodyOffset, maxOffset)
+	}
+}
+
+func TestApprovalToolCallFormatting(t *testing.T) {
+	tests := []struct {
+		name      string
+		tool      contracts.ToolType
+		arguments string
+		want      []string
+	}{
+		{
+			name: "bash", tool: contracts.BashTool,
+			arguments: `{"command":"printf 'hello\\nworld'\nprintf done","workdir":"scripts","timeout":30}`,
+			want:      []string{"Bash tool call", "WORKING DIRECTORY  scripts", "TIMEOUT            30 seconds", "printf 'hello\\nworld'\nprintf done"},
+		},
+		{
+			name: "write", tool: contracts.WriteTool,
+			arguments: `{"path":"notes.txt","content":"first line\nsecond line"}`,
+			want:      []string{"Write file", "TARGET  notes.txt", "2 lines", "1  first line", "2  second line"},
+		},
+		{
+			name: "edit", tool: contracts.EditTool,
+			arguments: `{"path":"main.go","old_string":"old\ntext","new_string":"new\ntext","replace_all":true}`,
+			want:      []string{"Edit file", "TARGET  main.go", "Replace every exact match", "- old\n- text", "+ new\n+ text"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			title, body := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: string(tt.tool), Arguments: tt.arguments}})
+			formatted := title + "\n" + body
+			for _, want := range tt.want {
+				if !strings.Contains(formatted, want) {
+					t.Fatalf("formatted approval lacks %q: %q", want, formatted)
+				}
+			}
+		})
 	}
 }
 

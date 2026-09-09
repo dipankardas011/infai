@@ -39,14 +39,15 @@ type modalOption struct {
 }
 
 type modalModel struct {
-	kind      modalKind
-	title     string
-	body      string
-	options   []modalOption
-	selected  int
-	switching bool
-	required  bool
-	approval  *Approval
+	kind       modalKind
+	title      string
+	body       string
+	bodyOffset int
+	options    []modalOption
+	selected   int
+	switching  bool
+	required   bool
+	approval   *Approval
 }
 
 func (m *modalModel) move(delta int) {
@@ -68,6 +69,9 @@ func (m *modalModel) optionForShortcut(key rune) (int, bool) {
 func renderModal(m *modalModel, width, height int, styles harnessStyles) string {
 	if m == nil || width <= 0 || height <= 0 {
 		return ""
+	}
+	if m.kind == modalApproval {
+		return renderApprovalModal(m, width, height, styles)
 	}
 	modalStyle := styles.modal
 	if modalStyle.GetHorizontalFrameSize() >= width || modalStyle.GetVerticalFrameSize() >= height {
@@ -136,6 +140,123 @@ func renderModal(m *modalModel, width, height int, styles harnessStyles) string 
 	}
 
 	return modalStyle.Width(boxWidth).MaxHeight(height).Render(strings.Join(rows, "\n"))
+}
+
+func renderApprovalModal(m *modalModel, width, height int, styles harnessStyles) string {
+	modalStyle, boxWidth, boxHeight, innerWidth, bodyHeight := approvalModalGeometry(m, width, height, styles)
+	title := styles.modalTitle.Render(strings.ToUpper(m.title))
+	footerText := ansi.Truncate("←/→ action  ·  PgUp/PgDn review  ·  mouse wheel scroll", innerWidth, "…")
+	footer := styles.muted.Render(footerText)
+	body := renderApprovalBody(m.body, innerWidth, styles)
+	lines := strings.Split(body, "\n")
+	maxOffset := max(len(lines)-bodyHeight, 0)
+	offset := clamp(m.bodyOffset, 0, maxOffset)
+	end := min(offset+bodyHeight, len(lines))
+	visibleBody := strings.Join(lines[offset:end], "\n")
+
+	rows := []string{title, visibleBody}
+	if maxOffset > 0 {
+		rows = append(rows, styles.muted.Render(fmt.Sprintf("review lines %d-%d of %d", offset+1, end, len(lines))))
+	} else {
+		rows = append(rows, "")
+	}
+	buttons := make([]string, 0, len(m.options))
+	for i, option := range m.options {
+		accent := everforest.Green
+		if option.decision == "deny" {
+			accent = everforest.Red
+		}
+		style := styles.modalOption.Background(everforest.SurfaceAlt).Foreground(accent).Padding(0, 1)
+		if i == m.selected {
+			style = lipgloss.NewStyle().Background(accent).Foreground(everforest.Background).Bold(true).Padding(0, 1)
+		}
+		buttons = append(buttons, style.Render(approvalButtonLabel(option)))
+	}
+	rows = append(rows, strings.Join(buttons, ""))
+	rows = append(rows, footer)
+	return modalStyle.Width(boxWidth).MaxHeight(boxHeight).Render(strings.Join(rows, "\n"))
+}
+
+func approvalModalGeometry(m *modalModel, width, height int, styles harnessStyles) (lipgloss.Style, int, int, int, int) {
+	modalStyle := styles.modal
+	if modalStyle.GetHorizontalFrameSize() >= width || modalStyle.GetVerticalFrameSize() >= height {
+		modalStyle = modalStyle.Padding(0)
+	}
+	boxWidth := min(max(width-4, 1), 120)
+	boxHeight := min(height, 32)
+	innerWidth := contentWidth(modalStyle, boxWidth)
+	titleHeight := lipgloss.Height(styles.modalTitle.Render(strings.ToUpper(m.title)))
+	fixedHeight := titleHeight + 3 // scroll position, action row, and footer
+	bodyHeight := max(boxHeight-modalStyle.GetVerticalFrameSize()-fixedHeight, 1)
+	return modalStyle, boxWidth, boxHeight, innerWidth, bodyHeight
+}
+
+func approvalMaxBodyOffset(m *modalModel, width, height int, styles harnessStyles) int {
+	_, _, _, innerWidth, bodyHeight := approvalModalGeometry(m, width, height, styles)
+	body := renderApprovalBody(m.body, innerWidth, styles)
+	return max(len(strings.Split(body, "\n"))-bodyHeight, 0)
+}
+
+func renderApprovalBody(body string, width int, styles harnessStyles) string {
+	var rendered []string
+	section := ""
+	for _, line := range strings.Split(body, "\n") {
+		style := styles.modalBody.Background(everforest.Surface)
+		switch line {
+		case "SCRIPT", "NEW CONTENT":
+			section = line
+			style = styles.active.Background(everforest.Surface).Bold(true)
+		case "BEFORE":
+			section = line
+			style = lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Red).Bold(true)
+		case "AFTER":
+			section = line
+			style = styles.active.Background(everforest.Surface).Bold(true)
+		default:
+			switch section {
+			case "SCRIPT", "NEW CONTENT":
+				style = lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text)
+			case "BEFORE":
+				style = lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Red)
+			case "AFTER":
+				style = lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Green)
+			}
+		}
+		if section == "NEW CONTENT" {
+			if number, content, ok := splitNumberedContent(line); ok {
+				numberWidth := lipgloss.Width(number)
+				numberStyle := lipgloss.NewStyle().Background(everforest.Surface).Foreground(lipgloss.Color("8")).Width(numberWidth)
+				contentStyle := lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Width(max(width-numberWidth-2, 1))
+				gap := lipgloss.NewStyle().Background(everforest.Surface).Render("  ")
+				line = lipgloss.JoinHorizontal(lipgloss.Top, numberStyle.Render(number), gap, contentStyle.Render(content))
+				rendered = append(rendered, strings.Split(line, "\n")...)
+				continue
+			}
+		}
+		rendered = append(rendered, strings.Split(style.Width(width).Render(line), "\n")...)
+	}
+	return strings.Join(rendered, "\n")
+}
+
+func approvalButtonLabel(option modalOption) string {
+	if option.shortcut == 0 || option.label == "" {
+		return option.label
+	}
+	return fmt.Sprintf("[%c]%s", option.shortcut-'a'+'A', option.label[1:])
+}
+
+func splitNumberedContent(line string) (string, string, bool) {
+	separator := strings.Index(line, "  ")
+	if separator <= 0 {
+		return "", "", false
+	}
+	number := line[:separator]
+	for _, r := range strings.TrimSpace(number) {
+		if r < '0' || r > '9' {
+			return "", "", false
+		}
+	}
+	return number, line[separator+2:], true
 }
 
 func renderTimelineOption(option modalOption, selected bool, width int, styles harnessStyles) string {
