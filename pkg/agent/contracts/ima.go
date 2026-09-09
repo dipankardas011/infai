@@ -44,7 +44,6 @@ type TokenUsage struct {
 
 // GenerateOptions carries per-request provider knobs.
 type GenerateOptions struct {
-	MaxTokens            int
 	Temperature          float64
 	ThinkingBudgetTokens int
 	ReasoningEffort      string

@@ -49,7 +49,7 @@ func NewOpenAICompatableAPI(b contracts.ProvisionedModel) (*genericOpenAICompata
 type openAIChatRequest struct {
 	Model           string                  `json:"model"`
 	Messages        []contracts.ChatMessage `json:"messages"`
-	MaxTokens       int                     `json:"max_tokens,omitempty"`
+	MaxTokens       uint64                  `json:"max_tokens,omitempty"`
 	Temperature     float64                 `json:"temperature,omitempty"`
 	ReasoningEffort string                  `json:"reasoning_effort,omitempty"`
 	Stream          bool                    `json:"stream,omitempty"`
@@ -81,8 +81,9 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 		wireMessages[i].Status = "" // NOTE: to avoid sending the status as openai api doesn't have one.
 	}
 	reqBody := openAIChatRequest{
-		Model:    o.b.Model().Id,
-		Messages: wireMessages,
+		Model:     o.b.Model().Id,
+		Messages:  wireMessages,
+		MaxTokens: o.b.Model().MaxOutputTokens,
 	}
 	for _, tool := range tools {
 		reqBody.Tools = append(reqBody.Tools, openAITool{
@@ -91,9 +92,6 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 		})
 	}
 	if opts != nil {
-		if opts.MaxTokens > 0 {
-			reqBody.MaxTokens = opts.MaxTokens
-		}
 		if opts.Temperature != 0 {
 			reqBody.Temperature = opts.Temperature
 		}
