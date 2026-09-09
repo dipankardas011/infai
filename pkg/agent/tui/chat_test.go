@@ -151,6 +151,26 @@ func TestTranscriptUsesCompactRoleMarkers(t *testing.T) {
 	}
 }
 
+func TestToolCallPreviewFormatsKnownTools(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments string
+		want      []string
+	}{
+		{name: "bash", arguments: `{"command":"grep -E 'MemTotal' /proc/meminfo; lscpu","workdir":"scripts"}`, want: []string{"cwd  scripts", "$ grep -E 'MemTotal' /proc/meminfo; lscpu"}},
+		{name: "write", arguments: `{"path":"notes.txt","content":"first\nsecond"}`, want: []string{"→ notes.txt", "2 lines, 12 bytes", "1  first", "2  second"}},
+		{name: "edit", arguments: `{"path":"main.go","old_string":"old","new_string":"new","replace_all":true}`, want: []string{"→ main.go", "every match", "- old", "+ new"}},
+	}
+	for _, tt := range tests {
+		body := ansi.Strip(toolCallPreview(tt.name, tt.arguments))
+		for _, want := range tt.want {
+			if !strings.Contains(body, want) {
+				t.Fatalf("tool preview for %q lacks %q: %q", tt.name, want, body)
+			}
+		}
+	}
+}
+
 func TestToolNameUsesMarkerEmphasis(t *testing.T) {
 	styles := newHarnessStyles()
 	rendered := renderToolMarker("▲", styles.system, styles.tool, "search", `search {"path":"."}`, 60)
@@ -658,7 +678,7 @@ func TestBlocksFromRecordsShowsToolCallsAndResults(t *testing.T) {
 	if len(blocks) != 2 {
 		t.Fatalf("blocks=%d want 2: %#v", len(blocks), blocks)
 	}
-	if blocks[0].role != "tool" || blocks[0].text != `read {"path":"README.md"}` {
+	if blocks[0].role != "tool" || blocks[0].text != "{\n  \"path\": \"README.md\"\n}" {
 		t.Fatalf("tool call block=%#v", blocks[0])
 	}
 	if blocks[1].role != "tool" || blocks[1].text != "success\n{\"content\":\"hello\"}" {

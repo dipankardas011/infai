@@ -1149,6 +1149,76 @@ func prefixedContent(prefix, content string) string {
 	return strings.Join(lines, "\n")
 }
 
+// toolCallPreview renders a decoded, readable body for a tool call in the
+// transcript. The tool name is kept separate by the renderer, so the returned
+// text never repeats it. Unknown tools fall back to pretty-printed arguments.
+func toolCallPreview(name, arguments string) string {
+	switch contracts.ToolType(name) {
+	case contracts.BashTool:
+		var args struct {
+			Command string `json:"command"`
+			Workdir string `json:"workdir"`
+			Timeout *int   `json:"timeout"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return prettyToolArguments(arguments)
+		}
+		var lines []string
+		if args.Workdir != "" {
+			lines = append(lines, "cwd  "+args.Workdir)
+		} else if args.Timeout != nil {
+			lines = append(lines, fmt.Sprintf("timeout  %ds", *args.Timeout))
+		}
+		lines = append(lines, "$ "+args.Command)
+		return strings.Join(lines, "\n")
+
+	case contracts.WriteTool:
+		var args struct {
+			Path    string  `json:"path"`
+			Content *string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return prettyToolArguments(arguments)
+		}
+		content := "<missing content>"
+		lineCount, byteCount := 0, 0
+		if args.Content != nil {
+			content = *args.Content
+			byteCount = len([]byte(content))
+			if content != "" {
+				lineCount = strings.Count(content, "\n") + 1
+			}
+		}
+		return fmt.Sprintf("→ %s  (%d lines, %d bytes)\n%s", args.Path, lineCount, byteCount, numberedContent(content))
+
+	case contracts.EditTool:
+		var args struct {
+			Path       string  `json:"path"`
+			OldString  *string `json:"old_string"`
+			NewString  *string `json:"new_string"`
+			ReplaceAll bool    `json:"replace_all"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return prettyToolArguments(arguments)
+		}
+		mode := "first match"
+		if args.ReplaceAll {
+			mode = "every match"
+		}
+		oldText, newText := "<missing old text>", "<missing new text>"
+		if args.OldString != nil {
+			oldText = *args.OldString
+		}
+		if args.NewString != nil {
+			newText = *args.NewString
+		}
+		return fmt.Sprintf("→ %s  (%s)\n- %s\n+ %s",
+			args.Path, mode, strings.ReplaceAll(oldText, "\n", "\n- "), strings.ReplaceAll(newText, "\n", "\n+ "))
+	}
+
+	return prettyToolArguments(arguments)
+}
+
 func (m *chatModel) handleApprovalUpdate(update ApprovalUpdate) {
 	if update.Approval == nil {
 		return
@@ -1257,7 +1327,12 @@ func (m *chatModel) appendToolEvent(kind, text string) {
 	if isChecklistTool(name) {
 		return
 	}
-	m.blocks = append(m.blocks, block{role: "tool", text: text, toolKind: kind, toolStatus: status, toolName: name})
+	display := text
+	if kind == "call" {
+		arguments := strings.TrimSpace(strings.TrimPrefix(text, name))
+		display = toolCallPreview(name, arguments)
+	}
+	m.blocks = append(m.blocks, block{role: "tool", text: display, toolKind: kind, toolStatus: status, toolName: name})
 }
 
 func (m *chatModel) appendError(err error) {
@@ -1407,7 +1482,7 @@ func blocksFromRecords(records []store.Record) []block {
 					if isChecklistTool(call.Function.Name) {
 						continue
 					}
-					blocks = append(blocks, block{role: "tool", text: toolCallDisplay(call), toolKind: "call", toolName: call.Function.Name})
+					blocks = append(blocks, block{role: "tool", text: toolCallPreview(call.Function.Name, call.Function.Arguments), toolKind: "call", toolName: call.Function.Name})
 				}
 			case "tool":
 				toolName := toolCallNames[message.ToolCallID]
@@ -1494,7 +1569,7 @@ func toolCallRecordDisplay(call *store.ToolCallRecord) string {
 	if call.Arguments == "" {
 		return call.Name
 	}
-	return call.Name + " " + call.Arguments
+	return toolCallPreview(call.Name, call.Arguments)
 }
 
 func toolResultDisplay(result *store.ToolResultRecord) string {
