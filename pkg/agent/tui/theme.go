@@ -24,6 +24,10 @@ var everforest = struct {
 	Aqua       color.Color
 	Blue       color.Color
 	Purple     color.Color
+
+	// Diff row backgrounds (Everforest bg_red / bg_green).
+	DiffInsertBg color.Color
+	DiffDeleteBg color.Color
 }{
 	Background: lipgloss.Color("#272e33"),
 	Surface:    lipgloss.Color("#2e383c"),
@@ -37,6 +41,9 @@ var everforest = struct {
 	Aqua:       lipgloss.Color("#83c092"),
 	Blue:       lipgloss.Color("#7fbbb3"),
 	Purple:     lipgloss.Color("#d699b6"),
+
+	DiffInsertBg: lipgloss.Color("#425047"),
+	DiffDeleteBg: lipgloss.Color("#514045"),
 }
 
 type harnessStyles struct {

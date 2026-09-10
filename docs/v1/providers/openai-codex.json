@@ -1,0 +1,167 @@
+{
+    "gpt-5.3-codex-spark": {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api",
+        "api_type": "openai-codex-responses",
+        "id": "gpt-5.3-codex-spark",
+        "name": "GPT-5.3 Codex Spark",
+        "max_context_window": 128000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": "none",
+            "xhigh": "xhigh",
+            "minimal": "low"
+        }
+    },
+    "gpt-5.4": {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api",
+        "api_type": "openai-codex-responses",
+        "id": "gpt-5.4",
+        "name": "GPT-5.4",
+        "max_context_window": 272000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text",
+            "image"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": "none",
+            "xhigh": "xhigh",
+            "minimal": "low"
+        }
+    },
+    "gpt-5.4-mini": {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api",
+        "api_type": "openai-codex-responses",
+        "id": "gpt-5.4-mini",
+        "name": "GPT-5.4 mini",
+        "max_context_window": 272000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text",
+            "image"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": "none",
+            "xhigh": "xhigh",
+            "minimal": "low"
+        }
+    },
+    "gpt-5.5": {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api",
+        "api_type": "openai-codex-responses",
+        "id": "gpt-5.5",
+        "name": "GPT-5.5",
+        "max_context_window": 272000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text",
+            "image"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": "none",
+            "xhigh": "xhigh",
+            "minimal": "low"
+        }
+    },
+    "gpt-5.6-luna": {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api",
+        "api_type": "openai-codex-responses",
+        "id": "gpt-5.6-luna",
+        "name": "GPT-5.6 Luna",
+        "max_context_window": 272000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text",
+            "image"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": "none",
+            "xhigh": "xhigh",
+            "max": "max",
+            "minimal": "low"
+        }
+    },
+    "gpt-5.6-sol": {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api",
+        "api_type": "openai-codex-responses",
+        "id": "gpt-5.6-sol",
+        "name": "GPT-5.6 Sol",
+        "max_context_window": 272000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text",
+            "image"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": "none",
+            "xhigh": "xhigh",
+            "max": "max",
+            "minimal": "low"
+        }
+    },
+    "gpt-5.6-terra": {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api",
+        "api_type": "openai-codex-responses",
+        "id": "gpt-5.6-terra",
+        "name": "GPT-5.6 Terra",
+        "max_context_window": 272000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text",
+            "image"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": "none",
+            "xhigh": "xhigh",
+            "max": "max",
+            "minimal": "low"
+        }
+    },
+    "gpt-6-astra": {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api",
+        "api_type": "openai-codex-responses",
+        "id": "gpt-6-astra",
+        "name": "GPT-6 Astra",
+        "max_context_window": 272000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text",
+            "image"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+        }
+    }
+}

@@ -25,7 +25,8 @@ type RenameSessionRequest struct {
 }
 
 type ChatRequest struct {
-	Prompt string `json:"prompt"`
+	Prompt   string                       `json:"prompt"`
+	Thinking contracts.InfaiThinkingLevel `json:"thinking"`
 }
 
 type BranchRequest struct {
@@ -60,11 +61,11 @@ type ChatResponse struct {
 	Reply            string                  `json:"reply"`
 	Model            string                  `json:"model"`
 	Name             string                  `json:"name,omitempty"`
-	ContextWindow    int                     `json:"ctx_window"`
+	ContextWindow    uint64                  `json:"ctx_window"`
 	ReasoningContent string                  `json:"reasoning_content,omitempty"`
 	Pending          *engine.ApprovalRequest `json:"pending,omitempty"`
 	Usage            *contracts.TokenUsage   `json:"usage,omitempty"`
-	ContextTokens    int                     `json:"context_tokens"`
+	ContextTokens    uint64                  `json:"context_tokens"`
 }
 
 type ChatDeltaEvent struct {
@@ -91,10 +92,10 @@ type ChatDoneEvent struct {
 	ReasoningContent string                  `json:"reasoning_content"`
 	Model            string                  `json:"model"`
 	Name             string                  `json:"name,omitempty"`
-	ContextWindow    int                     `json:"ctx_window"`
+	ContextWindow    uint64                  `json:"ctx_window"`
 	Pending          *engine.ApprovalRequest `json:"pending,omitempty"`
 	Usage            *contracts.TokenUsage   `json:"usage,omitempty"`
-	ContextTokens    int                     `json:"context_tokens"`
+	ContextTokens    uint64                  `json:"context_tokens"`
 }
 
 type ChatErrorEvent struct {

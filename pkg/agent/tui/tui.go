@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/term"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
 )
@@ -27,9 +28,9 @@ type ChatReply struct {
 	SessionID        uuid.UUID
 	Model            string
 	Name             string
-	ContextWindow    int
+	ContextWindow    uint64
 	Usage            *contracts.TokenUsage
-	ContextTokens    int
+	ContextTokens    uint64
 	Pending          *Approval
 }
 
@@ -60,17 +61,17 @@ type SessionCreateOptions struct {
 // Client is the CLI's view of the engine. RemoteClient is the HTTP transport
 // to a running <binary> server.
 type Client interface {
-	Chat(ctx context.Context, prompt string, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
+	Chat(ctx context.Context, prompt string, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
 	ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error
 	SetSession(id uuid.UUID)
-	CreateSession(ctx context.Context, opts SessionCreateOptions) (*store.SessionMeta, error)
-	LoadSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, error)
+	CreateSession(ctx context.Context, opts SessionCreateOptions) (*glue.SessionOutput, error)
+	LoadSession(ctx context.Context, id uuid.UUID) (*glue.SessionOutput, error)
 	GetSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, []store.Record, error)
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	RenameSession(ctx context.Context, id uuid.UUID, name string) (*store.SessionMeta, error)
 	ListSessions(ctx context.Context) ([]contracts.SessionSummary, error)
-	ListProviders(ctx context.Context) ([]store.Provider, error)
-	SetSessionModel(ctx context.Context, provider, model string) error
+	ListAllProviderModels(ctx context.Context) ([]glue.ListModelOutput, error)
+	SetSessionModel(ctx context.Context, provider, model string) (*glue.SessionOutput, error)
 	Compact(ctx context.Context) (*store.SessionMeta, error)
 	GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error)
 	SelectBranch(ctx context.Context, id, eventID uuid.UUID) (contracts.TaskChecklistState, error)
@@ -100,8 +101,10 @@ type RunOptions struct {
 
 // replState carries the mutable view the REPL renders in its status header.
 type replState struct {
-	session store.SessionMeta
-	used    int // accumulated prompt+completion tokens across the run
+	session       store.SessionMeta
+	contextWindow uint64
+	thinking      contracts.InfaiThinkingLevel
+	used          uint64 // accumulated prompt+completion tokens across the run
 }
 
 // Run is the CLI entry point: a plain-stdio interactive REPL.
@@ -148,7 +151,9 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 			return err
 		}
 		c.SetSession(meta.ID)
-		state.session = *meta
+		state.session = meta.SessionMeta
+		state.contextWindow = meta.ContextWindow
+		state.thinking = meta.Thinking
 	} else {
 		// New session: pick the provider/model now, not on the first message.
 		meta, err := ensureSession(ctx, c, out, scanner, opts)
@@ -156,7 +161,9 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 			Notice(out, "Error", err.Error())
 			return err
 		}
-		state.session = *meta
+		state.session = meta.SessionMeta
+		state.contextWindow = meta.ContextWindow
+		state.thinking = meta.Thinking
 	}
 
 	// Resumed session: print the history first, then drop into the loop.
@@ -215,7 +222,9 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 				Notice(out, "Error", err.Error())
 				continue
 			}
-			state.session = *meta
+			state.session = meta.SessionMeta
+			state.contextWindow = meta.ContextWindow
+			state.thinking = meta.Thinking
 			fmt.Fprintf(out, "\nnew session %s.\n", meta.ID)
 		}
 
@@ -224,7 +233,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 
 		thinkingShown := false
 		contentStarted := false
-		reply, err := c.Chat(ctx, prompt, func(kind contracts.DeltaKind, text string) {
+		reply, err := c.Chat(ctx, prompt, state.thinking, func(kind contracts.DeltaKind, text string) {
 			switch kind {
 			case contracts.DeltaReasoning:
 				if !thinkingShown {
@@ -331,7 +340,7 @@ func renderHistory(out io.Writer, records []store.Record) {
 // the server and wires it into the client. It is the lazy path used on the
 // first real message and by /new, so the REPL works before any model is
 // configured.
-func ensureSession(ctx context.Context, c Client, out io.Writer, scan *bufio.Scanner, opts RunOptions) (*store.SessionMeta, error) {
+func ensureSession(ctx context.Context, c Client, out io.Writer, scan *bufio.Scanner, opts RunOptions) (*glue.SessionOutput, error) {
 	provider, model, err := chooseModel(ctx, c, out, scan)
 	if err != nil {
 		return nil, err
@@ -359,7 +368,7 @@ func updateState(s *replState, reply *ChatReply) {
 		s.session.Model = reply.Model
 	}
 	if reply.ContextWindow > 0 {
-		s.session.ContextWindow = reply.ContextWindow
+		s.contextWindow = reply.ContextWindow
 	}
 	if reply.SessionID != uuid.Nil {
 		s.session.ID = reply.SessionID
@@ -373,13 +382,13 @@ func renderStatus(out io.Writer, s *replState) {
 		return
 	}
 	pct := ""
-	if s.session.ContextWindow > 0 {
-		pct = fmt.Sprintf(" (%d%%)", s.used*100/s.session.ContextWindow)
+	if s.contextWindow > 0 {
+		pct = fmt.Sprintf(" (%d%%)", s.used*100/s.contextWindow)
 	}
 	line := strings.Join([]string{
 		"model: " + s.session.Model,
 		"sess: " + s.session.ID.String(),
-		fmt.Sprintf("ctx: %d/%d%s", s.used, s.session.ContextWindow, pct),
+		fmt.Sprintf("ctx: %d/%d%s", s.used, s.contextWindow, pct),
 	}, "  ·  ")
 	cHeader.Fprintln(out, line)
 }
@@ -396,7 +405,7 @@ func runCommand(ctx context.Context, c Client, out io.Writer, s *replState, line
 	case "/help":
 		fmt.Fprintln(out, `commands:
   /help                          show this help
-  /providers                     list configured providers and their models
+  /models                        list configured provider models
   /model                         pick a model from a numbered list
   /model <provider> <model>      switch the session to a provider's model
   /sessions                      list saved sessions
@@ -413,18 +422,22 @@ func runCommand(ctx context.Context, c Client, out io.Writer, s *replState, line
 multi-line: end a line with \ to continue typing on the next line`)
 		return false, nil
 
-	case "/providers":
-		provs, err := c.ListProviders(ctx)
+	case "/models":
+		providerModels, err := c.ListAllProviderModels(ctx)
 		if err != nil {
 			return false, err
 		}
-		if len(provs) == 0 {
+		if len(providerModels) == 0 {
 			fmt.Fprintln(out, "no providers configured — add providers/models in models.json and restart the server")
 			return false, nil
 		}
-		for _, p := range provs {
-			fmt.Fprintf(out, "%-16s %-28s %-8s models: %s\n",
-				p.Name, p.Endpoint, p.APIType, strings.Join(p.ModelNames(), ", "))
+		for _, model := range providerModels {
+			thinking := make([]string, len(model.ThinkingLevels))
+			for i, level := range model.ThinkingLevels {
+				thinking[i] = string(level)
+			}
+			fmt.Fprintf(out, "%-20s @ %-16s id=%-24s context=%d thinking=%s\n",
+				model.ModelName, model.ProviderName, model.ModelID, model.ContextWindow, strings.Join(thinking, ","))
 		}
 		return false, nil
 
@@ -478,13 +491,15 @@ multi-line: end a line with \ to continue typing on the next line`)
 		if err != nil {
 			return false, err
 		}
-		s.session = *meta
+		s.session = meta.SessionMeta
+		s.contextWindow = meta.ContextWindow
+		s.thinking = meta.Thinking
 		s.used = 0
 		fmt.Fprintf(out, "new session %s\n", meta.ID)
 		return false, nil
 
 	case "/ctx":
-		fmt.Fprintf(out, "context used: %d / %d\n", s.used, s.session.ContextWindow)
+		fmt.Fprintf(out, "context used: %d / %d\n", s.used, s.contextWindow)
 		return false, nil
 
 	case "/compact":
@@ -594,13 +609,13 @@ func setModelFor(ctx context.Context, c Client, out io.Writer, s *replState, pro
 	if s.session.ID == uuid.Nil {
 		return fmt.Errorf("no active session — type a message or /new to start one first")
 	}
-	if err := c.SetSessionModel(ctx, provider, model); err != nil {
+	output, err := c.SetSessionModel(ctx, provider, model)
+	if err != nil {
 		return err
 	}
-	s.session.Provider = provider
-	if model != "" {
-		s.session.Model = model
-	}
+	s.session = output.SessionMeta
+	s.contextWindow = output.ContextWindow
+	s.thinking = output.Thinking
 	fmt.Fprintf(out, "session model set to %s @ %s\n", model, provider)
 	return nil
 }
@@ -608,7 +623,7 @@ func setModelFor(ctx context.Context, c Client, out io.Writer, s *replState, pro
 // chooseModel lists every configured model@provider and reads a numbered
 // selection from the input stream, returning the chosen provider and model.
 func chooseModel(ctx context.Context, c Client, out io.Writer, scan *bufio.Scanner) (string, string, error) {
-	providers, err := c.ListProviders(ctx)
+	providerModels, err := c.ListAllProviderModels(ctx)
 	if err != nil {
 		return "", "", err
 	}
@@ -617,10 +632,8 @@ func chooseModel(ctx context.Context, c Client, out io.Writer, scan *bufio.Scann
 		provider, model string
 	}
 	var opts []option
-	for _, p := range providers {
-		for _, name := range p.ModelNames() {
-			opts = append(opts, option{p.Name, name})
-		}
+	for _, model := range providerModels {
+		opts = append(opts, option{model.ProviderName, model.ModelID})
 	}
 	if len(opts) == 0 {
 		return "", "", fmt.Errorf("no models configured — add models in models.json and restart the server")
@@ -709,7 +722,9 @@ func runSessionCmd(ctx context.Context, c Client, out io.Writer, s *replState, a
 			return false, err
 		}
 		c.SetSession(meta.ID)
-		s.session = *meta
+		s.session = meta.SessionMeta
+		s.contextWindow = meta.ContextWindow
+		s.thinking = meta.Thinking
 		fmt.Fprintf(out, "resumed session %s\n", id)
 		return false, nil
 

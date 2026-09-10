@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/engine"
+	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
 )
@@ -31,8 +32,10 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 		mux.HandleFunc("GET /healthz", s.handleHealthz)
 	}
 
-	// providers (read-only; the registry is configured via models.json)
-	mux.HandleFunc("GET /v1/providers", s.handleListProviders)
+	// providers
+	mux.HandleFunc("POST /v1/providers/login", s.handleProviderLogin)
+	mux.HandleFunc("POST /v1/providers/logout", s.handleProviderLogout)
+	mux.HandleFunc("GET /v1/models", s.handleListModels)
 
 	// sessions
 	mux.HandleFunc("POST /v1/sessions", s.handleCreateSession)
@@ -122,8 +125,42 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 // ---- providers ----
 
-func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
-	s.writeJSON(w, http.StatusOK, s.engine.ListProviders())
+func (s *Server) handleProviderLogin(w http.ResponseWriter, r *http.Request) {
+	var input glue.LoginProviderInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.engine.LoginProvider(r.Context(), input); err != nil {
+		if errors.Is(err, engine.ErrProviderLoggedIn) {
+			s.writeError(w, http.StatusConflict, err)
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleProviderLogout(w http.ResponseWriter, r *http.Request) {
+	var input glue.LogoutProviderInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.engine.LogoutProvider(input); err != nil {
+		if errors.Is(err, engine.ErrProviderNotLoggedIn) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListModels(w http.ResponseWriter, _ *http.Request) {
+	s.writeJSON(w, http.StatusOK, s.engine.ListAllProviderModels())
 }
 
 // ---- sessions ----
@@ -148,7 +185,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.writeJSON(w, http.StatusCreated, sess.Meta())
+	s.writeJSON(w, http.StatusCreated, glue.SessionOutput{
+		SessionMeta:       sess.Meta(),
+		ContextWindow:     sess.CurrentSessionModelContextWindow(),
+		Thinking:          sess.CurrentThinkingPattern(),
+		AvailableThinking: sess.AvailableThinkingPatterns(),
+	})
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
@@ -229,7 +271,12 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, sess.Meta())
+	s.writeJSON(w, http.StatusOK, glue.SessionOutput{
+		SessionMeta:       sess.Meta(),
+		ContextWindow:     sess.CurrentSessionModelContextWindow(),
+		Thinking:          sess.CurrentThinkingPattern(),
+		AvailableThinking: sess.AvailableThinkingPatterns(),
+	})
 }
 
 func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
@@ -270,6 +317,11 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("provider is required"))
 		return
 	}
+	if req.Model == "" {
+		s.writeError(w, http.StatusBadRequest, errors.New("model is required"))
+		return
+	}
+
 	sess, err := s.engine.SetSessionModel(id, req.Provider, req.Model)
 	if err != nil {
 		if errors.Is(err, engine.ErrSessionNotFound) {
@@ -279,7 +331,12 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, sess.Meta())
+	s.writeJSON(w, http.StatusOK, glue.SessionOutput{
+		SessionMeta:       sess.Meta(),
+		ContextWindow:     sess.CurrentSessionModelContextWindow(),
+		Thinking:          sess.CurrentThinkingPattern(),
+		AvailableThinking: sess.AvailableThinkingPatterns(),
+	})
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -307,7 +364,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	stream := r.URL.Query().Get("stream") == "true" || strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 
-	var opts engine.ChatOptions
+	opts := engine.ChatOptions{Thinking: req.Thinking}
 	if stream {
 		if _, ok := w.(http.Flusher); !ok {
 			s.writeError(w, http.StatusBadRequest, errors.New("streaming not supported"))
@@ -366,7 +423,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			Reply:            res.Reply,
 			ReasoningContent: res.ReasoningContent,
 			Model:            meta.Model,
-			ContextWindow:    meta.ContextWindow,
+			ContextWindow:    sess.CurrentSessionModelContextWindow(),
 			Pending:          res.Pending,
 			Usage:            res.Usage,
 			ContextTokens:    res.ContextTokens,
@@ -383,7 +440,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		Status:           res.Status.String(),
 		Reply:            res.Reply,
 		Model:            meta.Model,
-		ContextWindow:    meta.ContextWindow,
+		ContextWindow:    sess.CurrentSessionModelContextWindow(),
 		ReasoningContent: res.ReasoningContent,
 		Pending:          res.Pending,
 		Usage:            res.Usage,

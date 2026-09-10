@@ -52,6 +52,43 @@ func TestComposerGrowsAndTranscriptYieldsSpace(t *testing.T) {
 	}
 }
 
+func TestReflowOnlyRendersTranscriptWhenWidthChanges(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.blocks = []block{{role: "system", text: "initial"}}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	m.blocks = append(m.blocks, block{role: "system", text: "pending refresh"})
+	m.reflow(false)
+	if content := ansi.Strip(m.viewport.GetContent()); strings.Contains(content, "pending refresh") {
+		t.Fatalf("same-width reflow unexpectedly rebuilt transcript: %q", content)
+	}
+
+	m.width = 79
+	m.reflow(false)
+	if content := ansi.Strip(m.viewport.GetContent()); !strings.Contains(content, "pending refresh") {
+		t.Fatalf("width-changing reflow did not rebuild transcript: %q", content)
+	}
+}
+
+func TestComposerGrowthKeepsTranscriptAtBottom(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	for i := range 20 {
+		m.blocks = append(m.blocks, block{role: "system", text: fmt.Sprintf("line %d", i)})
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	if !m.viewport.AtBottom() {
+		t.Fatal("transcript did not start at bottom")
+	}
+
+	m.composer.SetValue("one\ntwo\nthree\nfour")
+	m.reflow(false)
+	if !m.viewport.AtBottom() {
+		t.Fatal("composer growth moved transcript away from bottom")
+	}
+}
+
 func TestChecklistDeltaIsNotRenderedAsTranscriptText(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.appendDelta(contracts.DeltaTaskChecklist, `{"items":[]}`)
@@ -86,11 +123,19 @@ func TestEmptyCommandMenuDoesNotPushComposerPastTerminal(t *testing.T) {
 func TestWorkingStatusIsProminentAndOmitsTurns(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
-	m.width = 80
-	m.session = store.SessionMeta{ID: uuid.New(), Model: "gemma4-e2b-it"}
+	m.width = 120
+	sessionID := uuid.New()
+	m.session = store.SessionMeta{ID: sessionID, Provider: "infai", Model: "gemma4-e2b-it"}
+	m.thinking = contracts.ThinkingLow
+	m.used, m.contextWindow = 6, 100
 	normalStatus := ansi.Strip(m.statusView())
 	if strings.Contains(normalStatus, "turn") {
 		t.Fatalf("status contains turn count: %q", normalStatus)
+	}
+	for _, want := range []string{"gemma4-e2b-it (infai)", "thinking low", "[█░░░░░░░░░] 6%", sessionID.String()} {
+		if !strings.Contains(normalStatus, want) {
+			t.Fatalf("status lacks %q: %q", want, normalStatus)
+		}
 	}
 	m.working = true
 	m.workBegan = time.Now()
@@ -139,6 +184,77 @@ func TestTranscriptUsesCompactRoleMarkers(t *testing.T) {
 	for _, unwanted := range []string{"YOU", "THINKING", "Skill loaded:", "tool call:", "tool result:"} {
 		if strings.Contains(content, unwanted) {
 			t.Fatalf("chat transcript still contains %q", unwanted)
+		}
+	}
+}
+
+func TestToolCallPreviewFormatsKnownTools(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments string
+		want      []string
+	}{
+		{name: "read", arguments: `{"path":"pkg/agent/tui/chat.go","offset":10,"limit":25}`, want: []string{"pkg/agent/tui/chat.go", "lines 10-34"}},
+		{name: "read", arguments: `{"path":"go.mod","metadata":true}`, want: []string{"go.mod", "metadata"}},
+		{name: "bash", arguments: `{"command":"grep -E 'MemTotal' /proc/meminfo; lscpu","workdir":"scripts"}`, want: []string{"cwd  scripts", "$ grep -E 'MemTotal' /proc/meminfo; lscpu"}},
+		{name: "write", arguments: `{"path":"notes.txt","content":"first\nsecond"}`, want: []string{"→ notes.txt", "2 lines, 12 bytes", "1  first", "2  second"}},
+		{name: "edit", arguments: `{"path":"main.go","old_string":"old\nsame","new_string":"new\nsame","replace_all":true}`, want: []string{"diff --git a/main.go b/main.go", "--- a/main.go", "+++ b/main.go", "@@ -1,2 +1,2 @@", "\n-old\n+new\n same", "(every match)"}},
+	}
+	for _, tt := range tests {
+		body := ansi.Strip(toolCallPreview(tt.name, tt.arguments))
+		for _, want := range tt.want {
+			if !strings.Contains(body, want) {
+				t.Fatalf("tool preview for %q lacks %q: %q", tt.name, want, body)
+			}
+		}
+	}
+}
+
+func TestParseUnifiedRowsTracksLineNumbers(t *testing.T) {
+	rows := parseUnifiedRows("--- a/x\n+++ b/x\n@@ -10,3 +20,3 @@\n context\n-removed\n+added\n tail")
+	want := []diffRow{
+		{marker: '@'},
+		{oldNum: 10, newNum: 20, marker: ' '},
+		{oldNum: 11, marker: '-'},
+		{newNum: 21, marker: '+'},
+		{oldNum: 12, newNum: 22, marker: ' '},
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("rows=%d want %d: %#v", len(rows), len(want), rows)
+	}
+	for i := range want {
+		if rows[i].oldNum != want[i].oldNum || rows[i].newNum != want[i].newNum || rows[i].marker != want[i].marker {
+			t.Fatalf("row %d = %#v want %#v", i, rows[i], want[i])
+		}
+	}
+}
+
+func TestWordDiffSegmentsEmphasizeChanges(t *testing.T) {
+	oldSegments, newSegments := wordDiffSegments("return old_value", "return new_value")
+	emphasized := func(segments []diffSegment) string {
+		var b strings.Builder
+		for _, segment := range segments {
+			if segment.emph {
+				b.WriteString(segment.text)
+			}
+		}
+		return b.String()
+	}
+	if got := emphasized(oldSegments); got != "old" {
+		t.Fatalf("old emphasis=%q want %q", got, "old")
+	}
+	if got := emphasized(newSegments); got != "new" {
+		t.Fatalf("new emphasis=%q want %q", got, "new")
+	}
+}
+
+func TestRenderEditDiffBlockShowsGuttersAndEmphasis(t *testing.T) {
+	styles := newHarnessStyles()
+	args := `{"path":"main.go","old_string":"return old","new_string":"return new"}`
+	rendered := ansi.Strip(renderEditDiffBlock("▲", styles.system, styles, args, 70))
+	for _, want := range []string{"edit  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("edit diff lacks %q:\n%s", want, rendered)
 		}
 	}
 }
@@ -354,10 +470,172 @@ func TestApprovalOverlayKeepsTranscriptVisible(t *testing.T) {
 	m.showApproval(&Approval{Message: "Run this command?"})
 
 	content := m.View().Content
-	for _, want := range []string{"transcript remains visible", "APPROVAL REQUIRED", "Run this command?"} {
+	for _, want := range []string{"transcript remains visible", "APPROVAL REQUIRED", "Run this command?", "[A]llow", "[D]eny"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("approval view does not contain %q", want)
 		}
+	}
+}
+
+func TestApprovalModalPinsActionsWhileBodyScrolls(t *testing.T) {
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("review line %02d", i+1)
+	}
+	modal := &modalModel{
+		kind: modalApproval, title: "Approval required", body: strings.Join(lines, "\n"),
+		options: []modalOption{
+			{label: "Allow", shortcut: 'a'},
+			{label: "Deny", shortcut: 'd'},
+		},
+	}
+	rendered := ansi.Strip(renderModal(modal, 70, 12, newHarnessStyles()))
+	for _, want := range []string{"review line 01", "[A]llow", "[D]eny", "review lines 1-"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("approval modal lacks %q: %q", want, rendered)
+		}
+	}
+
+	modal.bodyOffset = 8
+	rendered = ansi.Strip(renderModal(modal, 70, 12, newHarnessStyles()))
+	if strings.Contains(rendered, "review line 01") || !strings.Contains(rendered, "review line 09") {
+		t.Fatalf("approval body did not scroll: %q", rendered)
+	}
+}
+
+func TestApprovalReviewScrollControls(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.width, m.height = 70, 12
+	m.modal = &modalModel{kind: modalApproval, title: "Approval", body: strings.Repeat("review line\n", 30)}
+
+	_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown}))
+	if m.modal.bodyOffset != 3 {
+		t.Fatalf("mouse wheel body offset=%d want 3", m.modal.bodyOffset)
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if m.modal.bodyOffset != 11 {
+		t.Fatalf("page down body offset=%d want 11", m.modal.bodyOffset)
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.modal.bodyOffset != 3 {
+		t.Fatalf("page up body offset=%d want 3", m.modal.bodyOffset)
+	}
+	for range 100 {
+		_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown}))
+	}
+	maxOffset := approvalMaxBodyOffset(m.modal, m.width, m.height, m.styles)
+	if m.modal.bodyOffset != maxOffset {
+		t.Fatalf("overscroll body offset=%d want bounded maximum %d", m.modal.bodyOffset, maxOffset)
+	}
+	_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelUp}))
+	if m.modal.bodyOffset != max(maxOffset-3, 0) {
+		t.Fatalf("reverse scroll body offset=%d did not move immediately from maximum %d", m.modal.bodyOffset, maxOffset)
+	}
+}
+
+func TestApprovalModalRendersEditDiff(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
+		Function: contracts.Function{
+			Name:      string(contracts.EditTool),
+			Arguments: `{"path":"main.go","old_string":"return old","new_string":"return new"}`,
+		},
+	}})
+
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"EDIT FILE", "TARGET  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new", "[A]llow", "[D]eny"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("edit approval modal lacks %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "BEFORE") || strings.Contains(content, "AFTER") {
+		t.Fatalf("edit approval modal still shows BEFORE/AFTER:\n%s", content)
+	}
+}
+
+func TestEditDiffWrapsAndKeepsActionsPinned(t *testing.T) {
+	long := strings.Repeat("wrapping content ", 12)
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
+		Function: contracts.Function{
+			Name:      string(contracts.EditTool),
+			Arguments: `{"path":"x.md","old_string":"` + long + `","new_string":"` + long + ` changed"}`,
+		},
+	}})
+
+	view := m.View().Content
+	if height := lipgloss.Height(view); height > 20 {
+		t.Fatalf("modal view height=%d exceeds terminal height 20", height)
+	}
+	content := ansi.Strip(view)
+	for _, want := range []string{"[A]llow", "[D]eny"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("wrapped edit approval lost pinned action %q:\n%s", want, content)
+		}
+	}
+}
+
+func TestApprovalModalRendersWriteAdditions(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
+		Function: contracts.Function{
+			Name:      string(contracts.WriteTool),
+			Arguments: `{"path":"notes.txt","content":"first line\nsecond line"}`,
+		},
+	}})
+
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"WRITE FILE", "TARGET  notes.txt", "1 + first line", "2 + second line"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("write approval modal lacks %q:\n%s", want, content)
+		}
+	}
+}
+
+func TestApprovalToolCallFormatting(t *testing.T) {
+	tests := []struct {
+		name      string
+		tool      contracts.ToolType
+		arguments string
+		want      []string
+	}{
+		{
+			name: "read", tool: contracts.ReadTool,
+			arguments: `{"path":"pkg/agent/tui/chat.go","offset":10,"limit":25}`,
+			want:      []string{"Read file", "SOURCE  pkg/agent/tui/chat.go", "lines 10-34"},
+		},
+		{
+			name: "bash", tool: contracts.BashTool,
+			arguments: `{"command":"printf 'hello\\nworld'\nprintf done","workdir":"scripts","timeout":30}`,
+			want:      []string{"Bash tool call", "WORKING DIRECTORY  scripts", "TIMEOUT            30 seconds", "printf 'hello\\nworld'\nprintf done"},
+		},
+		{
+			name: "write", tool: contracts.WriteTool,
+			arguments: `{"path":"notes.txt","content":"first line\nsecond line"}`,
+			want:      []string{"Write file", "TARGET  notes.txt", "2 lines", "EFFECT  Replace complete file contents"},
+		},
+		{
+			name: "edit", tool: contracts.EditTool,
+			arguments: `{"path":"main.go","old_string":"old\ntext","new_string":"new\ntext","replace_all":true}`,
+			want:      []string{"Edit file", "TARGET  main.go", "Replace every exact match"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			title, body := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: string(tt.tool), Arguments: tt.arguments}})
+			formatted := title + "\n" + body
+			for _, want := range tt.want {
+				if !strings.Contains(formatted, want) {
+					t.Fatalf("formatted approval lacks %q: %q", want, formatted)
+				}
+			}
+		})
 	}
 }
 
@@ -558,13 +836,36 @@ func TestBlocksFromRecordsShowsToolCallsAndResults(t *testing.T) {
 	if len(blocks) != 2 {
 		t.Fatalf("blocks=%d want 2: %#v", len(blocks), blocks)
 	}
-	if blocks[0].role != "tool" || blocks[0].text != `read {"path":"README.md"}` {
+	if blocks[0].role != "tool" || blocks[0].text != "README.md" {
 		t.Fatalf("tool call block=%#v", blocks[0])
 	}
-	if blocks[1].role != "tool" || blocks[1].text != "success\n{\"content\":\"hello\"}" {
+	if blocks[1].role != "tool" || blocks[1].text != "success · 1 line, 19 bytes" {
 		t.Fatalf("tool result block=%#v", blocks[1])
 	}
 	if blocks[1].toolName != "read" {
 		t.Fatalf("tool result name=%q want read", blocks[1].toolName)
+	}
+}
+
+func TestReadToolResultSummaryPreservesErrors(t *testing.T) {
+	if got := transcriptToolResultDisplay("read", "success", "one\ntwo\n", ""); got != "success · 2 lines, 8 bytes" {
+		t.Fatalf("successful read summary=%q", got)
+	}
+	if got := transcriptToolResultDisplay("read", "error", "", "permission denied"); got != "error: permission denied" {
+		t.Fatalf("read error=%q want full error", got)
+	}
+	if got := transcriptToolResultDisplay("bash", "success", "full output", ""); got != "success\nfull output" {
+		t.Fatalf("non-read result=%q want full output", got)
+	}
+}
+
+func TestCycleThinking(t *testing.T) {
+	m := &chatModel{availableThinking: []contracts.InfaiThinkingLevel{contracts.ThinkingOff, contracts.ThinkingLow, contracts.ThinkingHigh}}
+
+	for _, want := range []contracts.InfaiThinkingLevel{contracts.ThinkingOff, contracts.ThinkingLow, contracts.ThinkingHigh, ""} {
+		m.cycleThinking()
+		if got := m.thinking; got != want {
+			t.Fatalf("cycleThinking() = %q, want %q", got, want)
+		}
 	}
 }

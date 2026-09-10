@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,11 +24,13 @@ type ChatResult struct {
 	ReasoningContent string
 	Pending          *ApprovalRequest
 	Usage            *contracts.TokenUsage
-	ContextTokens    int
+	ContextTokens    uint64
 }
 
 // ChatOptions carries per-chat knobs.
-type ChatOptions struct{}
+type ChatOptions struct {
+	Thinking contracts.InfaiThinkingLevel
+}
 
 var (
 	ErrSessionNotFound    = errors.New("session not found")
@@ -44,10 +45,8 @@ type InfaiAgentEngine struct {
 	bgLogger  *slog.Logger
 	engineCfg *config.AgentEngineConfig
 
-	_ *sql.DB
-
-	modelProviderStore *store.ProviderStore
-	sessionStore       *store.SessionStore
+	providers    contracts.LLMProviders
+	sessionStore *store.SessionStore
 
 	mu     sync.Mutex
 	active map[uuid.UUID]*InfaiAgentSession
@@ -57,45 +56,52 @@ type InfaiAgentEngine struct {
 }
 
 func NewInfaiAgentEngine(bgLogger *slog.Logger, cfg *config.AgentEngineConfig) (*InfaiAgentEngine, error) {
-	providerStore, err := store.OpenProviderStore()
-	if err != nil {
-		return nil, err
-	}
 	sessionStore, err := store.OpenSessionStore()
 	if err != nil {
 		return nil, err
 	}
-	engine, err := NewInfaiAgentEngineAt(bgLogger, providerStore, sessionStore)
+	engine, err := NewInfaiAgentEngineAt(bgLogger, sessionStore)
 	if err != nil {
 		return nil, err
 	}
 	engine.engineCfg = cfg
+
+	ctx, cancel := context.WithTimeoutCause(context.Background(), time.Minute, fmt.Errorf("toke > 1minute to get provider configs"))
+	defer cancel()
+	loadingProviderErr := make(chan error, 1)
+
+	go func() {
+		loadingProviderErr <- engine.LoadConfiguredProviders(ctx)
+	}()
+
+	select {
+	case <-ctx.Done():
+		bgLogger.ErrorContext(ctx, "Failed to get LoadConfiguredProviders", "reason", context.Cause(ctx))
+		return nil, context.Cause(ctx)
+	case errChan := <-loadingProviderErr:
+		if errChan != nil {
+			bgLogger.ErrorContext(ctx, "Failed to get LoadConfiguredProviders", "reason", errChan)
+			return nil, errChan
+		}
+	}
+
 	return engine, nil
 }
 
 // NewInfaiAgentEngineAt wires an engine to explicit stores. The harness uses
 // the config-driven constructor; tests inject sandboxed stores here.
-func NewInfaiAgentEngineAt(bgLogger *slog.Logger, providerStore *store.ProviderStore, sessionStore *store.SessionStore) (*InfaiAgentEngine, error) {
-	if providerStore == nil || sessionStore == nil {
+func NewInfaiAgentEngineAt(bgLogger *slog.Logger, sessionStore *store.SessionStore) (*InfaiAgentEngine, error) {
+	if sessionStore == nil {
 		return nil, errors.New("engine: stores required")
 	}
+
 	return &InfaiAgentEngine{
-		bgLogger:           bgLogger,
-		modelProviderStore: providerStore,
-		sessionStore:       sessionStore,
-		active:             make(map[uuid.UUID]*InfaiAgentSession),
-		stopCh:             make(chan struct{}),
+		bgLogger:     bgLogger,
+		providers:    contracts.LLMProviders{Providers: make(map[string]contracts.LLMProviderConfiguration)},
+		sessionStore: sessionStore,
+		active:       make(map[uuid.UUID]*InfaiAgentSession),
+		stopCh:       make(chan struct{}),
 	}, nil
-}
-
-// ---- Provider management ----
-
-func (e *InfaiAgentEngine) ListProviders() []store.Provider {
-	return e.modelProviderStore.List()
-}
-
-func (e *InfaiAgentEngine) Provider(name string) (store.Provider, bool) {
-	return e.modelProviderStore.Get(name)
 }
 
 // ---- Sessions ----
@@ -120,23 +126,32 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	if opts.Provider == "" {
 		return nil, errors.New("engine: provider is required")
 	}
-	p, ok := e.modelProviderStore.Get(opts.Provider)
-	if !ok {
-		return nil, fmt.Errorf("engine: provider %q not configured", opts.Provider)
-	}
-	if p.APIType != "" && p.APIType != "openai" {
-		return nil, fmt.Errorf("engine: unsupported api_type %q for provider %q", p.APIType, p.Name)
-	}
 	if opts.Model == "" {
 		return nil, errors.New("engine: model is required")
 	}
-	m, ok := p.Model(opts.Model)
-	if !ok {
-		return nil, fmt.Errorf("engine: provider %q has no model %q", p.Name, opts.Model)
-	}
-	ctxWindow := m.ContextWindow
 
-	sess, err := NewSession(e.bgLogger.WithGroup("session"), &p, m.Name, ctxWindow, opts.Cwd, e.sessionStore)
+	providerConfig, ok := e.Provider(opts.Provider)
+	if !ok {
+		return nil, fmt.Errorf("engine: provider %q not configured", opts.Provider)
+	}
+	modelConfig, ok := providerConfig.Models[opts.Model]
+	if !ok {
+		return nil, fmt.Errorf("engine: model %q not configured for provider %q", opts.Model, opts.Provider)
+	}
+
+	sess, err := NewSession(
+		e.bgLogger.WithGroup("session"),
+		contracts.NewProvisionedModel(
+			providerConfig.Id,
+			opts.Provider,
+			providerConfig.BaseEndpoint,
+			providerConfig.APIType,
+			providerConfig.Auth,
+			modelConfig,
+		),
+		opts.Cwd,
+		e.sessionStore,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +160,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	e.active[sess.sessionID] = sess
 	e.mu.Unlock()
 
-	e.bgLogger.Info("session created", "session_id", sess.sessionID, "provider", p.Name, "model", m.Name)
+	e.bgLogger.Info("session created", "session_id", sess.sessionID, "provider", opts.Provider, "model", modelConfig.Id)
 	return sess, nil
 }
 
@@ -183,16 +198,27 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		return nil, err
 	}
 
-	p, ok := e.modelProviderStore.Get(meta.Provider)
+	providerConfig, ok := e.providers.Providers[meta.Provider]
 	if !ok {
 		_ = timeline.Close()
 		return nil, ErrNoProvider
 	}
-	if model, ok := p.Model(meta.Model); ok {
-		meta.ContextWindow = model.ContextWindow
+	modelConfig, ok := providerConfig.Models[meta.Model]
+	if !ok {
+		return nil, fmt.Errorf("engine: model %q not configured for provider %q", meta.Model, meta.Provider)
 	}
 
-	sess, err := NewResumedSession(e.bgLogger.WithGroup("session"), &p, meta, history, timeline, e.sessionStore)
+	sess, err := NewResumedSession(
+		e.bgLogger.WithGroup("session"),
+		contracts.NewProvisionedModel(
+			providerConfig.Id,
+			meta.Provider,
+			providerConfig.BaseEndpoint,
+			providerConfig.APIType,
+			providerConfig.Auth,
+			modelConfig,
+		),
+		meta, history, timeline, e.sessionStore)
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -200,7 +226,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 
 	e.active[id] = sess
 
-	e.bgLogger.Info("session loaded", "session_id", id, "provider", p.Name)
+	e.bgLogger.Info("session loaded", "session_id", id, "provider", meta.Provider)
 	return sess, nil
 }
 
@@ -214,29 +240,41 @@ func (e *InfaiAgentEngine) Session(id uuid.UUID) (*InfaiAgentSession, bool) {
 
 // SetSessionModel switches an active session to another provider's model. An
 // empty modelName keeps the provider's configured model.
-func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelName string) (*InfaiAgentSession, error) {
+func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId string) (*InfaiAgentSession, error) {
 	e.mu.Lock()
 	sess, ok := e.active[id]
 	e.mu.Unlock()
 	if !ok {
 		return nil, ErrSessionNotFound
 	}
-	p, ok := e.modelProviderStore.Get(providerName)
+	providerConfig, ok := e.Provider(providerName)
 	if !ok {
 		return nil, ErrNoProvider
 	}
-	if p.APIType != "" && p.APIType != "openai" {
-		return nil, fmt.Errorf("engine: unsupported api_type %q for provider %q", p.APIType, p.Name)
+	if providerConfig.APIType != contracts.OpenAICompatableAPI {
+		return nil, fmt.Errorf("engine: unsupported api_type %q for provider %q", providerConfig.APIType, providerName)
 	}
-	if modelName == "" {
+	if modelId == "" {
 		return nil, errors.New("engine: model is required")
 	}
-	m, ok := p.Model(modelName)
+
+	modelConfig, ok := providerConfig.Models[modelId]
 	if !ok {
-		return nil, fmt.Errorf("engine: provider %q has no model %q", providerName, modelName)
+		return nil, fmt.Errorf("engine: model %q not configured for provider %q", modelId, providerName)
 	}
-	sess.SetModel(&p, m.Name, m.ContextWindow)
-	e.bgLogger.Info("session model set", "session_id", id, "provider", providerName, "model", modelName)
+
+	if err := sess.SetModel(contracts.NewProvisionedModel(
+		providerConfig.Id,
+		providerName,
+		providerConfig.BaseEndpoint,
+		providerConfig.APIType,
+		providerConfig.Auth,
+		modelConfig,
+	)); err != nil {
+		return nil, err
+	}
+
+	e.bgLogger.Info("session model set", "session_id", id, "provider", providerName, "model", modelId)
 	return sess, nil
 }
 
@@ -247,6 +285,11 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string
 	e.mu.Unlock()
 	if !ok {
 		return nil, ErrSessionNotFound
+	}
+	if sess.CurrentThinkingPattern() != opts.Thinking {
+		if err := sess.SetThinkingPattern(opts.Thinking); err != nil {
+			return nil, err
+		}
 	}
 	return sess.Chat(ctx, prompt, opts)
 }

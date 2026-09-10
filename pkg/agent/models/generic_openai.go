@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -17,34 +18,39 @@ import (
 )
 
 type genericOpenAICompatableAPI struct {
-	baseURL       string
-	model         string
-	apiKey        string
+	b        contracts.ProvisionedModel
+	endpoint *url.URL
+
 	client        *http.Client
 	maxAttempts   int
 	retryBase     time.Duration
 	retryMaxDelay time.Duration
 }
 
-func NewOpenAICompatableAPI(baseURL, model, apiKey string) *genericOpenAICompatableAPI {
+func NewOpenAICompatableAPI(b contracts.ProvisionedModel) (*genericOpenAICompatableAPI, error) {
+	baseEndpoint, err := url.Parse(b.BaseEndpoint())
+	if err != nil || !baseEndpoint.IsAbs() || baseEndpoint.Host == "" {
+		return nil, fmt.Errorf("openai compatible api: invalid base endpoint %q", b.BaseEndpoint())
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+
 	transport.ResponseHeaderTimeout = 5 * time.Minute
+
 	return &genericOpenAICompatableAPI{
-		baseURL:       strings.TrimRight(baseURL, "/"),
-		model:         model,
-		apiKey:        apiKey,
+		b:             b,
+		endpoint:      baseEndpoint.JoinPath("chat", "completions"),
 		client:        &http.Client{Transport: transport},
 		maxAttempts:   10,
 		retryBase:     5 * time.Second,
 		retryMaxDelay: time.Minute,
-	}
+	}, nil
 }
 
 type openAIChatRequest struct {
 	Model           string                  `json:"model"`
 	Messages        []contracts.ChatMessage `json:"messages"`
-	MaxTokens       int                     `json:"max_tokens,omitempty"`
-	Temperature     float64                 `json:"temperature,omitempty"`
+	MaxTokens       uint64                  `json:"max_tokens,omitempty"`
+	Temperature     *float64                `json:"temperature,omitempty"`
 	ReasoningEffort string                  `json:"reasoning_effort,omitempty"`
 	Stream          bool                    `json:"stream,omitempty"`
 	StreamOptions   *openAIStreamOptions    `json:"stream_options,omitempty"`
@@ -67,14 +73,23 @@ type openAIChatResponse struct {
 	Usage *contracts.TokenUsage `json:"usage"`
 }
 
+func (o *genericOpenAICompatableAPI) GetModelSpecs() contracts.ProvisionedModel { return o.b }
+
 func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) (contracts.ChatMessage, *contracts.TokenUsage, error) {
 	wireMessages := append([]contracts.ChatMessage(nil), messages...)
 	for i := range wireMessages {
 		wireMessages[i].Status = "" // NOTE: to avoid sending the status as openai api doesn't have one.
 	}
 	reqBody := openAIChatRequest{
-		Model:    o.model,
-		Messages: wireMessages,
+		Model:       o.b.Model().Id,
+		Messages:    wireMessages,
+		MaxTokens:   o.b.Model().MaxOutputTokens,
+		Temperature: o.b.Model().DefaultTemperature,
+	}
+	if o.b.ThinkingPattern() != "" {
+		if value, ok := o.b.ThinkingLevelValue(); ok {
+			reqBody.ReasoningEffort = value
+		}
 	}
 	for _, tool := range tools {
 		reqBody.Tools = append(reqBody.Tools, openAITool{
@@ -83,15 +98,6 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 		})
 	}
 	if opts != nil {
-		if opts.MaxTokens > 0 {
-			reqBody.MaxTokens = opts.MaxTokens
-		}
-		if opts.Temperature != 0 {
-			reqBody.Temperature = opts.Temperature
-		}
-		if opts.ReasoningEffort != "" {
-			reqBody.ReasoningEffort = opts.ReasoningEffort
-		}
 		if opts.Stream {
 			reqBody.Stream = true
 			reqBody.StreamOptions = &openAIStreamOptions{IncludeUsage: true}
@@ -135,13 +141,21 @@ func (o *genericOpenAICompatableAPI) sendChatRequest(ctx context.Context, body [
 		maxAttempts = 1
 	}
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/chat/completions", bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.endpoint.String(), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if o.apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+o.apiKey)
+		auth := o.b.Auth()
+		switch auth.Method {
+		case contracts.NoneAuth:
+		case contracts.APIKey:
+			if auth.BearerToken == nil || strings.TrimSpace(*auth.BearerToken) == "" {
+				return nil, errors.New("openai compatible api: API key is required")
+			}
+			req.Header.Set("Authorization", "Bearer "+*auth.BearerToken)
+		default:
+			return nil, fmt.Errorf("openai compatible api: unsupported auth method %q", auth.Method)
 		}
 
 		resp, err := o.client.Do(req)

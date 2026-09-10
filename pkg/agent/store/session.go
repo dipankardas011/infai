@@ -13,17 +13,15 @@ import (
 	"github.com/google/uuid"
 )
 
-// SessionMeta is the runtime session metadata. ContextWindow is a
-// runtime/display value and is not persisted.
+// SessionMeta is the runtime session metadata.
 type SessionMeta struct {
-	ID            uuid.UUID `json:"id"`
-	Name          string    `json:"name,omitempty"`
-	Provider      string    `json:"provider"`
-	Model         string    `json:"model"`
-	Cwd           string    `json:"cwd,omitempty"`
-	ContextWindow int       `json:"context_window,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name,omitempty"`
+	Provider  string    `json:"provider"`
+	Model     string    `json:"model"`
+	Cwd       string    `json:"cwd,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type sessionFile struct {
