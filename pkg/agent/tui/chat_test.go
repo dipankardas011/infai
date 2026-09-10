@@ -159,7 +159,7 @@ func TestToolCallPreviewFormatsKnownTools(t *testing.T) {
 	}{
 		{name: "bash", arguments: `{"command":"grep -E 'MemTotal' /proc/meminfo; lscpu","workdir":"scripts"}`, want: []string{"cwd  scripts", "$ grep -E 'MemTotal' /proc/meminfo; lscpu"}},
 		{name: "write", arguments: `{"path":"notes.txt","content":"first\nsecond"}`, want: []string{"→ notes.txt", "2 lines, 12 bytes", "1  first", "2  second"}},
-		{name: "edit", arguments: `{"path":"main.go","old_string":"old","new_string":"new","replace_all":true}`, want: []string{"→ main.go", "every match", "- old", "+ new"}},
+		{name: "edit", arguments: `{"path":"main.go","old_string":"old\nsame","new_string":"new\nsame","replace_all":true}`, want: []string{"diff --git a/main.go b/main.go", "--- a/main.go", "+++ b/main.go", "@@ -1,2 +1,2 @@", "\n-old\n+new\n same", "(every match)"}},
 	}
 	for _, tt := range tests {
 		body := ansi.Strip(toolCallPreview(tt.name, tt.arguments))
@@ -167,6 +167,55 @@ func TestToolCallPreviewFormatsKnownTools(t *testing.T) {
 			if !strings.Contains(body, want) {
 				t.Fatalf("tool preview for %q lacks %q: %q", tt.name, want, body)
 			}
+		}
+	}
+}
+
+func TestParseUnifiedRowsTracksLineNumbers(t *testing.T) {
+	rows := parseUnifiedRows("--- a/x\n+++ b/x\n@@ -10,3 +20,3 @@\n context\n-removed\n+added\n tail")
+	want := []diffRow{
+		{marker: '@'},
+		{oldNum: 10, newNum: 20, marker: ' '},
+		{oldNum: 11, marker: '-'},
+		{newNum: 21, marker: '+'},
+		{oldNum: 12, newNum: 22, marker: ' '},
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("rows=%d want %d: %#v", len(rows), len(want), rows)
+	}
+	for i := range want {
+		if rows[i].oldNum != want[i].oldNum || rows[i].newNum != want[i].newNum || rows[i].marker != want[i].marker {
+			t.Fatalf("row %d = %#v want %#v", i, rows[i], want[i])
+		}
+	}
+}
+
+func TestWordDiffSegmentsEmphasizeChanges(t *testing.T) {
+	oldSegments, newSegments := wordDiffSegments("return old_value", "return new_value")
+	emphasized := func(segments []diffSegment) string {
+		var b strings.Builder
+		for _, segment := range segments {
+			if segment.emph {
+				b.WriteString(segment.text)
+			}
+		}
+		return b.String()
+	}
+	if got := emphasized(oldSegments); got != "old" {
+		t.Fatalf("old emphasis=%q want %q", got, "old")
+	}
+	if got := emphasized(newSegments); got != "new" {
+		t.Fatalf("new emphasis=%q want %q", got, "new")
+	}
+}
+
+func TestRenderEditDiffBlockShowsGuttersAndEmphasis(t *testing.T) {
+	styles := newHarnessStyles()
+	args := `{"path":"main.go","old_string":"return old","new_string":"return new"}`
+	rendered := ansi.Strip(renderEditDiffBlock("▲", styles.system, styles, args, 70))
+	for _, want := range []string{"edit  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("edit diff lacks %q:\n%s", want, rendered)
 		}
 	}
 }
@@ -445,6 +494,71 @@ func TestApprovalReviewScrollControls(t *testing.T) {
 	}
 }
 
+func TestApprovalModalRendersEditDiff(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
+		Function: contracts.Function{
+			Name:      string(contracts.EditTool),
+			Arguments: `{"path":"main.go","old_string":"return old","new_string":"return new"}`,
+		},
+	}})
+
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"EDIT FILE", "TARGET  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new", "[A]llow", "[D]eny"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("edit approval modal lacks %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "BEFORE") || strings.Contains(content, "AFTER") {
+		t.Fatalf("edit approval modal still shows BEFORE/AFTER:\n%s", content)
+	}
+}
+
+func TestEditDiffWrapsAndKeepsActionsPinned(t *testing.T) {
+	long := strings.Repeat("wrapping content ", 12)
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
+		Function: contracts.Function{
+			Name:      string(contracts.EditTool),
+			Arguments: `{"path":"x.md","old_string":"` + long + `","new_string":"` + long + ` changed"}`,
+		},
+	}})
+
+	view := m.View().Content
+	if height := lipgloss.Height(view); height > 20 {
+		t.Fatalf("modal view height=%d exceeds terminal height 20", height)
+	}
+	content := ansi.Strip(view)
+	for _, want := range []string{"[A]llow", "[D]eny"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("wrapped edit approval lost pinned action %q:\n%s", want, content)
+		}
+	}
+}
+
+func TestApprovalModalRendersWriteAdditions(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
+		Function: contracts.Function{
+			Name:      string(contracts.WriteTool),
+			Arguments: `{"path":"notes.txt","content":"first line\nsecond line"}`,
+		},
+	}})
+
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"WRITE FILE", "TARGET  notes.txt", "1 + first line", "2 + second line"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("write approval modal lacks %q:\n%s", want, content)
+		}
+	}
+}
+
 func TestApprovalToolCallFormatting(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -460,12 +574,12 @@ func TestApprovalToolCallFormatting(t *testing.T) {
 		{
 			name: "write", tool: contracts.WriteTool,
 			arguments: `{"path":"notes.txt","content":"first line\nsecond line"}`,
-			want:      []string{"Write file", "TARGET  notes.txt", "2 lines", "1  first line", "2  second line"},
+			want:      []string{"Write file", "TARGET  notes.txt", "2 lines", "EFFECT  Replace complete file contents"},
 		},
 		{
 			name: "edit", tool: contracts.EditTool,
 			arguments: `{"path":"main.go","old_string":"old\ntext","new_string":"new\ntext","replace_all":true}`,
-			want:      []string{"Edit file", "TARGET  main.go", "Replace every exact match", "- old\n- text", "+ new\n+ text"},
+			want:      []string{"Edit file", "TARGET  main.go", "Replace every exact match"},
 		},
 	}
 	for _, tt := range tests {

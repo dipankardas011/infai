@@ -42,6 +42,7 @@ type modalModel struct {
 	kind       modalKind
 	title      string
 	body       string
+	diffRows   []diffRow
 	bodyOffset int
 	options    []modalOption
 	selected   int
@@ -147,8 +148,7 @@ func renderApprovalModal(m *modalModel, width, height int, styles harnessStyles)
 	title := styles.modalTitle.Render(strings.ToUpper(m.title))
 	footerText := ansi.Truncate("←/→ action  ·  PgUp/PgDn review  ·  mouse wheel scroll", innerWidth, "…")
 	footer := styles.muted.Render(footerText)
-	body := renderApprovalBody(m.body, innerWidth, styles)
-	lines := strings.Split(body, "\n")
+	lines := approvalBodyLines(m, innerWidth, styles)
 	maxOffset := max(len(lines)-bodyHeight, 0)
 	offset := clamp(m.bodyOffset, 0, maxOffset)
 	end := min(offset+bodyHeight, len(lines))
@@ -193,8 +193,27 @@ func approvalModalGeometry(m *modalModel, width, height int, styles harnessStyle
 
 func approvalMaxBodyOffset(m *modalModel, width, height int, styles harnessStyles) int {
 	_, _, _, innerWidth, bodyHeight := approvalModalGeometry(m, width, height, styles)
-	body := renderApprovalBody(m.body, innerWidth, styles)
-	return max(len(strings.Split(body, "\n"))-bodyHeight, 0)
+	return max(len(approvalBodyLines(m, innerWidth, styles))-bodyHeight, 0)
+}
+
+// approvalBodyLines renders the metadata body followed by the structured diff
+// rows (when present) into the scrollable review pane.
+func approvalBodyLines(m *modalModel, width int, styles harnessStyles) []string {
+	var lines []string
+	if m.body != "" {
+		lines = append(lines, strings.Split(renderApprovalBody(m.body, width, styles), "\n")...)
+	}
+	if len(m.diffRows) > 0 {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		oldWidth, newWidth := diffGutterWidths(m.diffRows)
+		codeWidth := max(width-(oldWidth+newWidth+4), 1)
+		for _, row := range m.diffRows {
+			lines = append(lines, renderDiffRow(row, oldWidth, newWidth, codeWidth, styles)...)
+		}
+	}
+	return lines
 }
 
 func renderApprovalBody(body string, width int, styles harnessStyles) string {

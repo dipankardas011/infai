@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/color"
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,10 +18,12 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/aymanbagabas/go-udiff"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
+	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 type block struct {
@@ -28,6 +32,7 @@ type block struct {
 	toolKind   string
 	toolStatus string
 	toolName   string
+	toolArgs   string
 	skillName  string
 }
 
@@ -774,7 +779,7 @@ func (m *chatModel) statusView() string {
 		name = m.session.Name
 		thinking := m.thinking
 		if thinking == "" {
-			thinking = "default"
+			thinking = "off"
 		}
 		rest = strings.Join([]string{
 			m.styles.status.Render(fmt.Sprintf("%s (%s)", m.session.Model, m.session.Provider)),
@@ -914,7 +919,14 @@ func (m *chatModel) renderTranscript() string {
 					markerStyle = m.styles.error
 				}
 			}
-			content = renderToolMarker(marker, markerStyle, m.styles.tool, entry.toolName, entry.text, width)
+			switch {
+			case entry.toolKind == "call" && entry.toolName == string(contracts.EditTool) && entry.toolArgs != "":
+				content = renderEditDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
+			case entry.toolKind == "call" && entry.toolName == string(contracts.WriteTool) && entry.toolArgs != "":
+				content = renderWriteDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
+			default:
+				content = renderToolMarker(marker, markerStyle, m.styles.tool, entry.toolName, entry.text, width)
+			}
 		}
 		if strings.TrimSpace(content) != "" {
 			rendered = append(rendered, strings.Trim(content, "\n"))
@@ -946,18 +958,371 @@ func renderToolMarker(marker string, markerStyle, bodyStyle lipgloss.Style, name
 	if name != "" && (detail == name || strings.HasPrefix(detail, name+" ") || strings.HasPrefix(detail, name+"\n")) {
 		detail = strings.TrimSpace(strings.TrimPrefix(detail, name))
 	}
+	diff := name == string(contracts.EditTool)
 	body := strings.TrimSpace(name + " " + detail)
 	indent := lipgloss.Width(marker) + 1
 	lines := strings.Split(strings.Trim(lipgloss.Wrap(body, max(width-indent, 1), ""), "\n"), "\n")
 	for i := range lines {
 		if i == 0 {
 			rest := strings.TrimPrefix(lines[i], name)
-			lines[i] = markerStyle.Render(marker) + " " + markerStyle.Bold(true).Render(name) + bodyStyle.Render(rest)
+			lineStyle := bodyStyle
+			if diff {
+				lineStyle = diffLineStyle(bodyStyle, rest)
+			}
+			lines[i] = markerStyle.Render(marker) + " " + markerStyle.Bold(true).Render(name) + lineStyle.Render(rest)
 			continue
 		}
-		lines[i] = strings.Repeat(" ", indent) + bodyStyle.Render(lines[i])
+		lineStyle := bodyStyle
+		if diff {
+			lineStyle = diffLineStyle(bodyStyle, lines[i])
+		}
+		lines[i] = strings.Repeat(" ", indent) + lineStyle.Render(lines[i])
 	}
 	return strings.Join(lines, "\n")
+}
+
+func diffLineStyle(base lipgloss.Style, line string) lipgloss.Style {
+	switch {
+	case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"), strings.HasPrefix(line, "diff --git"):
+		return base.Foreground(everforest.Aqua)
+	case strings.HasPrefix(line, "@@"):
+		return base.Foreground(everforest.Blue)
+	case strings.HasPrefix(line, "+"):
+		return base.Foreground(everforest.Green)
+	case strings.HasPrefix(line, "-"):
+		return base.Foreground(everforest.Red)
+	}
+	return base
+}
+
+type diffSegment struct {
+	text string
+	emph bool
+}
+
+type diffRow struct {
+	oldNum, newNum int
+	marker         byte // ' ' context, '-' delete, '+' insert, '@' hunk header
+	text           string
+	segments       []diffSegment
+}
+
+// renderEditDiffBlock renders an edit tool call as a GitHub-style unified diff:
+// two line-number gutters, a marker column, full-row red/green backgrounds, and
+// word-level emphasis on the changed segments of paired lines.
+func renderEditDiffBlock(marker string, markerStyle lipgloss.Style, styles harnessStyles, args string, width int) string {
+	path, oldText, newText, replaceAll, ok := decodeEditArgs(args)
+	if !ok {
+		return renderToolMarker(marker, markerStyle, styles.tool, string(contracts.EditTool), prettyToolArguments(args), width)
+	}
+	rows := editDiffRows(path, oldText, newText)
+
+	header := markerStyle.Render(marker) + " " + markerStyle.Bold(true).Render(string(contracts.EditTool)) + "  " + styles.tool.Render(path)
+	if replaceAll {
+		header += styles.muted.Render("  (every match)")
+	}
+	return renderDiffBlock(header, marker, rows, width, styles)
+}
+
+// renderWriteDiffBlock renders a write tool call as all-addition rows: new file
+// contents shown with line numbers on the green insertion background.
+func renderWriteDiffBlock(marker string, markerStyle lipgloss.Style, styles harnessStyles, args string, width int) string {
+	path, content, ok := decodeWriteArgs(args)
+	if !ok {
+		return renderToolMarker(marker, markerStyle, styles.tool, string(contracts.WriteTool), prettyToolArguments(args), width)
+	}
+	lineCount, byteCount := 0, 0
+	if content != "" {
+		lineCount = strings.Count(content, "\n") + 1
+	}
+	byteCount = len([]byte(content))
+
+	header := markerStyle.Render(marker) + " " + markerStyle.Bold(true).Render(string(contracts.WriteTool)) + "  " + styles.tool.Render(path) +
+		styles.muted.Render(fmt.Sprintf("  (%d lines, %d bytes)", lineCount, byteCount))
+	return renderDiffBlock(header, marker, writeDiffRows(content), width, styles)
+}
+
+func renderDiffBlock(header, marker string, rows []diffRow, width int, styles harnessStyles) string {
+	indent := lipgloss.Width(marker) + 1
+	oldWidth, newWidth := diffGutterWidths(rows)
+	gutterWidth := oldWidth + newWidth + 4 // "old new marker " + trailing space
+	codeWidth := max(width-indent-gutterWidth, 1)
+
+	lines := []string{header}
+	for _, row := range rows {
+		for _, visual := range renderDiffRow(row, oldWidth, newWidth, codeWidth, styles) {
+			lines = append(lines, strings.Repeat(" ", indent)+visual)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func decodeEditArgs(args string) (path, oldText, newText string, replaceAll, ok bool) {
+	var input struct {
+		Path       string  `json:"path"`
+		OldString  *string `json:"old_string"`
+		NewString  *string `json:"new_string"`
+		ReplaceAll bool    `json:"replace_all"`
+	}
+	if err := json.Unmarshal([]byte(args), &input); err != nil {
+		return "", "", "", false, false
+	}
+	if input.OldString != nil {
+		oldText = *input.OldString
+	}
+	if input.NewString != nil {
+		newText = *input.NewString
+	}
+	return input.Path, oldText, newText, input.ReplaceAll, true
+}
+
+func decodeWriteArgs(args string) (path, content string, ok bool) {
+	var input struct {
+		Path    string  `json:"path"`
+		Content *string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(args), &input); err != nil {
+		return "", "", false
+	}
+	if input.Content != nil {
+		content = *input.Content
+	}
+	return input.Path, content, true
+}
+
+func editDiffRows(path, oldText, newText string) []diffRow {
+	rows := parseUnifiedRows(stripDiffNoNewline(udiff.Unified("a/"+path, "b/"+path, oldText, newText)))
+	emphasizeDiffRows(rows)
+	return rows
+}
+
+func writeDiffRows(content string) []diffRow {
+	if content == "" {
+		return nil
+	}
+	lines := strings.Split(content, "\n")
+	rows := make([]diffRow, 0, len(lines))
+	for i, line := range lines {
+		rows = append(rows, diffRow{newNum: i + 1, marker: '+', text: line})
+	}
+	return rows
+}
+
+func parseUnifiedRows(diff string) []diffRow {
+	rows := make([]diffRow, 0)
+	oldN, newN := 0, 0
+	for line := range strings.SplitSeq(diff, "\n") {
+		switch {
+		case strings.HasPrefix(line, "@@"):
+			oldN, newN = parseHunkHeader(line)
+			rows = append(rows, diffRow{marker: '@', text: line})
+		case strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
+			continue
+		case strings.HasPrefix(line, "-"):
+			rows = append(rows, diffRow{oldNum: oldN, marker: '-', text: line[1:]})
+			oldN++
+		case strings.HasPrefix(line, "+"):
+			rows = append(rows, diffRow{newNum: newN, marker: '+', text: line[1:]})
+			newN++
+		case strings.HasPrefix(line, " "):
+			rows = append(rows, diffRow{oldNum: oldN, newNum: newN, marker: ' ', text: line[1:]})
+			oldN++
+			newN++
+		}
+	}
+	return rows
+}
+
+func parseHunkHeader(line string) (int, int) {
+	line = strings.TrimPrefix(line, "@@ ")
+	if idx := strings.Index(line, " @@"); idx >= 0 {
+		line = line[:idx]
+	}
+	parts := strings.Fields(line)
+	if len(parts) != 2 {
+		return 0, 0
+	}
+	return parseHunkRange(parts[0]), parseHunkRange(parts[1])
+}
+
+func parseHunkRange(field string) int {
+	field = strings.TrimLeft(field, "-+")
+	if idx := strings.IndexByte(field, ','); idx >= 0 {
+		field = field[:idx]
+	}
+	n, _ := strconv.Atoi(field)
+	return n
+}
+
+func diffGutterWidths(rows []diffRow) (int, int) {
+	oldWidth, newWidth := 1, 1
+	for _, row := range rows {
+		if row.oldNum > 0 {
+			oldWidth = max(oldWidth, len(strconv.Itoa(row.oldNum)))
+		}
+		if row.newNum > 0 {
+			newWidth = max(newWidth, len(strconv.Itoa(row.newNum)))
+		}
+	}
+	return oldWidth, newWidth
+}
+
+func emphasizeDiffRows(rows []diffRow) {
+	for i := 0; i < len(rows); {
+		if rows[i].marker != '-' {
+			i++
+			continue
+		}
+		delStart := i
+		for i < len(rows) && rows[i].marker == '-' {
+			i++
+		}
+		delEnd := i
+		addStart := i
+		for i < len(rows) && rows[i].marker == '+' {
+			i++
+		}
+		addEnd := i
+
+		pairs := min(delEnd-delStart, addEnd-addStart)
+		for k := range pairs {
+			oldSegments, newSegments := wordDiffSegments(rows[delStart+k].text, rows[addStart+k].text)
+			rows[delStart+k].segments = oldSegments
+			rows[addStart+k].segments = newSegments
+		}
+	}
+}
+
+func wordDiffSegments(oldLine, newLine string) ([]diffSegment, []diffSegment) {
+	diffs := diffmatchpatch.New().DiffMain(oldLine, newLine, false)
+	oldSegments := make([]diffSegment, 0, len(diffs))
+	newSegments := make([]diffSegment, 0, len(diffs))
+	for _, d := range diffs {
+		switch d.Type {
+		case diffmatchpatch.DiffEqual:
+			oldSegments = append(oldSegments, diffSegment{text: d.Text})
+			newSegments = append(newSegments, diffSegment{text: d.Text})
+		case diffmatchpatch.DiffDelete:
+			oldSegments = append(oldSegments, diffSegment{text: d.Text, emph: true})
+		case diffmatchpatch.DiffInsert:
+			newSegments = append(newSegments, diffSegment{text: d.Text, emph: true})
+		}
+	}
+	return oldSegments, newSegments
+}
+
+// renderDiffRow returns one rendered visual line per wrapped segment. Long
+// source lines are wrapped to codeWidth so every visual line is exactly the
+// same width; the gutter is only printed on the first visual line.
+func renderDiffRow(row diffRow, oldWidth, newWidth, codeWidth int, styles harnessStyles) []string {
+	gutterWidth := oldWidth + newWidth + 4
+	if row.marker == '@' {
+		return []string{lipgloss.NewStyle().Foreground(everforest.Blue).Width(gutterWidth + codeWidth).Render(row.text)}
+	}
+	oldStr, newStr := "", ""
+	if row.oldNum > 0 {
+		oldStr = strconv.Itoa(row.oldNum)
+	}
+	if row.newNum > 0 {
+		newStr = strconv.Itoa(row.newNum)
+	}
+	gutter := fmt.Sprintf("%*s %*s %c ", oldWidth, oldStr, newWidth, newStr, row.marker)
+
+	bg := everforest.Background
+	emphFg := everforest.Text
+	switch row.marker {
+	case '-':
+		bg, emphFg = everforest.DiffDeleteBg, everforest.Red
+	case '+':
+		bg, emphFg = everforest.DiffInsertBg, everforest.Green
+	}
+	gutterStyle := lipgloss.NewStyle().Foreground(everforest.Muted).Background(bg)
+	blankGutter := gutterStyle.Render(strings.Repeat(" ", gutterWidth))
+
+	visual := wrapDiffSegments(row, codeWidth)
+	lines := make([]string, 0, len(visual))
+	for i, segments := range visual {
+		g := gutter
+		if i > 0 {
+			g = blankGutter
+		}
+		lines = append(lines, gutterStyle.Render(g)+renderDiffSegments(segments, everforest.Text, emphFg, bg, codeWidth))
+	}
+	return lines
+}
+
+// wrapDiffSegments splits a row into visual lines no wider than width, keeping
+// word-level emphasis intact across the wrap.
+func wrapDiffSegments(row diffRow, width int) [][]diffSegment {
+	if len(row.segments) == 0 {
+		return wrapPlainSegment(row.text, width)
+	}
+	visual := make([][]diffSegment, 0, 1)
+	current := make([]diffSegment, 0, len(row.segments))
+	currentWidth := 0
+	appendRune := func(r rune, emph bool) {
+		if len(current) > 0 && current[len(current)-1].emph == emph {
+			current[len(current)-1].text += string(r)
+			return
+		}
+		current = append(current, diffSegment{text: string(r), emph: emph})
+	}
+	for _, segment := range row.segments {
+		for _, r := range segment.text {
+			runeWidth := lipgloss.Width(string(r))
+			if currentWidth+runeWidth > width && currentWidth > 0 {
+				visual = append(visual, current)
+				current = make([]diffSegment, 0, len(row.segments))
+				currentWidth = 0
+			}
+			appendRune(r, segment.emph)
+			currentWidth += runeWidth
+		}
+	}
+	if len(current) > 0 || len(visual) == 0 {
+		visual = append(visual, current)
+	}
+	return visual
+}
+
+func wrapPlainSegment(text string, width int) [][]diffSegment {
+	if text == "" {
+		return [][]diffSegment{{{}}}
+	}
+	visual := make([][]diffSegment, 0, 1)
+	var current strings.Builder
+	currentWidth := 0
+	for _, r := range text {
+		runeWidth := lipgloss.Width(string(r))
+		if currentWidth+runeWidth > width && currentWidth > 0 {
+			visual = append(visual, []diffSegment{{text: current.String()}})
+			current.Reset()
+			currentWidth = 0
+		}
+		current.WriteRune(r)
+		currentWidth += runeWidth
+	}
+	visual = append(visual, []diffSegment{{text: current.String()}})
+	return visual
+}
+
+func renderDiffSegments(segments []diffSegment, fg, emphFg, bg color.Color, width int) string {
+	base := lipgloss.NewStyle().Foreground(fg).Background(bg)
+	emph := lipgloss.NewStyle().Foreground(emphFg).Background(bg).Bold(true)
+	var b strings.Builder
+	used := 0
+	for _, segment := range segments {
+		style := base
+		if segment.emph {
+			style = emph
+		}
+		b.WriteString(style.Render(segment.text))
+		used += lipgloss.Width(segment.text)
+	}
+	if pad := width - used; pad > 0 {
+		b.WriteString(base.Render(strings.Repeat(" ", pad)))
+	}
+	return b.String()
 }
 
 func (m *chatModel) renderMarkdown(markdown string, width int) string {
@@ -1026,26 +1391,39 @@ func (m *chatModel) showModels(models []glue.ListModelOutput, switching bool) {
 	m.modal = &modalModel{kind: modalModels, title: "Choose a model", body: "The model is applied to this session.", options: options, switching: switching}
 }
 
-func (m *chatModel) showCommands() {
-	m.commandMenu = true
-	m.commandSelection = 0
-}
-
 func (m *chatModel) showApproval(approval *Approval) {
 	title, body := "Approval required", approval.Message
+	var diffRows []diffRow
 	if approval.ToolCall != nil {
 		title, body = formatApprovalToolCall(*approval.ToolCall)
 		if approval.Message != "" {
 			body = approval.Message + "\n\n" + body
 		}
+		diffRows = approvalDiffRows(*approval.ToolCall)
 	}
 	m.modal = &modalModel{
-		kind: modalApproval, title: title, body: body, required: true, approval: approval,
+		kind: modalApproval, title: title, body: body, diffRows: diffRows, required: true, approval: approval,
 		options: []modalOption{
 			{label: "Allow", shortcut: 'a', decision: "approve"},
 			{label: "Deny", shortcut: 'd', decision: "deny"},
 		},
 	}
+}
+
+// approvalDiffRows returns structured diff rows for edit/write tool calls so the
+// review pane can render the same GitHub-style diff as the transcript.
+func approvalDiffRows(call contracts.ToolCall) []diffRow {
+	switch contracts.ToolType(call.Function.Name) {
+	case contracts.EditTool:
+		if path, oldText, newText, _, ok := decodeEditArgs(call.Function.Arguments); ok {
+			return editDiffRows(path, oldText, newText)
+		}
+	case contracts.WriteTool:
+		if _, content, ok := decodeWriteArgs(call.Function.Arguments); ok {
+			return writeDiffRows(content)
+		}
+	}
+	return nil
 }
 
 func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
@@ -1071,50 +1449,28 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 		return "Bash tool call", strings.Join(metadata, "\n")
 
 	case contracts.WriteTool:
-		var args struct {
-			Path    string  `json:"path"`
-			Content *string `json:"content"`
-		}
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		path, content, ok := decodeWriteArgs(call.Function.Arguments)
+		if !ok {
 			return "Write file", prettyToolArguments(call.Function.Arguments)
 		}
-		content := "<missing content>"
-		lineCount, byteCount := 0, 0
-		if args.Content != nil {
-			content = *args.Content
-			byteCount = len([]byte(content))
-			if content != "" {
-				lineCount = strings.Count(content, "\n") + 1
-			}
+		lineCount := 0
+		if content != "" {
+			lineCount = strings.Count(content, "\n") + 1
 		}
-		body := fmt.Sprintf("TARGET  %s\nEFFECT  Replace complete file contents\nSIZE    %d lines, %d bytes\n\nNEW CONTENT\n%s",
-			args.Path, lineCount, byteCount, numberedContent(content))
+		body := fmt.Sprintf("TARGET  %s\nEFFECT  Replace complete file contents\nSIZE    %d lines, %d bytes",
+			path, lineCount, len([]byte(content)))
 		return "Write file", body
 
 	case contracts.EditTool:
-		var args struct {
-			Path       string  `json:"path"`
-			OldString  *string `json:"old_string"`
-			NewString  *string `json:"new_string"`
-			ReplaceAll bool    `json:"replace_all"`
-		}
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		path, _, _, replaceAll, ok := decodeEditArgs(call.Function.Arguments)
+		if !ok {
 			return "Edit file", prettyToolArguments(call.Function.Arguments)
 		}
-		mode := "first exact match"
-		if args.ReplaceAll {
-			mode = "every exact match"
+		mode := "Replace first exact match"
+		if replaceAll {
+			mode = "Replace every exact match"
 		}
-		oldText, newText := "<missing old text>", "<missing new text>"
-		if args.OldString != nil {
-			oldText = *args.OldString
-		}
-		if args.NewString != nil {
-			newText = *args.NewString
-		}
-		body := fmt.Sprintf("TARGET  %s\nMODE    Replace %s\n\nBEFORE\n%s\n\nAFTER\n%s",
-			args.Path, mode, prefixedContent("- ", oldText), prefixedContent("+ ", newText))
-		return "Edit file", body
+		return "Edit file", fmt.Sprintf("TARGET  %s\nMODE    %s", path, mode)
 	}
 
 	return strings.ReplaceAll(call.Function.Name, "_", " ") + " tool call", prettyToolArguments(call.Function.Arguments)
@@ -1141,12 +1497,16 @@ func numberedContent(content string) string {
 	return strings.Join(lines, "\n")
 }
 
-func prefixedContent(prefix, content string) string {
-	lines := strings.Split(content, "\n")
-	for i := range lines {
-		lines[i] = prefix + lines[i]
+func stripDiffNoNewline(diff string) string {
+	lines := strings.Split(diff, "\n")
+	filtered := lines[:0]
+	for _, line := range lines {
+		if strings.TrimSpace(line) == `\ No newline at end of file` {
+			continue
+		}
+		filtered = append(filtered, line)
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(filtered, "\n")
 }
 
 // toolCallPreview renders a decoded, readable body for a tool call in the
@@ -1201,10 +1561,6 @@ func toolCallPreview(name, arguments string) string {
 		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 			return prettyToolArguments(arguments)
 		}
-		mode := "first match"
-		if args.ReplaceAll {
-			mode = "every match"
-		}
 		oldText, newText := "<missing old text>", "<missing new text>"
 		if args.OldString != nil {
 			oldText = *args.OldString
@@ -1212,8 +1568,13 @@ func toolCallPreview(name, arguments string) string {
 		if args.NewString != nil {
 			newText = *args.NewString
 		}
-		return fmt.Sprintf("→ %s  (%s)\n- %s\n+ %s",
-			args.Path, mode, strings.ReplaceAll(oldText, "\n", "\n- "), strings.ReplaceAll(newText, "\n", "\n+ "))
+		mode := ""
+		if args.ReplaceAll {
+			mode = " (every match)"
+		}
+		diff := udiff.Unified("a/"+args.Path, "b/"+args.Path, oldText, newText)
+		diff = stripDiffNoNewline(diff)
+		return fmt.Sprintf("diff --git a/%s b/%s%s\n%s", args.Path, args.Path, mode, strings.TrimRight(diff, "\n"))
 	}
 
 	return prettyToolArguments(arguments)
@@ -1327,12 +1688,12 @@ func (m *chatModel) appendToolEvent(kind, text string) {
 	if isChecklistTool(name) {
 		return
 	}
-	display := text
+	display, arguments := text, ""
 	if kind == "call" {
-		arguments := strings.TrimSpace(strings.TrimPrefix(text, name))
+		arguments = strings.TrimSpace(strings.TrimPrefix(text, name))
 		display = toolCallPreview(name, arguments)
 	}
-	m.blocks = append(m.blocks, block{role: "tool", text: display, toolKind: kind, toolStatus: status, toolName: name})
+	m.blocks = append(m.blocks, block{role: "tool", text: display, toolKind: kind, toolStatus: status, toolName: name, toolArgs: arguments})
 }
 
 func (m *chatModel) appendError(err error) {
@@ -1450,7 +1811,7 @@ func blocksFromRecords(records []store.Record) []block {
 			}
 		case store.KindToolCall:
 			if record.ToolCall != nil && !isChecklistTool(record.ToolCall.Name) {
-				blocks = append(blocks, block{role: "tool", text: toolCallRecordDisplay(record.ToolCall), toolKind: "call", toolName: record.ToolCall.Name})
+				blocks = append(blocks, block{role: "tool", text: toolCallRecordDisplay(record.ToolCall), toolKind: "call", toolName: record.ToolCall.Name, toolArgs: record.ToolCall.Arguments})
 			}
 		case store.KindToolResult:
 			if record.ToolResult != nil {
@@ -1482,7 +1843,7 @@ func blocksFromRecords(records []store.Record) []block {
 					if isChecklistTool(call.Function.Name) {
 						continue
 					}
-					blocks = append(blocks, block{role: "tool", text: toolCallPreview(call.Function.Name, call.Function.Arguments), toolKind: "call", toolName: call.Function.Name})
+					blocks = append(blocks, block{role: "tool", text: toolCallPreview(call.Function.Name, call.Function.Arguments), toolKind: "call", toolName: call.Function.Name, toolArgs: call.Function.Arguments})
 				}
 			case "tool":
 				toolName := toolCallNames[message.ToolCallID]
