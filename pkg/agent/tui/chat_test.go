@@ -194,6 +194,8 @@ func TestToolCallPreviewFormatsKnownTools(t *testing.T) {
 		arguments string
 		want      []string
 	}{
+		{name: "read", arguments: `{"path":"pkg/agent/tui/chat.go","offset":10,"limit":25}`, want: []string{"pkg/agent/tui/chat.go", "lines 10-34"}},
+		{name: "read", arguments: `{"path":"go.mod","metadata":true}`, want: []string{"go.mod", "metadata"}},
 		{name: "bash", arguments: `{"command":"grep -E 'MemTotal' /proc/meminfo; lscpu","workdir":"scripts"}`, want: []string{"cwd  scripts", "$ grep -E 'MemTotal' /proc/meminfo; lscpu"}},
 		{name: "write", arguments: `{"path":"notes.txt","content":"first\nsecond"}`, want: []string{"→ notes.txt", "2 lines, 12 bytes", "1  first", "2  second"}},
 		{name: "edit", arguments: `{"path":"main.go","old_string":"old\nsame","new_string":"new\nsame","replace_all":true}`, want: []string{"diff --git a/main.go b/main.go", "--- a/main.go", "+++ b/main.go", "@@ -1,2 +1,2 @@", "\n-old\n+new\n same", "(every match)"}},
@@ -604,6 +606,11 @@ func TestApprovalToolCallFormatting(t *testing.T) {
 		want      []string
 	}{
 		{
+			name: "read", tool: contracts.ReadTool,
+			arguments: `{"path":"pkg/agent/tui/chat.go","offset":10,"limit":25}`,
+			want:      []string{"Read file", "SOURCE  pkg/agent/tui/chat.go", "lines 10-34"},
+		},
+		{
 			name: "bash", tool: contracts.BashTool,
 			arguments: `{"command":"printf 'hello\\nworld'\nprintf done","workdir":"scripts","timeout":30}`,
 			want:      []string{"Bash tool call", "WORKING DIRECTORY  scripts", "TIMEOUT            30 seconds", "printf 'hello\\nworld'\nprintf done"},
@@ -829,14 +836,26 @@ func TestBlocksFromRecordsShowsToolCallsAndResults(t *testing.T) {
 	if len(blocks) != 2 {
 		t.Fatalf("blocks=%d want 2: %#v", len(blocks), blocks)
 	}
-	if blocks[0].role != "tool" || blocks[0].text != "{\n  \"path\": \"README.md\"\n}" {
+	if blocks[0].role != "tool" || blocks[0].text != "README.md" {
 		t.Fatalf("tool call block=%#v", blocks[0])
 	}
-	if blocks[1].role != "tool" || blocks[1].text != "success\n{\"content\":\"hello\"}" {
+	if blocks[1].role != "tool" || blocks[1].text != "success · 1 line, 19 bytes" {
 		t.Fatalf("tool result block=%#v", blocks[1])
 	}
 	if blocks[1].toolName != "read" {
 		t.Fatalf("tool result name=%q want read", blocks[1].toolName)
+	}
+}
+
+func TestReadToolResultSummaryPreservesErrors(t *testing.T) {
+	if got := transcriptToolResultDisplay("read", "success", "one\ntwo\n", ""); got != "success · 2 lines, 8 bytes" {
+		t.Fatalf("successful read summary=%q", got)
+	}
+	if got := transcriptToolResultDisplay("read", "error", "", "permission denied"); got != "error: permission denied" {
+		t.Fatalf("read error=%q want full error", got)
+	}
+	if got := transcriptToolResultDisplay("bash", "success", "full output", ""); got != "success\nfull output" {
+		t.Fatalf("non-read result=%q want full output", got)
 	}
 }
 

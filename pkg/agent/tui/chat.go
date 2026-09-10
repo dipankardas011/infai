@@ -1434,6 +1434,13 @@ func approvalDiffRows(call contracts.ToolCall) []diffRow {
 
 func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 	switch contracts.ToolType(call.Function.Name) {
+	case contracts.ReadTool:
+		preview, ok := readToolCallPreview(call.Function.Arguments)
+		if !ok {
+			return "Read file", prettyToolArguments(call.Function.Arguments)
+		}
+		return "Read file", "SOURCE  " + preview
+
 	case contracts.BashTool:
 		var args struct {
 			Command string `json:"command"`
@@ -1520,6 +1527,13 @@ func stripDiffNoNewline(diff string) string {
 // text never repeats it. Unknown tools fall back to pretty-printed arguments.
 func toolCallPreview(name, arguments string) string {
 	switch contracts.ToolType(name) {
+	case contracts.ReadTool:
+		preview, ok := readToolCallPreview(arguments)
+		if !ok {
+			return prettyToolArguments(arguments)
+		}
+		return preview
+
 	case contracts.BashTool:
 		var args struct {
 			Command string `json:"command"`
@@ -1584,6 +1598,30 @@ func toolCallPreview(name, arguments string) string {
 	}
 
 	return prettyToolArguments(arguments)
+}
+
+func readToolCallPreview(arguments string) (string, bool) {
+	var args struct {
+		Path     string `json:"path"`
+		Offset   *int   `json:"offset"`
+		Limit    *int   `json:"limit"`
+		Metadata bool   `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return "", false
+	}
+	switch {
+	case args.Metadata:
+		return args.Path + "  (metadata)", true
+	case args.Offset != nil && args.Limit != nil:
+		return fmt.Sprintf("%s  (lines %d-%d)", args.Path, *args.Offset, *args.Offset+*args.Limit-1), true
+	case args.Offset != nil:
+		return fmt.Sprintf("%s  (from line %d)", args.Path, *args.Offset), true
+	case args.Limit != nil:
+		return fmt.Sprintf("%s  (first %d lines)", args.Path, *args.Limit), true
+	default:
+		return args.Path, true
+	}
 }
 
 func (m *chatModel) handleApprovalUpdate(update ApprovalUpdate) {
@@ -1823,7 +1861,7 @@ func blocksFromRecords(records []store.Record) []block {
 			if record.ToolResult != nil {
 				toolName := toolCallNames[record.ToolResult.CallID]
 				if _, skill := skillCallIDs[record.ToolResult.CallID]; !skill && !isChecklistTool(toolName) {
-					blocks = append(blocks, block{role: "tool", text: toolResultDisplay(record.ToolResult), toolKind: "result", toolStatus: record.ToolResult.Status, toolName: toolCallNames[record.ToolResult.CallID]})
+					blocks = append(blocks, block{role: "tool", text: transcriptToolResultDisplay(toolName, record.ToolResult.Status, record.ToolResult.Output, record.ToolResult.Error), toolKind: "result", toolStatus: record.ToolResult.Status, toolName: toolName})
 				}
 			}
 		case store.KindMessage:
@@ -1858,7 +1896,7 @@ func blocksFromRecords(records []store.Record) []block {
 					if status == "" {
 						status = string(contracts.ToolExecutionSuccess)
 					}
-					blocks = append(blocks, block{role: "tool", text: message.Text(), toolKind: "result", toolStatus: status, toolName: toolCallNames[message.ToolCallID]})
+					blocks = append(blocks, block{role: "tool", text: transcriptToolResultDisplay(toolName, status, message.Text(), ""), toolKind: "result", toolStatus: status, toolName: toolName})
 				}
 			}
 		}
@@ -1947,6 +1985,24 @@ func toolResultDisplay(result *store.ToolResultRecord) string {
 		return result.Status + "\n" + result.Output
 	}
 	return result.Status
+}
+
+func transcriptToolResultDisplay(name, status, output, resultErr string) string {
+	if name != string(contracts.ReadTool) || status != string(contracts.ToolExecutionSuccess) || resultErr != "" {
+		return toolResultDisplay(&store.ToolResultRecord{Status: status, Output: output, Error: resultErr})
+	}
+	lines := 0
+	if output != "" {
+		lines = strings.Count(output, "\n")
+		if !strings.HasSuffix(output, "\n") {
+			lines++
+		}
+	}
+	lineLabel := "lines"
+	if lines == 1 {
+		lineLabel = "line"
+	}
+	return fmt.Sprintf("%s · %d %s, %d bytes", status, lines, lineLabel, len([]byte(output)))
 }
 
 type timelineTreeRow struct {
