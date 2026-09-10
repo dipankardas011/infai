@@ -748,6 +748,8 @@ func (m *chatModel) reflow(follow bool) {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
+	previousViewportWidth := m.viewport.Width()
+	wasAtBottom := m.viewport.AtBottom()
 	m.composer.SetWidth(contentWidth(m.styles.composer, m.width))
 	header := m.headerView()
 	status := m.statusView()
@@ -757,7 +759,11 @@ func (m *chatModel) reflow(follow bool) {
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
-	m.refreshTranscript(follow)
+	if previousViewportWidth != main.width {
+		m.refreshTranscript(follow || wasAtBottom)
+	} else if follow || wasAtBottom {
+		m.viewport.GotoBottom()
+	}
 }
 
 func (m *chatModel) headerView() string {

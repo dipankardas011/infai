@@ -52,6 +52,43 @@ func TestComposerGrowsAndTranscriptYieldsSpace(t *testing.T) {
 	}
 }
 
+func TestReflowOnlyRendersTranscriptWhenWidthChanges(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.blocks = []block{{role: "system", text: "initial"}}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	m.blocks = append(m.blocks, block{role: "system", text: "pending refresh"})
+	m.reflow(false)
+	if content := ansi.Strip(m.viewport.GetContent()); strings.Contains(content, "pending refresh") {
+		t.Fatalf("same-width reflow unexpectedly rebuilt transcript: %q", content)
+	}
+
+	m.width = 79
+	m.reflow(false)
+	if content := ansi.Strip(m.viewport.GetContent()); !strings.Contains(content, "pending refresh") {
+		t.Fatalf("width-changing reflow did not rebuild transcript: %q", content)
+	}
+}
+
+func TestComposerGrowthKeepsTranscriptAtBottom(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	for i := range 20 {
+		m.blocks = append(m.blocks, block{role: "system", text: fmt.Sprintf("line %d", i)})
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	if !m.viewport.AtBottom() {
+		t.Fatal("transcript did not start at bottom")
+	}
+
+	m.composer.SetValue("one\ntwo\nthree\nfour")
+	m.reflow(false)
+	if !m.viewport.AtBottom() {
+		t.Fatal("composer growth moved transcript away from bottom")
+	}
+}
+
 func TestChecklistDeltaIsNotRenderedAsTranscriptText(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.appendDelta(contracts.DeltaTaskChecklist, `{"items":[]}`)
