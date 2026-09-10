@@ -810,7 +810,7 @@ func (m *chatModel) statusView() string {
 	if checklist := m.taskChecklistView(max(m.width-2, 1)); checklist != "" {
 		rest = checklist + "\n" + rest
 	}
-	return fullWidth(lipgloss.NewStyle().Padding(0, 1), m.width, rest)
+	return fullWidth(lipgloss.NewStyle().PaddingTop(1).PaddingLeft(1).PaddingRight(1), m.width, rest)
 }
 
 func contextProgressBar(styles harnessStyles, percent, width int) string {
