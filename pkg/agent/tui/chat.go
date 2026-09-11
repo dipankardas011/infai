@@ -19,6 +19,8 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/glamour/v2/ansi"
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/aymanbagabas/go-udiff"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
@@ -1005,6 +1007,7 @@ func diffLineStyle(base lipgloss.Style, line string) lipgloss.Style {
 type diffSegment struct {
 	text string
 	emph bool
+	fg   color.Color
 }
 
 type diffRow struct {
@@ -1046,7 +1049,7 @@ func renderWriteDiffBlock(marker string, markerStyle lipgloss.Style, styles harn
 
 	header := markerStyle.Render(marker) + " " + markerStyle.Bold(true).Render(string(contracts.WriteTool)) + "  " + styles.tool.Render(path) +
 		styles.muted.Render(fmt.Sprintf("  (%d lines, %d bytes)", lineCount, byteCount))
-	return renderDiffBlock(header, marker, writeDiffRows(content), width, styles)
+	return renderDiffBlock(header, marker, writeDiffRows(path, content), width, styles)
 }
 
 func renderDiffBlock(header, marker string, rows []diffRow, width int, styles harnessStyles) string {
@@ -1100,10 +1103,11 @@ func decodeWriteArgs(args string) (path, content string, ok bool) {
 func editDiffRows(path, oldText, newText string) []diffRow {
 	rows := parseUnifiedRows(stripDiffNoNewline(udiff.Unified("a/"+path, "b/"+path, oldText, newText)))
 	emphasizeDiffRows(rows)
+	applyDiffSyntax(rows, path, oldText, newText)
 	return rows
 }
 
-func writeDiffRows(content string) []diffRow {
+func writeDiffRows(path, content string) []diffRow {
 	if content == "" {
 		return nil
 	}
@@ -1112,7 +1116,118 @@ func writeDiffRows(content string) []diffRow {
 	for i, line := range lines {
 		rows = append(rows, diffRow{newNum: i + 1, marker: '+', text: line})
 	}
+	applyDiffSyntax(rows, path, "", content)
 	return rows
+}
+
+func applyDiffSyntax(rows []diffRow, path, oldText, newText string) {
+	oldLines := highlightedSourceLines(path, oldText)
+	newLines := highlightedSourceLines(path, newText)
+	for i := range rows {
+		var syntax []diffSegment
+		switch rows[i].marker {
+		case '-':
+			syntax = sourceLine(oldLines, rows[i].oldNum)
+		case '+', ' ':
+			syntax = sourceLine(newLines, rows[i].newNum)
+		}
+		if len(syntax) > 0 {
+			rows[i].segments = mergeDiffEmphasis(rows[i].segments, syntax)
+		}
+	}
+}
+
+func sourceLine(lines [][]diffSegment, number int) []diffSegment {
+	if number <= 0 || number > len(lines) {
+		return nil
+	}
+	return lines[number-1]
+}
+
+func highlightedSourceLines(path, source string) [][]diffSegment {
+	lexer := lexers.Match(path)
+	if lexer == nil {
+		lexer = lexers.Analyse(source)
+	}
+	if lexer == nil {
+		return nil
+	}
+	iterator, err := chroma.Coalesce(lexer).Tokenise(nil, source)
+	if err != nil {
+		return nil
+	}
+	lines := make([][]diffSegment, 1, strings.Count(source, "\n")+1)
+	for token := iterator(); token != chroma.EOF; token = iterator() {
+		parts := strings.Split(token.Value, "\n")
+		for i, part := range parts {
+			if part != "" {
+				line := len(lines) - 1
+				lines[line] = append(lines[line], diffSegment{text: part, fg: syntaxTokenColor(token.Type)})
+			}
+			if i < len(parts)-1 {
+				lines = append(lines, nil)
+			}
+		}
+	}
+	return lines
+}
+
+func syntaxTokenColor(token chroma.TokenType) color.Color {
+	switch {
+	case token == chroma.NameBuiltin || token == chroma.NameBuiltinPseudo:
+		return everforest.Aqua
+	case token == chroma.NameFunction || token == chroma.NameFunctionMagic:
+		return everforest.Green
+	case token.InCategory(chroma.Comment):
+		return everforest.Muted
+	case token.InCategory(chroma.Keyword):
+		return everforest.Purple
+	case token.InSubCategory(chroma.LiteralString):
+		return everforest.Green
+	case token.InSubCategory(chroma.LiteralNumber):
+		return everforest.Purple
+	case token.InCategory(chroma.Operator):
+		return everforest.Red
+	case token.InCategory(chroma.Punctuation):
+		return everforest.Muted
+	default:
+		return everforest.Text
+	}
+}
+
+func mergeDiffEmphasis(emphasis, syntax []diffSegment) []diffSegment {
+	if len(emphasis) == 0 {
+		return syntax
+	}
+	flags := make([]bool, 0)
+	for _, segment := range emphasis {
+		for range segment.text {
+			flags = append(flags, segment.emph)
+		}
+	}
+	merged := make([]diffSegment, 0, len(syntax))
+	position := 0
+	for _, segment := range syntax {
+		for _, r := range segment.text {
+			emph := position < len(flags) && flags[position]
+			position++
+			if len(merged) > 0 && merged[len(merged)-1].emph == emph && sameColor(merged[len(merged)-1].fg, segment.fg) {
+				merged[len(merged)-1].text += string(r)
+			} else {
+				merged = append(merged, diffSegment{text: string(r), emph: emph, fg: segment.fg})
+			}
+		}
+	}
+	return merged
+}
+
+func sameColor(a, b color.Color) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	ar, ag, ab, aa := a.RGBA()
+	br, bg, bb, ba := b.RGBA()
+	return ar == br && ag == bg && ab == bb && aa == ba
 }
 
 func parseUnifiedRows(diff string) []diffRow {
@@ -1267,12 +1382,12 @@ func wrapDiffSegments(row diffRow, width int) [][]diffSegment {
 	visual := make([][]diffSegment, 0, 1)
 	current := make([]diffSegment, 0, len(row.segments))
 	currentWidth := 0
-	appendRune := func(r rune, emph bool) {
-		if len(current) > 0 && current[len(current)-1].emph == emph {
+	appendRune := func(r rune, emph bool, fg color.Color) {
+		if len(current) > 0 && current[len(current)-1].emph == emph && sameColor(current[len(current)-1].fg, fg) {
 			current[len(current)-1].text += string(r)
 			return
 		}
-		current = append(current, diffSegment{text: string(r), emph: emph})
+		current = append(current, diffSegment{text: string(r), emph: emph, fg: fg})
 	}
 	for _, segment := range row.segments {
 		for _, r := range segment.text {
@@ -1282,7 +1397,7 @@ func wrapDiffSegments(row diffRow, width int) [][]diffSegment {
 				current = make([]diffSegment, 0, len(row.segments))
 				currentWidth = 0
 			}
-			appendRune(r, segment.emph)
+			appendRune(r, segment.emph, segment.fg)
 			currentWidth += runeWidth
 		}
 	}
@@ -1320,8 +1435,11 @@ func renderDiffSegments(segments []diffSegment, fg, emphFg, bg color.Color, widt
 	used := 0
 	for _, segment := range segments {
 		style := base
-		if segment.emph {
+		switch {
+		case segment.emph:
 			style = emph
+		case segment.fg != nil:
+			style = lipgloss.NewStyle().Foreground(segment.fg).Background(bg)
 		}
 		b.WriteString(style.Render(segment.text))
 		used += lipgloss.Width(segment.text)
@@ -1435,8 +1553,8 @@ func approvalDiffRows(call contracts.ToolCall) []diffRow {
 			return editDiffRows(path, oldText, newText)
 		}
 	case contracts.WriteTool:
-		if _, content, ok := decodeWriteArgs(call.Function.Arguments); ok {
-			return writeDiffRows(content)
+		if path, content, ok := decodeWriteArgs(call.Function.Arguments); ok {
+			return writeDiffRows(path, content)
 		}
 	}
 	return nil
@@ -1727,14 +1845,6 @@ func (m *chatModel) appendDelta(kind contracts.DeltaKind, text string) {
 }
 
 func (m *chatModel) appendToolEvent(kind, text string) {
-	status := ""
-	if kind == "result" {
-		if strings.HasSuffix(text, "[success]") {
-			status = "success"
-		} else {
-			status = "error"
-		}
-	}
 	name := ""
 	if fields := strings.Fields(text); len(fields) > 0 {
 		name = fields[0]
@@ -1747,7 +1857,40 @@ func (m *chatModel) appendToolEvent(kind, text string) {
 		arguments = strings.TrimSpace(strings.TrimPrefix(text, name))
 		display = toolCallPreview(name, arguments)
 	}
+	status := ""
+	if kind == "result" {
+		if parsedName, parsedStatus, output, resultErr, ok := parseToolResultEvent(text); ok {
+			name, status = parsedName, parsedStatus
+			if output != "" || resultErr != "" {
+				display = transcriptToolResultDisplay(name, status, output, resultErr)
+			}
+		} else {
+			status = string(contracts.ToolExecutionError)
+		}
+	}
 	m.blocks = append(m.blocks, block{role: "tool", text: display, toolKind: kind, toolStatus: status, toolName: name, toolArgs: arguments})
+}
+
+func parseToolResultEvent(text string) (name, status, output, resultErr string, ok bool) {
+	header, rest, hasOutput := strings.Cut(text, "\n")
+	open := strings.Index(header, " [")
+	if open <= 0 {
+		return "", "", "", "", false
+	}
+	end := strings.IndexByte(header[open+2:], ']')
+	if end < 0 {
+		return "", "", "", "", false
+	}
+	end += open + 2
+	name = header[:open]
+	status = header[open+2 : end]
+	if tail := strings.TrimSpace(header[end+1:]); strings.HasPrefix(tail, ":") {
+		resultErr = strings.TrimSpace(strings.TrimPrefix(tail, ":"))
+	}
+	if hasOutput {
+		output = rest
+	}
+	return name, status, output, resultErr, true
 }
 
 func (m *chatModel) appendError(err error) {

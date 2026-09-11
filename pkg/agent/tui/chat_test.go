@@ -913,6 +913,49 @@ func TestReadToolResultSummaryPreservesErrors(t *testing.T) {
 	}
 }
 
+func TestLiveAndResumedBashResultsMatch(t *testing.T) {
+	payload := `{"exit_code":7,"output":"full output\n","truncated":true}`
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.appendDelta(contracts.DeltaToolResult, "bash [success]\n"+payload)
+	if len(m.blocks) != 1 {
+		t.Fatalf("live blocks=%d", len(m.blocks))
+	}
+
+	call := contracts.ToolCall{ID: "call-1", Type: "function", Function: contracts.Function{Name: string(contracts.BashTool)}}
+	toolMessage := contracts.NewToolMessage(call.ID, payload, contracts.ToolExecutionSuccess)
+	resumed := blocksFromRecords([]store.Record{
+		{Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}}},
+		{Kind: store.KindMessage, Message: &toolMessage},
+	})
+	if len(resumed) != 2 {
+		t.Fatalf("resumed blocks=%d", len(resumed))
+	}
+	if m.blocks[0].text != resumed[1].text {
+		t.Fatalf("live result %q != resumed result %q", m.blocks[0].text, resumed[1].text)
+	}
+	if !strings.Contains(m.blocks[0].text, "full output") {
+		t.Fatalf("live result omits bash output: %q", m.blocks[0].text)
+	}
+}
+
+func TestDiffRowsCarrySyntaxColors(t *testing.T) {
+	rows := editDiffRows("main.go", "return oldValue\n", "return newValue\n")
+	if len(rows) == 0 {
+		t.Fatal("edit diff produced no rows")
+	}
+	colored := false
+	for _, row := range rows {
+		for _, segment := range row.segments {
+			if segment.fg != nil && !segment.emph {
+				colored = true
+			}
+		}
+	}
+	if !colored {
+		t.Fatal("edit diff rows carry no syntax colors")
+	}
+}
+
 func TestCycleThinking(t *testing.T) {
 	m := &chatModel{availableThinking: []contracts.InfaiThinkingLevel{contracts.ThinkingOff, contracts.ThinkingLow, contracts.ThinkingHigh}}
 

@@ -973,7 +973,9 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 
 func toolResultEventText(name string, status contracts.ToolExecutionStatus, content string) string {
 	result := fmt.Sprintf("%s [%s]", name, status)
-	if status != contracts.ToolExecutionSuccess && content != "" {
+	if status == contracts.ToolExecutionSuccess && name == string(contracts.BashTool) && content != "" {
+		result += "\n" + content
+	} else if status != contracts.ToolExecutionSuccess && content != "" {
 		result += ": " + content
 	}
 	return result

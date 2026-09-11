@@ -605,7 +605,10 @@ func (o *openAICodexResponsesAPI) readStream(ctx context.Context, body io.Reader
 			}
 			if item.Type == "reasoning" && len(item.Summary) > 0 {
 				reasoning.Reset()
-				for _, part := range item.Summary {
+				for i, part := range item.Summary {
+					if i > 0 {
+						reasoning.WriteString("\n\n")
+					}
 					reasoning.WriteString(part.Text)
 				}
 			}
