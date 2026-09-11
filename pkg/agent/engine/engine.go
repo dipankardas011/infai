@@ -46,13 +46,12 @@ type InfaiAgentEngine struct {
 	bgLogger  *slog.Logger
 	engineCfg *config.AgentEngineConfig
 
+	providerMu   sync.Mutex
 	providers    contracts.LLMProviders
 	sessionStore *store.SessionStore
 
 	mu     sync.Mutex
 	active map[uuid.UUID]*InfaiAgentSession
-
-	providerOperationMu sync.Mutex
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -201,7 +200,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		return nil, err
 	}
 
-	providerConfig, ok := e.providers.Providers[meta.Provider]
+	providerConfig, ok := e.Provider(meta.Provider)
 	if !ok {
 		_ = timeline.Close()
 		return nil, ErrNoProvider
@@ -310,10 +309,8 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string
 
 func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess *InfaiAgentSession) error {
 	providerName := sess.Meta().Provider
-	e.providerOperationMu.Lock()
-	defer e.providerOperationMu.Unlock()
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.providerMu.Lock()
+	defer e.providerMu.Unlock()
 
 	provider, ok := e.providers.Providers[providerName]
 	if !ok {

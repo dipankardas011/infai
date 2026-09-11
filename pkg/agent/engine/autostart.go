@@ -36,9 +36,9 @@ func (e *InfaiAgentEngine) LoadConfiguredProviders(ctx context.Context) error {
 				return err
 			}
 		}
-		e.mu.Lock()
+		e.providerMu.Lock()
 		e.providers = providerStore
-		e.mu.Unlock()
+		e.providerMu.Unlock()
 		return nil
 	}
 
@@ -68,9 +68,9 @@ func (e *InfaiAgentEngine) LoadConfiguredProviders(ctx context.Context) error {
 			return err
 		}
 	}
-	e.mu.Lock()
+	e.providerMu.Lock()
 	e.providers.Providers = providers
-	e.mu.Unlock()
+	e.providerMu.Unlock()
 
 	return nil
 }
