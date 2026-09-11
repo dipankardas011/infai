@@ -647,14 +647,45 @@ func TestApprovalToolCallFormatting(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			title, body := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: string(tt.tool), Arguments: tt.arguments}})
-			formatted := title + "\n" + body
+			title, body, script := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: string(tt.tool), Arguments: tt.arguments}})
+			formatted := title + "\n" + body + "\n" + script
 			for _, want := range tt.want {
 				if !strings.Contains(formatted, want) {
 					t.Fatalf("formatted approval lacks %q: %q", want, formatted)
 				}
 			}
 		})
+	}
+}
+
+func TestApprovalModalRendersBashAsCode(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{
+		Name:      string(contracts.BashTool),
+		Arguments: `{"command":"if test -f go.mod; then\n  go test ./...\nfi","workdir":"."}`,
+	}}})
+
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"BASH TOOL CALL", "SCRIPT", "if test -f go.mod; then", "go test ./...", "fi"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("bash approval modal lacks %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "```bash") {
+		t.Fatalf("bash approval modal exposes Markdown fence:\n%s", content)
+	}
+
+	highlighted := renderApprovalScript("nvidia-smi", 40, newHarnessStyles())
+	if !strings.Contains(highlighted, "\x1b[48;2;46;56;60m") {
+		t.Fatalf("bash approval script does not use modal surface background: %q", highlighted)
+	}
+	if strings.Contains(highlighted, "\x1b[48;2;39;46;51m") {
+		t.Fatalf("bash approval script uses app background: %q", highlighted)
+	}
+	if got := strings.TrimSpace(ansi.Strip(highlighted)); got != "nvidia-smi" {
+		t.Fatalf("bash approval script=%q", got)
 	}
 }
 

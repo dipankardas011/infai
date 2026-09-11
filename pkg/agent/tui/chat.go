@@ -1408,16 +1408,17 @@ func (m *chatModel) showModels(models []glue.ListModelOutput, switching bool) {
 
 func (m *chatModel) showApproval(approval *Approval) {
 	title, body := "Approval required", approval.Message
+	script := ""
 	var diffRows []diffRow
 	if approval.ToolCall != nil {
-		title, body = formatApprovalToolCall(*approval.ToolCall)
+		title, body, script = formatApprovalToolCall(*approval.ToolCall)
 		if approval.Message != "" {
 			body = approval.Message + "\n\n" + body
 		}
 		diffRows = approvalDiffRows(*approval.ToolCall)
 	}
 	m.modal = &modalModel{
-		kind: modalApproval, title: title, body: body, diffRows: diffRows, required: true, approval: approval,
+		kind: modalApproval, title: title, body: body, script: script, diffRows: diffRows, required: true, approval: approval,
 		options: []modalOption{
 			{label: "Allow", shortcut: 'a', decision: "approve"},
 			{label: "Deny", shortcut: 'd', decision: "deny"},
@@ -1441,14 +1442,14 @@ func approvalDiffRows(call contracts.ToolCall) []diffRow {
 	return nil
 }
 
-func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
+func formatApprovalToolCall(call contracts.ToolCall) (string, string, string) {
 	switch contracts.ToolType(call.Function.Name) {
 	case contracts.ReadTool:
 		preview, ok := readToolCallPreview(call.Function.Arguments)
 		if !ok {
-			return "Read file", prettyToolArguments(call.Function.Arguments)
+			return "Read file", prettyToolArguments(call.Function.Arguments), ""
 		}
-		return "Read file", "SOURCE  " + preview
+		return "Read file", "SOURCE  " + preview, ""
 
 	case contracts.BashTool:
 		var args struct {
@@ -1457,7 +1458,7 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 			Timeout *int   `json:"timeout"`
 		}
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-			return "Bash tool call", prettyToolArguments(call.Function.Arguments)
+			return "Bash tool call", prettyToolArguments(call.Function.Arguments), ""
 		}
 		workdir := args.Workdir
 		if workdir == "" {
@@ -1467,13 +1468,13 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 		if args.Timeout != nil {
 			metadata = append(metadata, fmt.Sprintf("TIMEOUT            %d seconds", *args.Timeout))
 		}
-		metadata = append(metadata, "", "SCRIPT", args.Command)
-		return "Bash tool call", strings.Join(metadata, "\n")
+		metadata = append(metadata, "", "SCRIPT")
+		return "Bash tool call", strings.Join(metadata, "\n"), args.Command
 
 	case contracts.WriteTool:
 		path, content, ok := decodeWriteArgs(call.Function.Arguments)
 		if !ok {
-			return "Write file", prettyToolArguments(call.Function.Arguments)
+			return "Write file", prettyToolArguments(call.Function.Arguments), ""
 		}
 		lineCount := 0
 		if content != "" {
@@ -1481,21 +1482,21 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 		}
 		body := fmt.Sprintf("TARGET  %s\nEFFECT  Replace complete file contents\nSIZE    %d lines, %d bytes",
 			path, lineCount, len([]byte(content)))
-		return "Write file", body
+		return "Write file", body, ""
 
 	case contracts.EditTool:
 		path, _, _, replaceAll, ok := decodeEditArgs(call.Function.Arguments)
 		if !ok {
-			return "Edit file", prettyToolArguments(call.Function.Arguments)
+			return "Edit file", prettyToolArguments(call.Function.Arguments), ""
 		}
 		mode := "Replace first exact match"
 		if replaceAll {
 			mode = "Replace every exact match"
 		}
-		return "Edit file", fmt.Sprintf("TARGET  %s\nMODE    %s", path, mode)
+		return "Edit file", fmt.Sprintf("TARGET  %s\nMODE    %s", path, mode), ""
 	}
 
-	return strings.ReplaceAll(call.Function.Name, "_", " ") + " tool call", prettyToolArguments(call.Function.Arguments)
+	return strings.ReplaceAll(call.Function.Name, "_", " ") + " tool call", prettyToolArguments(call.Function.Arguments), ""
 }
 
 func prettyToolArguments(arguments string) string {

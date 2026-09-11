@@ -1,11 +1,15 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"image/color"
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/formatters"
+	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/uuid"
 )
@@ -42,6 +46,7 @@ type modalModel struct {
 	kind       modalKind
 	title      string
 	body       string
+	script     string
 	diffRows   []diffRow
 	bodyOffset int
 	options    []modalOption
@@ -203,6 +208,9 @@ func approvalBodyLines(m *modalModel, width int, styles harnessStyles) []string 
 	if m.body != "" {
 		lines = append(lines, strings.Split(renderApprovalBody(m.body, width, styles), "\n")...)
 	}
+	if m.script != "" {
+		lines = append(lines, strings.Split(renderApprovalScript(m.script, width, styles), "\n")...)
+	}
 	if len(m.diffRows) > 0 {
 		if len(lines) > 0 {
 			lines = append(lines, "")
@@ -256,6 +264,40 @@ func renderApprovalBody(body string, width int, styles harnessStyles) string {
 	}
 	return strings.Join(rendered, "\n")
 }
+
+func renderApprovalScript(script string, width int, styles harnessStyles) string {
+	lexer := lexers.Get("bash")
+	if lexer != nil {
+		iterator, err := chroma.Coalesce(lexer).Tokenise(nil, script)
+		if err == nil {
+			var highlighted bytes.Buffer
+			if err := formatters.TTY16m.Format(&highlighted, approvalBashStyle, iterator); err == nil {
+				lineStyle := lipgloss.NewStyle().Background(everforest.Surface).Width(width)
+				lines := strings.Split(strings.TrimSuffix(highlighted.String(), "\n"), "\n")
+				for i := range lines {
+					lines[i] = lineStyle.Render(lines[i])
+				}
+				return strings.Join(lines, "\n")
+			}
+		}
+	}
+	return styles.modalBody.Background(everforest.Surface).Foreground(everforest.Text).Width(width).Render(script)
+}
+
+var approvalBashStyle = chroma.MustNewStyle("infai-approval-bash", chroma.StyleEntries{
+	chroma.Background:      "bg:#2e383c",
+	chroma.Text:            "#d3c6aa bg:#2e383c",
+	chroma.Comment:         "#859289 bg:#2e383c",
+	chroma.CommentPreproc:  "#e69875 bg:#2e383c",
+	chroma.Keyword:         "#d699b6 bg:#2e383c",
+	chroma.KeywordReserved: "#d699b6 bg:#2e383c",
+	chroma.Operator:        "#e67e80 bg:#2e383c",
+	chroma.Punctuation:     "#859289 bg:#2e383c",
+	chroma.NameBuiltin:     "#83c092 bg:#2e383c",
+	chroma.NameFunction:    "#a7c080 bg:#2e383c",
+	chroma.LiteralNumber:   "#d699b6 bg:#2e383c",
+	chroma.LiteralString:   "#a7c080 bg:#2e383c",
+})
 
 func approvalButtonLabel(option modalOption) string {
 	if option.shortcut == 0 || option.label == "" {
