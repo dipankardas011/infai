@@ -244,8 +244,52 @@ func (c *RemoteClient) ListAllProviderModels(ctx context.Context) ([]glue.ListMo
 	return out, nil
 }
 
-func (c *RemoteClient) LoginProvider(ctx context.Context, providerID contracts.ProviderSlug) error {
-	return c.providerAction(ctx, "/v1/providers/login", glue.LoginProviderInput{ProviderID: providerID})
+func (c *RemoteClient) ProviderAuthMethods(ctx context.Context, providerID contracts.ProviderSlug) ([]contracts.ProviderAuthMethod, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/providers/"+string(providerID)+"/auth-methods", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+	var methods []contracts.ProviderAuthMethod
+	if err := json.NewDecoder(resp.Body).Decode(&methods); err != nil {
+		return nil, err
+	}
+	return methods, nil
+}
+
+func (c *RemoteClient) LoginProvider(ctx context.Context, input glue.LoginProviderInput) (*glue.LoginProviderOutput, error) {
+	var output glue.LoginProviderOutput
+	if err := c.postJSONInto(ctx, "/v1/providers/login", input, http.StatusAccepted, &output); err != nil {
+		return nil, err
+	}
+	return &output, nil
+}
+
+func (c *RemoteClient) ProviderLoginStatus(ctx context.Context, providerID contracts.ProviderSlug) (*glue.LoginProviderOutput, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/providers/"+string(providerID)+"/login", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+	var output glue.LoginProviderOutput
+	if err := json.NewDecoder(resp.Body).Decode(&output); err != nil {
+		return nil, err
+	}
+	return &output, nil
 }
 
 func (c *RemoteClient) LogoutProvider(ctx context.Context, providerID contracts.ProviderSlug) error {

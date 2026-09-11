@@ -2,8 +2,8 @@
 //
 // # Provider registry
 //
-// models.json is hand-edited and read-only from the app's point of view. The
-// ProviderStore loads it once and serves it in memory:
+// models.json stores custom provider definitions and managed provider
+// credentials. The engine loads it once and persists successful auth changes:
 //
 //	{
 //	  "providers": {
@@ -50,5 +50,5 @@
 //
 //	SessionStore  — list/delete/open timelines (session.go)
 //	SessionEventHub — per-session live sink broadcaster (session_event_hub.go)
-//	ProviderStore — read-only provider/model registry (models.go)
+//	ProviderStore — provider/model registry and credential persistence (models.go)
 package store

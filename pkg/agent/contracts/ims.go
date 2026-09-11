@@ -22,13 +22,14 @@ type SessionSummary struct {
 // ChatMessage is the single source of truth for chat messages.
 // NOTE: Adapters remove harness-only fields such as Status before sending the OpenAI wire format.
 type ChatMessage struct {
-	Role             string              `json:"role"`
-	Content          *string             `json:"content,omitempty"`
-	ReasoningContent string              `json:"reasoning_content,omitempty"`
-	Name             *string             `json:"name,omitempty"`
-	ToolCallID       string              `json:"tool_call_id,omitempty"`
-	ToolCalls        []ToolCall          `json:"tool_calls,omitempty"`
-	Status           ToolExecutionStatus `json:"status,omitempty"`
+	Role               string              `json:"role"`
+	Content            *string             `json:"content,omitempty"`
+	ReasoningContent   string              `json:"reasoning_content,omitempty"`
+	ReasoningSignature string              `json:"reasoning_signature,omitempty"`
+	Name               *string             `json:"name,omitempty"`
+	ToolCallID         string              `json:"tool_call_id,omitempty"`
+	ToolCalls          []ToolCall          `json:"tool_calls,omitempty"`
+	Status             ToolExecutionStatus `json:"status,omitempty"`
 }
 
 // ToolCall is a function-call the model requested. Schema is defined now;

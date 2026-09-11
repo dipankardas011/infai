@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/engine"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
@@ -33,7 +34,9 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	}
 
 	// providers
+	mux.HandleFunc("GET /v1/providers/{id}/auth-methods", s.handleProviderAuthMethods)
 	mux.HandleFunc("POST /v1/providers/login", s.handleProviderLogin)
+	mux.HandleFunc("GET /v1/providers/{id}/login", s.handleProviderLoginStatus)
 	mux.HandleFunc("POST /v1/providers/logout", s.handleProviderLogout)
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
 
@@ -125,13 +128,23 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 // ---- providers ----
 
+func (s *Server) handleProviderAuthMethods(w http.ResponseWriter, r *http.Request) {
+	methods, err := s.engine.ProviderAuthMethods(contracts.ProviderSlug(r.PathValue("id")))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, methods)
+}
+
 func (s *Server) handleProviderLogin(w http.ResponseWriter, r *http.Request) {
 	var input glue.LoginProviderInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.engine.LoginProvider(r.Context(), input); err != nil {
+	output, err := s.engine.LoginProvider(r.Context(), input)
+	if err != nil {
 		if errors.Is(err, engine.ErrProviderLoggedIn) {
 			s.writeError(w, http.StatusConflict, err)
 			return
@@ -139,7 +152,16 @@ func (s *Server) handleProviderLogin(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	s.writeJSON(w, http.StatusAccepted, output)
+}
+
+func (s *Server) handleProviderLoginStatus(w http.ResponseWriter, r *http.Request) {
+	output, ok := s.engine.ProviderLoginStatus(contracts.ProviderSlug(r.PathValue("id")))
+	if !ok {
+		s.writeError(w, http.StatusNotFound, errors.New("provider auth flow not found"))
+		return
+	}
+	s.writeJSON(w, http.StatusOK, output)
 }
 
 func (s *Server) handleProviderLogout(w http.ResponseWriter, r *http.Request) {
