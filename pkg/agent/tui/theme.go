@@ -175,5 +175,24 @@ func everforestMarkdownStyle() ansi.StyleConfig {
 	return cfg
 }
 
+func everforestThinkingMarkdownStyle() ansi.StyleConfig {
+	cfg := everforestMarkdownStyle()
+	muted := "#859289"
+	cfg.Document.Color = &muted
+	cfg.Heading.Color = &muted
+	cfg.H1.Color = &muted
+	cfg.H1.BackgroundColor = nil
+	cfg.H6.Color = &muted
+	cfg.HorizontalRule.Color = &muted
+	cfg.Link.Color = &muted
+	cfg.LinkText.Color = &muted
+	cfg.Image.Color = &muted
+	cfg.ImageText.Color = &muted
+	cfg.Code.Color = &muted
+	cfg.CodeBlock.Color = &muted
+	cfg.CodeBlock.Chroma = nil
+	return cfg
+}
+
 func themeBackground() color.Color { return everforest.Background }
 func themeForeground() color.Color { return everforest.Text }

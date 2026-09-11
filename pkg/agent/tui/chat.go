@@ -17,6 +17,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
+	"charm.land/glamour/v2/ansi"
 	"charm.land/lipgloss/v2"
 	"github.com/aymanbagabas/go-udiff"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -906,7 +907,7 @@ func (m *chatModel) renderTranscript() string {
 		case "assistant":
 			content = renderChatMarker("●", m.styles.active, lipgloss.NewStyle(), m.renderMarkdown(entry.text, max(width-2, 1)), width)
 		case "thinking":
-			content = renderChatMarker("◌", m.styles.muted, m.styles.thinking, entry.text, width)
+			content = renderChatMarker("◌", m.styles.muted, lipgloss.NewStyle(), m.renderThinkingMarkdown(entry.text, max(width-2, 1)), width)
 		case "error":
 			content = m.styles.error.Width(width).Render("ERROR  " + entry.text)
 		case "system", "status":
@@ -1332,17 +1333,25 @@ func renderDiffSegments(segments []diffSegment, fg, emphFg, bg color.Color, widt
 }
 
 func (m *chatModel) renderMarkdown(markdown string, width int) string {
+	return m.renderStyledMarkdown(markdown, width, everforestMarkdownStyle(), m.styles.assistant)
+}
+
+func (m *chatModel) renderThinkingMarkdown(markdown string, width int) string {
+	return m.renderStyledMarkdown(markdown, width, everforestThinkingMarkdownStyle(), m.styles.thinking)
+}
+
+func (m *chatModel) renderStyledMarkdown(markdown string, width int, style ansi.StyleConfig, fallback lipgloss.Style) string {
 	markdown = normalizeMarkdownMath(markdown)
 	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(everforestMarkdownStyle()),
+		glamour.WithStyles(style),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
-		return m.styles.assistant.Width(width).Render(markdown)
+		return fallback.Width(width).Render(markdown)
 	}
 	output, err := renderer.Render(markdown)
 	if err != nil {
-		return m.styles.assistant.Width(width).Render(markdown)
+		return fallback.Width(width).Render(markdown)
 	}
 	return output
 }
@@ -1988,6 +1997,27 @@ func toolResultDisplay(result *store.ToolResultRecord) string {
 }
 
 func transcriptToolResultDisplay(name, status, output, resultErr string) string {
+	if name == string(contracts.BashTool) && resultErr == "" {
+		var result struct {
+			ExitCode  int    `json:"exit_code"`
+			Output    string `json:"output"`
+			Truncated bool   `json:"truncated"`
+			TimedOut  bool   `json:"timed_out"`
+		}
+		if json.Unmarshal([]byte(output), &result) == nil {
+			summary := fmt.Sprintf("%s · exit %d", status, result.ExitCode)
+			if result.TimedOut {
+				summary += " · timed out"
+			}
+			if result.Truncated {
+				summary += " · output truncated"
+			}
+			if result.Output != "" {
+				return summary + "\n" + result.Output
+			}
+			return summary
+		}
+	}
 	if name != string(contracts.ReadTool) || status != string(contracts.ToolExecutionSuccess) || resultErr != "" {
 		return toolResultDisplay(&store.ToolResultRecord{Status: status, Output: output, Error: resultErr})
 	}

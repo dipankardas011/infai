@@ -162,6 +162,25 @@ func TestTranscriptPreservesUnicodeAndMarkdown(t *testing.T) {
 	}
 }
 
+func TestTranscriptRendersThinkingMarkdown(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.blocks = []block{{role: "thinking", text: "## Plan\n\nUse **careful reasoning**.\n\n- inspect\n- verify"}}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 48, Height: 16})
+
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"Plan", "careful reasoning", "inspect", "verify"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("thinking view does not contain %q: %q", want, content)
+		}
+	}
+	for _, rawMarkdown := range []string{"**careful reasoning**"} {
+		if strings.Contains(content, rawMarkdown) {
+			t.Fatalf("thinking view contains unrendered Markdown %q: %q", rawMarkdown, content)
+		}
+	}
+}
+
 func TestTranscriptUsesCompactRoleMarkers(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
@@ -854,8 +873,12 @@ func TestReadToolResultSummaryPreservesErrors(t *testing.T) {
 	if got := transcriptToolResultDisplay("read", "error", "", "permission denied"); got != "error: permission denied" {
 		t.Fatalf("read error=%q want full error", got)
 	}
-	if got := transcriptToolResultDisplay("bash", "success", "full output", ""); got != "success\nfull output" {
-		t.Fatalf("non-read result=%q want full output", got)
+	bashOutput := `{"exit_code":7,"output":"full output\n","truncated":true}`
+	if got := transcriptToolResultDisplay("bash", "success", bashOutput, ""); got != "success · exit 7 · output truncated\nfull output\n" {
+		t.Fatalf("bash result=%q", got)
+	}
+	if got := transcriptToolResultDisplay("bash", "success", "legacy output", ""); got != "success\nlegacy output" {
+		t.Fatalf("legacy bash result=%q", got)
 	}
 }
 
