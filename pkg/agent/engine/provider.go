@@ -18,13 +18,8 @@ import (
 var (
 	ErrProviderNotLoggedIn = errors.New("provider is not logged in")
 	ErrProviderLoggedIn    = errors.New("provider is already logged in")
+	ErrProviderOperation   = errors.New("another provider operation is already running")
 )
-
-type providerAuthOperation struct {
-	providerID contracts.ProviderSlug
-	result     glue.LoginProviderOutput
-	cancel     context.CancelFunc
-}
 
 func (e *InfaiAgentEngine) ListAllProviderModels() []glue.ListModelOutput {
 	e.mu.Lock()
@@ -63,85 +58,58 @@ func (e *InfaiAgentEngine) ProviderAuthMethods(providerID contracts.ProviderSlug
 	return models.ProviderAuthMethods(providerID)
 }
 
-func (e *InfaiAgentEngine) LoginProvider(ctx context.Context, input glue.LoginProviderInput) (glue.LoginProviderOutput, error) {
+func (e *InfaiAgentEngine) LoginProvider(ctx context.Context, input glue.LoginProviderInput, onUpdate func(glue.LoginProviderOutput) error) error {
 	if input.Method == "" {
-		return glue.LoginProviderOutput{}, errors.New("auth method is required")
+		return errors.New("auth method is required")
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	if onUpdate == nil {
+		return errors.New("provider auth update callback is required")
+	}
+	if !e.providerOperationMu.TryLock() {
+		return ErrProviderOperation
+	}
+	defer e.providerOperationMu.Unlock()
+	loginCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
 
+	e.mu.Lock()
 	select {
 	case <-e.stopCh:
-		return glue.LoginProviderOutput{}, ErrEngineShuttingDown
+		e.mu.Unlock()
+		return ErrEngineShuttingDown
 	default:
 	}
 
 	providerName := string(input.ProviderID)
 	existing, exists := e.providers.Providers[providerName]
 	if exists && providerHasUsableAuth(existing) {
-		return glue.LoginProviderOutput{}, fmt.Errorf("%w: %q", ErrProviderLoggedIn, providerName)
+		e.mu.Unlock()
+		return fmt.Errorf("%w: %q", ErrProviderLoggedIn, providerName)
 	}
+	e.mu.Unlock()
 
-	if e.providerAuth != nil && e.providerAuth.result.Status == contracts.ProviderAuthPending {
-		return glue.LoginProviderOutput{}, fmt.Errorf("authentication for provider %q is already pending", e.providerAuth.providerID)
-	}
-
-	flowCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	state := &providerAuthOperation{
-		providerID: input.ProviderID,
-		result:     glue.LoginProviderOutput{Status: contracts.ProviderAuthPending},
-		cancel:     cancel,
-	}
-	e.providerAuth = state
-
-	authFlow, err := models.ProvisionProviderAuth(ctx, input.ProviderID, input.Method, input.Credential)
+	authFlow, err := models.ProvisionProviderAuth(loginCtx, input.ProviderID, input.Method, input.Credential)
 	if err != nil {
-		cancel()
-		state.result.Status = contracts.ProviderAuthFailed
-		state.result.Error = err.Error()
 		e.bgLogger.WarnContext(ctx, "provider authentication setup failed", "provider", input.ProviderID, "method", input.Method, "error", err)
-		return glue.LoginProviderOutput{}, err
+		return err
 	}
-	state.result.Challenge = authFlow.Challenge()
-	result := state.result
 	e.bgLogger.InfoContext(ctx, "provider authentication started", "provider", input.ProviderID, "method", input.Method)
-
-	go e.completeProviderLogin(flowCtx, state, authFlow)
-	return result, nil
-}
-
-func (e *InfaiAgentEngine) ProviderLoginStatus(providerID contracts.ProviderSlug) (glue.LoginProviderOutput, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.providerAuth == nil || e.providerAuth.providerID != providerID {
-		return glue.LoginProviderOutput{}, false
+	if err := onUpdate(glue.LoginProviderOutput{
+		Status: contracts.ProviderAuthPending, Challenge: authFlow.Challenge(),
+	}); err != nil {
+		return err
 	}
-	return e.providerAuth.result, true
-}
 
-func (e *InfaiAgentEngine) completeProviderLogin(ctx context.Context, state *providerAuthOperation, authFlow contracts.ProviderAuthFlow) {
-	defer state.cancel()
-	auth, err := authFlow.Complete(ctx)
+	auth, err := authFlow.Complete(loginCtx)
 	if err == nil {
-		err = e.persistManagedProvider(ctx, state.providerID, auth)
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	select {
-	case <-e.stopCh:
-		if err == nil {
-			err = ErrEngineShuttingDown
-		}
-	default:
+		err = e.persistManagedProvider(loginCtx, input.ProviderID, auth)
 	}
 	if err != nil {
-		state.result.Status = contracts.ProviderAuthFailed
-		state.result.Error = err.Error()
-		e.bgLogger.WarnContext(ctx, "provider authentication failed", "provider", state.providerID, "error", err)
-	} else {
-		state.result.Status = contracts.ProviderAuthComplete
-		e.bgLogger.InfoContext(ctx, "provider authentication completed", "provider", state.providerID)
+		e.bgLogger.WarnContext(ctx, "provider authentication failed", "provider", input.ProviderID, "error", err)
+		return err
 	}
+	e.bgLogger.InfoContext(ctx, "provider authentication completed", "provider", input.ProviderID)
+	return onUpdate(glue.LoginProviderOutput{Status: contracts.ProviderAuthComplete})
 }
 
 func (e *InfaiAgentEngine) persistManagedProvider(ctx context.Context, providerID contracts.ProviderSlug, auth contracts.LLMProviderAuth) error {
@@ -206,6 +174,8 @@ func (e *InfaiAgentEngine) LogoutProvider(input glue.LogoutProviderInput) error 
 		return fmt.Errorf("provider %q does not support managed logout", input.ProviderID)
 	}
 
+	e.providerOperationMu.Lock()
+	defer e.providerOperationMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	_, exists := e.providers.Providers[providerName]

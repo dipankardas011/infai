@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -23,8 +22,7 @@ import (
 type ProviderManagementClient interface {
 	ListAllProviderModels(context.Context) ([]glue.ListModelOutput, error)
 	ProviderAuthMethods(context.Context, contracts.ProviderSlug) ([]contracts.ProviderAuthMethod, error)
-	LoginProvider(context.Context, glue.LoginProviderInput) (*glue.LoginProviderOutput, error)
-	ProviderLoginStatus(context.Context, contracts.ProviderSlug) (*glue.LoginProviderOutput, error)
+	LoginProvider(context.Context, glue.LoginProviderInput, func(glue.LoginProviderOutput)) error
 	LogoutProvider(context.Context, contracts.ProviderSlug) error
 }
 
@@ -77,39 +75,21 @@ func RunProviderLogin(ctx context.Context, client ProviderManagementClient, in i
 			return err
 		}
 	}
-	result, err := client.LoginProvider(ctx, glue.LoginProviderInput{
+	err = client.LoginProvider(ctx, glue.LoginProviderInput{
 		ProviderID: providerID, Method: method.Method, Credential: credential,
-	})
-	if err != nil {
-		return err
-	}
-	if result.Challenge.VerificationURL != "" {
+	}, func(result glue.LoginProviderOutput) {
+		if result.Challenge.VerificationURL == "" {
+			return
+		}
 		styles := newHarnessStyles()
 		fmt.Fprintln(out, styles.screenBody.Render("Open this URL to authorize infaiw:"))
 		fmt.Fprintln(out, styles.active.Render(result.Challenge.VerificationURL))
 		if result.Challenge.UserCode != "" {
 			fmt.Fprintln(out, styles.screenBody.Render("Enter code: ")+styles.active.Render(result.Challenge.UserCode))
 		}
-	}
-	for result.Status == contracts.ProviderAuthPending {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
-		result, err = client.ProviderLoginStatus(ctx, providerID)
-		if err != nil {
-			return err
-		}
-	}
-	if result.Status == contracts.ProviderAuthFailed {
-		if result.Error == "" {
-			result.Error = "authentication failed"
-		}
-		return errors.New(result.Error)
-	}
-	if result.Status != contracts.ProviderAuthComplete {
-		return fmt.Errorf("provider authentication returned unknown status %q", result.Status)
+	})
+	if err != nil {
+		return err
 	}
 	fmt.Fprintln(out, lipgloss.NewStyle().Foreground(everforest.Green).Render("Logged in to "+string(providerID)))
 	return nil

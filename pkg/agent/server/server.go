@@ -36,7 +36,6 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	// providers
 	mux.HandleFunc("GET /v1/providers/{id}/auth-methods", s.handleProviderAuthMethods)
 	mux.HandleFunc("POST /v1/providers/login", s.handleProviderLogin)
-	mux.HandleFunc("GET /v1/providers/{id}/login", s.handleProviderLoginStatus)
 	mux.HandleFunc("POST /v1/providers/logout", s.handleProviderLogout)
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
 
@@ -143,25 +142,30 @@ func (s *Server) handleProviderLogin(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	output, err := s.engine.LoginProvider(r.Context(), input)
-	if err != nil {
-		if errors.Is(err, engine.ErrProviderLoggedIn) {
-			s.writeError(w, http.StatusConflict, err)
-			return
-		}
-		s.writeError(w, http.StatusBadRequest, err)
+	if _, ok := w.(http.Flusher); !ok {
+		s.writeError(w, http.StatusBadRequest, errors.New("streaming not supported"))
 		return
 	}
-	s.writeJSON(w, http.StatusAccepted, output)
-}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	s.flush(w)
 
-func (s *Server) handleProviderLoginStatus(w http.ResponseWriter, r *http.Request) {
-	output, ok := s.engine.ProviderLoginStatus(contracts.ProviderSlug(r.PathValue("id")))
-	if !ok {
-		s.writeError(w, http.StatusNotFound, errors.New("provider auth flow not found"))
+	err := s.engine.LoginProvider(r.Context(), input, func(output glue.LoginProviderOutput) error {
+		if err := s.writeSSE(w, output); err != nil {
+			return err
+		}
+		s.flush(w)
+		return nil
+	})
+	if err == nil || r.Context().Err() != nil {
 		return
 	}
-	s.writeJSON(w, http.StatusOK, output)
+	if writeErr := s.writeSSE(w, glue.LoginProviderOutput{Status: contracts.ProviderAuthFailed, Error: err.Error()}); writeErr != nil {
+		s.logger.Debug("provider login stream error event failed", "provider", input.ProviderID, "error", writeErr)
+	}
+	s.flush(w)
 }
 
 func (s *Server) handleProviderLogout(w http.ResponseWriter, r *http.Request) {

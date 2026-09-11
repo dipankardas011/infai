@@ -52,7 +52,7 @@ type InfaiAgentEngine struct {
 	mu     sync.Mutex
 	active map[uuid.UUID]*InfaiAgentSession
 
-	providerAuth *providerAuthOperation
+	providerOperationMu sync.Mutex
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -310,6 +310,8 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string
 
 func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess *InfaiAgentSession) error {
 	providerName := sess.Meta().Provider
+	e.providerOperationMu.Lock()
+	defer e.providerOperationMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -490,9 +492,6 @@ func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
 		close(e.stopCh)
 	})
 	e.mu.Lock()
-	if e.providerAuth != nil && e.providerAuth.result.Status == contracts.ProviderAuthPending {
-		e.providerAuth.cancel()
-	}
 	for id, sess := range e.active {
 		sess.close()
 		delete(e.active, id)
