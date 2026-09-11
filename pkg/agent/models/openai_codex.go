@@ -452,19 +452,26 @@ func (o *openAICodexResponsesAPI) send(ctx context.Context, body []byte) (*http.
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := o.client.Do(req)
 	if err != nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		return nil, fmt.Errorf("openai codex responses api: request failed: %w", err)
 	}
 	if resp.StatusCode == http.StatusOK {
+		// Generate consumes and closes successful streaming responses.
 		return resp, nil
 	}
 	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	_ = resp.Body.Close()
+	closeErr := resp.Body.Close()
 	statusErr := fmt.Errorf("openai codex responses api: status %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 	if readErr != nil {
 		statusErr = fmt.Errorf("%w: read response body: %v", statusErr, readErr)
+	}
+	if closeErr != nil {
+		statusErr = fmt.Errorf("%w: close response body: %v", statusErr, closeErr)
 	}
 	return nil, statusErr
 }

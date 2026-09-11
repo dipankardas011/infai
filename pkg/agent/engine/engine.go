@@ -300,7 +300,12 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string
 			return nil, err
 		}
 	}
-	return sess.Chat(ctx, prompt, opts)
+	result, err := sess.Chat(ctx, prompt, opts)
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		meta := sess.Meta()
+		e.bgLogger.ErrorContext(ctx, "session chat failed", "session_id", id, "provider", meta.Provider, "model", meta.Model, "error", err)
+	}
+	return result, err
 }
 
 func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess *InfaiAgentSession) error {
@@ -310,11 +315,11 @@ func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess 
 
 	provider, ok := e.providers.Providers[providerName]
 	if !ok {
-		e.mu.Unlock()
 		return ErrNoProvider
 	}
 	refreshed, changed, err := models.RefreshProviderAuth(ctx, provider.Id, provider.Auth)
 	if err != nil {
+		e.bgLogger.WarnContext(ctx, "provider credential refresh failed", "provider", providerName, "error", err)
 		return err
 	}
 	if !changed {
@@ -324,10 +329,12 @@ func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess 
 	provider.Auth = refreshed
 	candidate := providersWith(e.providers, providerName, provider)
 	if err := store.PersistProviders(candidate); err != nil {
+		e.bgLogger.ErrorContext(ctx, "persist refreshed provider credentials", "provider", providerName, "error", err)
 		return fmt.Errorf("persist refreshed provider credentials: %w", err)
 	}
 
 	e.providers = candidate
+	e.bgLogger.InfoContext(ctx, "provider credentials refreshed", "provider", providerName)
 
 	return sess.setProviderAuth(providerName, refreshed)
 }

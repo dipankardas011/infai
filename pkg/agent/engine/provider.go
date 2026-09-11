@@ -99,10 +99,12 @@ func (e *InfaiAgentEngine) LoginProvider(ctx context.Context, input glue.LoginPr
 		cancel()
 		state.result.Status = contracts.ProviderAuthFailed
 		state.result.Error = err.Error()
+		e.bgLogger.WarnContext(ctx, "provider authentication setup failed", "provider", input.ProviderID, "method", input.Method, "error", err)
 		return glue.LoginProviderOutput{}, err
 	}
 	state.result.Challenge = authFlow.Challenge()
 	result := state.result
+	e.bgLogger.InfoContext(ctx, "provider authentication started", "provider", input.ProviderID, "method", input.Method)
 
 	go e.completeProviderLogin(flowCtx, state, authFlow)
 	return result, nil
@@ -135,8 +137,10 @@ func (e *InfaiAgentEngine) completeProviderLogin(ctx context.Context, state *pro
 	if err != nil {
 		state.result.Status = contracts.ProviderAuthFailed
 		state.result.Error = err.Error()
+		e.bgLogger.WarnContext(ctx, "provider authentication failed", "provider", state.providerID, "error", err)
 	} else {
 		state.result.Status = contracts.ProviderAuthComplete
+		e.bgLogger.InfoContext(ctx, "provider authentication completed", "provider", state.providerID)
 	}
 }
 
@@ -218,6 +222,7 @@ func (e *InfaiAgentEngine) LogoutProvider(input glue.LogoutProviderInput) error 
 		return err
 	}
 	e.providers = candidate
+	e.bgLogger.Info("provider logged out", "provider", input.ProviderID)
 	return nil
 }
 
