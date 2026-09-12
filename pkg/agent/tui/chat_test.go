@@ -162,6 +162,113 @@ func TestTranscriptPreservesUnicodeAndMarkdown(t *testing.T) {
 	}
 }
 
+func TestTranscriptRendersThinkingMarkdown(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.blocks = []block{{role: "thinking", text: "## Plan\n\nUse **careful reasoning**.\n\n- inspect\n- verify"}}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 48, Height: 16})
+
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"Plan", "careful reasoning", "inspect", "verify"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("thinking view does not contain %q: %q", want, content)
+		}
+	}
+	for _, rawMarkdown := range []string{"**careful reasoning**"} {
+		if strings.Contains(content, rawMarkdown) {
+			t.Fatalf("thinking view contains unrendered Markdown %q: %q", rawMarkdown, content)
+		}
+	}
+}
+
+func TestStreamingBlocksRenderMarkdownOnlyWhenComplete(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+
+	m.appendDelta(contracts.DeltaReasoning, "Use **careful reasoning**.")
+	m.refreshTranscript(true)
+	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "**careful reasoning**") {
+		t.Fatalf("active thinking block was rendered as Markdown: %q", content)
+	}
+	if m.blocks[0].renderedValid {
+		t.Fatal("active thinking block was cached before completion")
+	}
+
+	m.appendDelta(contracts.DeltaContent, "Final **answer**.")
+	m.refreshTranscript(true)
+	content := ansi.Strip(m.viewport.View())
+	if strings.Contains(content, "**careful reasoning**") {
+		t.Fatalf("completed thinking block was not rendered as Markdown: %q", content)
+	}
+	if !strings.Contains(content, "Final **answer**.") {
+		t.Fatalf("active assistant block was rendered as Markdown: %q", content)
+	}
+	if !m.blocks[0].renderedValid || m.blocks[1].renderedValid {
+		t.Fatalf("render cache state = thinking %v, assistant %v", m.blocks[0].renderedValid, m.blocks[1].renderedValid)
+	}
+
+	cachedThinking := m.blocks[0].rendered
+	m.appendDelta(contracts.DeltaContent, " More text.")
+	m.refreshTranscript(true)
+	if m.blocks[0].rendered != cachedThinking {
+		t.Fatal("completed thinking block was rendered again during assistant streaming")
+	}
+
+	_, _ = m.Update(turnDoneMsg{})
+	content = ansi.Strip(m.viewport.View())
+	if strings.Contains(content, "**answer**") || !m.blocks[1].renderedValid {
+		t.Fatalf("assistant block was not finalized as Markdown: %q", content)
+	}
+}
+
+func TestStreamingTranscriptRefreshesOncePerInterval(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.working = true
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+
+	_, cmd := m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: "first "})
+	if cmd == nil || !m.streamTick {
+		t.Fatal("first stream delta did not start the refresh interval")
+	}
+	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "first") {
+		t.Fatalf("first stream delta was not displayed immediately: %q", content)
+	}
+
+	_, _ = m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: "second"})
+	if content := ansi.Strip(m.viewport.View()); strings.Contains(content, "second") {
+		t.Fatalf("subsequent delta refreshed before the interval: %q", content)
+	}
+	if !strings.Contains(m.blocks[0].text, "second") {
+		t.Fatal("subsequent delta was not retained while awaiting refresh")
+	}
+
+	tickID := m.streamTickID
+	_, cmd = m.Update(streamRefreshTickMsg{id: tickID})
+	if cmd == nil {
+		t.Fatal("active stream refresh interval was not continued")
+	}
+	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "first second") {
+		t.Fatalf("pending stream content was not displayed on interval: %q", content)
+	}
+
+	_, _ = m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: " resized"})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 61, Height: 20})
+	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "resized") {
+		t.Fatalf("resize did not display pending stream content: %q", content)
+	}
+
+	_, _ = m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: " complete"})
+	_, _ = m.Update(turnDoneMsg{})
+	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "complete") {
+		t.Fatalf("turn completion did not display pending stream content: %q", content)
+	}
+	if m.streamTick || m.streamDirty {
+		t.Fatal("turn completion left the stream refresh interval active")
+	}
+}
+
 func TestTranscriptUsesCompactRoleMarkers(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
@@ -394,9 +501,12 @@ func TestWorkingTurnDoesNotQueueInputOrOpenSessions(t *testing.T) {
 	_, _ = m.Update(tea.PasteMsg{Content: "queued"})
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
 	escape := tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
-	_, _ = m.Update(escape)
+	_, cmd := m.Update(escape)
 	if turnCtx.Err() != nil {
 		t.Fatal("first escape canceled the working turn")
+	}
+	if cmd == nil || !m.cancelArmed {
+		t.Fatal("first escape did not arm cancellation timeout")
 	}
 	_, _ = m.Update(escape)
 	if !errors.Is(turnCtx.Err(), context.Canceled) {
@@ -408,6 +518,36 @@ func TestWorkingTurnDoesNotQueueInputOrOpenSessions(t *testing.T) {
 	}
 	if m.modal != nil {
 		t.Fatal("working turn opened the session workspace")
+	}
+}
+
+func TestWorkingTurnCancelArmExpires(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.working = true
+	m.workStatus = "working"
+	turnCtx, cancel := context.WithCancel(context.Background())
+	m.turnCancel = cancel
+	t.Cleanup(cancel)
+
+	escape := tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
+	_, _ = m.Update(escape)
+	armID := m.cancelArmID
+	_, _ = m.Update(cancelArmTimeoutMsg{id: armID})
+	if m.cancelArmed {
+		t.Fatal("escape cancellation remained armed after timeout")
+	}
+	if m.workStatus != "working" {
+		t.Fatalf("work status after timeout = %q, want working", m.workStatus)
+	}
+
+	_, _ = m.Update(escape)
+	if turnCtx.Err() != nil {
+		t.Fatal("escape after timeout acted as the second escape")
+	}
+	_, _ = m.Update(cancelArmTimeoutMsg{id: armID})
+	if !m.cancelArmed {
+		t.Fatal("stale timeout disarmed a newer escape sequence")
 	}
 }
 
@@ -628,14 +768,45 @@ func TestApprovalToolCallFormatting(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			title, body := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: string(tt.tool), Arguments: tt.arguments}})
-			formatted := title + "\n" + body
+			title, body, script := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: string(tt.tool), Arguments: tt.arguments}})
+			formatted := title + "\n" + body + "\n" + script
 			for _, want := range tt.want {
 				if !strings.Contains(formatted, want) {
 					t.Fatalf("formatted approval lacks %q: %q", want, formatted)
 				}
 			}
 		})
+	}
+}
+
+func TestApprovalModalRendersBashAsCode(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{
+		Name:      string(contracts.BashTool),
+		Arguments: `{"command":"if test -f go.mod; then\n  go test ./...\nfi","workdir":"."}`,
+	}}})
+
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"BASH TOOL CALL", "SCRIPT", "if test -f go.mod; then", "go test ./...", "fi"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("bash approval modal lacks %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "```bash") {
+		t.Fatalf("bash approval modal exposes Markdown fence:\n%s", content)
+	}
+
+	highlighted := renderApprovalScript("nvidia-smi", 40, newHarnessStyles())
+	if !strings.Contains(highlighted, "\x1b[48;2;46;56;60m") {
+		t.Fatalf("bash approval script does not use modal surface background: %q", highlighted)
+	}
+	if strings.Contains(highlighted, "\x1b[48;2;39;46;51m") {
+		t.Fatalf("bash approval script uses app background: %q", highlighted)
+	}
+	if got := strings.TrimSpace(ansi.Strip(highlighted)); got != "nvidia-smi" {
+		t.Fatalf("bash approval script=%q", got)
 	}
 }
 
@@ -854,15 +1025,62 @@ func TestReadToolResultSummaryPreservesErrors(t *testing.T) {
 	if got := transcriptToolResultDisplay("read", "error", "", "permission denied"); got != "error: permission denied" {
 		t.Fatalf("read error=%q want full error", got)
 	}
-	if got := transcriptToolResultDisplay("bash", "success", "full output", ""); got != "success\nfull output" {
-		t.Fatalf("non-read result=%q want full output", got)
+	bashOutput := `{"exit_code":7,"output":"full output\n","truncated":true}`
+	if got := transcriptToolResultDisplay("bash", "success", bashOutput, ""); got != "success · exit 7 · output truncated\nfull output\n" {
+		t.Fatalf("bash result=%q", got)
+	}
+	if got := transcriptToolResultDisplay("bash", "success", "legacy output", ""); got != "success\nlegacy output" {
+		t.Fatalf("legacy bash result=%q", got)
+	}
+}
+
+func TestLiveAndResumedBashResultsMatch(t *testing.T) {
+	payload := `{"exit_code":7,"output":"full output\n","truncated":true}`
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.appendDelta(contracts.DeltaToolResult, "bash [success]\n"+payload)
+	if len(m.blocks) != 1 {
+		t.Fatalf("live blocks=%d", len(m.blocks))
+	}
+
+	call := contracts.ToolCall{ID: "call-1", Type: "function", Function: contracts.Function{Name: string(contracts.BashTool)}}
+	toolMessage := contracts.NewToolMessage(call.ID, payload, contracts.ToolExecutionSuccess)
+	resumed := blocksFromRecords([]store.Record{
+		{Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}}},
+		{Kind: store.KindMessage, Message: &toolMessage},
+	})
+	if len(resumed) != 2 {
+		t.Fatalf("resumed blocks=%d", len(resumed))
+	}
+	if m.blocks[0].text != resumed[1].text {
+		t.Fatalf("live result %q != resumed result %q", m.blocks[0].text, resumed[1].text)
+	}
+	if !strings.Contains(m.blocks[0].text, "full output") {
+		t.Fatalf("live result omits bash output: %q", m.blocks[0].text)
+	}
+}
+
+func TestDiffRowsCarrySyntaxColors(t *testing.T) {
+	rows := editDiffRows("main.go", "return oldValue\n", "return newValue\n")
+	if len(rows) == 0 {
+		t.Fatal("edit diff produced no rows")
+	}
+	colored := false
+	for _, row := range rows {
+		for _, segment := range row.segments {
+			if segment.fg != nil && !segment.emph {
+				colored = true
+			}
+		}
+	}
+	if !colored {
+		t.Fatal("edit diff rows carry no syntax colors")
 	}
 }
 
 func TestCycleThinking(t *testing.T) {
 	m := &chatModel{availableThinking: []contracts.InfaiThinkingLevel{contracts.ThinkingOff, contracts.ThinkingLow, contracts.ThinkingHigh}}
 
-	for _, want := range []contracts.InfaiThinkingLevel{contracts.ThinkingOff, contracts.ThinkingLow, contracts.ThinkingHigh, ""} {
+	for _, want := range []contracts.InfaiThinkingLevel{contracts.ThinkingOff, contracts.ThinkingLow, contracts.ThinkingHigh, contracts.ThinkingOff} {
 		m.cycleThinking()
 		if got := m.thinking; got != want {
 			t.Fatalf("cycleThinking() = %q, want %q", got, want)

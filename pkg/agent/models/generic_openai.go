@@ -78,7 +78,8 @@ func (o *genericOpenAICompatableAPI) GetModelSpecs() contracts.ProvisionedModel 
 func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) (contracts.ChatMessage, *contracts.TokenUsage, error) {
 	wireMessages := append([]contracts.ChatMessage(nil), messages...)
 	for i := range wireMessages {
-		wireMessages[i].Status = "" // NOTE: to avoid sending the status as openai api doesn't have one.
+		wireMessages[i].Status = ""             // NOTE: to avoid sending the status as openai api doesn't have one.
+		wireMessages[i].ReasoningSignature = "" // Provider-specific replay metadata is not part of Chat Completions.
 	}
 	reqBody := openAIChatRequest{
 		Model:       o.b.Model().Id,
@@ -150,10 +151,10 @@ func (o *genericOpenAICompatableAPI) sendChatRequest(ctx context.Context, body [
 		switch auth.Method {
 		case contracts.NoneAuth:
 		case contracts.APIKey:
-			if auth.BearerToken == nil || strings.TrimSpace(*auth.BearerToken) == "" {
+			if strings.TrimSpace(auth.BearerToken) == "" {
 				return nil, errors.New("openai compatible api: API key is required")
 			}
-			req.Header.Set("Authorization", "Bearer "+*auth.BearerToken)
+			req.Header.Set("Authorization", "Bearer "+auth.BearerToken)
 		default:
 			return nil, fmt.Errorf("openai compatible api: unsupported auth method %q", auth.Method)
 		}

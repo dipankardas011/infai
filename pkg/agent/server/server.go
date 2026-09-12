@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/engine"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
@@ -33,6 +34,7 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	}
 
 	// providers
+	mux.HandleFunc("GET /v1/providers/{id}/auth-methods", s.handleProviderAuthMethods)
 	mux.HandleFunc("POST /v1/providers/login", s.handleProviderLogin)
 	mux.HandleFunc("POST /v1/providers/logout", s.handleProviderLogout)
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
@@ -125,21 +127,45 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 // ---- providers ----
 
+func (s *Server) handleProviderAuthMethods(w http.ResponseWriter, r *http.Request) {
+	methods, err := s.engine.ProviderAuthMethods(contracts.ProviderSlug(r.PathValue("id")))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, methods)
+}
+
 func (s *Server) handleProviderLogin(w http.ResponseWriter, r *http.Request) {
 	var input glue.LoginProviderInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.engine.LoginProvider(r.Context(), input); err != nil {
-		if errors.Is(err, engine.ErrProviderLoggedIn) {
-			s.writeError(w, http.StatusConflict, err)
-			return
-		}
-		s.writeError(w, http.StatusBadRequest, err)
+	if _, ok := w.(http.Flusher); !ok {
+		s.writeError(w, http.StatusBadRequest, errors.New("streaming not supported"))
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	s.flush(w)
+
+	err := s.engine.LoginProvider(r.Context(), input, func(output glue.LoginProviderOutput) error {
+		if err := s.writeSSE(w, output); err != nil {
+			return err
+		}
+		s.flush(w)
+		return nil
+	})
+	if err == nil || r.Context().Err() != nil {
+		return
+	}
+	if writeErr := s.writeSSE(w, glue.LoginProviderOutput{Status: contracts.ProviderAuthFailed, Error: err.Error()}); writeErr != nil {
+		s.logger.Debug("provider login stream error event failed", "provider", input.ProviderID, "error", writeErr)
+	}
+	s.flush(w)
 }
 
 func (s *Server) handleProviderLogout(w http.ResponseWriter, r *http.Request) {

@@ -244,8 +244,75 @@ func (c *RemoteClient) ListAllProviderModels(ctx context.Context) ([]glue.ListMo
 	return out, nil
 }
 
-func (c *RemoteClient) LoginProvider(ctx context.Context, providerID contracts.ProviderSlug) error {
-	return c.providerAction(ctx, "/v1/providers/login", glue.LoginProviderInput{ProviderID: providerID})
+func (c *RemoteClient) ProviderAuthMethods(ctx context.Context, providerID contracts.ProviderSlug) ([]contracts.ProviderAuthMethod, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/providers/"+string(providerID)+"/auth-methods", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+	var methods []contracts.ProviderAuthMethod
+	if err := json.NewDecoder(resp.Body).Decode(&methods); err != nil {
+		return nil, err
+	}
+	return methods, nil
+}
+
+func (c *RemoteClient) LoginProvider(ctx context.Context, input glue.LoginProviderInput, onUpdate func(glue.LoginProviderOutput)) error {
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/providers/login", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return readAPIError(resp)
+	}
+
+	dec := models.NewDecoder(resp.Body)
+	for {
+		event, err := dec.Decode()
+		if err == io.EOF {
+			return io.ErrUnexpectedEOF
+		}
+		if err != nil {
+			return err
+		}
+		var output glue.LoginProviderOutput
+		if err := json.Unmarshal([]byte(event.Data), &output); err != nil {
+			return err
+		}
+		if onUpdate != nil {
+			onUpdate(output)
+		}
+		switch output.Status {
+		case contracts.ProviderAuthComplete:
+			return nil
+		case contracts.ProviderAuthFailed:
+			if output.Error == "" {
+				output.Error = "authentication failed"
+			}
+			return errors.New(output.Error)
+		case contracts.ProviderAuthPending:
+		default:
+			return fmt.Errorf("provider authentication returned unknown status %q", output.Status)
+		}
+	}
 }
 
 func (c *RemoteClient) LogoutProvider(ctx context.Context, providerID contracts.ProviderSlug) error {

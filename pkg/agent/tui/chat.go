@@ -17,7 +17,10 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
+	"charm.land/glamour/v2/ansi"
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/aymanbagabas/go-udiff"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
@@ -27,13 +30,16 @@ import (
 )
 
 type block struct {
-	role       string
-	text       string
-	toolKind   string
-	toolStatus string
-	toolName   string
-	toolArgs   string
-	skillName  string
+	role          string
+	text          string
+	toolKind      string
+	toolStatus    string
+	toolName      string
+	toolArgs      string
+	skillName     string
+	rendered      string
+	renderedWidth int
+	renderedValid bool
 }
 
 type chatModel struct {
@@ -58,13 +64,20 @@ type chatModel struct {
 	commandMenu      bool
 	commandSelection int
 
-	working     bool
-	workBegan   time.Time
-	workStatus  string
-	cancelArmed bool
-	turnCancel  context.CancelFunc
-	stream      chan tea.Msg
-	initCmd     tea.Cmd
+	working      bool
+	workBegan    time.Time
+	workStatus   string
+	cancelArmed  bool
+	cancelArmID  uint64
+	cancelStatus string
+	turnCancel   context.CancelFunc
+	stream       chan tea.Msg
+	initCmd      tea.Cmd
+	streaming    bool
+	streamingAt  int
+	streamTick   bool
+	streamTickID uint64
+	streamDirty  bool
 }
 
 type streamDeltaMsg struct {
@@ -119,6 +132,11 @@ type renamedMsg struct {
 	err  error
 }
 type animationTickMsg struct{}
+type cancelArmTimeoutMsg struct{ id uint64 }
+type streamRefreshTickMsg struct{ id uint64 }
+
+const cancelArmTimeout = 10 * time.Second
+const streamRefreshInterval = time.Second
 
 func runChatTUI(ctx context.Context, client Client, sessions []contracts.SessionSummary, opts RunOptions, in io.Reader, out io.Writer) error {
 	runCtx, cancel := context.WithCancel(ctx)
@@ -178,28 +196,51 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.scrollApproval(0)
 		m.reflow(true)
+		m.streamDirty = false
 		return m, nil
 	case streamDeltaMsg:
 		if msg.kind == contracts.DeltaStatus {
-			m.workStatus = statusLabel(msg.text)
+			status := statusLabel(msg.text)
+			if m.cancelArmed {
+				m.cancelStatus = status
+			} else {
+				m.workStatus = status
+			}
 		} else if msg.kind == contracts.DeltaTaskChecklist {
 			if state, err := decodeTaskChecklist(msg.text); err == nil {
 				m.checklist = state
 			}
 		}
+		wasStreaming, wasStreamingAt := m.streaming, m.streamingAt
 		m.appendDelta(msg.kind, msg.text)
-		m.refreshTranscript(true)
-		return m, waitStream(m.ctx, m.stream)
+		wait := waitStream(m.ctx, m.stream)
+		if msg.kind == contracts.DeltaContent || msg.kind == contracts.DeltaReasoning {
+			if !wasStreaming || wasStreamingAt != m.streamingAt || !m.streamTick {
+				m.stopStreamRefresh()
+				m.refreshTranscript(true)
+				return m, tea.Batch(wait, m.startStreamRefresh())
+			}
+			m.streamDirty = true
+			return m, wait
+		}
+		if msg.kind != contracts.DeltaTaskChecklist {
+			m.stopStreamRefresh()
+			m.refreshTranscript(true)
+		}
+		return m, wait
 	case streamApprovalMsg:
 		m.handleApprovalUpdate(msg.update)
 		return m, waitStream(m.ctx, m.stream)
 	case turnDoneMsg:
+		m.stopStreamRefresh()
 		if m.turnCancel != nil {
 			m.turnCancel()
 			m.turnCancel = nil
 		}
 		m.working = false
+		m.streaming = false
 		m.cancelArmed = false
+		m.cancelStatus = ""
 		m.workStatus = ""
 		if errors.Is(msg.err, context.Canceled) || msg.reply != nil && msg.reply.Status == "canceled" {
 			m.appendDelta(contracts.DeltaStatus, "generation canceled")
@@ -330,6 +371,25 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, animationTickCmd()
 		}
 		return m, nil
+	case cancelArmTimeoutMsg:
+		if m.cancelArmed && msg.id == m.cancelArmID {
+			m.cancelArmed = false
+			m.workStatus = m.cancelStatus
+			m.cancelStatus = ""
+			m.reflow(false)
+		}
+		return m, nil
+	case streamRefreshTickMsg:
+		if !m.streamTick || msg.id != m.streamTickID {
+			return m, nil
+		}
+		if !m.streamDirty {
+			m.streamTick = false
+			return m, nil
+		}
+		m.streamDirty = false
+		m.refreshTranscript(true)
+		return m, streamRefreshTickCmd(msg.id)
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.PasteMsg:
@@ -382,8 +442,14 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.working && key == "esc" {
 		if !m.cancelArmed {
 			m.cancelArmed = true
+			m.cancelArmID++
+			m.cancelStatus = m.workStatus
 			m.workStatus = "press esc again to cancel"
+			m.reflow(false)
+			return m, cancelArmTimeoutCmd(m.cancelArmID)
 		} else if m.turnCancel != nil {
+			m.cancelArmed = false
+			m.cancelStatus = ""
 			m.workStatus = "canceling"
 			m.turnCancel()
 		}
@@ -493,8 +559,6 @@ func (m *chatModel) cycleThinking() {
 		}
 		if i+1 < len(m.availableThinking) {
 			next = m.availableThinking[i+1]
-		} else {
-			next = ""
 		}
 		break
 	}
@@ -898,40 +962,16 @@ func (m *chatModel) refreshTranscript(follow bool) {
 func (m *chatModel) renderTranscript() string {
 	width := max(m.viewport.Width()-m.viewport.Style.GetHorizontalFrameSize(), 1)
 	var rendered []string
-	for _, entry := range m.blocks {
-		var content string
-		switch entry.role {
-		case "user":
-			content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, entry.text, width)
-		case "assistant":
-			content = renderChatMarker("●", m.styles.active, lipgloss.NewStyle(), m.renderMarkdown(entry.text, max(width-2, 1)), width)
-		case "thinking":
-			content = renderChatMarker("◌", m.styles.muted, m.styles.thinking, entry.text, width)
-		case "error":
-			content = m.styles.error.Width(width).Render("ERROR  " + entry.text)
-		case "system", "status":
-			content = m.styles.system.Width(width).Render("· " + entry.text)
-		case "compaction":
-			content = m.styles.thinking.Width(width).Render("CONTEXT COMPACTED\n" + entry.text)
-		case "skill":
-			content = renderChatMarker("✦", m.styles.skill, m.styles.skill, entry.text, width)
-		case "tool":
-			marker := "▲"
-			markerStyle := m.styles.system
-			if entry.toolKind == "result" {
-				marker = "▼"
-				markerStyle = m.styles.active
-				if entry.toolStatus != "success" {
-					markerStyle = m.styles.error
-				}
-			}
-			switch {
-			case entry.toolKind == "call" && entry.toolName == string(contracts.EditTool) && entry.toolArgs != "":
-				content = renderEditDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
-			case entry.toolKind == "call" && entry.toolName == string(contracts.WriteTool) && entry.toolArgs != "":
-				content = renderWriteDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
-			default:
-				content = renderToolMarker(marker, markerStyle, m.styles.tool, entry.toolName, entry.text, width)
+	for i := range m.blocks {
+		entry := &m.blocks[i]
+		streaming := m.streaming && m.streamingAt == i
+		content := entry.rendered
+		if streaming || !entry.renderedValid || entry.renderedWidth != width {
+			content = m.renderBlock(entry, width, streaming)
+			if !streaming {
+				entry.rendered = content
+				entry.renderedWidth = width
+				entry.renderedValid = true
 			}
 		}
 		if strings.TrimSpace(content) != "" {
@@ -942,6 +982,53 @@ func (m *chatModel) renderTranscript() string {
 		return m.styles.muted.Render("\nStart with a question, a task, or / for commands.")
 	}
 	return strings.Join(rendered, "\n\n")
+}
+
+func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string {
+	var content string
+	switch entry.role {
+	case "user":
+		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, entry.text, width)
+	case "assistant":
+		text := entry.text
+		if !streaming {
+			text = m.renderMarkdown(text, max(width-2, 1))
+		}
+		content = renderChatMarker("●", m.styles.active, lipgloss.NewStyle(), text, width)
+	case "thinking":
+		text := entry.text
+		if !streaming {
+			text = m.renderThinkingMarkdown(text, max(width-2, 1))
+		}
+		content = renderChatMarker("◌", m.styles.muted, lipgloss.NewStyle(), text, width)
+	case "error":
+		content = m.styles.error.Width(width).Render("ERROR  " + entry.text)
+	case "system", "status":
+		content = m.styles.system.Width(width).Render("· " + entry.text)
+	case "compaction":
+		content = m.styles.thinking.Width(width).Render("CONTEXT COMPACTED\n" + entry.text)
+	case "skill":
+		content = renderChatMarker("✦", m.styles.skill, m.styles.skill, entry.text, width)
+	case "tool":
+		marker := "▲"
+		markerStyle := m.styles.system
+		if entry.toolKind == "result" {
+			marker = "▼"
+			markerStyle = m.styles.active
+			if entry.toolStatus != "success" {
+				markerStyle = m.styles.error
+			}
+		}
+		switch {
+		case entry.toolKind == "call" && entry.toolName == string(contracts.EditTool) && entry.toolArgs != "":
+			content = renderEditDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
+		case entry.toolKind == "call" && entry.toolName == string(contracts.WriteTool) && entry.toolArgs != "":
+			content = renderWriteDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
+		default:
+			content = renderToolMarker(marker, markerStyle, m.styles.tool, entry.toolName, entry.text, width)
+		}
+	}
+	return content
 }
 
 func renderChatMarker(marker string, markerStyle, bodyStyle lipgloss.Style, text string, width int) string {
@@ -1004,6 +1091,7 @@ func diffLineStyle(base lipgloss.Style, line string) lipgloss.Style {
 type diffSegment struct {
 	text string
 	emph bool
+	fg   color.Color
 }
 
 type diffRow struct {
@@ -1045,7 +1133,7 @@ func renderWriteDiffBlock(marker string, markerStyle lipgloss.Style, styles harn
 
 	header := markerStyle.Render(marker) + " " + markerStyle.Bold(true).Render(string(contracts.WriteTool)) + "  " + styles.tool.Render(path) +
 		styles.muted.Render(fmt.Sprintf("  (%d lines, %d bytes)", lineCount, byteCount))
-	return renderDiffBlock(header, marker, writeDiffRows(content), width, styles)
+	return renderDiffBlock(header, marker, writeDiffRows(path, content), width, styles)
 }
 
 func renderDiffBlock(header, marker string, rows []diffRow, width int, styles harnessStyles) string {
@@ -1099,10 +1187,11 @@ func decodeWriteArgs(args string) (path, content string, ok bool) {
 func editDiffRows(path, oldText, newText string) []diffRow {
 	rows := parseUnifiedRows(stripDiffNoNewline(udiff.Unified("a/"+path, "b/"+path, oldText, newText)))
 	emphasizeDiffRows(rows)
+	applyDiffSyntax(rows, path, oldText, newText)
 	return rows
 }
 
-func writeDiffRows(content string) []diffRow {
+func writeDiffRows(path, content string) []diffRow {
 	if content == "" {
 		return nil
 	}
@@ -1111,7 +1200,118 @@ func writeDiffRows(content string) []diffRow {
 	for i, line := range lines {
 		rows = append(rows, diffRow{newNum: i + 1, marker: '+', text: line})
 	}
+	applyDiffSyntax(rows, path, "", content)
 	return rows
+}
+
+func applyDiffSyntax(rows []diffRow, path, oldText, newText string) {
+	oldLines := highlightedSourceLines(path, oldText)
+	newLines := highlightedSourceLines(path, newText)
+	for i := range rows {
+		var syntax []diffSegment
+		switch rows[i].marker {
+		case '-':
+			syntax = sourceLine(oldLines, rows[i].oldNum)
+		case '+', ' ':
+			syntax = sourceLine(newLines, rows[i].newNum)
+		}
+		if len(syntax) > 0 {
+			rows[i].segments = mergeDiffEmphasis(rows[i].segments, syntax)
+		}
+	}
+}
+
+func sourceLine(lines [][]diffSegment, number int) []diffSegment {
+	if number <= 0 || number > len(lines) {
+		return nil
+	}
+	return lines[number-1]
+}
+
+func highlightedSourceLines(path, source string) [][]diffSegment {
+	lexer := lexers.Match(path)
+	if lexer == nil {
+		lexer = lexers.Analyse(source)
+	}
+	if lexer == nil {
+		return nil
+	}
+	iterator, err := chroma.Coalesce(lexer).Tokenise(nil, source)
+	if err != nil {
+		return nil
+	}
+	lines := make([][]diffSegment, 1, strings.Count(source, "\n")+1)
+	for token := iterator(); token != chroma.EOF; token = iterator() {
+		parts := strings.Split(token.Value, "\n")
+		for i, part := range parts {
+			if part != "" {
+				line := len(lines) - 1
+				lines[line] = append(lines[line], diffSegment{text: part, fg: syntaxTokenColor(token.Type)})
+			}
+			if i < len(parts)-1 {
+				lines = append(lines, nil)
+			}
+		}
+	}
+	return lines
+}
+
+func syntaxTokenColor(token chroma.TokenType) color.Color {
+	switch {
+	case token == chroma.NameBuiltin || token == chroma.NameBuiltinPseudo:
+		return everforest.Aqua
+	case token == chroma.NameFunction || token == chroma.NameFunctionMagic:
+		return everforest.Green
+	case token.InCategory(chroma.Comment):
+		return everforest.Muted
+	case token.InCategory(chroma.Keyword):
+		return everforest.Purple
+	case token.InSubCategory(chroma.LiteralString):
+		return everforest.Green
+	case token.InSubCategory(chroma.LiteralNumber):
+		return everforest.Purple
+	case token.InCategory(chroma.Operator):
+		return everforest.Red
+	case token.InCategory(chroma.Punctuation):
+		return everforest.Muted
+	default:
+		return everforest.Text
+	}
+}
+
+func mergeDiffEmphasis(emphasis, syntax []diffSegment) []diffSegment {
+	if len(emphasis) == 0 {
+		return syntax
+	}
+	flags := make([]bool, 0)
+	for _, segment := range emphasis {
+		for range segment.text {
+			flags = append(flags, segment.emph)
+		}
+	}
+	merged := make([]diffSegment, 0, len(syntax))
+	position := 0
+	for _, segment := range syntax {
+		for _, r := range segment.text {
+			emph := position < len(flags) && flags[position]
+			position++
+			if len(merged) > 0 && merged[len(merged)-1].emph == emph && sameColor(merged[len(merged)-1].fg, segment.fg) {
+				merged[len(merged)-1].text += string(r)
+			} else {
+				merged = append(merged, diffSegment{text: string(r), emph: emph, fg: segment.fg})
+			}
+		}
+	}
+	return merged
+}
+
+func sameColor(a, b color.Color) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	ar, ag, ab, aa := a.RGBA()
+	br, bg, bb, ba := b.RGBA()
+	return ar == br && ag == bg && ab == bb && aa == ba
 }
 
 func parseUnifiedRows(diff string) []diffRow {
@@ -1266,12 +1466,12 @@ func wrapDiffSegments(row diffRow, width int) [][]diffSegment {
 	visual := make([][]diffSegment, 0, 1)
 	current := make([]diffSegment, 0, len(row.segments))
 	currentWidth := 0
-	appendRune := func(r rune, emph bool) {
-		if len(current) > 0 && current[len(current)-1].emph == emph {
+	appendRune := func(r rune, emph bool, fg color.Color) {
+		if len(current) > 0 && current[len(current)-1].emph == emph && sameColor(current[len(current)-1].fg, fg) {
 			current[len(current)-1].text += string(r)
 			return
 		}
-		current = append(current, diffSegment{text: string(r), emph: emph})
+		current = append(current, diffSegment{text: string(r), emph: emph, fg: fg})
 	}
 	for _, segment := range row.segments {
 		for _, r := range segment.text {
@@ -1281,7 +1481,7 @@ func wrapDiffSegments(row diffRow, width int) [][]diffSegment {
 				current = make([]diffSegment, 0, len(row.segments))
 				currentWidth = 0
 			}
-			appendRune(r, segment.emph)
+			appendRune(r, segment.emph, segment.fg)
 			currentWidth += runeWidth
 		}
 	}
@@ -1319,8 +1519,11 @@ func renderDiffSegments(segments []diffSegment, fg, emphFg, bg color.Color, widt
 	used := 0
 	for _, segment := range segments {
 		style := base
-		if segment.emph {
+		switch {
+		case segment.emph:
 			style = emph
+		case segment.fg != nil:
+			style = lipgloss.NewStyle().Foreground(segment.fg).Background(bg)
 		}
 		b.WriteString(style.Render(segment.text))
 		used += lipgloss.Width(segment.text)
@@ -1332,17 +1535,25 @@ func renderDiffSegments(segments []diffSegment, fg, emphFg, bg color.Color, widt
 }
 
 func (m *chatModel) renderMarkdown(markdown string, width int) string {
+	return m.renderStyledMarkdown(markdown, width, everforestMarkdownStyle(), m.styles.assistant)
+}
+
+func (m *chatModel) renderThinkingMarkdown(markdown string, width int) string {
+	return m.renderStyledMarkdown(markdown, width, everforestThinkingMarkdownStyle(), m.styles.thinking)
+}
+
+func (m *chatModel) renderStyledMarkdown(markdown string, width int, style ansi.StyleConfig, fallback lipgloss.Style) string {
 	markdown = normalizeMarkdownMath(markdown)
 	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(everforestMarkdownStyle()),
+		glamour.WithStyles(style),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
-		return m.styles.assistant.Width(width).Render(markdown)
+		return fallback.Width(width).Render(markdown)
 	}
 	output, err := renderer.Render(markdown)
 	if err != nil {
-		return m.styles.assistant.Width(width).Render(markdown)
+		return fallback.Width(width).Render(markdown)
 	}
 	return output
 }
@@ -1354,6 +1565,26 @@ func spinnerFrame(start time.Time) string {
 
 func animationTickCmd() tea.Cmd {
 	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return animationTickMsg{} })
+}
+
+func cancelArmTimeoutCmd(id uint64) tea.Cmd {
+	return tea.Tick(cancelArmTimeout, func(time.Time) tea.Msg { return cancelArmTimeoutMsg{id: id} })
+}
+
+func (m *chatModel) startStreamRefresh() tea.Cmd {
+	m.streamTick = true
+	m.streamTickID++
+	return streamRefreshTickCmd(m.streamTickID)
+}
+
+func (m *chatModel) stopStreamRefresh() {
+	m.streamTick = false
+	m.streamDirty = false
+	m.streamTickID++
+}
+
+func streamRefreshTickCmd(id uint64) tea.Cmd {
+	return tea.Tick(streamRefreshInterval, func(time.Time) tea.Msg { return streamRefreshTickMsg{id: id} })
 }
 
 func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required bool) {
@@ -1399,16 +1630,17 @@ func (m *chatModel) showModels(models []glue.ListModelOutput, switching bool) {
 
 func (m *chatModel) showApproval(approval *Approval) {
 	title, body := "Approval required", approval.Message
+	script := ""
 	var diffRows []diffRow
 	if approval.ToolCall != nil {
-		title, body = formatApprovalToolCall(*approval.ToolCall)
+		title, body, script = formatApprovalToolCall(*approval.ToolCall)
 		if approval.Message != "" {
 			body = approval.Message + "\n\n" + body
 		}
 		diffRows = approvalDiffRows(*approval.ToolCall)
 	}
 	m.modal = &modalModel{
-		kind: modalApproval, title: title, body: body, diffRows: diffRows, required: true, approval: approval,
+		kind: modalApproval, title: title, body: body, script: script, diffRows: diffRows, required: true, approval: approval,
 		options: []modalOption{
 			{label: "Allow", shortcut: 'a', decision: "approve"},
 			{label: "Deny", shortcut: 'd', decision: "deny"},
@@ -1425,21 +1657,21 @@ func approvalDiffRows(call contracts.ToolCall) []diffRow {
 			return editDiffRows(path, oldText, newText)
 		}
 	case contracts.WriteTool:
-		if _, content, ok := decodeWriteArgs(call.Function.Arguments); ok {
-			return writeDiffRows(content)
+		if path, content, ok := decodeWriteArgs(call.Function.Arguments); ok {
+			return writeDiffRows(path, content)
 		}
 	}
 	return nil
 }
 
-func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
+func formatApprovalToolCall(call contracts.ToolCall) (string, string, string) {
 	switch contracts.ToolType(call.Function.Name) {
 	case contracts.ReadTool:
 		preview, ok := readToolCallPreview(call.Function.Arguments)
 		if !ok {
-			return "Read file", prettyToolArguments(call.Function.Arguments)
+			return "Read file", prettyToolArguments(call.Function.Arguments), ""
 		}
-		return "Read file", "SOURCE  " + preview
+		return "Read file", "SOURCE  " + preview, ""
 
 	case contracts.BashTool:
 		var args struct {
@@ -1448,7 +1680,7 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 			Timeout *int   `json:"timeout"`
 		}
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-			return "Bash tool call", prettyToolArguments(call.Function.Arguments)
+			return "Bash tool call", prettyToolArguments(call.Function.Arguments), ""
 		}
 		workdir := args.Workdir
 		if workdir == "" {
@@ -1458,13 +1690,13 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 		if args.Timeout != nil {
 			metadata = append(metadata, fmt.Sprintf("TIMEOUT            %d seconds", *args.Timeout))
 		}
-		metadata = append(metadata, "", "SCRIPT", args.Command)
-		return "Bash tool call", strings.Join(metadata, "\n")
+		metadata = append(metadata, "", "SCRIPT")
+		return "Bash tool call", strings.Join(metadata, "\n"), args.Command
 
 	case contracts.WriteTool:
 		path, content, ok := decodeWriteArgs(call.Function.Arguments)
 		if !ok {
-			return "Write file", prettyToolArguments(call.Function.Arguments)
+			return "Write file", prettyToolArguments(call.Function.Arguments), ""
 		}
 		lineCount := 0
 		if content != "" {
@@ -1472,21 +1704,21 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 		}
 		body := fmt.Sprintf("TARGET  %s\nEFFECT  Replace complete file contents\nSIZE    %d lines, %d bytes",
 			path, lineCount, len([]byte(content)))
-		return "Write file", body
+		return "Write file", body, ""
 
 	case contracts.EditTool:
 		path, _, _, replaceAll, ok := decodeEditArgs(call.Function.Arguments)
 		if !ok {
-			return "Edit file", prettyToolArguments(call.Function.Arguments)
+			return "Edit file", prettyToolArguments(call.Function.Arguments), ""
 		}
 		mode := "Replace first exact match"
 		if replaceAll {
 			mode = "Replace every exact match"
 		}
-		return "Edit file", fmt.Sprintf("TARGET  %s\nMODE    %s", path, mode)
+		return "Edit file", fmt.Sprintf("TARGET  %s\nMODE    %s", path, mode), ""
 	}
 
-	return strings.ReplaceAll(call.Function.Name, "_", " ") + " tool call", prettyToolArguments(call.Function.Arguments)
+	return strings.ReplaceAll(call.Function.Name, "_", " ") + " tool call", prettyToolArguments(call.Function.Arguments), ""
 }
 
 func prettyToolArguments(arguments string) string {
@@ -1689,42 +1921,46 @@ func (m *chatModel) appendDelta(kind contracts.DeltaKind, text string) {
 	case contracts.DeltaReasoning:
 		role = "thinking"
 	case contracts.DeltaStatus:
+		m.streaming = false
 		role, text = "status", statusLabel(text)
 	case contracts.DeltaCompactionSummary:
+		m.streaming = false
 		role = "compaction"
 	case contracts.DeltaToolCall:
+		m.streaming = false
 		m.appendToolEvent("call", text)
 		return
 	case contracts.DeltaToolResult:
+		m.streaming = false
 		m.appendToolEvent("result", text)
 		return
 	case contracts.DeltaSkillLoad:
+		m.streaming = false
 		m.blocks = append(m.blocks, block{role: "skill", text: text})
 		return
 	case contracts.DeltaTaskChecklist:
 		// Checklist state is rendered in the header, never as transcript text.
 		return
 	}
-	if len(m.blocks) > 0 && m.blocks[len(m.blocks)-1].role == role && role != "status" {
+	streaming := kind == contracts.DeltaContent || kind == contracts.DeltaReasoning
+	if streaming && m.streaming && m.streamingAt == len(m.blocks)-1 && m.blocks[m.streamingAt].role == role {
 		m.blocks[len(m.blocks)-1].text += text
 		return
 	}
 	if role == "status" && len(m.blocks) > 0 && m.blocks[len(m.blocks)-1].role == role {
-		m.blocks[len(m.blocks)-1].text = text
+		entry := &m.blocks[len(m.blocks)-1]
+		entry.text = text
+		entry.renderedValid = false
 		return
 	}
 	m.blocks = append(m.blocks, block{role: role, text: text})
+	if streaming {
+		m.streaming = true
+		m.streamingAt = len(m.blocks) - 1
+	}
 }
 
 func (m *chatModel) appendToolEvent(kind, text string) {
-	status := ""
-	if kind == "result" {
-		if strings.HasSuffix(text, "[success]") {
-			status = "success"
-		} else {
-			status = "error"
-		}
-	}
 	name := ""
 	if fields := strings.Fields(text); len(fields) > 0 {
 		name = fields[0]
@@ -1737,7 +1973,40 @@ func (m *chatModel) appendToolEvent(kind, text string) {
 		arguments = strings.TrimSpace(strings.TrimPrefix(text, name))
 		display = toolCallPreview(name, arguments)
 	}
+	status := ""
+	if kind == "result" {
+		if parsedName, parsedStatus, output, resultErr, ok := parseToolResultEvent(text); ok {
+			name, status = parsedName, parsedStatus
+			if output != "" || resultErr != "" {
+				display = transcriptToolResultDisplay(name, status, output, resultErr)
+			}
+		} else {
+			status = string(contracts.ToolExecutionError)
+		}
+	}
 	m.blocks = append(m.blocks, block{role: "tool", text: display, toolKind: kind, toolStatus: status, toolName: name, toolArgs: arguments})
+}
+
+func parseToolResultEvent(text string) (name, status, output, resultErr string, ok bool) {
+	header, rest, hasOutput := strings.Cut(text, "\n")
+	open := strings.Index(header, " [")
+	if open <= 0 {
+		return "", "", "", "", false
+	}
+	end := strings.IndexByte(header[open+2:], ']')
+	if end < 0 {
+		return "", "", "", "", false
+	}
+	end += open + 2
+	name = header[:open]
+	status = header[open+2 : end]
+	if tail := strings.TrimSpace(header[end+1:]); strings.HasPrefix(tail, ":") {
+		resultErr = strings.TrimSpace(strings.TrimPrefix(tail, ":"))
+	}
+	if hasOutput {
+		output = rest
+	}
+	return name, status, output, resultErr, true
 }
 
 func (m *chatModel) appendError(err error) {
@@ -1988,6 +2257,27 @@ func toolResultDisplay(result *store.ToolResultRecord) string {
 }
 
 func transcriptToolResultDisplay(name, status, output, resultErr string) string {
+	if name == string(contracts.BashTool) && resultErr == "" {
+		var result struct {
+			ExitCode  int    `json:"exit_code"`
+			Output    string `json:"output"`
+			Truncated bool   `json:"truncated"`
+			TimedOut  bool   `json:"timed_out"`
+		}
+		if json.Unmarshal([]byte(output), &result) == nil {
+			summary := fmt.Sprintf("%s · exit %d", status, result.ExitCode)
+			if result.TimedOut {
+				summary += " · timed out"
+			}
+			if result.Truncated {
+				summary += " · output truncated"
+			}
+			if result.Output != "" {
+				return summary + "\n" + result.Output
+			}
+			return summary
+		}
+	}
 	if name != string(contracts.ReadTool) || status != string(contracts.ToolExecutionSuccess) || resultErr != "" {
 		return toolResultDisplay(&store.ToolResultRecord{Status: status, Output: output, Error: resultErr})
 	}

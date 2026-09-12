@@ -129,7 +129,8 @@ const (
 type ProviderAPIType string
 
 const (
-	OpenAICompatableAPI ProviderAPIType = "openai-completions"
+	OpenAICompatableAPI     ProviderAPIType = "openai-completions"
+	OpenAICodexResponsesAPI ProviderAPIType = "openai-codex-responses"
 )
 
 type LLMSupportedModality string
@@ -156,16 +157,19 @@ type LLMProviderConfiguration struct {
 	Models       map[string]LLMModelConfiguration `json:"models"`
 }
 
+// LLMProviderAuth is the credential material persisted for a provider. Codex
+// uses the OAuth fields; API-key providers use BearerToken.
 type LLMProviderAuth struct {
 	Method LLMProviderAuthMethod `json:"method"`
 
-	// OAuth2
-	ClientId     *string    `json:"client_id,omitempty"`
-	ClientSecret *string    `json:"client_secret,omitempty"`
-	TTLToken     *time.Time `json:"ttl_token,omitempty"`
+	// Oauth2
+	AccessToken  string     `json:"access_token,omitempty"`
+	RefreshToken string     `json:"refresh_token,omitempty"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	AccountID    string     `json:"account_id,omitempty"`
 
-	// APIKey
-	BearerToken *string `json:"bearer_token,omitempty"`
+	// API Token
+	BearerToken string `json:"bearer_token,omitempty"`
 }
 
 type ThinkingLevels struct {

@@ -159,7 +159,6 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 			a.Status = Error
 			return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, fmt.Errorf("agent: turn %d: %w", turn, err)
 		}
-		messages = append(messages, reply)
 
 		if len(reply.ToolCalls) > 0 {
 			if a.comms == nil {
@@ -186,12 +185,13 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 			if err := json.Unmarshal(response.Payload, &toolMessages); err != nil {
 				return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, err
 			}
-			messages = append(messages, toolMessages...)
+			messages = append(messages, append([]contracts.ChatMessage{reply}, toolMessages...)...)
 
 			if a.shouldCompact != nil && a.shouldCompact(usage) {
 				return TurnResult{Status: TurnNeedsCompaction, Messages: messages, Usage: usage}, nil
 			}
 		} else {
+			messages = append(messages, reply)
 			// TODO: some evaluation Certira need to be there as a WithEval() like thing.
 			break
 		}

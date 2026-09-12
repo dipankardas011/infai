@@ -137,16 +137,32 @@ func everforestMarkdownStyle() ansi.StyleConfig {
 	blue := "#7fbbb3"
 	purple := "#d699b6"
 	red := "#e67e80"
+	orange := "#e69875"
 	yellow := "#dbbc7f"
 	surface := "#2e383c"
+	diffDelete := "#514045"
 
 	cfg.Document.Margin = &margin
 	cfg.Document.Color = &text
+	cfg.BlockQuote.Color = &muted
+	cfg.Paragraph.Color = &text
+	cfg.List.Color = &text
 	cfg.Heading.Color = &green
 	cfg.H1.Color = &yellow
 	cfg.H1.BackgroundColor = &surface
+	cfg.H2.Color = &green
+	cfg.H3.Color = &aqua
+	cfg.H4.Color = &blue
+	cfg.H5.Color = &purple
 	cfg.H6.Color = &aqua
+	cfg.Text.Color = &text
+	cfg.Strikethrough.Color = &muted
+	cfg.Emph.Color = &text
+	cfg.Strong.Color = &yellow
 	cfg.HorizontalRule.Color = &muted
+	cfg.Item.Color = &green
+	cfg.Enumeration.Color = &green
+	cfg.Task.Color = &green
 	cfg.Link.Color = &blue
 	cfg.LinkText.Color = &aqua
 	cfg.Image.Color = &purple
@@ -155,24 +171,95 @@ func everforestMarkdownStyle() ansi.StyleConfig {
 	cfg.Code.BackgroundColor = &surface
 	cfg.CodeBlock.Color = &text
 	cfg.CodeBlock.Margin = &margin
+	cfg.Table.Color = &text
+	cfg.DefinitionList.Color = &text
+	cfg.DefinitionTerm.Color = &yellow
+	cfg.DefinitionDescription.Color = &text
+	cfg.HTMLBlock.Color = &muted
+	cfg.HTMLSpan.Color = &muted
 	if cfg.CodeBlock.Chroma != nil {
-		cfg.CodeBlock.Chroma.Text.Color = &text
-		cfg.CodeBlock.Chroma.Comment.Color = &muted
-		cfg.CodeBlock.Chroma.Keyword.Color = &purple
-		cfg.CodeBlock.Chroma.KeywordReserved.Color = &purple
-		cfg.CodeBlock.Chroma.KeywordType.Color = &yellow
-		cfg.CodeBlock.Chroma.Operator.Color = &red
-		cfg.CodeBlock.Chroma.Punctuation.Color = &muted
-		cfg.CodeBlock.Chroma.Name.Color = &text
-		cfg.CodeBlock.Chroma.NameBuiltin.Color = &aqua
-		cfg.CodeBlock.Chroma.NameFunction.Color = &green
-		cfg.CodeBlock.Chroma.LiteralNumber.Color = &purple
-		cfg.CodeBlock.Chroma.LiteralString.Color = &green
-		cfg.CodeBlock.Chroma.GenericDeleted.Color = &red
-		cfg.CodeBlock.Chroma.GenericInserted.Color = &green
-		cfg.CodeBlock.Chroma.Background.BackgroundColor = &surface
+		chroma := cfg.CodeBlock.Chroma
+		chroma.Text.Color = &text
+		chroma.Error.Color = &red
+		chroma.Error.BackgroundColor = &diffDelete
+		chroma.Comment.Color = &muted
+		chroma.CommentPreproc.Color = &orange
+		chroma.Keyword.Color = &purple
+		chroma.KeywordReserved.Color = &red
+		chroma.KeywordNamespace.Color = &aqua
+		chroma.KeywordType.Color = &yellow
+		chroma.Operator.Color = &orange
+		chroma.Punctuation.Color = &muted
+		chroma.Name.Color = &text
+		chroma.NameBuiltin.Color = &aqua
+		chroma.NameTag.Color = &red
+		chroma.NameAttribute.Color = &yellow
+		chroma.NameClass.Color = &yellow
+		chroma.NameConstant.Color = &purple
+		chroma.NameDecorator.Color = &orange
+		chroma.NameException.Color = &red
+		chroma.NameFunction.Color = &green
+		chroma.NameOther.Color = &text
+		chroma.Literal.Color = &orange
+		chroma.LiteralNumber.Color = &purple
+		chroma.LiteralDate.Color = &aqua
+		chroma.LiteralString.Color = &green
+		chroma.LiteralStringEscape.Color = &yellow
+		chroma.GenericDeleted.Color = &red
+		chroma.GenericEmph.Color = &text
+		chroma.GenericInserted.Color = &green
+		chroma.GenericStrong.Color = &yellow
+		chroma.GenericSubheading.Color = &aqua
+		chroma.Background.BackgroundColor = &surface
 	}
 	return cfg
+}
+
+func everforestThinkingMarkdownStyle() ansi.StyleConfig {
+	cfg := everforestMarkdownStyle()
+	muted := "#859289"
+	setMarkdownForeground(&cfg, &muted)
+	cfg.H1.BackgroundColor = nil
+	cfg.CodeBlock.Chroma = nil
+	return cfg
+}
+
+func setMarkdownForeground(cfg *ansi.StyleConfig, foreground *string) {
+	for _, target := range []**string{
+		&cfg.Document.Color,
+		&cfg.BlockQuote.Color,
+		&cfg.Paragraph.Color,
+		&cfg.List.Color,
+		&cfg.Heading.Color,
+		&cfg.H1.Color,
+		&cfg.H2.Color,
+		&cfg.H3.Color,
+		&cfg.H4.Color,
+		&cfg.H5.Color,
+		&cfg.H6.Color,
+		&cfg.Text.Color,
+		&cfg.Strikethrough.Color,
+		&cfg.Emph.Color,
+		&cfg.Strong.Color,
+		&cfg.HorizontalRule.Color,
+		&cfg.Item.Color,
+		&cfg.Enumeration.Color,
+		&cfg.Task.Color,
+		&cfg.Link.Color,
+		&cfg.LinkText.Color,
+		&cfg.Image.Color,
+		&cfg.ImageText.Color,
+		&cfg.Code.Color,
+		&cfg.CodeBlock.Color,
+		&cfg.Table.Color,
+		&cfg.DefinitionList.Color,
+		&cfg.DefinitionTerm.Color,
+		&cfg.DefinitionDescription.Color,
+		&cfg.HTMLBlock.Color,
+		&cfg.HTMLSpan.Color,
+	} {
+		*target = foreground
+	}
 }
 
 func themeBackground() color.Color { return everforest.Background }

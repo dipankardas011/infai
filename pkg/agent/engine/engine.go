@@ -12,6 +12,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/agent"
 	"github.com/dipankardas011/infai/pkg/agent/config"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
 )
@@ -45,6 +46,7 @@ type InfaiAgentEngine struct {
 	bgLogger  *slog.Logger
 	engineCfg *config.AgentEngineConfig
 
+	providerMu   sync.Mutex
 	providers    contracts.LLMProviders
 	sessionStore *store.SessionStore
 
@@ -198,7 +200,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		return nil, err
 	}
 
-	providerConfig, ok := e.providers.Providers[meta.Provider]
+	providerConfig, ok := e.Provider(meta.Provider)
 	if !ok {
 		_ = timeline.Close()
 		return nil, ErrNoProvider
@@ -251,9 +253,6 @@ func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId s
 	if !ok {
 		return nil, ErrNoProvider
 	}
-	if providerConfig.APIType != contracts.OpenAICompatableAPI {
-		return nil, fmt.Errorf("engine: unsupported api_type %q for provider %q", providerConfig.APIType, providerName)
-	}
 	if modelId == "" {
 		return nil, errors.New("engine: model is required")
 	}
@@ -286,12 +285,57 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string
 	if !ok {
 		return nil, ErrSessionNotFound
 	}
+	needsRefresh, err := sess.providerAuthNeedsRefresh(time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if needsRefresh {
+		if err := e.refreshSessionProviderAuth(ctx, sess); err != nil {
+			return nil, err
+		}
+	}
 	if sess.CurrentThinkingPattern() != opts.Thinking {
 		if err := sess.SetThinkingPattern(opts.Thinking); err != nil {
 			return nil, err
 		}
 	}
-	return sess.Chat(ctx, prompt, opts)
+	result, err := sess.Chat(ctx, prompt, opts)
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		meta := sess.Meta()
+		e.bgLogger.ErrorContext(ctx, "session chat failed", "session_id", id, "provider", meta.Provider, "model", meta.Model, "error", err)
+	}
+	return result, err
+}
+
+func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess *InfaiAgentSession) error {
+	providerName := sess.Meta().Provider
+	e.providerMu.Lock()
+	defer e.providerMu.Unlock()
+
+	provider, ok := e.providers.Providers[providerName]
+	if !ok {
+		return ErrNoProvider
+	}
+	refreshed, changed, err := models.RefreshProviderAuth(ctx, provider.Id, provider.Auth)
+	if err != nil {
+		e.bgLogger.WarnContext(ctx, "provider credential refresh failed", "provider", providerName, "error", err)
+		return err
+	}
+	if !changed {
+		return sess.setProviderAuth(providerName, provider.Auth)
+	}
+
+	provider.Auth = refreshed
+	candidate := providersWith(e.providers, providerName, provider)
+	if err := store.PersistProviders(candidate); err != nil {
+		e.bgLogger.ErrorContext(ctx, "persist refreshed provider credentials", "provider", providerName, "error", err)
+		return fmt.Errorf("persist refreshed provider credentials: %w", err)
+	}
+
+	e.providers = candidate
+	e.bgLogger.InfoContext(ctx, "provider credentials refreshed", "provider", providerName)
+
+	return sess.setProviderAuth(providerName, refreshed)
 }
 
 func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, decision ApprovalDecisionFromClient) error {
@@ -444,7 +488,6 @@ func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
 	e.stopOnce.Do(func() {
 		close(e.stopCh)
 	})
-
 	e.mu.Lock()
 	for id, sess := range e.active {
 		sess.close()

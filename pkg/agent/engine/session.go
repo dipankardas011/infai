@@ -84,6 +84,9 @@ type pendingApproval struct {
 // NewSession creates a fresh session bound to the given provider and model.
 func NewSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, cwd string, ss *store.SessionStore) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(choosenModel)
+	if err != nil {
+		return nil, err
+	}
 
 	o := &InfaiAgentSession{
 		l:             l,
@@ -152,6 +155,9 @@ func NewSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, cwd str
 // caller resolves lazy blob records before constructing the chat history.
 func NewResumedSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, meta store.SessionMeta, history []contracts.ChatMessage, timeline *store.Timeline, sessionStore *store.SessionStore) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(choosenModel)
+	if err != nil {
+		return nil, err
+	}
 
 	o := &InfaiAgentSession{
 		l:             l,
@@ -265,6 +271,36 @@ func (s *InfaiAgentSession) CurrentThinkingPattern() contracts.InfaiThinkingLeve
 	return s.model.GetModelSpecs().ThinkingPattern()
 }
 
+func (s *InfaiAgentSession) providerAuthNeedsRefresh(now time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	specs := s.model.GetModelSpecs()
+	switch specs.ProviderSlug() {
+	case contracts.Codex:
+		auth := specs.Auth()
+		if auth.Method != contracts.OAuth2 {
+			return false, errors.New("openai codex auth: OAuth credentials are missing; run provider login again")
+		}
+		if auth.ExpiresAt == nil {
+			return false, errors.New("openai codex auth: token expiry is missing; run provider login again")
+		}
+		if auth.ExpiresAt.After(now.Add(5 * time.Minute)) {
+			if auth.AccessToken == "" || auth.AccountID == "" {
+				return false, errors.New("openai codex auth: credentials are incomplete; run provider login again")
+			}
+			return false, nil
+		}
+		if auth.RefreshToken == "" {
+			return false, errors.New("openai codex auth: refresh token is missing; run provider login again")
+		}
+		return true, nil
+
+	default:
+		return false, nil
+	}
+}
+
 // EventHub exposes the session's live broadcaster so the server can attach the
 // live SSE sink per request.
 func (s *InfaiAgentSession) EventHub() *store.SessionEventHub {
@@ -333,6 +369,38 @@ func (s *InfaiAgentSession) SetModel(choosenModel contracts.ProvisionedModel) er
 	if err := s.store.SaveMeta(s.meta); err != nil {
 		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
 	}
+	return nil
+}
+
+func (s *InfaiAgentSession) setProviderAuth(providerName string, auth contracts.LLMProviderAuth) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := s.model.GetModelSpecs()
+	if current.ProviderName() != providerName {
+		return nil
+	}
+
+	provisioned := contracts.NewProvisionedModel(
+		current.ProviderSlug(), current.ProviderName(), current.BaseEndpoint(), current.APIType(), auth, current.Model(),
+	)
+	var err error
+	if current.ThinkingPattern() != "" {
+		provisioned, err = provisioned.WithThinkingPattern(current.ThinkingPattern())
+		if err != nil {
+			return err
+		}
+	}
+	model, err := models.ProvisionModelClient(provisioned)
+	if err != nil {
+		return err
+	}
+
+	s.model = model
+	if agent := s.Agents[s.sessionAgentId]; agent != nil {
+		agent.SetModel(model)
+	}
+
 	return nil
 }
 
@@ -807,10 +875,15 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 				if err := s.executeAfterApproval(ctx, msg.From, call); err != nil {
 					if errors.Is(err, errApprovalDenied) {
 						status = contracts.ToolExecutionDenied
+					} else if errors.Is(err, context.Canceled) {
+						status = contracts.ToolExecutionError
+						content = "tool execution was canceled by the user before completion"
 					} else {
 						status = contracts.ToolExecutionError
 					}
-					content = err.Error()
+					if content == "" {
+						content = err.Error()
+					}
 					s.events.Publish(store.Record{
 						Kind:      store.KindDelta,
 						Timestamp: time.Now().UTC(),
@@ -905,7 +978,9 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 
 func toolResultEventText(name string, status contracts.ToolExecutionStatus, content string) string {
 	result := fmt.Sprintf("%s [%s]", name, status)
-	if status != contracts.ToolExecutionSuccess && content != "" {
+	if status == contracts.ToolExecutionSuccess && name == string(contracts.BashTool) && content != "" {
+		result += "\n" + content
+	} else if status != contracts.ToolExecutionSuccess && content != "" {
 		result += ": " + content
 	}
 	return result
