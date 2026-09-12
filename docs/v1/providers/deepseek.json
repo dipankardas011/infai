@@ -53,7 +53,8 @@
         "max_output_tokens": 384000,
         "default_temperature": null,
         "modality": [
-            "text"
+            "text",
+            "image"
         ],
         "available_thinking": true,
         "thinking_levels": {
