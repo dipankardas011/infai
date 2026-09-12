@@ -61,13 +61,15 @@ type chatModel struct {
 	commandMenu      bool
 	commandSelection int
 
-	working     bool
-	workBegan   time.Time
-	workStatus  string
-	cancelArmed bool
-	turnCancel  context.CancelFunc
-	stream      chan tea.Msg
-	initCmd     tea.Cmd
+	working      bool
+	workBegan    time.Time
+	workStatus   string
+	cancelArmed  bool
+	cancelArmID  uint64
+	cancelStatus string
+	turnCancel   context.CancelFunc
+	stream       chan tea.Msg
+	initCmd      tea.Cmd
 }
 
 type streamDeltaMsg struct {
@@ -122,6 +124,9 @@ type renamedMsg struct {
 	err  error
 }
 type animationTickMsg struct{}
+type cancelArmTimeoutMsg struct{ id uint64 }
+
+const cancelArmTimeout = 10 * time.Second
 
 func runChatTUI(ctx context.Context, client Client, sessions []contracts.SessionSummary, opts RunOptions, in io.Reader, out io.Writer) error {
 	runCtx, cancel := context.WithCancel(ctx)
@@ -184,7 +189,12 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case streamDeltaMsg:
 		if msg.kind == contracts.DeltaStatus {
-			m.workStatus = statusLabel(msg.text)
+			status := statusLabel(msg.text)
+			if m.cancelArmed {
+				m.cancelStatus = status
+			} else {
+				m.workStatus = status
+			}
 		} else if msg.kind == contracts.DeltaTaskChecklist {
 			if state, err := decodeTaskChecklist(msg.text); err == nil {
 				m.checklist = state
@@ -203,6 +213,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.working = false
 		m.cancelArmed = false
+		m.cancelStatus = ""
 		m.workStatus = ""
 		if errors.Is(msg.err, context.Canceled) || msg.reply != nil && msg.reply.Status == "canceled" {
 			m.appendDelta(contracts.DeltaStatus, "generation canceled")
@@ -333,6 +344,14 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, animationTickCmd()
 		}
 		return m, nil
+	case cancelArmTimeoutMsg:
+		if m.cancelArmed && msg.id == m.cancelArmID {
+			m.cancelArmed = false
+			m.workStatus = m.cancelStatus
+			m.cancelStatus = ""
+			m.reflow(false)
+		}
+		return m, nil
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.PasteMsg:
@@ -385,8 +404,14 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.working && key == "esc" {
 		if !m.cancelArmed {
 			m.cancelArmed = true
+			m.cancelArmID++
+			m.cancelStatus = m.workStatus
 			m.workStatus = "press esc again to cancel"
+			m.reflow(false)
+			return m, cancelArmTimeoutCmd(m.cancelArmID)
 		} else if m.turnCancel != nil {
+			m.cancelArmed = false
+			m.cancelStatus = ""
 			m.workStatus = "canceling"
 			m.turnCancel()
 		}
@@ -496,8 +521,6 @@ func (m *chatModel) cycleThinking() {
 		}
 		if i+1 < len(m.availableThinking) {
 			next = m.availableThinking[i+1]
-		} else {
-			next = ""
 		}
 		break
 	}
@@ -1481,6 +1504,10 @@ func spinnerFrame(start time.Time) string {
 
 func animationTickCmd() tea.Cmd {
 	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return animationTickMsg{} })
+}
+
+func cancelArmTimeoutCmd(id uint64) tea.Cmd {
+	return tea.Tick(cancelArmTimeout, func(time.Time) tea.Msg { return cancelArmTimeoutMsg{id: id} })
 }
 
 func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required bool) {

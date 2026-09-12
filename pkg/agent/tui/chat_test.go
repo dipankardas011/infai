@@ -413,9 +413,12 @@ func TestWorkingTurnDoesNotQueueInputOrOpenSessions(t *testing.T) {
 	_, _ = m.Update(tea.PasteMsg{Content: "queued"})
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
 	escape := tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
-	_, _ = m.Update(escape)
+	_, cmd := m.Update(escape)
 	if turnCtx.Err() != nil {
 		t.Fatal("first escape canceled the working turn")
+	}
+	if cmd == nil || !m.cancelArmed {
+		t.Fatal("first escape did not arm cancellation timeout")
 	}
 	_, _ = m.Update(escape)
 	if !errors.Is(turnCtx.Err(), context.Canceled) {
@@ -427,6 +430,36 @@ func TestWorkingTurnDoesNotQueueInputOrOpenSessions(t *testing.T) {
 	}
 	if m.modal != nil {
 		t.Fatal("working turn opened the session workspace")
+	}
+}
+
+func TestWorkingTurnCancelArmExpires(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.working = true
+	m.workStatus = "working"
+	turnCtx, cancel := context.WithCancel(context.Background())
+	m.turnCancel = cancel
+	t.Cleanup(cancel)
+
+	escape := tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
+	_, _ = m.Update(escape)
+	armID := m.cancelArmID
+	_, _ = m.Update(cancelArmTimeoutMsg{id: armID})
+	if m.cancelArmed {
+		t.Fatal("escape cancellation remained armed after timeout")
+	}
+	if m.workStatus != "working" {
+		t.Fatalf("work status after timeout = %q, want working", m.workStatus)
+	}
+
+	_, _ = m.Update(escape)
+	if turnCtx.Err() != nil {
+		t.Fatal("escape after timeout acted as the second escape")
+	}
+	_, _ = m.Update(cancelArmTimeoutMsg{id: armID})
+	if !m.cancelArmed {
+		t.Fatal("stale timeout disarmed a newer escape sequence")
 	}
 }
 
@@ -959,7 +992,7 @@ func TestDiffRowsCarrySyntaxColors(t *testing.T) {
 func TestCycleThinking(t *testing.T) {
 	m := &chatModel{availableThinking: []contracts.InfaiThinkingLevel{contracts.ThinkingOff, contracts.ThinkingLow, contracts.ThinkingHigh}}
 
-	for _, want := range []contracts.InfaiThinkingLevel{contracts.ThinkingOff, contracts.ThinkingLow, contracts.ThinkingHigh, ""} {
+	for _, want := range []contracts.InfaiThinkingLevel{contracts.ThinkingOff, contracts.ThinkingLow, contracts.ThinkingHigh, contracts.ThinkingOff} {
 		m.cycleThinking()
 		if got := m.thinking; got != want {
 			t.Fatalf("cycleThinking() = %q, want %q", got, want)

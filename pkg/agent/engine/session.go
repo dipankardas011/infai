@@ -875,10 +875,15 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 				if err := s.executeAfterApproval(ctx, msg.From, call); err != nil {
 					if errors.Is(err, errApprovalDenied) {
 						status = contracts.ToolExecutionDenied
+					} else if errors.Is(err, context.Canceled) {
+						status = contracts.ToolExecutionError
+						content = "tool execution was canceled by the user before completion"
 					} else {
 						status = contracts.ToolExecutionError
 					}
-					content = err.Error()
+					if content == "" {
+						content = err.Error()
+					}
 					s.events.Publish(store.Record{
 						Kind:      store.KindDelta,
 						Timestamp: time.Now().UTC(),
