@@ -50,7 +50,7 @@ func (c *RemoteClient) SessionID() uuid.UUID {
 	return c.sessionID
 }
 
-func (c *RemoteClient) Chat(ctx context.Context, prompt string, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
+func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
 	c.mu.Lock()
 	sessionID := c.sessionID
 	c.mu.Unlock()
@@ -60,8 +60,9 @@ func (c *RemoteClient) Chat(ctx context.Context, prompt string, thinking contrac
 
 	payload, err := json.Marshal(struct {
 		Prompt   string                       `json:"prompt"`
+		Images   []contracts.ImageInput       `json:"images,omitempty"`
 		Thinking contracts.InfaiThinkingLevel `json:"thinking"`
-	}{Prompt: prompt, Thinking: thinking})
+	}{Prompt: input.Text, Images: input.Images, Thinking: thinking})
 	if err != nil {
 		return nil, err
 	}

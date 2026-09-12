@@ -148,6 +148,9 @@ func SerializeForCompaction(history []contracts.ChatMessage) string {
 		case "user":
 			b.WriteString("User: ")
 			b.WriteString(truncateRunes(m.Text(), maxUserChars))
+			for _, image := range m.Images {
+				b.WriteString(imageCompactionMarker(image))
+			}
 		case "assistant":
 			b.WriteString("Assistant")
 			if len(m.ToolCalls) > 0 {
@@ -180,6 +183,17 @@ func SerializeForCompaction(history []contracts.ChatMessage) string {
 		b.WriteString("\n\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// imageCompactionMarker preserves a metadata-only reference to an attached
+// image so compaction does not silently drop image context. The bytes are
+// intentionally omitted from the summary input.
+func imageCompactionMarker(image contracts.ImageInput) string {
+	name := image.Name
+	if name == "" {
+		name = "image"
+	}
+	return fmt.Sprintf("\n[image attachment: %s, %s, %dx%d, %d bytes]", name, image.MediaType, image.Width, image.Height, len(image.Data))
 }
 
 // compactionInput assembles the summarizer's request: the serialized toCompact

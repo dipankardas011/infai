@@ -184,7 +184,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID, bra
 	}
 
 	disk := eventDisk{ID: id, ParentID: parentID, BranchFrom: branchFrom, Kind: record.Kind}
-	if len(encodedRecord) >= blobBytesThreshold {
+	if len(encodedRecord) >= blobBytesThreshold || recordHasImages(record) {
 		hash, err := t.writeBlob(encodedRecord)
 		if err != nil {
 			return Event{}, err
@@ -239,6 +239,13 @@ func (t *Timeline) CurrentHeadEventID() uuid.UUID {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.head
+}
+
+// recordHasImages reports whether a durable record carries image attachments.
+// Image-bearing records always use blob storage so encoded bytes never land in
+// the event chunks, regardless of how small the image is.
+func recordHasImages(record Record) bool {
+	return record.Message != nil && len(record.Message.Images) > 0
 }
 
 func (t *Timeline) LoadEvent(id uuid.UUID) (Event, error) {

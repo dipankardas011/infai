@@ -61,7 +61,7 @@ type SessionCreateOptions struct {
 // Client is the CLI's view of the engine. RemoteClient is the HTTP transport
 // to a running <binary> server.
 type Client interface {
-	Chat(ctx context.Context, prompt string, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
+	Chat(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
 	ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error
 	SetSession(id uuid.UUID)
 	CreateSession(ctx context.Context, opts SessionCreateOptions) (*glue.SessionOutput, error)
@@ -233,7 +233,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 
 		thinkingShown := false
 		contentStarted := false
-		reply, err := c.Chat(ctx, prompt, state.thinking, func(kind contracts.DeltaKind, text string) {
+		reply, err := c.Chat(ctx, contracts.UserInput{Text: prompt}, state.thinking, func(kind contracts.DeltaKind, text string) {
 			switch kind {
 			case contracts.DeltaReasoning:
 				if !thinkingShown {

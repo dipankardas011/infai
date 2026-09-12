@@ -26,6 +26,7 @@ type RenameSessionRequest struct {
 
 type ChatRequest struct {
 	Prompt   string                       `json:"prompt"`
+	Images   []contracts.ImageInput       `json:"images,omitempty"`
 	Thinking contracts.InfaiThinkingLevel `json:"thinking"`
 }
 

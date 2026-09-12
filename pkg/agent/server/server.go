@@ -25,6 +25,11 @@ type Server struct {
 	logger        *slog.Logger
 }
 
+// maxChatBodyBytes bounds the chat request body. Inline base64 images make it
+// larger than a typical JSON endpoint, but still bounded well below the
+// harness-wide total attachment limit plus envelope overhead.
+const maxChatBodyBytes = 32 << 20
+
 func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz bool) *Server {
 	s := &Server{engine: e, enableHealthz: enableHealthz, logger: l}
 
@@ -216,6 +221,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		ContextWindow:     sess.CurrentSessionModelContextWindow(),
 		Thinking:          sess.CurrentThinkingPattern(),
 		AvailableThinking: sess.AvailableThinkingPatterns(),
+		Modalities:        sess.SupportedModalities(),
 	})
 }
 
@@ -302,6 +308,7 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		ContextWindow:     sess.CurrentSessionModelContextWindow(),
 		Thinking:          sess.CurrentThinkingPattern(),
 		AvailableThinking: sess.AvailableThinkingPatterns(),
+		Modalities:        sess.SupportedModalities(),
 	})
 }
 
@@ -362,6 +369,7 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 		ContextWindow:     sess.CurrentSessionModelContextWindow(),
 		Thinking:          sess.CurrentThinkingPattern(),
 		AvailableThinking: sess.AvailableThinkingPatterns(),
+		Modalities:        sess.SupportedModalities(),
 	})
 }
 
@@ -372,12 +380,21 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Images travel inline as base64, so the chat endpoint gets a dedicated
+	// body limit before any decoding happens.
+	r.Body = http.MaxBytesReader(w, r.Body, maxChatBodyBytes)
+
 	var req ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("chat request body exceeds the %d MB limit", maxChatBodyBytes>>20))
+			return
+		}
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if strings.TrimSpace(req.Prompt) == "" {
+	input := contracts.UserInput{Text: req.Prompt, Images: req.Images}
+	if input.Empty() {
 		s.writeError(w, http.StatusBadRequest, errors.New("prompt is required"))
 		return
 	}
@@ -423,7 +440,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		defer remove()
 	}
 
-	res, err := s.engine.Chat(r.Context(), id, req.Prompt, opts)
+	res, err := s.engine.Chat(r.Context(), id, input, opts)
 	if errors.Is(err, engine.ErrSessionNotFound) {
 		s.writeError(w, http.StatusNotFound, err)
 		return
