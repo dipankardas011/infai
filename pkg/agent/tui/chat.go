@@ -30,13 +30,16 @@ import (
 )
 
 type block struct {
-	role       string
-	text       string
-	toolKind   string
-	toolStatus string
-	toolName   string
-	toolArgs   string
-	skillName  string
+	role          string
+	text          string
+	toolKind      string
+	toolStatus    string
+	toolName      string
+	toolArgs      string
+	skillName     string
+	rendered      string
+	renderedWidth int
+	renderedValid bool
 }
 
 type chatModel struct {
@@ -70,6 +73,11 @@ type chatModel struct {
 	turnCancel   context.CancelFunc
 	stream       chan tea.Msg
 	initCmd      tea.Cmd
+	streaming    bool
+	streamingAt  int
+	streamTick   bool
+	streamTickID uint64
+	streamDirty  bool
 }
 
 type streamDeltaMsg struct {
@@ -125,8 +133,10 @@ type renamedMsg struct {
 }
 type animationTickMsg struct{}
 type cancelArmTimeoutMsg struct{ id uint64 }
+type streamRefreshTickMsg struct{ id uint64 }
 
 const cancelArmTimeout = 10 * time.Second
+const streamRefreshInterval = time.Second
 
 func runChatTUI(ctx context.Context, client Client, sessions []contracts.SessionSummary, opts RunOptions, in io.Reader, out io.Writer) error {
 	runCtx, cancel := context.WithCancel(ctx)
@@ -186,6 +196,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.scrollApproval(0)
 		m.reflow(true)
+		m.streamDirty = false
 		return m, nil
 	case streamDeltaMsg:
 		if msg.kind == contracts.DeltaStatus {
@@ -200,18 +211,34 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.checklist = state
 			}
 		}
+		wasStreaming, wasStreamingAt := m.streaming, m.streamingAt
 		m.appendDelta(msg.kind, msg.text)
-		m.refreshTranscript(true)
-		return m, waitStream(m.ctx, m.stream)
+		wait := waitStream(m.ctx, m.stream)
+		if msg.kind == contracts.DeltaContent || msg.kind == contracts.DeltaReasoning {
+			if !wasStreaming || wasStreamingAt != m.streamingAt || !m.streamTick {
+				m.stopStreamRefresh()
+				m.refreshTranscript(true)
+				return m, tea.Batch(wait, m.startStreamRefresh())
+			}
+			m.streamDirty = true
+			return m, wait
+		}
+		if msg.kind != contracts.DeltaTaskChecklist {
+			m.stopStreamRefresh()
+			m.refreshTranscript(true)
+		}
+		return m, wait
 	case streamApprovalMsg:
 		m.handleApprovalUpdate(msg.update)
 		return m, waitStream(m.ctx, m.stream)
 	case turnDoneMsg:
+		m.stopStreamRefresh()
 		if m.turnCancel != nil {
 			m.turnCancel()
 			m.turnCancel = nil
 		}
 		m.working = false
+		m.streaming = false
 		m.cancelArmed = false
 		m.cancelStatus = ""
 		m.workStatus = ""
@@ -352,6 +379,17 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.reflow(false)
 		}
 		return m, nil
+	case streamRefreshTickMsg:
+		if !m.streamTick || msg.id != m.streamTickID {
+			return m, nil
+		}
+		if !m.streamDirty {
+			m.streamTick = false
+			return m, nil
+		}
+		m.streamDirty = false
+		m.refreshTranscript(true)
+		return m, streamRefreshTickCmd(msg.id)
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.PasteMsg:
@@ -924,40 +962,16 @@ func (m *chatModel) refreshTranscript(follow bool) {
 func (m *chatModel) renderTranscript() string {
 	width := max(m.viewport.Width()-m.viewport.Style.GetHorizontalFrameSize(), 1)
 	var rendered []string
-	for _, entry := range m.blocks {
-		var content string
-		switch entry.role {
-		case "user":
-			content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, entry.text, width)
-		case "assistant":
-			content = renderChatMarker("●", m.styles.active, lipgloss.NewStyle(), m.renderMarkdown(entry.text, max(width-2, 1)), width)
-		case "thinking":
-			content = renderChatMarker("◌", m.styles.muted, lipgloss.NewStyle(), m.renderThinkingMarkdown(entry.text, max(width-2, 1)), width)
-		case "error":
-			content = m.styles.error.Width(width).Render("ERROR  " + entry.text)
-		case "system", "status":
-			content = m.styles.system.Width(width).Render("· " + entry.text)
-		case "compaction":
-			content = m.styles.thinking.Width(width).Render("CONTEXT COMPACTED\n" + entry.text)
-		case "skill":
-			content = renderChatMarker("✦", m.styles.skill, m.styles.skill, entry.text, width)
-		case "tool":
-			marker := "▲"
-			markerStyle := m.styles.system
-			if entry.toolKind == "result" {
-				marker = "▼"
-				markerStyle = m.styles.active
-				if entry.toolStatus != "success" {
-					markerStyle = m.styles.error
-				}
-			}
-			switch {
-			case entry.toolKind == "call" && entry.toolName == string(contracts.EditTool) && entry.toolArgs != "":
-				content = renderEditDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
-			case entry.toolKind == "call" && entry.toolName == string(contracts.WriteTool) && entry.toolArgs != "":
-				content = renderWriteDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
-			default:
-				content = renderToolMarker(marker, markerStyle, m.styles.tool, entry.toolName, entry.text, width)
+	for i := range m.blocks {
+		entry := &m.blocks[i]
+		streaming := m.streaming && m.streamingAt == i
+		content := entry.rendered
+		if streaming || !entry.renderedValid || entry.renderedWidth != width {
+			content = m.renderBlock(entry, width, streaming)
+			if !streaming {
+				entry.rendered = content
+				entry.renderedWidth = width
+				entry.renderedValid = true
 			}
 		}
 		if strings.TrimSpace(content) != "" {
@@ -968,6 +982,53 @@ func (m *chatModel) renderTranscript() string {
 		return m.styles.muted.Render("\nStart with a question, a task, or / for commands.")
 	}
 	return strings.Join(rendered, "\n\n")
+}
+
+func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string {
+	var content string
+	switch entry.role {
+	case "user":
+		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, entry.text, width)
+	case "assistant":
+		text := entry.text
+		if !streaming {
+			text = m.renderMarkdown(text, max(width-2, 1))
+		}
+		content = renderChatMarker("●", m.styles.active, lipgloss.NewStyle(), text, width)
+	case "thinking":
+		text := entry.text
+		if !streaming {
+			text = m.renderThinkingMarkdown(text, max(width-2, 1))
+		}
+		content = renderChatMarker("◌", m.styles.muted, lipgloss.NewStyle(), text, width)
+	case "error":
+		content = m.styles.error.Width(width).Render("ERROR  " + entry.text)
+	case "system", "status":
+		content = m.styles.system.Width(width).Render("· " + entry.text)
+	case "compaction":
+		content = m.styles.thinking.Width(width).Render("CONTEXT COMPACTED\n" + entry.text)
+	case "skill":
+		content = renderChatMarker("✦", m.styles.skill, m.styles.skill, entry.text, width)
+	case "tool":
+		marker := "▲"
+		markerStyle := m.styles.system
+		if entry.toolKind == "result" {
+			marker = "▼"
+			markerStyle = m.styles.active
+			if entry.toolStatus != "success" {
+				markerStyle = m.styles.error
+			}
+		}
+		switch {
+		case entry.toolKind == "call" && entry.toolName == string(contracts.EditTool) && entry.toolArgs != "":
+			content = renderEditDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
+		case entry.toolKind == "call" && entry.toolName == string(contracts.WriteTool) && entry.toolArgs != "":
+			content = renderWriteDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
+		default:
+			content = renderToolMarker(marker, markerStyle, m.styles.tool, entry.toolName, entry.text, width)
+		}
+	}
+	return content
 }
 
 func renderChatMarker(marker string, markerStyle, bodyStyle lipgloss.Style, text string, width int) string {
@@ -1510,6 +1571,22 @@ func cancelArmTimeoutCmd(id uint64) tea.Cmd {
 	return tea.Tick(cancelArmTimeout, func(time.Time) tea.Msg { return cancelArmTimeoutMsg{id: id} })
 }
 
+func (m *chatModel) startStreamRefresh() tea.Cmd {
+	m.streamTick = true
+	m.streamTickID++
+	return streamRefreshTickCmd(m.streamTickID)
+}
+
+func (m *chatModel) stopStreamRefresh() {
+	m.streamTick = false
+	m.streamDirty = false
+	m.streamTickID++
+}
+
+func streamRefreshTickCmd(id uint64) tea.Cmd {
+	return tea.Tick(streamRefreshInterval, func(time.Time) tea.Msg { return streamRefreshTickMsg{id: id} })
+}
+
 func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required bool) {
 	options := []modalOption{{label: "Start a new session", detail: "choose a provider and model", status: "NEW", shortcut: 'n'}}
 	for i, session := range sessions {
@@ -1844,31 +1921,43 @@ func (m *chatModel) appendDelta(kind contracts.DeltaKind, text string) {
 	case contracts.DeltaReasoning:
 		role = "thinking"
 	case contracts.DeltaStatus:
+		m.streaming = false
 		role, text = "status", statusLabel(text)
 	case contracts.DeltaCompactionSummary:
+		m.streaming = false
 		role = "compaction"
 	case contracts.DeltaToolCall:
+		m.streaming = false
 		m.appendToolEvent("call", text)
 		return
 	case contracts.DeltaToolResult:
+		m.streaming = false
 		m.appendToolEvent("result", text)
 		return
 	case contracts.DeltaSkillLoad:
+		m.streaming = false
 		m.blocks = append(m.blocks, block{role: "skill", text: text})
 		return
 	case contracts.DeltaTaskChecklist:
 		// Checklist state is rendered in the header, never as transcript text.
 		return
 	}
-	if len(m.blocks) > 0 && m.blocks[len(m.blocks)-1].role == role && role != "status" {
+	streaming := kind == contracts.DeltaContent || kind == contracts.DeltaReasoning
+	if streaming && m.streaming && m.streamingAt == len(m.blocks)-1 && m.blocks[m.streamingAt].role == role {
 		m.blocks[len(m.blocks)-1].text += text
 		return
 	}
 	if role == "status" && len(m.blocks) > 0 && m.blocks[len(m.blocks)-1].role == role {
-		m.blocks[len(m.blocks)-1].text = text
+		entry := &m.blocks[len(m.blocks)-1]
+		entry.text = text
+		entry.renderedValid = false
 		return
 	}
 	m.blocks = append(m.blocks, block{role: role, text: text})
+	if streaming {
+		m.streaming = true
+		m.streamingAt = len(m.blocks) - 1
+	}
 }
 
 func (m *chatModel) appendToolEvent(kind, text string) {

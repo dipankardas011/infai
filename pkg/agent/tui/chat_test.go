@@ -181,6 +181,94 @@ func TestTranscriptRendersThinkingMarkdown(t *testing.T) {
 	}
 }
 
+func TestStreamingBlocksRenderMarkdownOnlyWhenComplete(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+
+	m.appendDelta(contracts.DeltaReasoning, "Use **careful reasoning**.")
+	m.refreshTranscript(true)
+	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "**careful reasoning**") {
+		t.Fatalf("active thinking block was rendered as Markdown: %q", content)
+	}
+	if m.blocks[0].renderedValid {
+		t.Fatal("active thinking block was cached before completion")
+	}
+
+	m.appendDelta(contracts.DeltaContent, "Final **answer**.")
+	m.refreshTranscript(true)
+	content := ansi.Strip(m.viewport.View())
+	if strings.Contains(content, "**careful reasoning**") {
+		t.Fatalf("completed thinking block was not rendered as Markdown: %q", content)
+	}
+	if !strings.Contains(content, "Final **answer**.") {
+		t.Fatalf("active assistant block was rendered as Markdown: %q", content)
+	}
+	if !m.blocks[0].renderedValid || m.blocks[1].renderedValid {
+		t.Fatalf("render cache state = thinking %v, assistant %v", m.blocks[0].renderedValid, m.blocks[1].renderedValid)
+	}
+
+	cachedThinking := m.blocks[0].rendered
+	m.appendDelta(contracts.DeltaContent, " More text.")
+	m.refreshTranscript(true)
+	if m.blocks[0].rendered != cachedThinking {
+		t.Fatal("completed thinking block was rendered again during assistant streaming")
+	}
+
+	_, _ = m.Update(turnDoneMsg{})
+	content = ansi.Strip(m.viewport.View())
+	if strings.Contains(content, "**answer**") || !m.blocks[1].renderedValid {
+		t.Fatalf("assistant block was not finalized as Markdown: %q", content)
+	}
+}
+
+func TestStreamingTranscriptRefreshesOncePerInterval(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.working = true
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+
+	_, cmd := m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: "first "})
+	if cmd == nil || !m.streamTick {
+		t.Fatal("first stream delta did not start the refresh interval")
+	}
+	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "first") {
+		t.Fatalf("first stream delta was not displayed immediately: %q", content)
+	}
+
+	_, _ = m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: "second"})
+	if content := ansi.Strip(m.viewport.View()); strings.Contains(content, "second") {
+		t.Fatalf("subsequent delta refreshed before the interval: %q", content)
+	}
+	if !strings.Contains(m.blocks[0].text, "second") {
+		t.Fatal("subsequent delta was not retained while awaiting refresh")
+	}
+
+	tickID := m.streamTickID
+	_, cmd = m.Update(streamRefreshTickMsg{id: tickID})
+	if cmd == nil {
+		t.Fatal("active stream refresh interval was not continued")
+	}
+	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "first second") {
+		t.Fatalf("pending stream content was not displayed on interval: %q", content)
+	}
+
+	_, _ = m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: " resized"})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 61, Height: 20})
+	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "resized") {
+		t.Fatalf("resize did not display pending stream content: %q", content)
+	}
+
+	_, _ = m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: " complete"})
+	_, _ = m.Update(turnDoneMsg{})
+	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "complete") {
+		t.Fatalf("turn completion did not display pending stream content: %q", content)
+	}
+	if m.streamTick || m.streamDirty {
+		t.Fatal("turn completion left the stream refresh interval active")
+	}
+}
+
 func TestTranscriptUsesCompactRoleMarkers(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
