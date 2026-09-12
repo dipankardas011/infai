@@ -41,12 +41,14 @@ func RefreshProviderAuth(ctx context.Context, providerID contracts.ProviderSlug,
 func ProvisionModelClient(
 	m contracts.ProvisionedModel,
 ) (contracts.InfaiModelAdaptor, error) {
-	switch m.APIType() {
-	case contracts.OpenAICompatableAPI:
-		return NewOpenAICompatableAPI(m)
-	case contracts.OpenAICodexResponsesAPI:
+	switch m.ProviderSlug() {
+	case contracts.DeepSeek:
+		return NewDeepSeekAPI(m)
+	case contracts.Codex:
 		return NewOpenAICodexResponsesAPI(m)
+	case contracts.OpenAIGeneric:
+		return NewOpenAICompatableAPI(m)
 	default:
-		return nil, fmt.Errorf("unsupported provider API type %q for %q", m.APIType(), m.ProviderSlug())
+		return nil, fmt.Errorf("unsupported provider %q", m.ProviderSlug())
 	}
 }
