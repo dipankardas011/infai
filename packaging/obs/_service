@@ -2,19 +2,19 @@
   <service name="download_url">
     <param name="protocol">https</param>
     <param name="host">github.com</param>
-    <param name="path">/dipankardas011/infai/releases/download/infaiw-v0.3.0/infaiw_0.3.0_linux_amd64.tar.gz</param>
-    <param name="filename">infaiw_0.3.0_linux_amd64.tar.gz</param>
+    <param name="path">/dipankardas011/infai/releases/download/infaiw-v0.4.0/infaiw_0.4.0_linux_amd64.tar.gz</param>
+    <param name="filename">infaiw_0.4.0_linux_amd64.tar.gz</param>
   </service>
   <service name="download_url">
     <param name="protocol">https</param>
     <param name="host">github.com</param>
-    <param name="path">/dipankardas011/infai/releases/download/infaiw-v0.3.0/infaiw_0.3.0_linux_arm64.tar.gz</param>
-    <param name="filename">infaiw_0.3.0_linux_arm64.tar.gz</param>
+    <param name="path">/dipankardas011/infai/releases/download/infaiw-v0.4.0/infaiw_0.4.0_linux_arm64.tar.gz</param>
+    <param name="filename">infaiw_0.4.0_linux_arm64.tar.gz</param>
   </service>
   <service name="download_url">
     <param name="protocol">https</param>
     <param name="host">github.com</param>
-    <param name="path">/dipankardas011/infai/releases/download/infaiw-v0.3.0/infaiw-0.3.0.tar.gz</param>
-    <param name="filename">infaiw-0.3.0.tar.gz</param>
+    <param name="path">/dipankardas011/infai/releases/download/infaiw-v0.4.0/infaiw-0.4.0.tar.gz</param>
+    <param name="filename">infaiw-0.4.0.tar.gz</param>
   </service>
 </services>
