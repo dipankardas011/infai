@@ -47,14 +47,47 @@ func NewOpenAICompatableAPI(b contracts.ProvisionedModel) (*genericOpenAICompata
 }
 
 type openAIChatRequest struct {
-	Model           string                  `json:"model"`
-	Messages        []contracts.ChatMessage `json:"messages"`
-	MaxTokens       uint64                  `json:"max_tokens,omitempty"`
-	Temperature     *float64                `json:"temperature,omitempty"`
-	ReasoningEffort string                  `json:"reasoning_effort,omitempty"`
-	Stream          bool                    `json:"stream,omitempty"`
-	StreamOptions   *openAIStreamOptions    `json:"stream_options,omitempty"`
-	Tools           []openAITool            `json:"tools,omitempty"`
+	Model           string               `json:"model"`
+	Messages        []openAIWireMessage  `json:"messages"`
+	MaxTokens       uint64               `json:"max_tokens,omitempty"`
+	Temperature     *float64             `json:"temperature,omitempty"`
+	ReasoningEffort string               `json:"reasoning_effort,omitempty"`
+	Stream          bool                 `json:"stream,omitempty"`
+	StreamOptions   *openAIStreamOptions `json:"stream_options,omitempty"`
+	Tools           []openAITool         `json:"tools,omitempty"`
+}
+
+// openAIWireMessage is the Chat Completions message shape. Content is a plain
+// string for text-only turns and a content-part array when images are present.
+type openAIWireMessage struct {
+	Role             string               `json:"role"`
+	Content          any                  `json:"content,omitempty"`
+	ReasoningContent string               `json:"reasoning_content,omitempty"`
+	Name             *string              `json:"name,omitempty"`
+	ToolCallID       string               `json:"tool_call_id,omitempty"`
+	ToolCalls        []contracts.ToolCall `json:"tool_calls,omitempty"`
+}
+
+// openAIWireMessages converts canonical messages into Chat Completions wire
+// messages, dropping harness-only fields and translating image attachments.
+func openAIWireMessages(messages []contracts.ChatMessage) []openAIWireMessage {
+	wire := make([]openAIWireMessage, 0, len(messages))
+	for _, message := range messages {
+		wm := openAIWireMessage{
+			Role:             message.Role,
+			ReasoningContent: message.ReasoningContent,
+			Name:             message.Name,
+			ToolCallID:       message.ToolCallID,
+			ToolCalls:        message.ToolCalls,
+		}
+		if parts := chatCompletionsContent(message); parts != nil {
+			wm.Content = parts
+		} else if message.Content != nil {
+			wm.Content = *message.Content
+		}
+		wire = append(wire, wm)
+	}
+	return wire
 }
 
 type openAITool struct {
@@ -76,36 +109,7 @@ type openAIChatResponse struct {
 func (o *genericOpenAICompatableAPI) GetModelSpecs() contracts.ProvisionedModel { return o.b }
 
 func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) (contracts.ChatMessage, *contracts.TokenUsage, error) {
-	wireMessages := append([]contracts.ChatMessage(nil), messages...)
-	for i := range wireMessages {
-		wireMessages[i].Status = ""             // NOTE: to avoid sending the status as openai api doesn't have one.
-		wireMessages[i].ReasoningSignature = "" // Provider-specific replay metadata is not part of Chat Completions.
-	}
-	reqBody := openAIChatRequest{
-		Model:       o.b.Model().Id,
-		Messages:    wireMessages,
-		MaxTokens:   o.b.Model().MaxOutputTokens,
-		Temperature: o.b.Model().DefaultTemperature,
-	}
-	if o.b.ThinkingPattern() != "" {
-		if value, ok := o.b.ThinkingLevelValue(); ok {
-			reqBody.ReasoningEffort = value
-		}
-	}
-	for _, tool := range tools {
-		reqBody.Tools = append(reqBody.Tools, openAITool{
-			Type:     "function",
-			Function: tool,
-		})
-	}
-	if opts != nil {
-		if opts.Stream {
-			reqBody.Stream = true
-			reqBody.StreamOptions = &openAIStreamOptions{IncludeUsage: true}
-		}
-	}
-
-	raw, err := json.Marshal(reqBody)
+	raw, err := o.buildRequest(messages, tools, opts)
 	if err != nil {
 		return contracts.ChatMessage{}, nil, err
 	}
@@ -134,6 +138,35 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 	}
 
 	return reply, parsed.Usage, nil
+}
+
+// buildRequest assembles the Chat Completions request body. It is separated
+// from Generate so the exact wire payload can be asserted in tests.
+func (o *genericOpenAICompatableAPI) buildRequest(messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) ([]byte, error) {
+	reqBody := openAIChatRequest{
+		Model:       o.b.Model().Id,
+		Messages:    openAIWireMessages(messages),
+		MaxTokens:   o.b.Model().MaxOutputTokens,
+		Temperature: o.b.Model().DefaultTemperature,
+	}
+	if o.b.ThinkingPattern() != "" {
+		if value, ok := o.b.ThinkingLevelValue(); ok {
+			reqBody.ReasoningEffort = value
+		}
+	}
+	for _, tool := range tools {
+		reqBody.Tools = append(reqBody.Tools, openAITool{
+			Type:     "function",
+			Function: tool,
+		})
+	}
+	if opts != nil {
+		if opts.Stream {
+			reqBody.Stream = true
+			reqBody.StreamOptions = &openAIStreamOptions{IncludeUsage: true}
+		}
+	}
+	return json.Marshal(reqBody)
 }
 
 func (o *genericOpenAICompatableAPI) sendChatRequest(ctx context.Context, body []byte, opts *contracts.GenerateOptions) (*http.Response, error) {

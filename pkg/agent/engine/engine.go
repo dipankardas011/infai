@@ -36,6 +36,9 @@ type ChatOptions struct {
 var (
 	ErrSessionNotFound    = errors.New("session not found")
 	ErrEngineShuttingDown = errors.New("engine is shutting down")
+	// ErrInvalidInput marks a request the client can fix (empty message,
+	// unsupported modality, bad image bytes) so the server can return 400.
+	ErrInvalidInput = errors.New("invalid input")
 )
 
 // InfaiAgentEngine owns the provider registry, the on-disk session store and
@@ -278,7 +281,7 @@ func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId s
 }
 
 // Chat runs one prompt against an existing session and returns the outcome.
-func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string, opts ChatOptions) (*ChatResult, error) {
+func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, input contracts.UserInput, opts ChatOptions) (*ChatResult, error) {
 	e.mu.Lock()
 	sess, ok := e.active[id]
 	e.mu.Unlock()
@@ -299,7 +302,7 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, prompt string
 			return nil, err
 		}
 	}
-	result, err := sess.Chat(ctx, prompt, opts)
+	result, err := sess.Chat(ctx, input, opts)
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		meta := sess.Meta()
 		e.bgLogger.ErrorContext(ctx, "session chat failed", "session_id", id, "provider", meta.Provider, "model", meta.Model, "error", err)

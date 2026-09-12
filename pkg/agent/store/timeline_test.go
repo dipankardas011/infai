@@ -3,12 +3,15 @@ package store
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/google/uuid"
 )
 
@@ -401,5 +404,206 @@ func TestTimelineRejectsCorruptedBlob(t *testing.T) {
 	defer reloaded.Close()
 	if _, err := reloaded.LoadEvent(event.ID); err == nil {
 		t.Fatal("corrupted blob was accepted")
+	}
+}
+
+func TestTimelineDecodesLegacyTextOnlyMessage(t *testing.T) {
+	legacy := []byte(`{"kind":"message","ts":"2024-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}`)
+	var record Record
+	if err := json.Unmarshal(legacy, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Message == nil || record.Message.Text() != "hello" {
+		t.Fatalf("legacy message decoded wrong: %+v", record.Message)
+	}
+	if len(record.Message.Images) != 0 {
+		t.Fatalf("legacy message unexpectedly carried images: %+v", record.Message.Images)
+	}
+}
+
+func TestTimelinePersistsImageMessageAcrossReload(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "timeline")
+	timeline, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := contracts.NewUserMessageWithInput(contracts.UserInput{
+		Text: "describe",
+		Images: []contracts.ImageInput{{
+			Name: "clipboard-1.png", MediaType: "image/png", Width: 2, Height: 2, Data: []byte("small-png"),
+		}},
+	})
+	event, err := timeline.AppendToHead(Record{Kind: KindMessage, Timestamp: time.Now().UTC(), Message: &message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := timeline.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reloaded.Close()
+	got, err := reloaded.LoadEvent(event.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Record == nil || got.Record.Message == nil {
+		t.Fatal("image message missing after reload")
+	}
+	images := got.Record.Message.Images
+	if len(images) != 1 {
+		t.Fatalf("images=%d want 1", len(images))
+	}
+	if images[0].Name != "clipboard-1.png" || images[0].MediaType != "image/png" {
+		t.Fatalf("image metadata changed: %+v", images[0])
+	}
+	if !bytes.Equal(images[0].Data, []byte("small-png")) {
+		t.Fatal("image bytes changed across reload")
+	}
+}
+
+func TestTimelineAlwaysBlobsImageMessages(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "timeline")
+	timeline, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := contracts.NewUserMessageWithInput(contracts.UserInput{
+		Text: "tiny",
+		Images: []contracts.ImageInput{{
+			Name: "tiny.png", MediaType: "image/png", Width: 1, Height: 1, Data: []byte("tiny-image-bytes"),
+		}},
+	})
+	event, err := timeline.AppendToHead(Record{Kind: KindMessage, Timestamp: time.Now().UTC(), Message: &message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.BlobHash == "" {
+		t.Fatal("small image message was not stored as a blob")
+	}
+	if _, err := os.Stat(filepath.Join(root, "blobs", event.BlobHash)); err != nil {
+		t.Fatalf("blob file missing: %v", err)
+	}
+	chunks, err := os.ReadFile(filepath.Join(root, "chunks", "000000.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(chunks, []byte("tiny-image-bytes")) {
+		t.Fatal("chunk contains raw image bytes")
+	}
+	if bytes.Contains(chunks, []byte(base64.StdEncoding.EncodeToString([]byte("tiny-image-bytes")))) {
+		t.Fatal("chunk contains base64 image bytes")
+	}
+	if !bytes.Contains(chunks, []byte(event.BlobHash)) {
+		t.Fatal("chunk does not reference the blob hash")
+	}
+	got, err := timeline.LoadEvent(event.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Record == nil || got.Record.Message == nil || len(got.Record.Message.Images) != 1 {
+		t.Fatalf("blob-backed image message did not resolve: %+v", got)
+	}
+}
+
+func TestTimelineStoresLargeImageMessageInBlob(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "timeline")
+	timeline, err := NewTimeline(root, TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("x"), blobBytesThreshold)
+	message := contracts.NewUserMessageWithInput(contracts.UserInput{
+		Text: "big",
+		Images: []contracts.ImageInput{{
+			Name: "big.png", MediaType: "image/png", Width: 1, Height: 1, Data: payload,
+		}},
+	})
+	event, err := timeline.AppendToHead(Record{Kind: KindMessage, Timestamp: time.Now().UTC(), Message: &message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.BlobHash == "" {
+		t.Fatal("large image message was not stored as a blob")
+	}
+	got, err := timeline.LoadEvent(event.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Record == nil || got.Record.Message == nil || len(got.Record.Message.Images) != 1 {
+		t.Fatal("blob-backed image message did not resolve")
+	}
+	if len(got.Record.Message.Images[0].Data) != len(payload) {
+		t.Fatalf("image bytes length=%d want=%d", len(got.Record.Message.Images[0].Data), len(payload))
+	}
+}
+
+func TestTimelineBlobEventCarriesBoundedPreview(t *testing.T) {
+	timeline, err := NewTimeline(filepath.Join(t.TempDir(), "timeline"), TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer timeline.Close()
+
+	message := contracts.NewUserMessageWithInput(contracts.UserInput{
+		Text: "describe",
+		Images: []contracts.ImageInput{{
+			Name: "a.png", MediaType: "image/png", Width: 2, Height: 2, Data: []byte("bytes"),
+		}},
+	})
+	if _, err := timeline.AppendToHead(Record{Kind: KindMessage, Timestamp: time.Now().UTC(), Message: &message}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := timeline.LoadEntireTimeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Record != nil {
+		t.Fatalf("expected one unresolved blob event: %+v", events)
+	}
+	preview := events[0].Preview
+	if preview == nil {
+		t.Fatal("blob event has no preview sidecar")
+	}
+	if preview.Role != "user" || preview.Text != "describe" || preview.ImageCount != 1 {
+		t.Fatalf("preview=%+v want role=user text=describe images=1", preview)
+	}
+
+	// Full bytes are still recoverable from the blob.
+	resolved, err := timeline.LoadEvent(events[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Record == nil || resolved.Record.Message == nil || len(resolved.Record.Message.Images) != 1 {
+		t.Fatalf("blob did not resolve: %+v", resolved.Record)
+	}
+	if len(resolved.Record.Message.Images[0].Data) == 0 {
+		t.Fatal("resolved image bytes are empty")
+	}
+}
+
+func TestTimelinePreviewIsBounded(t *testing.T) {
+	timeline, err := NewTimeline(filepath.Join(t.TempDir(), "timeline"), TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer timeline.Close()
+
+	payload := bytes.Repeat([]byte("x"), blobBytesThreshold)
+	if _, err := timeline.AppendToHead(Record{Kind: KindToolResult, Timestamp: time.Now().UTC(), ToolResult: &ToolResultRecord{CallID: "c", Status: "success", Output: string(payload)}}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := timeline.LoadEntireTimeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Preview == nil {
+		t.Fatalf("expected a preview for the blob event: %+v", events)
+	}
+	if got := len([]rune(events[0].Preview.Text)); got > previewTextLimit+1 {
+		t.Fatalf("preview text length=%d want <= %d", got, previewTextLimit+1)
 	}
 }

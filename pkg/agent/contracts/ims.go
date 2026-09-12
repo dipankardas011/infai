@@ -24,6 +24,7 @@ type SessionSummary struct {
 type ChatMessage struct {
 	Role               string              `json:"role"`
 	Content            *string             `json:"content,omitempty"`
+	Images             []ImageInput        `json:"images,omitempty"`
 	ReasoningContent   string              `json:"reasoning_content,omitempty"`
 	ReasoningSignature string              `json:"reasoning_signature,omitempty"`
 	Name               *string             `json:"name,omitempty"`
@@ -78,6 +79,13 @@ func NewSystemMessage(content string) ChatMessage {
 
 func NewUserMessage(content string) ChatMessage {
 	return ChatMessage{Role: "user", Content: &content}
+}
+
+// NewUserMessageWithInput builds a user message carrying text and image
+// attachments. Image bytes stay in canonical form; adapters translate them.
+func NewUserMessageWithInput(input UserInput) ChatMessage {
+	content := input.Text
+	return ChatMessage{Role: "user", Content: &content, Images: input.Images}
 }
 
 func NewAssistantMessage(content string) ChatMessage {

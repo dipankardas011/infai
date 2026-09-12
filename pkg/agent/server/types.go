@@ -26,6 +26,7 @@ type RenameSessionRequest struct {
 
 type ChatRequest struct {
 	Prompt   string                       `json:"prompt"`
+	Images   []contracts.ImageInput       `json:"images,omitempty"`
 	Thinking contracts.InfaiThinkingLevel `json:"thinking"`
 }
 
@@ -45,8 +46,11 @@ type TimelineEventResponse struct {
 	ParentID   uuid.UUID        `json:"parent_id"`
 	BranchFrom *uuid.UUID       `json:"branch_from,omitempty"`
 	Kind       store.RecordKind `json:"kind"`
-	BlobHash   string           `json:"blob_hash,omitempty"`
 	Record     *store.Record    `json:"record,omitempty"`
+
+	// When Record is TOO Big or Images are there then we use these both
+	BlobHash string              `json:"blob_hash,omitempty"`
+	Preview  *store.EventPreview `json:"preview,omitempty"`
 }
 
 type TimelineResponse struct {

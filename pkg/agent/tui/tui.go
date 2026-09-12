@@ -61,7 +61,7 @@ type SessionCreateOptions struct {
 // Client is the CLI's view of the engine. RemoteClient is the HTTP transport
 // to a running <binary> server.
 type Client interface {
-	Chat(ctx context.Context, prompt string, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
+	Chat(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
 	ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error
 	SetSession(id uuid.UUID)
 	CreateSession(ctx context.Context, opts SessionCreateOptions) (*glue.SessionOutput, error)
@@ -78,12 +78,13 @@ type Client interface {
 }
 
 type TimelineEvent struct {
-	ID         uuid.UUID        `json:"id"`
-	ParentID   uuid.UUID        `json:"parent_id"`
-	BranchFrom *uuid.UUID       `json:"branch_from,omitempty"`
-	Kind       store.RecordKind `json:"kind"`
-	BlobHash   string           `json:"blob_hash,omitempty"`
-	Record     *store.Record    `json:"record,omitempty"`
+	ID         uuid.UUID           `json:"id"`
+	ParentID   uuid.UUID           `json:"parent_id"`
+	BranchFrom *uuid.UUID          `json:"branch_from,omitempty"`
+	Kind       store.RecordKind    `json:"kind"`
+	BlobHash   string              `json:"blob_hash,omitempty"`
+	Preview    *store.EventPreview `json:"preview,omitempty"`
+	Record     *store.Record       `json:"record,omitempty"`
 }
 
 type TimelineView struct {
@@ -233,7 +234,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 
 		thinkingShown := false
 		contentStarted := false
-		reply, err := c.Chat(ctx, prompt, state.thinking, func(kind contracts.DeltaKind, text string) {
+		reply, err := c.Chat(ctx, contracts.UserInput{Text: prompt}, state.thinking, func(kind contracts.DeltaKind, text string) {
 			switch kind {
 			case contracts.DeltaReasoning:
 				if !thinkingShown {

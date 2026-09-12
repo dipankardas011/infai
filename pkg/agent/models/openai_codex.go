@@ -423,7 +423,7 @@ func codexInput(messages []contracts.ChatMessage) (string, []any, error) {
 		default:
 			input = append(input, map[string]any{
 				"type": "message", "role": message.Role,
-				"content": []any{map[string]any{"type": "input_text", "text": message.Text()}},
+				"content": codexContentParts(message),
 			})
 		}
 	}

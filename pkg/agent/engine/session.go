@@ -24,6 +24,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/memory"
 	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/store"
+	"github.com/dipankardas011/infai/pkg/agent/vision"
 	"github.com/dipankardas011/infai/pkg/ds"
 	"github.com/google/uuid"
 )
@@ -265,6 +266,14 @@ func (s *InfaiAgentSession) AvailableThinkingPatterns() []contracts.InfaiThinkin
 	return s.model.GetModelSpecs().Model().AvailableThinkingPatterns()
 }
 
+// SupportedModalities returns the input modalities declared by the session's
+// currently selected model.
+func (s *InfaiAgentSession) SupportedModalities() []contracts.LLMSupportedModality {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]contracts.LLMSupportedModality(nil), s.model.GetModelSpecs().Model().Modality...)
+}
+
 func (s *InfaiAgentSession) CurrentThinkingPattern() contracts.InfaiThinkingLevel {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -475,13 +484,28 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 // persistent history and returns the outcome. The session stays registered
 // and idle after the call; the next Chat reuses the same conversation. New
 // messages, usage and meta are persisted through the recorder as they settle.
-func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOptions) (*ChatResult, error) {
+func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput, opts ChatOptions) (*ChatResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.closed {
 		return nil, ErrSessionClosed
 	}
+
+	if input.Empty() {
+		return nil, fmt.Errorf("%w: message is required", ErrInvalidInput)
+	}
+
+	modelConfig := s.model.GetModelSpecs().Model()
+	if err := contracts.ValidateUserInput(modelConfig, input); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	images, err := vision.ValidateInputs(input.Images)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	input.Images = images
+
 	parentID := s.timeline.CurrentHeadEventID()
 	switch {
 	case s.pendingBranchParent != uuid.Nil:
@@ -509,7 +533,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		return nil, err
 	}
 
-	s.history = append(s.history, contracts.NewUserMessage(prompt))
+	s.history = append(s.history, contracts.NewUserMessageWithInput(input))
 
 	// Persist the user's message before generation so a hard crash can never
 	// lose what was typed. The reply is synced at turn end; an interrupted
@@ -527,7 +551,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, prompt string, opts ChatOp
 		return nil, fmt.Errorf("persist user message: %w", appendErr)
 	}
 	if s.meta.Name == "" {
-		s.meta.Name = sessionNameFromPrompt(prompt)
+		s.meta.Name = sessionNameFromPrompt(input.Text)
 		s.meta.UpdatedAt = time.Now().UTC()
 		if err := s.store.SaveMeta(s.meta); err != nil {
 			s.l.Error("persist session name", "session_id", s.sessionID, "error", err)

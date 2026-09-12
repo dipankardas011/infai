@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
 )
@@ -1085,5 +1086,124 @@ func TestCycleThinking(t *testing.T) {
 		if got := m.thinking; got != want {
 			t.Fatalf("cycleThinking() = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestSubmitKeepsDraftWhenNoSession(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.composer.SetValue("keep me")
+
+	if cmd := m.submit(); cmd != nil {
+		t.Fatal("submit dispatched without a session")
+	}
+	if got := m.composer.Value(); got != "keep me" {
+		t.Fatalf("composer=%q want draft retained", got)
+	}
+}
+
+func TestSubmitKeepsDraftAndImagesWhenModelLacksImage(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.session = store.SessionMeta{ID: uuid.New(), Model: "text-only"}
+	m.modalities = []contracts.LLMSupportedModality{contracts.ModalityText}
+	m.pending = []contracts.ImageInput{{Name: "a.png", MediaType: "image/png", Data: []byte("a")}}
+	m.composer.SetValue("look")
+
+	if cmd := m.submit(); cmd != nil {
+		t.Fatal("submit dispatched with a text-only model")
+	}
+	if got := m.composer.Value(); got != "look" {
+		t.Fatalf("composer=%q want draft retained", got)
+	}
+	if len(m.pending) != 1 {
+		t.Fatalf("pending=%d want retained", len(m.pending))
+	}
+}
+
+func TestModelSwitchClearsPendingAttachments(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.pending = []contracts.ImageInput{{Name: "a.png", MediaType: "image/png", Data: []byte("a")}}
+
+	_, _ = m.Update(modelSetMsg{output: &glue.SessionOutput{SessionMeta: store.SessionMeta{ID: uuid.New(), Model: "m"}}})
+
+	if m.pending != nil {
+		t.Fatalf("pending survived model switch: %+v", m.pending)
+	}
+}
+
+func TestSessionLoadClearsPendingAttachments(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.pending = []contracts.ImageInput{{Name: "a.png", MediaType: "image/png", Data: []byte("a")}}
+
+	_, _ = m.Update(sessionLoadedMsg{output: &glue.SessionOutput{SessionMeta: store.SessionMeta{ID: uuid.New(), Model: "m"}}})
+
+	if m.pending != nil {
+		t.Fatalf("pending survived session load: %+v", m.pending)
+	}
+}
+
+type stubChatClient struct{}
+
+func (stubChatClient) Chat(context.Context, contracts.UserInput, contracts.InfaiThinkingLevel, func(contracts.DeltaKind, string), func(ApprovalUpdate)) (*ChatReply, error) {
+	return &ChatReply{}, nil
+}
+func (stubChatClient) ResolveApproval(context.Context, Approval, string, string) error { return nil }
+func (stubChatClient) SetSession(uuid.UUID)                                            {}
+func (stubChatClient) CreateSession(context.Context, SessionCreateOptions) (*glue.SessionOutput, error) {
+	return &glue.SessionOutput{}, nil
+}
+func (stubChatClient) LoadSession(context.Context, uuid.UUID) (*glue.SessionOutput, error) {
+	return &glue.SessionOutput{}, nil
+}
+func (stubChatClient) GetSession(context.Context, uuid.UUID) (*store.SessionMeta, []store.Record, error) {
+	return nil, nil, nil
+}
+func (stubChatClient) DeleteSession(context.Context, uuid.UUID) error { return nil }
+func (stubChatClient) RenameSession(context.Context, uuid.UUID, string) (*store.SessionMeta, error) {
+	return &store.SessionMeta{}, nil
+}
+func (stubChatClient) ListSessions(context.Context) ([]contracts.SessionSummary, error) {
+	return nil, nil
+}
+func (stubChatClient) ListAllProviderModels(context.Context) ([]glue.ListModelOutput, error) {
+	return nil, nil
+}
+func (stubChatClient) SetSessionModel(context.Context, string, string) (*glue.SessionOutput, error) {
+	return &glue.SessionOutput{}, nil
+}
+func (stubChatClient) Compact(context.Context) (*store.SessionMeta, error) {
+	return &store.SessionMeta{}, nil
+}
+func (stubChatClient) GetTimeline(context.Context, uuid.UUID) (*TimelineView, error) {
+	return &TimelineView{}, nil
+}
+func (stubChatClient) SelectBranch(context.Context, uuid.UUID, uuid.UUID) (contracts.TaskChecklistState, error) {
+	return contracts.TaskChecklistState{}, nil
+}
+
+func TestCtrlUClearsImagesAndComposer(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.pending = []contracts.ImageInput{{Name: "a.png", MediaType: "image/png", Data: []byte("a")}}
+	m.composer.SetValue("draft")
+
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'u', Mod: tea.ModCtrl}))
+
+	if m.pending != nil {
+		t.Fatalf("pending=%+v want cleared", m.pending)
+	}
+	if got := m.composer.Value(); got != "" {
+		t.Fatalf("composer=%q want cleared", got)
 	}
 }

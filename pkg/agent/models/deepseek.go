@@ -63,15 +63,52 @@ type deepSeekThinking struct {
 }
 
 type deepSeekChatRequest struct {
-	Model           string                  `json:"model"`
-	Messages        []contracts.ChatMessage `json:"messages"`
-	MaxTokens       uint64                  `json:"max_tokens,omitempty"`
-	Temperature     *float64                `json:"temperature,omitempty"`
-	Thinking        *deepSeekThinking       `json:"thinking,omitempty"`
-	ReasoningEffort string                  `json:"reasoning_effort,omitempty"`
-	Stream          bool                    `json:"stream,omitempty"`
-	StreamOptions   *deepSeekStreamOptions  `json:"stream_options,omitempty"`
-	Tools           []deepSeekTool          `json:"tools,omitempty"`
+	Model           string                 `json:"model"`
+	Messages        []deepSeekWireMessage  `json:"messages"`
+	MaxTokens       uint64                 `json:"max_tokens,omitempty"`
+	Temperature     *float64               `json:"temperature,omitempty"`
+	Thinking        *deepSeekThinking      `json:"thinking,omitempty"`
+	ReasoningEffort string                 `json:"reasoning_effort,omitempty"`
+	Stream          bool                   `json:"stream,omitempty"`
+	StreamOptions   *deepSeekStreamOptions `json:"stream_options,omitempty"`
+	Tools           []deepSeekTool         `json:"tools,omitempty"`
+}
+
+// deepSeekWireMessage is the DeepSeek Chat Completions message shape. It
+// mirrors the OpenAI-compatible format, including content-part arrays for
+// image-bearing user turns.
+type deepSeekWireMessage struct {
+	Role             string               `json:"role"`
+	Content          any                  `json:"content,omitempty"`
+	ReasoningContent string               `json:"reasoning_content,omitempty"`
+	Name             *string              `json:"name,omitempty"`
+	ToolCallID       string               `json:"tool_call_id,omitempty"`
+	ToolCalls        []contracts.ToolCall `json:"tool_calls,omitempty"`
+}
+
+// deepSeekWireMessages converts canonical messages into DeepSeek wire
+// messages, dropping harness-only fields and translating image attachments.
+func deepSeekWireMessages(messages []contracts.ChatMessage) []deepSeekWireMessage {
+	wire := make([]deepSeekWireMessage, 0, len(messages))
+	for _, message := range messages {
+		wm := deepSeekWireMessage{
+			Role:             message.Role,
+			ReasoningContent: message.ReasoningContent,
+			Name:             message.Name,
+			ToolCallID:       message.ToolCallID,
+			ToolCalls:        message.ToolCalls,
+		}
+		switch {
+		case len(message.Images) > 0:
+			wm.Content = chatCompletionsContent(message)
+		case message.Content != nil:
+			wm.Content = *message.Content
+		case message.Role == "assistant":
+			wm.Content = ""
+		}
+		wire = append(wire, wm)
+	}
+	return wire
 }
 
 type deepSeekStreamOptions struct {
@@ -105,64 +142,7 @@ type deepSeekChatResponse struct {
 }
 
 func (d *deepSeekAPI) Generate(ctx context.Context, messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) (contracts.ChatMessage, *contracts.TokenUsage, error) {
-	wireMessages := append([]contracts.ChatMessage(nil), messages...)
-	for i := range wireMessages {
-		wireMessages[i].Status = ""
-		wireMessages[i].ReasoningSignature = ""
-		if wireMessages[i].Role == "assistant" && wireMessages[i].Content == nil {
-			empty := ""
-			wireMessages[i].Content = &empty
-		}
-	}
-
-	reqBody := deepSeekChatRequest{
-		Model:       d.b.Model().Id,
-		Messages:    wireMessages,
-		MaxTokens:   d.b.Model().MaxOutputTokens,
-		Temperature: d.b.Model().DefaultTemperature,
-	}
-
-	switch d.b.ThinkingPattern() {
-	case "":
-		// DeepSeek defaults to thinking enabled with high effort.
-		reqBody.Temperature = nil
-	case contracts.ThinkingOff:
-		reqBody.Thinking = &deepSeekThinking{Type: "disabled"}
-	default:
-		effort, ok := d.b.ThinkingLevelValue()
-		if !ok {
-			return contracts.ChatMessage{}, nil, fmt.Errorf("deepseek: thinking pattern %q has no configured value", d.b.ThinkingPattern())
-		}
-		effort, err := normalizeDeepSeekReasoningEffort(effort)
-		if err != nil {
-			return contracts.ChatMessage{}, nil, err
-		}
-		reqBody.Thinking = &deepSeekThinking{Type: "enabled"}
-		reqBody.ReasoningEffort = effort
-		reqBody.Temperature = nil
-	}
-
-	for _, tool := range tools {
-		reqBody.Tools = append(reqBody.Tools, deepSeekTool{
-			Type: "function",
-			Function: deepSeekToolFunction{
-				Name:        tool.Name,
-				Description: tool.Description,
-				Parameters: deepSeekToolParameters{
-					Type:                 tool.Parameters.Type,
-					Properties:           tool.Parameters.Properties,
-					Required:             append([]string{}, tool.Parameters.RequiredFields...),
-					AdditionalProperties: tool.Parameters.AdditionalProperties,
-				},
-			},
-		})
-	}
-	if opts != nil && opts.Stream {
-		reqBody.Stream = true
-		reqBody.StreamOptions = &deepSeekStreamOptions{IncludeUsage: true}
-	}
-
-	raw, err := json.Marshal(reqBody)
+	raw, err := d.buildRequest(messages, tools, opts)
 	if err != nil {
 		return contracts.ChatMessage{}, nil, err
 	}
@@ -191,6 +171,58 @@ func (d *deepSeekAPI) Generate(ctx context.Context, messages []contracts.ChatMes
 		reply.Role = "assistant"
 	}
 	return reply, parsed.Usage, nil
+}
+
+// buildRequest assembles the DeepSeek request body. It is separated from
+// Generate so the exact wire payload can be asserted in tests.
+func (d *deepSeekAPI) buildRequest(messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) ([]byte, error) {
+	reqBody := deepSeekChatRequest{
+		Model:       d.b.Model().Id,
+		Messages:    deepSeekWireMessages(messages),
+		MaxTokens:   d.b.Model().MaxOutputTokens,
+		Temperature: d.b.Model().DefaultTemperature,
+	}
+
+	switch d.b.ThinkingPattern() {
+	case "":
+		// DeepSeek defaults to thinking enabled with high effort.
+		reqBody.Temperature = nil
+	case contracts.ThinkingOff:
+		reqBody.Thinking = &deepSeekThinking{Type: "disabled"}
+	default:
+		effort, ok := d.b.ThinkingLevelValue()
+		if !ok {
+			return nil, fmt.Errorf("deepseek: thinking pattern %q has no configured value", d.b.ThinkingPattern())
+		}
+		effort, err := normalizeDeepSeekReasoningEffort(effort)
+		if err != nil {
+			return nil, err
+		}
+		reqBody.Thinking = &deepSeekThinking{Type: "enabled"}
+		reqBody.ReasoningEffort = effort
+		reqBody.Temperature = nil
+	}
+
+	for _, tool := range tools {
+		reqBody.Tools = append(reqBody.Tools, deepSeekTool{
+			Type: "function",
+			Function: deepSeekToolFunction{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters: deepSeekToolParameters{
+					Type:                 tool.Parameters.Type,
+					Properties:           tool.Parameters.Properties,
+					Required:             append([]string{}, tool.Parameters.RequiredFields...),
+					AdditionalProperties: tool.Parameters.AdditionalProperties,
+				},
+			},
+		})
+	}
+	if opts != nil && opts.Stream {
+		reqBody.Stream = true
+		reqBody.StreamOptions = &deepSeekStreamOptions{IncludeUsage: true}
+	}
+	return json.Marshal(reqBody)
 }
 
 type deepSeekStreamChunk struct {

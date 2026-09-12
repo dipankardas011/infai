@@ -25,6 +25,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
+	"github.com/dipankardas011/infai/pkg/agent/vision"
 	"github.com/google/uuid"
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
@@ -32,6 +33,7 @@ import (
 type block struct {
 	role          string
 	text          string
+	imageCount    int
 	toolKind      string
 	toolStatus    string
 	toolName      string
@@ -51,6 +53,9 @@ type chatModel struct {
 	contextWindow     uint64
 	thinking          contracts.InfaiThinkingLevel
 	availableThinking []contracts.InfaiThinkingLevel
+	modalities        []contracts.LLMSupportedModality
+	pending           []contracts.ImageInput
+	clipboard         ClipboardReader
 	used              uint64
 	blocks            []block
 
@@ -83,6 +88,11 @@ type chatModel struct {
 type streamDeltaMsg struct {
 	kind contracts.DeltaKind
 	text string
+}
+
+type clipboardImageMsg struct {
+	image contracts.ImageInput
+	err   error
 }
 
 type streamApprovalMsg struct{ update ApprovalUpdate }
@@ -171,11 +181,12 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 	view.Style = lipgloss.NewStyle().Padding(0, 1)
 
 	m := &chatModel{
-		ctx:      ctx,
-		client:   client,
-		styles:   newHarnessStyles(),
-		viewport: view,
-		composer: input,
+		ctx:       ctx,
+		client:    client,
+		styles:    newHarnessStyles(),
+		viewport:  view,
+		composer:  input,
+		clipboard: defaultClipboard(),
 	}
 	if opts.SessionID != uuid.Nil {
 		m.modal = loadingModal("Opening session")
@@ -231,6 +242,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case streamApprovalMsg:
 		m.handleApprovalUpdate(msg.update)
 		return m, waitStream(m.ctx, m.stream)
+	case clipboardImageMsg:
+		return m.handleClipboardImage(msg)
 	case turnDoneMsg:
 		m.stopStreamRefresh()
 		if m.turnCancel != nil {
@@ -273,6 +286,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
+		m.modalities = msg.output.Modalities
+		m.pending = nil
+		m.reflow(false)
 		m.client.SetSession(msg.output.ID)
 		m.blocks = blocksFromRecords(msg.records)
 		m.checklist = taskChecklistFromRecords(msg.records)
@@ -302,6 +318,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
+		m.modalities = msg.output.Modalities
+		m.pending = nil
+		m.reflow(false)
 		m.client.SetSession(msg.output.ID)
 		m.blocks = nil
 		m.checklist = contracts.TaskChecklistState{}
@@ -317,6 +336,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.contextWindow = msg.output.ContextWindow
 			m.thinking = msg.output.Thinking
 			m.availableThinking = msg.output.AvailableThinking
+			m.modalities = msg.output.Modalities
+			m.pending = nil
+			m.reflow(false)
 			m.blocks = append(m.blocks, block{role: "system", text: "Model switched to " + msg.output.Model + " @ " + msg.output.Provider})
 		}
 		m.modal = nil
@@ -458,6 +480,18 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.modal != nil {
 		return m, m.handleModalKey(msg)
+	}
+	switch msg.Key().Keystroke() {
+	case "ctrl+v":
+		return m, m.pasteImage()
+	case "ctrl+u":
+		// Clear staged images and the composer text; with none staged, ctrl+u
+		// keeps its normal delete-before-cursor behavior.
+		if len(m.pending) > 0 {
+			m.composer.Reset()
+			m.clearAttachments()
+			return m, nil
+		}
 	}
 	if m.working {
 		switch key {
@@ -661,19 +695,31 @@ func (m *chatModel) submit() tea.Cmd {
 	if prompt == "" || m.working {
 		return nil
 	}
-	m.composer.Reset()
-	m.commandMenu = false
-	m.reflow(false)
-	if strings.HasPrefix(prompt, "/") {
+	images := append([]contracts.ImageInput(nil), m.pending...)
+	if strings.HasPrefix(prompt, "/") && len(images) == 0 {
+		m.composer.Reset()
+		m.commandMenu = false
+		m.reflow(false)
 		return m.runCommand(prompt)
 	}
 	if m.session.ID == uuid.Nil {
+		// Keep the draft and attachments so the user can retry once a session
+		// exists.
 		m.appendError(errors.New("no active session"))
 		m.refreshTranscript(true)
 		return nil
 	}
+	if len(images) > 0 && !m.modelSupportsImage() {
+		m.appendError(fmt.Errorf("model %q does not support image input", m.session.Model))
+		m.refreshTranscript(true)
+		return nil
+	}
+	m.composer.Reset()
+	m.commandMenu = false
+	m.reflow(false)
 
-	m.blocks = append(m.blocks, block{role: "user", text: prompt})
+	input := contracts.UserInput{Text: prompt, Images: images}
+	m.blocks = append(m.blocks, block{role: "user", text: prompt, imageCount: len(images)})
 	m.working = true
 	m.workBegan = time.Now()
 	m.workStatus = "working"
@@ -693,13 +739,15 @@ func (m *chatModel) submit() tea.Cmd {
 		}
 	}
 	go func() {
-		reply, err := m.client.Chat(turnCtx, prompt, thinking, func(kind contracts.DeltaKind, text string) {
+		reply, err := m.client.Chat(turnCtx, input, thinking, func(kind contracts.DeltaKind, text string) {
 			emit(streamDeltaMsg{kind: kind, text: text})
 		}, func(update ApprovalUpdate) {
 			emit(streamApprovalMsg{update: update})
 		})
 		emit(turnDoneMsg{reply: reply, err: err})
 	}()
+	// Attachments are consumed only once dispatch has successfully begun.
+	m.pending = nil
 	return tea.Batch(waitStream(m.ctx, stream), animationTickCmd())
 }
 
@@ -715,6 +763,143 @@ func waitStream(ctx context.Context, stream <-chan tea.Msg) tea.Cmd {
 			return nil
 		}
 	}
+}
+
+// ---- image attachments ----
+
+// modelSupportsImage reports whether the selected model declares image input.
+// An empty modality list means the model declares no multimodal input.
+func (m *chatModel) modelSupportsImage() bool {
+	for _, modality := range m.modalities {
+		if modality == contracts.ModalityImage {
+			return true
+		}
+	}
+	return false
+}
+
+// pasteImage kicks off an asynchronous clipboard read. It performs the cheap
+// preflight checks synchronously so failures are reported without spawning a
+// process.
+func (m *chatModel) pasteImage() tea.Cmd {
+	if m.modal != nil || m.working {
+		return nil
+	}
+	if m.session.ID == uuid.Nil {
+		m.appendError(errors.New("no active session"))
+		m.refreshTranscript(true)
+		return nil
+	}
+	if !m.modelSupportsImage() {
+		m.appendError(fmt.Errorf("model %q does not support image input", m.session.Model))
+		m.refreshTranscript(true)
+		return nil
+	}
+	if len(m.pending) >= vision.MaxImages {
+		m.appendError(fmt.Errorf("at most %d images can be attached", vision.MaxImages))
+		m.refreshTranscript(true)
+		return nil
+	}
+	if m.clipboard == nil {
+		m.appendError(ErrClipboardUnavailable)
+		m.refreshTranscript(true)
+		return nil
+	}
+	return pasteImageCmd(m.ctx, m.clipboard)
+}
+
+func pasteImageCmd(ctx context.Context, reader ClipboardReader) tea.Cmd {
+	return func() tea.Msg {
+		data, err := reader.ReadImage(ctx)
+		if err != nil {
+			return clipboardImageMsg{err: err}
+		}
+		// Decoding is CPU-heavy for large images, so it runs here, off the
+		// Bubble Tea update loop.
+		image, err := vision.ValidateImage(data)
+		if err != nil {
+			return clipboardImageMsg{err: err}
+		}
+		return clipboardImageMsg{image: image}
+	}
+}
+
+func (m *chatModel) handleClipboardImage(msg clipboardImageMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.appendError(clipboardError(msg.err))
+		m.refreshTranscript(true)
+		return m, nil
+	}
+	if m.session.ID == uuid.Nil {
+		m.appendError(errors.New("no active session"))
+		m.refreshTranscript(true)
+		return m, nil
+	}
+	if !m.modelSupportsImage() {
+		m.appendError(fmt.Errorf("model %q does not support image input", m.session.Model))
+		m.refreshTranscript(true)
+		return m, nil
+	}
+	if len(m.pending) >= vision.MaxImages {
+		m.appendError(fmt.Errorf("at most %d images can be attached", vision.MaxImages))
+		m.refreshTranscript(true)
+		return m, nil
+	}
+	image := msg.image
+	candidate := append(append([]contracts.ImageInput(nil), m.pending...), image)
+	if err := vision.ValidateBatch(candidate); err != nil {
+		m.appendError(err)
+		m.refreshTranscript(true)
+		return m, nil
+	}
+	image.Name = clipboardImageName(len(m.pending)+1, image.MediaType)
+	m.pending = append(m.pending, image)
+	m.reflow(false)
+	return m, nil
+}
+
+func clipboardError(err error) error {
+	switch {
+	case errors.Is(err, ErrClipboardUnavailable):
+		return errors.New("clipboard image paste is unavailable: install wl-paste, xclip, or pngpaste")
+	case errors.Is(err, ErrClipboardEmpty):
+		return errors.New("no image found on the clipboard")
+	case errors.Is(err, ErrClipboardTooLarge):
+		return fmt.Errorf("clipboard image exceeds the %d MB limit", vision.MaxImageBytes>>20)
+	default:
+		return err
+	}
+}
+
+// renderImageBadges renders the green [Image N] chips for a set of attachments.
+func (m *chatModel) renderImageBadges(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	badges := make([]string, 0, count)
+	for i := range count {
+		badges = append(badges, m.styles.imageBadge.Render(fmt.Sprintf("[Image %d]", i+1)))
+	}
+	return strings.Join(badges, " ")
+}
+
+// attachmentsView shows the staged attachments as [Image N] chips above the
+// composer. The composer text itself stays clean.
+func (m *chatModel) attachmentsView() string {
+	if len(m.pending) == 0 {
+		return ""
+	}
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, m.renderImageBadges(len(m.pending)))
+}
+
+// clearAttachments drops every staged image. Ctrl+U is the explicit action
+// because the composer carries no marker text to delete.
+func (m *chatModel) clearAttachments() {
+	if len(m.pending) == 0 {
+		return
+	}
+	m.pending = nil
+	m.reflow(false)
 }
 
 func (m *chatModel) runCommand(command string) tea.Cmd {
@@ -756,6 +941,7 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 	case "/help":
 		m.blocks = append(m.blocks, block{role: "system", text: strings.Join([]string{
 			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll · Ctrl+O sessions · Ctrl+N new · Ctrl+T thinking",
+			"Ctrl+V paste image · Ctrl+U clear images",
 			"/new · /sessions · /model · /compact · /timeline · /rename · /quit",
 		}, "\n")})
 		m.refreshTranscript(true)
@@ -775,8 +961,9 @@ func (m *chatModel) View() tea.View {
 	header := m.headerView()
 	status := m.statusView()
 	commands := m.commandMenuView()
+	attachments := m.attachmentsView()
 	composer := m.composerView()
-	parts := []string{header, m.viewport.View(), status, commands, composer}
+	parts := []string{header, m.viewport.View(), status, commands, attachments, composer}
 	if len(m.areas) == len(parts) {
 		parts[3] = m.commandMenuViewForHeight(m.areas[3].height)
 		for i := range parts {
@@ -818,8 +1005,9 @@ func (m *chatModel) reflow(follow bool) {
 	header := m.headerView()
 	status := m.statusView()
 	commands := m.commandMenuView()
+	attachments := m.attachmentsView()
 	composer := m.composerView()
-	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(status), intrinsic(commands), intrinsic(composer))
+	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(status), intrinsic(commands), intrinsic(attachments), intrinsic(composer))
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
@@ -989,6 +1177,9 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	switch entry.role {
 	case "user":
 		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, entry.text, width)
+		if badges := m.renderImageBadges(entry.imageCount); badges != "" {
+			content += "\n" + strings.Repeat(" ", lipgloss.Width("●")+1) + badges
+		}
 	case "assistant":
 		text := entry.text
 		if !streaming {
@@ -2140,7 +2331,7 @@ func blocksFromRecords(records []store.Record) []block {
 			message := record.Message
 			switch message.Role {
 			case "user":
-				blocks = append(blocks, block{role: "user", text: message.Text()})
+				blocks = append(blocks, block{role: "user", text: message.Text(), imageCount: len(message.Images)})
 			case "assistant":
 				if message.ReasoningContent != "" {
 					blocks = append(blocks, block{role: "thinking", text: message.ReasoningContent})
@@ -2388,7 +2579,7 @@ type timelineDisplay struct {
 
 func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 	if event.Record == nil {
-		return []timelineDisplay{{role: "assistant", text: "content unavailable"}}
+		return previewDisplays(event.Preview)
 	}
 	if event.Record.ToolCall != nil {
 		call := event.Record.ToolCall
@@ -2456,6 +2647,32 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 		text = strings.ReplaceAll(string(event.Kind), "_", " ")
 	}
 	return []timelineDisplay{{role: "assistant", text: text}}
+}
+
+func previewDisplays(preview *store.EventPreview) []timelineDisplay {
+	if preview == nil {
+		return []timelineDisplay{{role: "assistant", text: "content unavailable"}}
+	}
+	role := preview.Role
+	if role == "" {
+		role = "assistant"
+	}
+	text := preview.Text
+	if text == "" {
+		text = "content unavailable"
+	}
+	if preview.ImageCount > 0 {
+		text = strings.TrimSpace(text + " " + imageBadgeText(preview.ImageCount))
+	}
+	return []timelineDisplay{{role: role, text: text}}
+}
+
+func imageBadgeText(count int) string {
+	badges := make([]string, 0, count)
+	for i := range count {
+		badges = append(badges, fmt.Sprintf("[Image %d]", i+1))
+	}
+	return strings.Join(badges, " ")
 }
 
 func singleLine(value string) string {

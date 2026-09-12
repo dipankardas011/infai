@@ -35,6 +35,7 @@ func (e *InfaiAgentEngine) ListAllProviderModels() []glue.ListModelOutput {
 				ProviderName:   providerName,
 				ContextWindow:  model.MaxContextLength,
 				ThinkingLevels: model.AvailableThinkingPatterns(),
+				Modalities:     model.Modality,
 			})
 		}
 	}
