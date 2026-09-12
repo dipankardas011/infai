@@ -189,11 +189,33 @@ func SerializeForCompaction(history []contracts.ChatMessage) string {
 // image so compaction does not silently drop image context. The bytes are
 // intentionally omitted from the summary input.
 func imageCompactionMarker(image contracts.ImageInput) string {
-	name := image.Name
+	name := sanitizeMarkerName(image.Name)
 	if name == "" {
 		name = "image"
 	}
 	return fmt.Sprintf("\n[image attachment: %s, %s, %dx%d, %d bytes]", name, image.MediaType, image.Width, image.Height, len(image.Data))
+}
+
+// sanitizeMarkerName neutralizes client-controlled attachment names before
+// they are interpolated into the compaction prompt: control characters are
+// dropped, whitespace is collapsed, and the result is capped.
+func sanitizeMarkerName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case r < 0x20 || r == 0x7f:
+			return -1
+		default:
+			return r
+		}
+	}, name)
+	name = strings.Join(strings.Fields(name), " ")
+	runes := []rune(name)
+	if len(runes) > 64 {
+		name = string(runes[:64])
+	}
+	return name
 }
 
 // compactionInput assembles the summarizer's request: the serialized toCompact

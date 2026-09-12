@@ -493,16 +493,16 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput,
 	}
 
 	if input.Empty() {
-		return nil, errors.New("session: message is required")
+		return nil, fmt.Errorf("%w: message is required", ErrInvalidInput)
 	}
 
 	modelConfig := s.model.GetModelSpecs().Model()
 	if err := contracts.ValidateUserInput(modelConfig, input); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	images, err := vision.ValidateInputs(input.Images)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	input.Images = images
 

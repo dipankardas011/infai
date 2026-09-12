@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -37,6 +38,19 @@ type Event struct {
 	Kind       RecordKind
 	Record     *Record
 	BlobHash   string
+	// Preview is a bounded, display-only summary kept inline for blob-backed
+	// records so UIs can render an event without reading the blob. It is nil
+	// for inline records.
+	Preview *EventPreview
+}
+
+// EventPreview is the sidecar kept in the chunk for blob-backed events. It is
+// deliberately bounded: text is collapsed to a single line and truncated, so a
+// large blob never forces its full payload through the timeline API.
+type EventPreview struct {
+	Role       string `json:"role,omitempty"`
+	Text       string `json:"text,omitempty"`
+	ImageCount int    `json:"image_count,omitempty"`
 }
 
 type EventLocation struct {
@@ -68,12 +82,13 @@ type Timeline struct {
 }
 
 type eventDisk struct {
-	ID         uuid.UUID  `json:"id"`
-	ParentID   uuid.UUID  `json:"parent_id,omitempty"`
-	BranchFrom *uuid.UUID `json:"branch_from,omitempty"`
-	Kind       RecordKind `json:"kind"`
-	Record     *Record    `json:"record,omitempty"`
-	BlobHash   string     `json:"blob_hash,omitempty"`
+	ID         uuid.UUID     `json:"id"`
+	ParentID   uuid.UUID     `json:"parent_id,omitempty"`
+	BranchFrom *uuid.UUID    `json:"branch_from,omitempty"`
+	Kind       RecordKind    `json:"kind"`
+	Record     *Record       `json:"record,omitempty"`
+	BlobHash   string        `json:"blob_hash,omitempty"`
+	Preview    *EventPreview `json:"preview,omitempty"`
 }
 
 type indexDisk struct {
@@ -190,6 +205,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID, bra
 			return Event{}, err
 		}
 		disk.BlobHash = hash
+		disk.Preview = buildEventPreview(record)
 	} else {
 		disk.Record = &record
 	}
@@ -232,7 +248,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID, bra
 	t.index[id] = loc
 	t.parents[id] = parentID
 	t.head = id
-	return Event{ID: id, ParentID: parentID, BranchFrom: branchFrom, Kind: record.Kind, Record: &record, BlobHash: disk.BlobHash}, nil
+	return Event{ID: id, ParentID: parentID, BranchFrom: branchFrom, Kind: record.Kind, Record: &record, BlobHash: disk.BlobHash, Preview: disk.Preview}, nil
 }
 
 func (t *Timeline) CurrentHeadEventID() uuid.UUID {
@@ -246,6 +262,61 @@ func (t *Timeline) CurrentHeadEventID() uuid.UUID {
 // the event chunks, regardless of how small the image is.
 func recordHasImages(record Record) bool {
 	return record.Message != nil && len(record.Message.Images) > 0
+}
+
+// previewTextLimit bounds the sidecar text so a blobbed record never pushes its
+// full payload through the timeline API.
+const previewTextLimit = 200
+
+// buildEventPreview derives the bounded display sidecar for a blob-backed
+// record. It never includes image bytes.
+func buildEventPreview(record Record) *EventPreview {
+	preview := &EventPreview{}
+	switch {
+	case record.Message != nil:
+		message := record.Message
+		preview.Role = message.Role
+		preview.ImageCount = len(message.Images)
+		preview.Text = previewText(message.Text())
+		if preview.Text == "" && len(message.ToolCalls) > 0 {
+			names := make([]string, 0, len(message.ToolCalls))
+			for _, call := range message.ToolCalls {
+				names = append(names, call.Function.Name)
+			}
+			preview.Text = previewText(strings.Join(names, ", "))
+		}
+	case record.ToolCall != nil:
+		preview.Role = "tool_call"
+		preview.Text = previewText(record.ToolCall.Name + " " + record.ToolCall.Arguments)
+	case record.ToolResult != nil:
+		preview.Role = "tool_result"
+		text := record.ToolResult.Status
+		if record.ToolResult.Error != "" {
+			text += ": " + record.ToolResult.Error
+		} else if record.ToolResult.Output != "" {
+			text += ": " + record.ToolResult.Output
+		}
+		preview.Text = previewText(text)
+	case record.Compaction != nil:
+		preview.Role = "assistant"
+		preview.Text = previewText("context compacted: " + record.Compaction.Summary)
+	case record.Approval != nil && record.Approval.ToolCall != nil:
+		preview.Role = "tool_call"
+		preview.Text = previewText(record.Approval.ToolCall.Function.Name)
+	default:
+		preview.Role = "assistant"
+		preview.Text = previewText(record.Text)
+	}
+	return preview
+}
+
+func previewText(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > previewTextLimit {
+		return string(runes[:previewTextLimit]) + "..."
+	}
+	return value
 }
 
 func (t *Timeline) LoadEvent(id uuid.UUID) (Event, error) {
@@ -694,7 +765,7 @@ func (t *Timeline) readAt(id uuid.UUID, loc EventLocation) (Event, error) {
 	if kind == "" && disk.Record != nil {
 		kind = disk.Record.Kind
 	}
-	return Event{ID: disk.ID, ParentID: disk.ParentID, BranchFrom: disk.BranchFrom, Kind: kind, Record: record, BlobHash: disk.BlobHash}, nil
+	return Event{ID: disk.ID, ParentID: disk.ParentID, BranchFrom: disk.BranchFrom, Kind: kind, Record: record, BlobHash: disk.BlobHash, Preview: disk.Preview}, nil
 }
 
 // ResolveRecord materializes a blob-backed event when its content is needed.

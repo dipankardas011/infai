@@ -91,8 +91,8 @@ type streamDeltaMsg struct {
 }
 
 type clipboardImageMsg struct {
-	data []byte
-	err  error
+	image contracts.ImageInput
+	err   error
 }
 
 type streamApprovalMsg struct{ update ApprovalUpdate }
@@ -287,6 +287,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
 		m.modalities = msg.output.Modalities
+		m.pending = nil
+		m.reflow(false)
 		m.client.SetSession(msg.output.ID)
 		m.blocks = blocksFromRecords(msg.records)
 		m.checklist = taskChecklistFromRecords(msg.records)
@@ -317,6 +319,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
 		m.modalities = msg.output.Modalities
+		m.pending = nil
+		m.reflow(false)
 		m.client.SetSession(msg.output.ID)
 		m.blocks = nil
 		m.checklist = contracts.TaskChecklistState{}
@@ -333,6 +337,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.thinking = msg.output.Thinking
 			m.availableThinking = msg.output.AvailableThinking
 			m.modalities = msg.output.Modalities
+			m.pending = nil
+			m.reflow(false)
 			m.blocks = append(m.blocks, block{role: "system", text: "Model switched to " + msg.output.Model + " @ " + msg.output.Provider})
 		}
 		m.modal = nil
@@ -690,13 +696,15 @@ func (m *chatModel) submit() tea.Cmd {
 		return nil
 	}
 	images := append([]contracts.ImageInput(nil), m.pending...)
-	m.composer.Reset()
-	m.commandMenu = false
-	m.reflow(false)
 	if strings.HasPrefix(prompt, "/") && len(images) == 0 {
+		m.composer.Reset()
+		m.commandMenu = false
+		m.reflow(false)
 		return m.runCommand(prompt)
 	}
 	if m.session.ID == uuid.Nil {
+		// Keep the draft and attachments so the user can retry once a session
+		// exists.
 		m.appendError(errors.New("no active session"))
 		m.refreshTranscript(true)
 		return nil
@@ -706,6 +714,9 @@ func (m *chatModel) submit() tea.Cmd {
 		m.refreshTranscript(true)
 		return nil
 	}
+	m.composer.Reset()
+	m.commandMenu = false
+	m.reflow(false)
 
 	input := contracts.UserInput{Text: prompt, Images: images}
 	m.blocks = append(m.blocks, block{role: "user", text: prompt, imageCount: len(images)})
@@ -800,7 +811,16 @@ func (m *chatModel) pasteImage() tea.Cmd {
 func pasteImageCmd(ctx context.Context, reader ClipboardReader) tea.Cmd {
 	return func() tea.Msg {
 		data, err := reader.ReadImage(ctx)
-		return clipboardImageMsg{data: data, err: err}
+		if err != nil {
+			return clipboardImageMsg{err: err}
+		}
+		// Decoding is CPU-heavy for large images, so it runs here, off the
+		// Bubble Tea update loop.
+		image, err := vision.ValidateImage(data)
+		if err != nil {
+			return clipboardImageMsg{err: err}
+		}
+		return clipboardImageMsg{image: image}
 	}
 }
 
@@ -825,12 +845,7 @@ func (m *chatModel) handleClipboardImage(msg clipboardImageMsg) (tea.Model, tea.
 		m.refreshTranscript(true)
 		return m, nil
 	}
-	image, err := vision.ValidateImage(msg.data)
-	if err != nil {
-		m.appendError(err)
-		m.refreshTranscript(true)
-		return m, nil
-	}
+	image := msg.image
 	candidate := append(append([]contracts.ImageInput(nil), m.pending...), image)
 	if err := vision.ValidateBatch(candidate); err != nil {
 		m.appendError(err)
@@ -849,6 +864,8 @@ func clipboardError(err error) error {
 		return errors.New("clipboard image paste is unavailable: install wl-paste, xclip, or pngpaste")
 	case errors.Is(err, ErrClipboardEmpty):
 		return errors.New("no image found on the clipboard")
+	case errors.Is(err, ErrClipboardTooLarge):
+		return fmt.Errorf("clipboard image exceeds the %d MB limit", vision.MaxImageBytes>>20)
 	default:
 		return err
 	}
@@ -2562,7 +2579,7 @@ type timelineDisplay struct {
 
 func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 	if event.Record == nil {
-		return []timelineDisplay{{role: "assistant", text: "content unavailable"}}
+		return previewDisplays(event.Preview)
 	}
 	if event.Record.ToolCall != nil {
 		call := event.Record.ToolCall
@@ -2630,6 +2647,32 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 		text = strings.ReplaceAll(string(event.Kind), "_", " ")
 	}
 	return []timelineDisplay{{role: "assistant", text: text}}
+}
+
+func previewDisplays(preview *store.EventPreview) []timelineDisplay {
+	if preview == nil {
+		return []timelineDisplay{{role: "assistant", text: "content unavailable"}}
+	}
+	role := preview.Role
+	if role == "" {
+		role = "assistant"
+	}
+	text := preview.Text
+	if text == "" {
+		text = "content unavailable"
+	}
+	if preview.ImageCount > 0 {
+		text = strings.TrimSpace(text + " " + imageBadgeText(preview.ImageCount))
+	}
+	return []timelineDisplay{{role: role, text: text}}
+}
+
+func imageBadgeText(count int) string {
+	badges := make([]string, 0, count)
+	for i := range count {
+		badges = append(badges, fmt.Sprintf("[Image %d]", i+1))
+	}
+	return strings.Join(badges, " ")
 }
 
 func singleLine(value string) string {

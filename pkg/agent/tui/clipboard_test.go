@@ -91,6 +91,25 @@ func TestSystemClipboardCommandSelection(t *testing.T) {
 	}
 }
 
+func TestLimitedWriterRejectsOversize(t *testing.T) {
+	w := &limitedWriter{limit: 4}
+	if _, err := w.Write([]byte("abc")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := w.Write([]byte("def")); !errors.Is(err, ErrClipboardTooLarge) {
+		t.Fatalf("err=%v want ErrClipboardTooLarge", err)
+	}
+}
+
+func TestSystemClipboardReportsTooLarge(t *testing.T) {
+	c := testClipboard("linux", nil, map[string]string{"xclip": "/usr/bin/xclip"}, func(string, []string) ([]byte, error) {
+		return nil, ErrClipboardTooLarge
+	})
+	if _, err := c.ReadImage(context.Background()); !errors.Is(err, ErrClipboardTooLarge) {
+		t.Fatalf("err=%v want ErrClipboardTooLarge", err)
+	}
+}
+
 func TestSystemClipboardFallsBackToJPEG(t *testing.T) {
 	var tried []string
 	c := testClipboard("linux", map[string]string{"WAYLAND_DISPLAY": "wayland-0"}, map[string]string{"wl-paste": "/usr/bin/wl-paste"}, func(_ string, args []string) ([]byte, error) {

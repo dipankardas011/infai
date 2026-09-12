@@ -540,3 +540,70 @@ func TestTimelineStoresLargeImageMessageInBlob(t *testing.T) {
 		t.Fatalf("image bytes length=%d want=%d", len(got.Record.Message.Images[0].Data), len(payload))
 	}
 }
+
+func TestTimelineBlobEventCarriesBoundedPreview(t *testing.T) {
+	timeline, err := NewTimeline(filepath.Join(t.TempDir(), "timeline"), TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer timeline.Close()
+
+	message := contracts.NewUserMessageWithInput(contracts.UserInput{
+		Text: "describe",
+		Images: []contracts.ImageInput{{
+			Name: "a.png", MediaType: "image/png", Width: 2, Height: 2, Data: []byte("bytes"),
+		}},
+	})
+	if _, err := timeline.AppendToHead(Record{Kind: KindMessage, Timestamp: time.Now().UTC(), Message: &message}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := timeline.LoadEntireTimeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Record != nil {
+		t.Fatalf("expected one unresolved blob event: %+v", events)
+	}
+	preview := events[0].Preview
+	if preview == nil {
+		t.Fatal("blob event has no preview sidecar")
+	}
+	if preview.Role != "user" || preview.Text != "describe" || preview.ImageCount != 1 {
+		t.Fatalf("preview=%+v want role=user text=describe images=1", preview)
+	}
+
+	// Full bytes are still recoverable from the blob.
+	resolved, err := timeline.LoadEvent(events[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Record == nil || resolved.Record.Message == nil || len(resolved.Record.Message.Images) != 1 {
+		t.Fatalf("blob did not resolve: %+v", resolved.Record)
+	}
+	if len(resolved.Record.Message.Images[0].Data) == 0 {
+		t.Fatal("resolved image bytes are empty")
+	}
+}
+
+func TestTimelinePreviewIsBounded(t *testing.T) {
+	timeline, err := NewTimeline(filepath.Join(t.TempDir(), "timeline"), TimelineOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer timeline.Close()
+
+	payload := bytes.Repeat([]byte("x"), blobBytesThreshold)
+	if _, err := timeline.AppendToHead(Record{Kind: KindToolResult, Timestamp: time.Now().UTC(), ToolResult: &ToolResultRecord{CallID: "c", Status: "success", Output: string(payload)}}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := timeline.LoadEntireTimeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Preview == nil {
+		t.Fatalf("expected a preview for the blob event: %+v", events)
+	}
+	if got := len([]rune(events[0].Preview.Text)); got > previewTextLimit+1 {
+		t.Fatalf("preview text length=%d want <= %d", got, previewTextLimit+1)
+	}
+}

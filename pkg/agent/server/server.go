@@ -260,7 +260,7 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 	response := TimelineResponse{Meta: meta, Head: head, Events: make([]TimelineEventResponse, 0, len(events))}
 	for _, event := range events {
-		response.Events = append(response.Events, TimelineEventResponse{ID: event.ID, ParentID: event.ParentID, BranchFrom: event.BranchFrom, Kind: event.Kind, BlobHash: event.BlobHash, Record: event.Record})
+		response.Events = append(response.Events, TimelineEventResponse{ID: event.ID, ParentID: event.ParentID, BranchFrom: event.BranchFrom, Kind: event.Kind, BlobHash: event.BlobHash, Preview: event.Preview, Record: event.Record})
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }
@@ -451,6 +451,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				s.logger.Debug("stream error event failed", "session_id", id, "error", werr)
 			}
 			s.flush(w)
+			return
+		}
+		if errors.Is(err, engine.ErrInvalidInput) {
+			s.writeError(w, http.StatusBadRequest, err)
 			return
 		}
 		s.writeError(w, http.StatusInternalServerError, err)

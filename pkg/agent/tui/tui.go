@@ -78,12 +78,13 @@ type Client interface {
 }
 
 type TimelineEvent struct {
-	ID         uuid.UUID        `json:"id"`
-	ParentID   uuid.UUID        `json:"parent_id"`
-	BranchFrom *uuid.UUID       `json:"branch_from,omitempty"`
-	Kind       store.RecordKind `json:"kind"`
-	BlobHash   string           `json:"blob_hash,omitempty"`
-	Record     *store.Record    `json:"record,omitempty"`
+	ID         uuid.UUID           `json:"id"`
+	ParentID   uuid.UUID           `json:"parent_id"`
+	BranchFrom *uuid.UUID          `json:"branch_from,omitempty"`
+	Kind       store.RecordKind    `json:"kind"`
+	BlobHash   string              `json:"blob_hash,omitempty"`
+	Preview    *store.EventPreview `json:"preview,omitempty"`
+	Record     *store.Record       `json:"record,omitempty"`
 }
 
 type TimelineView struct {
