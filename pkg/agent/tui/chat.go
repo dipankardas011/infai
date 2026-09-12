@@ -8,7 +8,6 @@ import (
 	"image/color"
 	"io"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,20 +30,10 @@ import (
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
-// imageMeta is the metadata-only view of an attachment stored in a transcript
-// block. Image bytes are never duplicated into the TUI.
-type imageMeta struct {
-	Name      string
-	MediaType string
-	Width     int
-	Height    int
-	Size      int
-}
-
 type block struct {
 	role          string
 	text          string
-	images        []imageMeta
+	imageCount    int
 	toolKind      string
 	toolStatus    string
 	toolName      string
@@ -486,8 +475,17 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.modal != nil {
 		return m, m.handleModalKey(msg)
 	}
-	if msg.Key().Keystroke() == "alt+v" {
+	switch msg.Key().Keystroke() {
+	case "ctrl+v":
 		return m, m.pasteImage()
+	case "ctrl+u":
+		// Clear staged images and the composer text; with none staged, ctrl+u
+		// keeps its normal delete-before-cursor behavior.
+		if len(m.pending) > 0 {
+			m.composer.Reset()
+			m.clearAttachments()
+			return m, nil
+		}
 	}
 	if m.working {
 		switch key {
@@ -691,10 +689,7 @@ func (m *chatModel) submit() tea.Cmd {
 	if prompt == "" || m.working {
 		return nil
 	}
-	// The text is the source of truth: an image is only sent while its
-	// [#image N] marker survives in the composer. Deleting the marker discards
-	// the image, so no separate removal action is needed.
-	images := referencedImages(prompt, m.pending)
+	images := append([]contracts.ImageInput(nil), m.pending...)
 	m.composer.Reset()
 	m.commandMenu = false
 	m.reflow(false)
@@ -713,7 +708,7 @@ func (m *chatModel) submit() tea.Cmd {
 	}
 
 	input := contracts.UserInput{Text: prompt, Images: images}
-	m.blocks = append(m.blocks, userBlock(prompt, images))
+	m.blocks = append(m.blocks, block{role: "user", text: prompt, imageCount: len(images)})
 	m.working = true
 	m.workBegan = time.Now()
 	m.workStatus = "working"
@@ -760,8 +755,6 @@ func waitStream(ctx context.Context, stream <-chan tea.Msg) tea.Cmd {
 }
 
 // ---- image attachments ----
-
-var attachmentMarkerPattern = regexp.MustCompile(`\[#image (\d+)\]`)
 
 // modelSupportsImage reports whether the selected model declares image input.
 // An empty modality list means the model declares no multimodal input.
@@ -846,46 +839,8 @@ func (m *chatModel) handleClipboardImage(msg clipboardImageMsg) (tea.Model, tea.
 	}
 	image.Name = clipboardImageName(len(m.pending)+1, image.MediaType)
 	m.pending = append(m.pending, image)
-	m.insertAttachmentMarker(len(m.pending))
 	m.reflow(false)
 	return m, nil
-}
-
-// insertAttachmentMarker writes the Pi-style positional marker at the cursor.
-// The marker number is 1-based and maps to pending[number-1].
-func (m *chatModel) insertAttachmentMarker(number int) {
-	if value := m.composer.Value(); value != "" && !strings.HasSuffix(value, " ") && !strings.HasSuffix(value, "\n") {
-		m.composer.InsertString(" ")
-	}
-	m.composer.InsertString(fmt.Sprintf("[#image %d] ", number))
-}
-
-// referencedImages returns the staged attachments whose [#image N] marker is
-// still present in the text, in first-occurrence order. Markers that are
-// missing or out of range are ignored, and duplicate markers attach once.
-func referencedImages(text string, pending []contracts.ImageInput) []contracts.ImageInput {
-	matches := attachmentMarkerPattern.FindAllStringSubmatch(text, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	seen := make(map[int]struct{}, len(matches))
-	images := make([]contracts.ImageInput, 0, len(matches))
-	for _, match := range matches {
-		number, err := strconv.Atoi(match[1])
-		if err != nil {
-			continue
-		}
-		index := number - 1
-		if index < 0 || index >= len(pending) {
-			continue
-		}
-		if _, ok := seen[index]; ok {
-			continue
-		}
-		seen[index] = struct{}{}
-		images = append(images, pending[index])
-	}
-	return images
 }
 
 func clipboardError(err error) error {
@@ -899,59 +854,35 @@ func clipboardError(err error) error {
 	}
 }
 
-func userBlock(text string, images []contracts.ImageInput) block {
-	return block{role: "user", text: text, images: imageMetaFromInputs(images)}
+// renderImageBadges renders the green [Image N] chips for a set of attachments.
+func (m *chatModel) renderImageBadges(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	badges := make([]string, 0, count)
+	for i := range count {
+		badges = append(badges, m.styles.imageBadge.Render(fmt.Sprintf("[Image %d]", i+1)))
+	}
+	return strings.Join(badges, " ")
 }
 
-func imageMetaFromInputs(images []contracts.ImageInput) []imageMeta {
-	if len(images) == 0 {
-		return nil
-	}
-	metas := make([]imageMeta, 0, len(images))
-	for _, image := range images {
-		metas = append(metas, imageMeta{
-			Name:      image.Name,
-			MediaType: image.MediaType,
-			Width:     image.Width,
-			Height:    image.Height,
-			Size:      len(image.Data),
-		})
-	}
-	return metas
-}
-
-func renderImageMeta(images []imageMeta, indexed bool) string {
-	lines := make([]string, 0, len(images))
-	for i, image := range images {
-		name := image.Name
-		if name == "" {
-			name = "image"
-		}
-		prefix := ""
-		if indexed {
-			prefix = fmt.Sprintf("[#image %d] ", i+1)
-		}
-		lines = append(lines, prefix+fmt.Sprintf("%s  %s  %dx%d  %s", name, image.MediaType, image.Width, image.Height, humanBytes(image.Size)))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func humanBytes(size int) string {
-	switch {
-	case size >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(size)/(1<<20))
-	case size >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(size)/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", size)
-	}
-}
-
+// attachmentsView shows the staged attachments as [Image N] chips above the
+// composer. The composer text itself stays clean.
 func (m *chatModel) attachmentsView() string {
 	if len(m.pending) == 0 {
 		return ""
 	}
-	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, renderImageMeta(imageMetaFromInputs(m.pending), true))
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, m.renderImageBadges(len(m.pending)))
+}
+
+// clearAttachments drops every staged image. Ctrl+U is the explicit action
+// because the composer carries no marker text to delete.
+func (m *chatModel) clearAttachments() {
+	if len(m.pending) == 0 {
+		return
+	}
+	m.pending = nil
+	m.reflow(false)
 }
 
 func (m *chatModel) runCommand(command string) tea.Cmd {
@@ -993,7 +924,7 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 	case "/help":
 		m.blocks = append(m.blocks, block{role: "system", text: strings.Join([]string{
 			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll · Ctrl+O sessions · Ctrl+N new · Ctrl+T thinking",
-			"Alt+V paste image · delete an [#image N] marker to drop that image",
+			"Ctrl+V paste image · Ctrl+U clear images",
 			"/new · /sessions · /model · /compact · /timeline · /rename · /quit",
 		}, "\n")})
 		m.refreshTranscript(true)
@@ -1228,15 +1159,10 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	var content string
 	switch entry.role {
 	case "user":
-		body := entry.text
-		if len(entry.images) > 0 {
-			if body == "" {
-				body = renderImageMeta(entry.images, false)
-			} else {
-				body += "\n" + renderImageMeta(entry.images, false)
-			}
+		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, entry.text, width)
+		if badges := m.renderImageBadges(entry.imageCount); badges != "" {
+			content += "\n" + strings.Repeat(" ", lipgloss.Width("●")+1) + badges
 		}
-		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, body, width)
 	case "assistant":
 		text := entry.text
 		if !streaming {
@@ -2388,7 +2314,7 @@ func blocksFromRecords(records []store.Record) []block {
 			message := record.Message
 			switch message.Role {
 			case "user":
-				blocks = append(blocks, block{role: "user", text: message.Text(), images: imageMetaFromInputs(message.Images)})
+				blocks = append(blocks, block{role: "user", text: message.Text(), imageCount: len(message.Images)})
 			case "assistant":
 				if message.ReasoningContent != "" {
 					blocks = append(blocks, block{role: "thinking", text: message.ReasoningContent})

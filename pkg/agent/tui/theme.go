@@ -58,6 +58,7 @@ type harnessStyles struct {
 	muted       lipgloss.Style
 	userMarker  lipgloss.Style
 	assistant   lipgloss.Style
+	imageBadge  lipgloss.Style
 	thinking    lipgloss.Style
 	system      lipgloss.Style
 	error       lipgloss.Style
@@ -92,6 +93,7 @@ func newHarnessStyles() harnessStyles {
 		muted:       lipgloss.NewStyle().Foreground(everforest.Muted),
 		userMarker:  lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
 		assistant:   lipgloss.NewStyle().Foreground(everforest.Text),
+		imageBadge:  lipgloss.NewStyle().Background(everforest.Green).Foreground(everforest.Background).Bold(true),
 		thinking:    lipgloss.NewStyle().Foreground(everforest.Muted).Italic(true),
 		system:      lipgloss.NewStyle().Foreground(everforest.Purple),
 		error:       lipgloss.NewStyle().Foreground(everforest.Red),

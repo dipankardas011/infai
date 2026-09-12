@@ -4,8 +4,22 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
 	"testing"
 )
+
+func testPNG(t *testing.T, width, height int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	img.Set(0, 0, color.RGBA{B: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
 
 func testClipboard(goos string, env map[string]string, tools map[string]string, output func(string, []string) ([]byte, error)) *systemClipboard {
 	return &systemClipboard{
