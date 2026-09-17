@@ -1,21 +1,20 @@
-package engine
+package contracts
 
 import (
 	"time"
 
-	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/google/uuid"
 )
 
 // ApprovalRequest is the external engine/client representation of a pending
 // human decision. It deliberately contains no channel or runtime waiter.
 type ApprovalRequest struct {
-	ID          uuid.UUID          `json:"id"`
-	SessionID   uuid.UUID          `json:"session_id"`
-	AgentID     uuid.UUID          `json:"agent_id"`
-	ToolCall    contracts.ToolCall `json:"tool_call"`
-	Fingerprint string             `json:"fingerprint"`
-	CreatedAt   time.Time          `json:"created_at"`
+	ID          uuid.UUID `json:"id"`
+	SessionID   uuid.UUID `json:"session_id"`
+	AgentID     uuid.UUID `json:"agent_id"`
+	ToolCall    ToolCall  `json:"tool_call"`
+	Fingerprint string    `json:"fingerprint"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type ApprovalDecision string

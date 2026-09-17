@@ -78,8 +78,8 @@ type InfaiAgentSession struct {
 }
 
 type pendingApproval struct {
-	request  ApprovalRequest
-	decision chan ApprovalDecisionFromClient
+	request  contracts.ApprovalRequest
+	decision chan contracts.ApprovalDecisionFromClient
 }
 
 // NewSession creates a fresh session bound to the given provider and model.
@@ -1027,7 +1027,7 @@ func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uu
 	hash := sha256.Sum256([]byte(fingerprintInput))
 	fingerprint := hex.EncodeToString(hash[:])
 
-	request := ApprovalRequest{
+	request := contracts.ApprovalRequest{
 		ID:          approvalID,
 		SessionID:   s.sessionID,
 		AgentID:     agentID,
@@ -1038,7 +1038,7 @@ func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uu
 
 	pending := &pendingApproval{
 		request:  request,
-		decision: make(chan ApprovalDecisionFromClient, 1),
+		decision: make(chan contracts.ApprovalDecisionFromClient, 1),
 	}
 
 	s.approvalMu.Lock()
@@ -1084,7 +1084,7 @@ func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uu
 			"approval_id", request.ID,
 			"decision", decision.Decision,
 		)
-		if decision.Decision != ApprovalApprove {
+		if decision.Decision != contracts.ApprovalApprove {
 			return errApprovalDenied
 		}
 	case <-ctx.Done():
@@ -1109,7 +1109,7 @@ func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uu
 	return nil
 }
 
-func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision ApprovalDecisionFromClient) error {
+func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision contracts.ApprovalDecisionFromClient) error {
 	s.approvalMu.Lock()
 	defer s.approvalMu.Unlock()
 
@@ -1122,7 +1122,7 @@ func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision ApprovalDecis
 	) != 1 {
 		return errors.New("invalid approval fingerprint")
 	}
-	if decision.Decision != ApprovalApprove && decision.Decision != ApprovalDeny && decision.Decision != ApprovalDenyWithReason {
+	if decision.Decision != contracts.ApprovalApprove && decision.Decision != contracts.ApprovalDeny && decision.Decision != contracts.ApprovalDenyWithReason {
 		return errors.New("invalid approval decision")
 	}
 
@@ -1184,9 +1184,9 @@ func (s *InfaiAgentSession) removeAgent(id uuid.UUID) {
 // lives here (the API boundary) because the wire format wants a plain reply
 // string — the agent itself only returns history.
 func lastAssistantText(messages []contracts.ChatMessage) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "assistant" {
-			return messages[i].Text()
+	for _, message := range slices.Backward(messages) {
+		if message.Role == "assistant" {
+			return message.Text()
 		}
 	}
 	return ""
@@ -1195,8 +1195,8 @@ func lastAssistantText(messages []contracts.ChatMessage) string {
 // lastAssistantReasoning extracts the reasoning text of the final assistant
 // message, or "" when the provider returned none.
 func lastAssistantReasoning(messages []contracts.ChatMessage) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if m := messages[i]; m.Role == "assistant" && m.ReasoningContent != "" {
+	for _, m := range slices.Backward(messages) {
+		if m.Role == "assistant" && m.ReasoningContent != "" {
 			return m.ReasoningContent
 		}
 	}

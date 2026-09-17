@@ -23,7 +23,7 @@ type ChatResult struct {
 	Status           agent.TurnStatus
 	Reply            string
 	ReasoningContent string
-	Pending          *ApprovalRequest
+	Pending          *contracts.ApprovalRequest
 	Usage            *contracts.TokenUsage
 	ContextTokens    uint64
 }
@@ -341,7 +341,7 @@ func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess 
 	return sess.setProviderAuth(providerName, refreshed)
 }
 
-func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, decision ApprovalDecisionFromClient) error {
+func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, decision contracts.ApprovalDecisionFromClient) error {
 	sess, ok := e.Session(id)
 	if !ok {
 		return ErrSessionNotFound

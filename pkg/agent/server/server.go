@@ -78,7 +78,7 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("invalid approval id"))
 		return
 	}
-	var req engine.ApprovalDecisionFromClient
+	var req contracts.ApprovalDecisionFromClient
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -197,7 +197,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, _ *http.Request) {
 // ---- sessions ----
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
-	var req CreateSessionRequest
+	var req glue.CreateSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -244,7 +244,7 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, SessionDetailResponse{Meta: meta, Records: records})
+	s.writeJSON(w, http.StatusOK, glue.SessionDetailResponse{Meta: meta, Records: records})
 }
 
 func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
@@ -258,9 +258,9 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusNotFound, err)
 		return
 	}
-	response := TimelineResponse{Meta: meta, Head: head, Events: make([]TimelineEventResponse, 0, len(events))}
+	response := glue.TimelineResponse{Meta: meta, Head: head, Events: make([]glue.TimelineEventResponse, 0, len(events))}
 	for _, event := range events {
-		response.Events = append(response.Events, TimelineEventResponse{ID: event.ID, ParentID: event.ParentID, BranchFrom: event.BranchFrom, Kind: event.Kind, BlobHash: event.BlobHash, Preview: event.Preview, Record: event.Record})
+		response.Events = append(response.Events, glue.TimelineEventResponse{ID: event.ID, ParentID: event.ParentID, BranchFrom: event.BranchFrom, Kind: event.Kind, BlobHash: event.BlobHash, Preview: event.Preview, Record: event.Record})
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }
@@ -271,7 +271,7 @@ func (s *Server) handleBranchTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
 		return
 	}
-	var req BranchRequest
+	var req glue.BranchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.EventID == uuid.Nil {
 		s.writeError(w, http.StatusBadRequest, errors.New("event_id is required"))
 		return
@@ -318,7 +318,7 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
 		return
 	}
-	var req RenameSessionRequest
+	var req glue.RenameSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -341,7 +341,7 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
 		return
 	}
-	var req SetSessionModelRequest
+	var req glue.SetSessionModelRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -384,7 +384,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// body limit before any decoding happens.
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatBodyBytes)
 
-	var req ChatRequest
+	var req glue.ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("chat request body exceeds the %d MB limit", maxChatBodyBytes>>20))
@@ -424,7 +424,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			var event any
 			switch rec.Kind {
 			case store.KindDelta:
-				event = ChatDeltaEvent{Kind: string(rec.DeltaKind), Delta: rec.Text}
+				event = glue.ChatDeltaEvent{Kind: string(rec.DeltaKind), Delta: rec.Text}
 			case store.KindApprovalRequested, store.KindApprovalResolved, store.KindApprovalCanceled:
 				event = approvalSSEEvent(rec)
 			default:
@@ -447,7 +447,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if stream {
-			if werr := s.writeSSE(w, ChatErrorEvent{Error: err.Error()}); werr != nil {
+			if werr := s.writeSSE(w, glue.ChatErrorEvent{Error: err.Error()}); werr != nil {
 				s.logger.Debug("stream error event failed", "session_id", id, "error", werr)
 			}
 			s.flush(w)
@@ -463,7 +463,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	meta := sess.Meta()
 	if stream {
-		done := ChatDoneEvent{
+		done := glue.ChatDoneEvent{
 			Done:             true,
 			SessionID:        res.SessionID,
 			Status:           res.Status.String(),
@@ -482,7 +482,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body := ChatResponse{
+	body := glue.ChatResponse{
 		SessionID:        res.SessionID,
 		Status:           res.Status.String(),
 		Reply:            res.Reply,
@@ -497,7 +497,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func approvalSSEEvent(rec store.Record) any {
-	event := ApprovalSSEEvent{Type: string(rec.Kind)}
+	event := glue.ApprovalSSEEvent{Type: string(rec.Kind)}
 	if rec.Approval != nil {
 		event.ID = rec.Approval.ID
 		event.SessionID = rec.Approval.SessionID
@@ -538,7 +538,7 @@ func (s *Server) writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func (s *Server) writeError(w http.ResponseWriter, code int, err error) {
-	s.writeJSON(w, code, ErrorResponse{Error: err.Error()})
+	s.writeJSON(w, code, glue.ErrorResponse{Error: err.Error()})
 }
 
 // writeSSE emits one Server-Sent Event carrying a JSON payload. Returns the
