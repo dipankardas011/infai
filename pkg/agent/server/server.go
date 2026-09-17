@@ -13,6 +13,7 @@ import (
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/engine"
+	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
@@ -84,7 +85,7 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.engine.ResolveApproval(sessionID, approvalID, req); err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -101,7 +102,7 @@ func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.engine.CompactSession(r.Context(), id); err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -110,7 +111,7 @@ func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, ok := s.engine.Session(id)
 	if !ok {
-		s.writeError(w, http.StatusNotFound, engine.ErrSessionNotFound)
+		s.writeError(w, http.StatusNotFound, harnessErr.ErrSessionNotFound)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, sess.Meta())
@@ -209,7 +210,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Cwd:      req.Cwd,
 	})
 	if err != nil {
-		if errors.Is(err, engine.ErrEngineShuttingDown) {
+		if errors.Is(err, harnessErr.ErrEngineShuttingDown) {
 			s.writeError(w, http.StatusServiceUnavailable, err)
 			return
 		}
@@ -278,7 +279,7 @@ func (s *Server) handleBranchTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 	checklist, err := s.engine.SelectBranch(id, req.EventID)
 	if err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -296,7 +297,7 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := s.engine.LoadSession(id)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) || errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -325,7 +326,7 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 	}
 	meta, err := s.engine.RenameSession(id, req.Name)
 	if err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -357,7 +358,7 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 
 	sess, err := s.engine.SetSessionModel(id, req.Provider, req.Model)
 	if err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -401,13 +402,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	sess, ok := s.engine.Session(id)
 	if !ok {
-		s.writeError(w, http.StatusNotFound, engine.ErrSessionNotFound)
+		s.writeError(w, http.StatusNotFound, harnessErr.ErrSessionNotFound)
 		return
 	}
 
 	stream := r.URL.Query().Get("stream") == "true" || strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 
-	opts := engine.ChatOptions{Thinking: req.Thinking}
+	opts := contracts.ChatOptions{Thinking: req.Thinking}
 	if stream {
 		if _, ok := w.(http.Flusher); !ok {
 			s.writeError(w, http.StatusBadRequest, errors.New("streaming not supported"))
@@ -441,7 +442,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, err := s.engine.Chat(r.Context(), id, input, opts)
-	if errors.Is(err, engine.ErrSessionNotFound) {
+	if errors.Is(err, harnessErr.ErrSessionNotFound) {
 		s.writeError(w, http.StatusNotFound, err)
 		return
 	}
@@ -453,7 +454,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			s.flush(w)
 			return
 		}
-		if errors.Is(err, engine.ErrInvalidInput) {
+		if errors.Is(err, harnessErr.ErrInvalidInput) {
 			s.writeError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -519,7 +520,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.engine.CloseSession(id); err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}

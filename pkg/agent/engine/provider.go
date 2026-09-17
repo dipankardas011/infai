@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/store"
@@ -75,7 +76,7 @@ func (e *InfaiAgentEngine) LoginProvider(ctx context.Context, input glue.LoginPr
 
 	select {
 	case <-e.stopCh:
-		return ErrEngineShuttingDown
+		return harnessErr.ErrEngineShuttingDown
 	default:
 	}
 
@@ -129,7 +130,7 @@ func (e *InfaiAgentEngine) persistManagedProvider(ctx context.Context, providerI
 
 	select {
 	case <-e.stopCh:
-		return ErrEngineShuttingDown
+		return harnessErr.ErrEngineShuttingDown
 	default:
 	}
 	previous, exists := e.providers.Providers[providerName]

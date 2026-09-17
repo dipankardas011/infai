@@ -9,36 +9,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dipankardas011/infai/pkg/agent/agent"
 	"github.com/dipankardas011/infai/pkg/agent/config"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/models"
+	"github.com/dipankardas011/infai/pkg/agent/session"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
-)
-
-// ChatResult is the outcome of one Chat call on a session.
-type ChatResult struct {
-	SessionID        uuid.UUID
-	Status           agent.TurnStatus
-	Reply            string
-	ReasoningContent string
-	Pending          *contracts.ApprovalRequest
-	Usage            *contracts.TokenUsage
-	ContextTokens    uint64
-}
-
-// ChatOptions carries per-chat knobs.
-type ChatOptions struct {
-	Thinking contracts.InfaiThinkingLevel
-}
-
-var (
-	ErrSessionNotFound    = errors.New("session not found")
-	ErrEngineShuttingDown = errors.New("engine is shutting down")
-	// ErrInvalidInput marks a request the client can fix (empty message,
-	// unsupported modality, bad image bytes) so the server can return 400.
-	ErrInvalidInput = errors.New("invalid input")
 )
 
 // InfaiAgentEngine owns the provider registry, the on-disk session store and
@@ -54,7 +31,7 @@ type InfaiAgentEngine struct {
 	sessionStore *store.SessionStore
 
 	mu     sync.Mutex
-	active map[uuid.UUID]*InfaiAgentSession
+	active map[uuid.UUID]*session.InfaiAgentSession
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -104,7 +81,7 @@ func NewInfaiAgentEngineAt(bgLogger *slog.Logger, sessionStore *store.SessionSto
 		bgLogger:     bgLogger,
 		providers:    contracts.LLMProviders{Providers: make(map[string]contracts.LLMProviderConfiguration)},
 		sessionStore: sessionStore,
-		active:       make(map[uuid.UUID]*InfaiAgentSession),
+		active:       make(map[uuid.UUID]*session.InfaiAgentSession),
 		stopCh:       make(chan struct{}),
 	}, nil
 }
@@ -119,10 +96,10 @@ type CreateSessionOptions struct {
 
 // CreateSession registers a new idle session and persists it. It stays until
 // CloseSession or Shutdown; a prompt can be sent any number of times via Chat.
-func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSessionOptions) (*InfaiAgentSession, error) {
+func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSessionOptions) (*session.InfaiAgentSession, error) {
 	select {
 	case <-e.stopCh:
-		return nil, ErrEngineShuttingDown
+		return nil, harnessErr.ErrEngineShuttingDown
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
@@ -144,7 +121,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		return nil, fmt.Errorf("engine: model %q not configured for provider %q", opts.Model, opts.Provider)
 	}
 
-	sess, err := NewSession(
+	sess, err := session.NewSession(
 		e.bgLogger.WithGroup("session"),
 		contracts.NewProvisionedModel(
 			providerConfig.Id,
@@ -162,19 +139,19 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	}
 
 	e.mu.Lock()
-	e.active[sess.sessionID] = sess
+	e.active[sess.ID()] = sess
 	e.mu.Unlock()
 
-	e.bgLogger.Info("session created", "session_id", sess.sessionID, "provider", opts.Provider, "model", modelConfig.Id)
+	e.bgLogger.Info("session created", "session_id", sess.ID(), "provider", opts.Provider, "model", modelConfig.Id)
 	return sess, nil
 }
 
 // LoadSession rebuilds a saved session from its timeline and registers it
 // as active so it can be chatted with again.
-func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error) {
+func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*session.InfaiAgentSession, error) {
 	select {
 	case <-e.stopCh:
-		return nil, ErrEngineShuttingDown
+		return nil, harnessErr.ErrEngineShuttingDown
 	default:
 	}
 	e.mu.Lock()
@@ -197,7 +174,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 		_ = timeline.Close()
 		return nil, err
 	}
-	history, err := timelineHistory(timeline, events)
+	history, err := session.TimelineHistory(timeline, events)
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -206,14 +183,14 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 	providerConfig, ok := e.Provider(meta.Provider)
 	if !ok {
 		_ = timeline.Close()
-		return nil, ErrNoProvider
+		return nil, harnessErr.ErrNoProvider
 	}
 	modelConfig, ok := providerConfig.Models[meta.Model]
 	if !ok {
 		return nil, fmt.Errorf("engine: model %q not configured for provider %q", meta.Model, meta.Provider)
 	}
 
-	sess, err := NewResumedSession(
+	sess, err := session.NewResumedSession(
 		e.bgLogger.WithGroup("session"),
 		contracts.NewProvisionedModel(
 			providerConfig.Id,
@@ -236,7 +213,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*InfaiAgentSession, error)
 }
 
 // Session returns an active session, if any.
-func (e *InfaiAgentEngine) Session(id uuid.UUID) (*InfaiAgentSession, bool) {
+func (e *InfaiAgentEngine) Session(id uuid.UUID) (*session.InfaiAgentSession, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	sess, ok := e.active[id]
@@ -245,16 +222,16 @@ func (e *InfaiAgentEngine) Session(id uuid.UUID) (*InfaiAgentSession, bool) {
 
 // SetSessionModel switches an active session to another provider's model. An
 // empty modelName keeps the provider's configured model.
-func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId string) (*InfaiAgentSession, error) {
+func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId string) (*session.InfaiAgentSession, error) {
 	e.mu.Lock()
 	sess, ok := e.active[id]
 	e.mu.Unlock()
 	if !ok {
-		return nil, ErrSessionNotFound
+		return nil, harnessErr.ErrSessionNotFound
 	}
 	providerConfig, ok := e.Provider(providerName)
 	if !ok {
-		return nil, ErrNoProvider
+		return nil, harnessErr.ErrNoProvider
 	}
 	if modelId == "" {
 		return nil, errors.New("engine: model is required")
@@ -281,14 +258,14 @@ func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId s
 }
 
 // Chat runs one prompt against an existing session and returns the outcome.
-func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, input contracts.UserInput, opts ChatOptions) (*ChatResult, error) {
+func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, input contracts.UserInput, opts contracts.ChatOptions) (*contracts.ChatResult, error) {
 	e.mu.Lock()
 	sess, ok := e.active[id]
 	e.mu.Unlock()
 	if !ok {
-		return nil, ErrSessionNotFound
+		return nil, harnessErr.ErrSessionNotFound
 	}
-	needsRefresh, err := sess.providerAuthNeedsRefresh(time.Now().UTC())
+	needsRefresh, err := sess.ProviderAuthNeedsRefresh(time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -310,14 +287,14 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, input contrac
 	return result, err
 }
 
-func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess *InfaiAgentSession) error {
+func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess *session.InfaiAgentSession) error {
 	providerName := sess.Meta().Provider
 	e.providerMu.Lock()
 	defer e.providerMu.Unlock()
 
 	provider, ok := e.providers.Providers[providerName]
 	if !ok {
-		return ErrNoProvider
+		return harnessErr.ErrNoProvider
 	}
 	refreshed, changed, err := models.RefreshProviderAuth(ctx, provider.Id, provider.Auth)
 	if err != nil {
@@ -325,7 +302,7 @@ func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess 
 		return err
 	}
 	if !changed {
-		return sess.setProviderAuth(providerName, provider.Auth)
+		return sess.SetProviderAuth(providerName, provider.Auth)
 	}
 
 	provider.Auth = refreshed
@@ -338,13 +315,13 @@ func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess 
 	e.providers = candidate
 	e.bgLogger.InfoContext(ctx, "provider credentials refreshed", "provider", providerName)
 
-	return sess.setProviderAuth(providerName, refreshed)
+	return sess.SetProviderAuth(providerName, refreshed)
 }
 
 func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, decision contracts.ApprovalDecisionFromClient) error {
 	sess, ok := e.Session(id)
 	if !ok {
-		return ErrSessionNotFound
+		return harnessErr.ErrSessionNotFound
 	}
 	return sess.ResolveApproval(approvalID, decision)
 }
@@ -355,7 +332,7 @@ func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) err
 	sess, ok := e.active[id]
 	e.mu.Unlock()
 	if !ok {
-		return ErrSessionNotFound
+		return harnessErr.ErrSessionNotFound
 	}
 	return sess.CompactChat(ctx)
 }
@@ -371,9 +348,9 @@ func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 	e.mu.Unlock()
 
 	if !ok {
-		return ErrSessionNotFound
+		return harnessErr.ErrSessionNotFound
 	}
-	sess.close()
+	sess.Close()
 	if err := e.sessionStore.Delete(id); err != nil {
 		return err
 	}
@@ -395,7 +372,8 @@ func (e *InfaiAgentEngine) RenameSession(id uuid.UUID, name string) (*store.Sess
 		if err := sess.Rename(name); err != nil {
 			return nil, err
 		}
-		return &sess.meta, nil
+		meta := sess.Meta()
+		return &meta, nil
 	}
 	meta, err := e.sessionStore.LoadMeta(id)
 	if err != nil {
@@ -447,7 +425,7 @@ func (e *InfaiAgentEngine) GetSessionRecords(id uuid.UUID) (store.SessionMeta, [
 	if err != nil {
 		return store.SessionMeta{}, nil, err
 	}
-	records, err := timelineRecords(timeline, events)
+	records, err := session.TimelineRecords(timeline, events)
 	return meta, records, err
 }
 
@@ -479,7 +457,7 @@ func (e *InfaiAgentEngine) GetTimeline(id uuid.UUID) (store.SessionMeta, []store
 func (e *InfaiAgentEngine) SelectBranch(id, eventID uuid.UUID) (contracts.TaskChecklistState, error) {
 	sess, ok := e.Session(id)
 	if !ok {
-		return contracts.TaskChecklistState{}, ErrSessionNotFound
+		return contracts.TaskChecklistState{}, harnessErr.ErrSessionNotFound
 	}
 	return sess.SelectBranch(eventID)
 }
@@ -493,7 +471,7 @@ func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
 	})
 	e.mu.Lock()
 	for id, sess := range e.active {
-		sess.close()
+		sess.Close()
 		delete(e.active, id)
 	}
 	e.mu.Unlock()

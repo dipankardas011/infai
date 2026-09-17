@@ -1,4 +1,4 @@
-package engine
+package session
 
 import (
 	"context"
@@ -21,18 +21,14 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/auditor"
 	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/memory"
 	"github.com/dipankardas011/infai/pkg/agent/models"
+	"github.com/dipankardas011/infai/pkg/agent/prompts"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/dipankardas011/infai/pkg/agent/vision"
 	"github.com/dipankardas011/infai/pkg/ds"
 	"github.com/google/uuid"
-)
-
-var (
-	ErrSessionClosed  = errors.New("session closed")
-	ErrNoProvider     = errors.New("engine: no provider configured")
-	errApprovalDenied = errors.New("tool execution was denied by the user")
 )
 
 // InfaiAgentSession is the persistent state of one conversation. It is a
@@ -139,7 +135,7 @@ func NewSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, cwd str
 	}
 	o.configureMemoryTools()
 
-	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, o.availableSkills, cwd)
+	systemPrompt, err := prompts.GetBasicSystemPrompt(o.availableTools, o.availableSkills, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +190,7 @@ func NewResumedSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, 
 	}
 	o.configureMemoryTools()
 
-	systemPrompt, err := GetBasicSystemPrompt(o.availableTools, o.availableSkills, meta.Cwd)
+	systemPrompt, err := prompts.GetBasicSystemPrompt(o.availableTools, o.availableSkills, meta.Cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +276,7 @@ func (s *InfaiAgentSession) CurrentThinkingPattern() contracts.InfaiThinkingLeve
 	return s.model.GetModelSpecs().ThinkingPattern()
 }
 
-func (s *InfaiAgentSession) providerAuthNeedsRefresh(now time.Time) (bool, error) {
+func (s *InfaiAgentSession) ProviderAuthNeedsRefresh(now time.Time) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -351,7 +347,7 @@ func (s *InfaiAgentSession) Rename(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return ErrSessionClosed
+		return harnessErr.ErrSessionClosed
 	}
 	s.meta.Name = name
 	s.meta.UpdatedAt = time.Now().UTC()
@@ -381,7 +377,7 @@ func (s *InfaiAgentSession) SetModel(choosenModel contracts.ProvisionedModel) er
 	return nil
 }
 
-func (s *InfaiAgentSession) setProviderAuth(providerName string, auth contracts.LLMProviderAuth) error {
+func (s *InfaiAgentSession) SetProviderAuth(providerName string, auth contracts.LLMProviderAuth) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -417,7 +413,7 @@ func (s *InfaiAgentSession) SetThinkingPattern(pattern contracts.InfaiThinkingLe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return ErrSessionClosed
+		return harnessErr.ErrSessionClosed
 	}
 	provisioned, err := s.model.GetModelSpecs().WithThinkingPattern(pattern)
 	if err != nil {
@@ -441,7 +437,7 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	if s.closed {
-		return ErrSessionClosed
+		return harnessErr.ErrSessionClosed
 	}
 	if s.pendingBranchParent != uuid.Nil { // Avoids manual compaction when the BranchParent is under Dirty Write of branch switch
 		return errors.New("session: submit a message on the selected branch before compacting")
@@ -453,7 +449,7 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 		s.l.Error("read last compaction from timeline", "error", err)
 		return err
 	}
-	toCompact, retained := planCompaction(s.history, false)
+	toCompact, retained := prompts.PlanCompaction(s.history, false)
 	if len(toCompact) == 0 {
 		s.l.Info("manual compaction skipped: nothing to compact")
 		return nil
@@ -464,7 +460,7 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	systemPrompt, history, err := compactionInput(toCompact, prevCheckpoint, checklistContext)
+	systemPrompt, history, err := prompts.CompactionInput(toCompact, prevCheckpoint, checklistContext)
 	if err != nil {
 		s.l.Error("manual compaction input failed", "error", err)
 		return err
@@ -484,25 +480,25 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 // persistent history and returns the outcome. The session stays registered
 // and idle after the call; the next Chat reuses the same conversation. New
 // messages, usage and meta are persisted through the recorder as they settle.
-func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput, opts ChatOptions) (*ChatResult, error) {
+func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput, opts contracts.ChatOptions) (*contracts.ChatResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.closed {
-		return nil, ErrSessionClosed
+		return nil, harnessErr.ErrSessionClosed
 	}
 
 	if input.Empty() {
-		return nil, fmt.Errorf("%w: message is required", ErrInvalidInput)
+		return nil, fmt.Errorf("%w: message is required", harnessErr.ErrInvalidInput)
 	}
 
 	modelConfig := s.model.GetModelSpecs().Model()
 	if err := contracts.ValidateUserInput(modelConfig, input); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		return nil, fmt.Errorf("%w: %v", harnessErr.ErrInvalidInput, err)
 	}
 	images, err := vision.ValidateInputs(input.Images)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		return nil, fmt.Errorf("%w: %v", harnessErr.ErrInvalidInput, err)
 	}
 	input.Images = images
 
@@ -513,7 +509,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput,
 		if err != nil {
 			return nil, err
 		}
-		history, err := timelineHistory(s.timeline, events)
+		history, err := TimelineHistory(s.timeline, events)
 		if err != nil {
 			return nil, err
 		}
@@ -583,7 +579,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput,
 		return nil, err
 	}
 	compacted := false
-	if result.Status == agent.TurnNeedsCompaction {
+	if result.Status == contracts.TurnNeedsCompaction {
 		s.l.InfoContext(ctx, "automatic compaction requested", "session_id", s.sessionID)
 		if result.Usage != nil {
 			s.l.Warn("automatic compaction triggered",
@@ -599,7 +595,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput,
 			s.l.Error("read last compaction from timeline", "error", err)
 			return nil, err
 		}
-		toCompact, retained := planCompaction(s.history, true)
+		toCompact, retained := prompts.PlanCompaction(s.history, true)
 		if len(toCompact) == 0 {
 			s.l.Warn("automatic compaction requested but nothing outside the retained tail")
 			return nil, nil
@@ -609,7 +605,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput,
 		if err != nil {
 			return nil, err
 		}
-		systemPrompt, history, err := compactionInput(toCompact, prevCheckpoint, checklistContext)
+		systemPrompt, history, err := prompts.CompactionInput(toCompact, prevCheckpoint, checklistContext)
 		if err != nil {
 			s.l.Error("automatic compaction input failed", "error", err)
 			return nil, err
@@ -623,7 +619,7 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput,
 		if err != nil {
 			return nil, err
 		}
-		if result.Status == agent.TurnNeedsCompaction {
+		if result.Status == contracts.TurnNeedsCompaction {
 			s.l.Warn("automatic compaction requested again; stopping after one continuation", "session_id", s.sessionID)
 		}
 	}
@@ -641,11 +637,11 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput,
 	}
 	reply := ""
 	reasoning := ""
-	if result.Status != agent.TurnCanceled {
+	if result.Status != contracts.TurnCanceled {
 		reply = lastAssistantText(result.Messages)
 		reasoning = lastAssistantReasoning(result.Messages)
 	}
-	return &ChatResult{
+	return &contracts.ChatResult{
 		SessionID:        s.sessionID,
 		Status:           result.Status,
 		Reply:            reply,
@@ -672,7 +668,7 @@ func (s *InfaiAgentSession) publishTaskChecklist() error {
 
 // runAgent owns one complete agent/comms invocation and persists the messages
 // it produced before returning control to Chat.
-func (s *InfaiAgentSession) runAgent(ctx context.Context, agentLoop *agent.Agent) (agent.TurnResult, error) {
+func (s *InfaiAgentSession) runAgent(ctx context.Context, agentLoop *agent.Agent) (contracts.TurnResult, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -682,7 +678,7 @@ func (s *InfaiAgentSession) runAgent(ctx context.Context, agentLoop *agent.Agent
 	}()
 
 	agentErr := make(chan error, 1)
-	var result agent.TurnResult
+	var result contracts.TurnResult
 	var err error
 	go func() {
 		result, err = agentLoop.Invoke(runCtx, s.history)
@@ -799,26 +795,26 @@ func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string
 	return nil
 }
 
-func (s *InfaiAgentSession) summarize(ctx context.Context, systemPrompt string, history []contracts.ChatMessage) (agent.CompactionResult, error) {
+func (s *InfaiAgentSession) summarize(ctx context.Context, systemPrompt string, history []contracts.ChatMessage) (contracts.CompactionResult, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
-		return agent.CompactionResult{}, err
+		return contracts.CompactionResult{}, err
 	}
 	compactionAgent, err := s.registerTransientAgent(id, systemPrompt)
 	if err != nil {
-		return agent.CompactionResult{}, err
+		return contracts.CompactionResult{}, err
 	}
 	defer s.removeAgent(id)
 
 	compactionAgent.SetModel(s.model)
 	result, err := compactionAgent.Invoke(ctx, history)
 	if err != nil {
-		return agent.CompactionResult{}, err
+		return contracts.CompactionResult{}, err
 	}
-	return agent.CompactionResult{Summary: lastAssistantText(result.Messages)}, nil
+	return contracts.CompactionResult{Summary: lastAssistantText(result.Messages)}, nil
 }
 
-func (s *InfaiAgentSession) close() {
+func (s *InfaiAgentSession) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
@@ -897,7 +893,7 @@ func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.Ag
 				return
 			case auditor.HumanPolicy:
 				if err := s.executeAfterApproval(ctx, msg.From, call); err != nil {
-					if errors.Is(err, errApprovalDenied) {
+					if errors.Is(err, harnessErr.ErrApprovalDenied) {
 						status = contracts.ToolExecutionDenied
 					} else if errors.Is(err, context.Canceled) {
 						status = contracts.ToolExecutionError
@@ -1085,7 +1081,7 @@ func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uu
 			"decision", decision.Decision,
 		)
 		if decision.Decision != contracts.ApprovalApprove {
-			return errApprovalDenied
+			return harnessErr.ErrApprovalDenied
 		}
 	case <-ctx.Done():
 		s.approvalMu.Lock()
@@ -1203,10 +1199,10 @@ func lastAssistantReasoning(messages []contracts.ChatMessage) string {
 	return ""
 }
 
-func timelineHistory(timeline *store.Timeline, events []store.Event) ([]contracts.ChatMessage, error) {
+func TimelineHistory(timeline *store.Timeline, events []store.Event) ([]contracts.ChatMessage, error) {
 	// Timeline loads events lazily so inspection stays cheap. Resuming a
 	// session is the boundary where blob-backed records must become messages.
-	records, err := timelineRecords(timeline, events)
+	records, err := TimelineRecords(timeline, events)
 	if err != nil {
 		return nil, err
 	}
@@ -1244,7 +1240,7 @@ func timelineHistory(timeline *store.Timeline, events []store.Event) ([]contract
 	return history, nil
 }
 
-func timelineRecords(timeline *store.Timeline, events []store.Event) ([]store.Record, error) {
+func TimelineRecords(timeline *store.Timeline, events []store.Event) ([]store.Record, error) {
 	records := make([]store.Record, 0, len(events))
 	for _, event := range events {
 		record := event.Record
@@ -1269,7 +1265,7 @@ func getLatestTaskChecklist(timeline *store.Timeline, head uuid.UUID) (contracts
 	if err != nil {
 		return state, err
 	}
-	records, err := timelineRecords(timeline, events)
+	records, err := TimelineRecords(timeline, events)
 	if err != nil {
 		return state, err
 	}
@@ -1361,4 +1357,24 @@ func continuationContext(summary, checklist string) (string, error) {
 		return "", fmt.Errorf("render continuation context: %w", err)
 	}
 	return output.String(), nil
+}
+
+func sessionNameFromPrompt(prompt string) string {
+	const maxRunes = 56
+	title := strings.Join(strings.Fields(prompt), " ")
+	if title == "" {
+		return "Untitled session"
+	}
+	runes := []rune(title)
+	if len(runes) <= maxRunes {
+		return title
+	}
+	cut := maxRunes
+	for i := maxRunes; i > maxRunes/2; i-- {
+		if runes[i] == ' ' {
+			cut = i
+			break
+		}
+	}
+	return strings.TrimSpace(string(runes[:cut])) + "…"
 }
