@@ -314,7 +314,7 @@ func previewText(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
 	runes := []rune(value)
 	if len(runes) > previewTextLimit {
-		return string(runes[:previewTextLimit]) + "..."
+		return string(runes[:previewTextLimit]) + "…"
 	}
 	return value
 }
