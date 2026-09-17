@@ -132,6 +132,9 @@ at the workflow layer (D14), where they are just UNIX. Composite tool == a
 
 ## 4. Subagent rules
 
+> **Direction:** Use `MULTI_AGENT_DESIGN.md` for the accepted subagent and swarm
+> design. This older section remains only as design history.
+
 - **Ceiling, then subset**: a subagent inherits the parent's policy as its
   *maximum*; `spawn_subagent(task, scope)` narrows it further. Blanket-allow
   inside a subagent is forbidden — it would be the model's way around the

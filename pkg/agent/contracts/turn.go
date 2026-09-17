@@ -1,6 +1,4 @@
-package agent
-
-import "github.com/dipankardas011/infai/pkg/agent/contracts"
+package contracts
 
 type TurnStatus int
 
@@ -36,8 +34,8 @@ func (s TurnStatus) String() string {
 // cancellation so the caller can decide whether the session stays open.
 type TurnResult struct {
 	Status   TurnStatus
-	Messages []contracts.ChatMessage
-	Usage    *contracts.TokenUsage
+	Messages []ChatMessage
+	Usage    *TokenUsage
 
 	// PendingApprovalID identifies an approval owned by the engine/session.
 	// The agent does not own the external approval request or its transport.

@@ -121,9 +121,9 @@ func (a *Agent) SetDeltaHook(hook func(contracts.DeltaKind, string)) {
 // each reply. It checks ctx each turn so a canceled session context unwinds
 // cleanly (children get derived contexts, so cancellation propagates to the
 // whole agent tree without explicit close messages).
-func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (TurnResult, error) {
+func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (contracts.TurnResult, error) {
 	if a.model == nil {
-		return TurnResult{}, ErrNoModel
+		return contracts.TurnResult{}, ErrNoModel
 	}
 
 	a.Status = Working
@@ -135,7 +135,7 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 
 	for turn := 0; turn < a.MaxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
-			return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, nil
+			return contracts.TurnResult{Status: contracts.TurnCanceled, Messages: messages, Usage: usage}, nil
 		}
 
 		// Streaming is always on: deltas flow to the delta hook (the adapter
@@ -154,19 +154,19 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 		if err != nil {
 			if ctx.Err() != nil {
 				// Canceled mid-call: report as canceled, not a model error.
-				return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, nil
+				return contracts.TurnResult{Status: contracts.TurnCanceled, Messages: messages, Usage: usage}, nil
 			}
 			a.Status = Error
-			return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, fmt.Errorf("agent: turn %d: %w", turn, err)
+			return contracts.TurnResult{Status: contracts.TurnDone, Messages: messages, Usage: usage}, fmt.Errorf("agent: turn %d: %w", turn, err)
 		}
 
 		if len(reply.ToolCalls) > 0 {
 			if a.comms == nil {
-				return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, errors.New("agent: inter-agent communication is not configured")
+				return contracts.TurnResult{Status: contracts.TurnDone, Messages: messages, Usage: usage}, errors.New("agent: inter-agent communication is not configured")
 			}
 			payload, err := json.Marshal(reply.ToolCalls)
 			if err != nil {
-				return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, err
+				return contracts.TurnResult{Status: contracts.TurnDone, Messages: messages, Usage: usage}, err
 			}
 			if err := a.comms.Send(ctx, comms.AgentComm{
 				ID:      uuid.New(),
@@ -174,21 +174,21 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 				Kind:    comms.AgentCommTool,
 				Payload: payload,
 			}); err != nil {
-				return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, err
+				return contracts.TurnResult{Status: contracts.TurnCanceled, Messages: messages, Usage: usage}, err
 			}
 
 			response, err := a.comms.Receive(ctx)
 			if err != nil {
-				return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, err
+				return contracts.TurnResult{Status: contracts.TurnCanceled, Messages: messages, Usage: usage}, err
 			}
 			var toolMessages []contracts.ChatMessage
 			if err := json.Unmarshal(response.Payload, &toolMessages); err != nil {
-				return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, err
+				return contracts.TurnResult{Status: contracts.TurnDone, Messages: messages, Usage: usage}, err
 			}
 			messages = append(messages, append([]contracts.ChatMessage{reply}, toolMessages...)...)
 
 			if a.shouldCompact != nil && a.shouldCompact(usage) {
-				return TurnResult{Status: TurnNeedsCompaction, Messages: messages, Usage: usage}, nil
+				return contracts.TurnResult{Status: contracts.TurnNeedsCompaction, Messages: messages, Usage: usage}, nil
 			}
 		} else {
 			messages = append(messages, reply)
@@ -199,7 +199,7 @@ func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (Tu
 
 	// Canceled on the final iteration's boundary — report it, not "done".
 	if err := ctx.Err(); err != nil {
-		return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, nil
+		return contracts.TurnResult{Status: contracts.TurnCanceled, Messages: messages, Usage: usage}, nil
 	}
-	return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, nil
+	return contracts.TurnResult{Status: contracts.TurnDone, Messages: messages, Usage: usage}, nil
 }

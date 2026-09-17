@@ -6,6 +6,24 @@ import (
 	"github.com/google/uuid"
 )
 
+// ToolCall is a function-call the model requested. Schema is defined now;
+// the tool loop (AccessControl → execution → results) wires it later.
+type ToolCall struct {
+	ID       string   `json:"id"`
+	Type     string   `json:"type"`
+	Function Function `json:"function"`
+}
+
+// Function names the tool and carries the JSON-encoded argument object.
+type Function struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+func NewToolMessage(callID, content string, status ToolExecutionStatus) ChatMessage {
+	return ChatMessage{Role: "tool", ToolCallID: callID, Content: &content, Status: status}
+}
+
 // Tool is an executable action the model may call, described for the system
 // prompt.
 type Tool struct {
