@@ -88,30 +88,8 @@ type GenerateOptions struct {
 	// (typed by DeltaKind, in stream order) are delivered to OnDelta; the
 	// full message is still returned as usual.
 	Stream  bool
-	OnDelta func(kind DeltaKind, text string)
+	OnDelta func(kind EventStreamKind, text string)
 }
-
-// DeltaKind distinguishes the text fragments a stream delivers.
-type DeltaKind string
-
-const (
-	// DeltaContent is the model's visible answer text.
-	DeltaContent DeltaKind = "content"
-	// DeltaReasoning is the model's reasoning text (shown separately).
-	DeltaReasoning DeltaKind = "reasoning"
-	// DeltaStatus is a live UI status update, not model output.
-	DeltaStatus DeltaKind = "status"
-	// DeltaCompactionSummary is a live-only compaction summary for the UI.
-	DeltaCompactionSummary DeltaKind = "compaction_summary"
-	// DeltaToolCall identifies a tool invocation requested by the model.
-	DeltaToolCall DeltaKind = "tool_call"
-	// DeltaToolResult identifies the completion of a tool invocation.
-	DeltaToolResult DeltaKind = "tool_result"
-	// DeltaSkillLoad identifies a skill being loaded from memory into context.
-	DeltaSkillLoad DeltaKind = "skill_load"
-	// DeltaTaskChecklist carries the current structured task checklist state.
-	DeltaTaskChecklist DeltaKind = "task_checklist"
-)
 
 type LLMProviders struct {
 	// Key can be a userDefined as well as provider Slug (when user chooses deepseek/codex) else for a generic one they can add whatever they feel like

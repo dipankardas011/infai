@@ -27,50 +27,40 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/prompts"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/dipankardas011/infai/pkg/agent/vision"
-	"github.com/dipankardas011/infai/pkg/ds"
 	"github.com/google/uuid"
 )
 
-// InfaiAgentSession is the persistent state of one conversation. It is a
-// passive object: it holds history and the agent tree, and Chat() runs the
-// loop against it. Between Chat calls the session is idle — no goroutine is
-// held — so it stays registered until explicitly closed. Every turn is
-// streamed through the session's event hub, which fans out to the live user
-// sink (SSE/stdout); durable history is written directly to the timeline.
 type InfaiAgentSession struct {
-	sessionID uuid.UUID
+	l    *slog.Logger
+	mu   sync.Mutex
+	meta store.SessionMeta
 
-	l *slog.Logger
+	closed bool
 
 	model contracts.InfaiModelAdaptor
 
-	mu      sync.Mutex
-	closed  bool
-	history []contracts.ChatMessage
+	timeline *store.Timeline
+	store    *store.SessionStore
+	events   *store.SessionEventHub
 
-	meta                store.SessionMeta
-	timeline            *store.Timeline
-	store               *store.SessionStore
-	events              *store.SessionEventHub
 	persisted           int
 	pendingBranchParent uuid.UUID
 
-	auditorPolicy   *auditor.AuditorPolicy
+	auditorPolicy *auditor.AuditorPolicy
+
 	availableTools  []contracts.Tool
 	availableSkills []contracts.Skill
 	fileManager     *actuators.FileManager
 	skillRegistry   *memory.SkillRegistry
 	taskChecklist   *memory.TaskChecklist
 
-	// WARN: we do need to properly handle the Concurrency.
-	agentMapping    map[uuid.UUID]*ds.Set[uuid.UUID] // Parent -> Child
-	agentComms      *comms.AgentComms
-	approvalMu      sync.Mutex
-	pendingApproval *pendingApproval
+	agent *agent.Agent
 
-	sessionAgentId uuid.UUID
+	activeTimeline []contracts.ChatMessage
 
-	Agents map[uuid.UUID]*agent.Agent
+	aeComms            *comms.ISACChannel
+	aolTimeline        chan []contracts.ChatMessage
+	sessionEventStream chan contracts.EventStream
 }
 
 type pendingApproval struct {
@@ -79,7 +69,14 @@ type pendingApproval struct {
 }
 
 // NewSession creates a fresh session bound to the given provider and model.
-func NewSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, cwd string, ss *store.SessionStore) (*InfaiAgentSession, error) {
+func NewSession(
+	id uuid.UUID,
+	l *slog.Logger,
+	choosenModel contracts.ProvisionedModel,
+	cwd string,
+	ss *store.SessionStore,
+	aeComms *comms.ISACChannel,
+) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(choosenModel)
 	if err != nil {
 		return nil, err
@@ -89,11 +86,9 @@ func NewSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, cwd str
 		l:             l,
 		model:         model,
 		store:         ss,
-		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
-		agentComms:    comms.NewAgentComms(),
-		Agents:        make(map[uuid.UUID]*agent.Agent),
 		auditorPolicy: auditor.NewAuditorPolicy(),
 		taskChecklist: memory.NewTaskChecklist(),
+		aeComms:       aeComms,
 	}
 
 	o.fileManager, err = actuators.NewFileManager(cwd)
@@ -102,26 +97,20 @@ func NewSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, cwd str
 	}
 	cwd = o.fileManager.Root()
 
-	if v, err := uuid.NewV7(); err != nil {
-		return nil, err
-	} else {
-		o.sessionID = v
-	}
-
 	now := time.Now().UTC()
 	o.meta = store.SessionMeta{
-		ID:        o.sessionID,
+		ID:        id,
 		Provider:  o.model.GetModelSpecs().ProviderName(),
 		Model:     o.model.GetModelSpecs().Model().Id,
 		Cwd:       cwd,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-
-	o.events = store.NewSessionEventHub()
 	if err := ss.SaveMeta(o.meta); err != nil {
 		return nil, err
 	}
+
+	o.events = store.NewSessionEventHub()
 
 	timeline, err := ss.LoadSessionTimelineClient(o.meta.ID)
 	if err != nil {
@@ -139,38 +128,62 @@ func NewSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, cwd str
 	if err != nil {
 		return nil, err
 	}
-	firstAgent, err := o.registerNewParentAgent(systemPrompt)
+
+	o.activeTimeline = []contracts.ChatMessage{}
+	o.aolTimeline = make(chan []contracts.ChatMessage)
+	o.sessionEventStream = make(chan contracts.EventStream)
+
+	go o.HandleTimelineAOL(context.TODO(), o.aolTimeline)
+	go o.HandleAgentLoopEvents(context.TODO())
+
+	o.agent, err = agent.NewAgent(
+		context.TODO(), // FIXME: please fix the context things.
+		o.model,
+		contracts.InteractiveAgent, // TODO: need this to be coming from engine
+		o.activeTimeline,
+		chan<- []contracts.ChatMessage(o.aolTimeline),
+		chan<- contracts.EventStream(o.sessionEventStream),
+		o.GenToolCallDispatchHandler(context.TODO()),
+		systemPrompt,
+		agent.WithMaxTurns(1000),
+		agent.WithTools(o.availableTools...),
+		agent.WithAutoCompaction(o.shouldCompact),
+	)
 	if err != nil {
 		return nil, err
 	}
-	o.sessionAgentId = firstAgent.Id
 
 	return o, nil
 }
 
 // NewResumedSession rebuilds a session from the active timeline ancestry. The
 // caller resolves lazy blob records before constructing the chat history.
-func NewResumedSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, meta store.SessionMeta, history []contracts.ChatMessage, timeline *store.Timeline, sessionStore *store.SessionStore) (*InfaiAgentSession, error) {
+func NewResumedSession(
+	l *slog.Logger,
+	choosenModel contracts.ProvisionedModel,
+	meta store.SessionMeta,
+	history []contracts.ChatMessage,
+	timeline *store.Timeline,
+	sessionStore *store.SessionStore,
+	aeComms *comms.ISACChannel,
+) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(choosenModel)
 	if err != nil {
 		return nil, err
 	}
 
 	o := &InfaiAgentSession{
-		l:             l,
-		model:         model,
-		agentMapping:  make(map[uuid.UUID]*ds.Set[uuid.UUID]),
-		agentComms:    comms.NewAgentComms(),
-		Agents:        make(map[uuid.UUID]*agent.Agent),
-		sessionID:     meta.ID,
-		meta:          meta,
-		store:         sessionStore,
-		history:       history,
-		persisted:     len(history),
-		timeline:      timeline,
-		events:        store.NewSessionEventHub(),
-		auditorPolicy: auditor.NewAuditorPolicy(),
-		taskChecklist: memory.NewTaskChecklist(),
+		l:              l,
+		model:          model,
+		meta:           meta,
+		store:          sessionStore,
+		activeTimeline: history,
+		persisted:      len(history),
+		timeline:       timeline,
+		events:         store.NewSessionEventHub(),
+		auditorPolicy:  auditor.NewAuditorPolicy(),
+		taskChecklist:  memory.NewTaskChecklist(),
+		aeComms:        aeComms,
 	}
 
 	o.fileManager, err = actuators.NewFileManager(meta.Cwd)
@@ -195,11 +208,29 @@ func NewResumedSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, 
 		return nil, err
 	}
 
-	firstAgent, err := o.registerNewParentAgent(systemPrompt)
+	o.aolTimeline = make(chan []contracts.ChatMessage)
+	o.sessionEventStream = make(chan contracts.EventStream)
+
+	go o.HandleTimelineAOL(context.TODO(), o.aolTimeline)
+	go o.HandleAgentLoopEvents(context.TODO())
+
+	o.agent, err = agent.NewAgent(
+		context.TODO(), // FIXME: please fix the context things.
+		o.model,
+		contracts.InteractiveAgent, // TODO: need this to be coming from engine
+		o.activeTimeline,
+		chan<- []contracts.ChatMessage(o.aolTimeline),
+		chan<- contracts.EventStream(o.sessionEventStream),
+		o.GenToolCallDispatchHandler(context.TODO()),
+		systemPrompt,
+		agent.WithMaxTurns(1000),
+		agent.WithTools(o.availableTools...),
+		agent.WithAutoCompaction(o.shouldCompact),
+	)
 	if err != nil {
 		return nil, err
 	}
-	o.sessionAgentId = firstAgent.Id
+
 	state, err := getLatestTaskChecklist(o.timeline, o.timeline.CurrentHeadEventID())
 	if err != nil {
 		return nil, fmt.Errorf("reconstruct task checklist: %w", err)
@@ -211,99 +242,10 @@ func NewResumedSession(l *slog.Logger, choosenModel contracts.ProvisionedModel, 
 	return o, nil
 }
 
-func (s *InfaiAgentSession) configureFileTools() {
-	if len(s.availableTools) == 0 {
-		s.availableTools = []contracts.Tool{}
-	}
-	s.availableTools = append(s.availableTools,
-		actuators.ReadTool(),
-		actuators.ListTool(),
-		actuators.GlobTool(),
-		actuators.SearchTool(),
-		actuators.WriteTool(),
-		actuators.EditTool(),
-		actuators.BashTool(),
-	)
-}
-
-func (s *InfaiAgentSession) configureMemoryTools() {
-	if len(s.availableTools) == 0 {
-		s.availableTools = []contracts.Tool{}
-	}
-
-	memoryTools := []contracts.Tool{}
-	memoryTools = append(memoryTools, memory.ReadSkillTool(), memory.TaskChecklistTool())
-	if s.skillRegistry != nil {
-		s.availableSkills = s.skillRegistry.Skills()
-	}
-
-	s.availableTools = append(s.availableTools, memoryTools...)
-}
-
-func (s *InfaiAgentSession) ID() uuid.UUID {
-	return s.sessionID
-}
-
 func (s *InfaiAgentSession) Meta() store.SessionMeta {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.meta
-}
-
-func (s *InfaiAgentSession) CurrentSessionModelContextWindow() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.model.GetModelSpecs().Model().MaxContextLength
-}
-
-func (s *InfaiAgentSession) AvailableThinkingPatterns() []contracts.InfaiThinkingLevel {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.model.GetModelSpecs().Model().AvailableThinkingPatterns()
-}
-
-// SupportedModalities returns the input modalities declared by the session's
-// currently selected model.
-func (s *InfaiAgentSession) SupportedModalities() []contracts.LLMSupportedModality {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]contracts.LLMSupportedModality(nil), s.model.GetModelSpecs().Model().Modality...)
-}
-
-func (s *InfaiAgentSession) CurrentThinkingPattern() contracts.InfaiThinkingLevel {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.model.GetModelSpecs().ThinkingPattern()
-}
-
-func (s *InfaiAgentSession) ProviderAuthNeedsRefresh(now time.Time) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	specs := s.model.GetModelSpecs()
-	switch specs.ProviderSlug() {
-	case contracts.Codex:
-		auth := specs.Auth()
-		if auth.Method != contracts.OAuth2 {
-			return false, errors.New("openai codex auth: OAuth credentials are missing; run provider login again")
-		}
-		if auth.ExpiresAt == nil {
-			return false, errors.New("openai codex auth: token expiry is missing; run provider login again")
-		}
-		if auth.ExpiresAt.After(now.Add(5 * time.Minute)) {
-			if auth.AccessToken == "" || auth.AccountID == "" {
-				return false, errors.New("openai codex auth: credentials are incomplete; run provider login again")
-			}
-			return false, nil
-		}
-		if auth.RefreshToken == "" {
-			return false, errors.New("openai codex auth: refresh token is missing; run provider login again")
-		}
-		return true, nil
-
-	default:
-		return false, nil
-	}
 }
 
 // EventHub exposes the session's live broadcaster so the server can attach the
@@ -652,20 +594,6 @@ func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput,
 	}, nil
 }
 
-func (s *InfaiAgentSession) publishTaskChecklist() error {
-	content, err := json.Marshal(s.taskChecklist.Snapshot())
-	if err != nil {
-		return fmt.Errorf("encode task checklist delta: %w", err)
-	}
-	s.events.Publish(store.Record{
-		Kind:      store.KindDelta,
-		Timestamp: time.Now().UTC(),
-		DeltaKind: contracts.DeltaTaskChecklist,
-		Text:      string(content),
-	})
-	return nil
-}
-
 // runAgent owns one complete agent/comms invocation and persists the messages
 // it produced before returning control to Chat.
 func (s *InfaiAgentSession) runAgent(ctx context.Context, agentLoop *agent.Agent) (contracts.TurnResult, error) {
@@ -705,20 +633,6 @@ func (s *InfaiAgentSession) runAgent(ctx context.Context, agentLoop *agent.Agent
 		}
 	}
 	return result, err
-}
-
-// persistMessagesLocked writes history entries beyond the watermark as message
-// records. Caller holds s.mu.
-func (s *InfaiAgentSession) persistMessagesLocked() error {
-	for i := s.persisted; i < len(s.history); i++ {
-		m := s.history[i]
-		if _, err := s.timeline.AppendToHead(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &m}); err != nil {
-			s.l.Error("persist message", "session_id", s.sessionID, "error", err)
-			return fmt.Errorf("persist message: %w", err)
-		}
-	}
-	s.persisted = len(s.history)
-	return nil
 }
 
 func (s *InfaiAgentSession) rebuildHistoryLocked(summary string, retained []contracts.ChatMessage, checklistContext string) error {
@@ -1295,7 +1209,7 @@ func getLatestTaskChecklist(timeline *store.Timeline, head uuid.UUID) (contracts
 					continue
 				}
 				delete(toolResults, call.ID)
-				if call.Function.Name != string(contracts.TaskChecklistTool) {
+				if call.Function.Name != contracts.TaskChecklistTool {
 					continue
 				}
 				checklist, err := memory.DecodeTaskChecklistState(output)

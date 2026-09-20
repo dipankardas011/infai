@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/config"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
@@ -30,8 +31,9 @@ type InfaiAgentEngine struct {
 	providers    contracts.LLMProviders
 	sessionStore *store.SessionStore
 
-	mu     sync.Mutex
-	active map[uuid.UUID]*session.InfaiAgentSession
+	mu                  sync.Mutex
+	activeSessionAgents map[uuid.UUID]*session.InfaiAgentSession
+	aseComms            *comms.AgentComms
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -78,11 +80,12 @@ func NewInfaiAgentEngineAt(bgLogger *slog.Logger, sessionStore *store.SessionSto
 	}
 
 	return &InfaiAgentEngine{
-		bgLogger:     bgLogger,
-		providers:    contracts.LLMProviders{Providers: make(map[string]contracts.LLMProviderConfiguration)},
-		sessionStore: sessionStore,
-		active:       make(map[uuid.UUID]*session.InfaiAgentSession),
-		stopCh:       make(chan struct{}),
+		bgLogger:            bgLogger,
+		providers:           contracts.LLMProviders{Providers: make(map[string]contracts.LLMProviderConfiguration)},
+		sessionStore:        sessionStore,
+		activeSessionAgents: make(map[uuid.UUID]*session.InfaiAgentSession),
+		stopCh:              make(chan struct{}),
+		aseComms:            comms.NewAgentComms(),
 	}, nil
 }
 
@@ -120,8 +123,16 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	if !ok {
 		return nil, fmt.Errorf("engine: model %q not configured for provider %q", opts.Model, opts.Provider)
 	}
+	sessID, err := uuid.NewV7()
+	if err != nil {
+		return nil, err
+	}
+	if err := e.aseComms.RegisterSessionAgent(sessID); err != nil {
+		return nil, err
+	}
 
 	sess, err := session.NewSession(
+		sessID,
 		e.bgLogger.WithGroup("session"),
 		contracts.NewProvisionedModel(
 			providerConfig.Id,
@@ -133,22 +144,23 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		),
 		opts.Cwd,
 		e.sessionStore,
+		e.aseComms.NewSessionAgentComms(sessID),
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	e.mu.Lock()
-	e.active[sess.ID()] = sess
+	e.activeSessionAgents[sessID] = sess
 	e.mu.Unlock()
 
-	e.bgLogger.Info("session created", "session_id", sess.ID(), "provider", opts.Provider, "model", modelConfig.Id)
+	e.bgLogger.Info("session created", "session_id", sessID, "provider", opts.Provider, "model", modelConfig.Id)
 	return sess, nil
 }
 
 // LoadSession rebuilds a saved session from its timeline and registers it
 // as active so it can be chatted with again.
-func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*session.InfaiAgentSession, error) {
+func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgentSession, error) {
 	select {
 	case <-e.stopCh:
 		return nil, harnessErr.ErrEngineShuttingDown
@@ -156,15 +168,16 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*session.InfaiAgentSession
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if sess, ok := e.active[id]; ok {
+
+	if sess, ok := e.activeSessionAgents[sessionID]; ok {
 		return sess, nil
 	}
-	meta, err := e.sessionStore.LoadMeta(id)
+	meta, err := e.sessionStore.LoadMeta(sessionID)
 	if err != nil {
 		return nil, err
 	}
 
-	timeline, err := e.sessionStore.LoadSessionTimelineClient(id)
+	timeline, err := e.sessionStore.LoadSessionTimelineClient(sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -189,6 +202,10 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*session.InfaiAgentSession
 	if !ok {
 		return nil, fmt.Errorf("engine: model %q not configured for provider %q", meta.Model, meta.Provider)
 	}
+	if err := e.aseComms.RegisterSessionAgent(sessionID); err != nil {
+		_ = timeline.Close()
+		return nil, err
+	}
 
 	sess, err := session.NewResumedSession(
 		e.bgLogger.WithGroup("session"),
@@ -200,15 +217,17 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*session.InfaiAgentSession
 			providerConfig.Auth,
 			modelConfig,
 		),
-		meta, history, timeline, e.sessionStore)
+		meta, history, timeline, e.sessionStore,
+		e.aseComms.NewSessionAgentComms(sessionID),
+	)
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
 	}
 
-	e.active[id] = sess
+	e.activeSessionAgents[sessionID] = sess
 
-	e.bgLogger.Info("session loaded", "session_id", id, "provider", meta.Provider)
+	e.bgLogger.Info("session loaded", "session_id", sessionID, "provider", meta.Provider)
 	return sess, nil
 }
 
@@ -216,7 +235,7 @@ func (e *InfaiAgentEngine) LoadSession(id uuid.UUID) (*session.InfaiAgentSession
 func (e *InfaiAgentEngine) Session(id uuid.UUID) (*session.InfaiAgentSession, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	sess, ok := e.active[id]
+	sess, ok := e.activeSessionAgents[id]
 	return sess, ok
 }
 
@@ -224,7 +243,7 @@ func (e *InfaiAgentEngine) Session(id uuid.UUID) (*session.InfaiAgentSession, bo
 // empty modelName keeps the provider's configured model.
 func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId string) (*session.InfaiAgentSession, error) {
 	e.mu.Lock()
-	sess, ok := e.active[id]
+	sess, ok := e.activeSessionAgents[id]
 	e.mu.Unlock()
 	if !ok {
 		return nil, harnessErr.ErrSessionNotFound
@@ -260,7 +279,7 @@ func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId s
 // Chat runs one prompt against an existing session and returns the outcome.
 func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, input contracts.UserInput, opts contracts.ChatOptions) (*contracts.ChatResult, error) {
 	e.mu.Lock()
-	sess, ok := e.active[id]
+	sess, ok := e.activeSessionAgents[id]
 	e.mu.Unlock()
 	if !ok {
 		return nil, harnessErr.ErrSessionNotFound
@@ -329,7 +348,7 @@ func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, d
 // CompactSession creates a continuation checkpoint for an active session.
 func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) error {
 	e.mu.Lock()
-	sess, ok := e.active[id]
+	sess, ok := e.activeSessionAgents[id]
 	e.mu.Unlock()
 	if !ok {
 		return harnessErr.ErrSessionNotFound
@@ -341,9 +360,9 @@ func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) err
 // disk. An in-flight Chat finishes or is canceled by its own context.
 func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 	e.mu.Lock()
-	sess, ok := e.active[id]
+	sess, ok := e.activeSessionAgents[id]
 	if ok {
-		delete(e.active, id)
+		delete(e.activeSessionAgents, id)
 	}
 	e.mu.Unlock()
 
@@ -366,7 +385,7 @@ func (e *InfaiAgentEngine) RenameSession(id uuid.UUID, name string) (*store.Sess
 		return nil, errors.New("engine: session name is required")
 	}
 	e.mu.Lock()
-	sess, ok := e.active[id]
+	sess, ok := e.activeSessionAgents[id]
 	e.mu.Unlock()
 	if ok {
 		if err := sess.Rename(name); err != nil {
@@ -399,10 +418,16 @@ func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 	defer e.mu.Unlock()
 	summaries := make([]contracts.SessionSummary, 0, len(metas))
 	for _, meta := range metas {
-		_, active := e.active[meta.ID]
+		_, active := e.activeSessionAgents[meta.ID]
 		summaries = append(summaries, contracts.SessionSummary{
-			ID: meta.ID, Name: meta.Name, Provider: meta.Provider, Model: meta.Model,
-			Cwd: meta.Cwd, CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt, Active: active,
+			ID:        meta.ID,
+			Name:      meta.Name,
+			Provider:  meta.Provider,
+			Model:     meta.Model,
+			Cwd:       meta.Cwd,
+			CreatedAt: meta.CreatedAt,
+			UpdatedAt: meta.UpdatedAt,
+			Active:    active,
 		})
 	}
 	return summaries
@@ -470,11 +495,12 @@ func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
 		close(e.stopCh)
 	})
 	e.mu.Lock()
-	for id, sess := range e.active {
+	for id, sess := range e.activeSessionAgents {
 		sess.Close()
-		delete(e.active, id)
+		delete(e.activeSessionAgents, id)
 	}
 	e.mu.Unlock()
+	e.aseComms.Close()
 
 	e.bgLogger.DebugContext(ctx, "engine shutdown complete")
 	return nil

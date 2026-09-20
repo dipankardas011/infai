@@ -665,7 +665,7 @@ func decodeCodexOutputItem(raw json.RawMessage) (codexOutputItem, error) {
 	return item, nil
 }
 
-func emitCodexDelta(opts *contracts.GenerateOptions, kind contracts.DeltaKind, text string) {
+func emitCodexDelta(opts *contracts.GenerateOptions, kind contracts.EventStreamKind, text string) {
 	if text != "" && opts != nil && opts.OnDelta != nil {
 		opts.OnDelta(kind, text)
 	}

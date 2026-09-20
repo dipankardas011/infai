@@ -34,82 +34,86 @@ type AgentComm struct {
 }
 
 var (
-	ErrAgentCommsClosed   = errors.New("agent communications closed")
-	ErrAgentNotRegistered = errors.New("agent is not registered")
+	ErrAgentCommsClosed   = errors.New("agent-engine communications closed")
+	ErrAgentNotRegistered = errors.New("agent-engine is not registered")
 )
 
 // AgentComms is the session-owned communication hub. Agents have private
 // inboxes, while every agent sends outbound messages to one session inbox.
 type AgentComms struct {
-	mu           sync.RWMutex
-	sessionInbox chan AgentComm
-	agentInboxes map[uuid.UUID]chan AgentComm
-	done         chan struct{}
-	once         sync.Once
+	mu               sync.RWMutex
+	engineInbox      chan AgentComm
+	sessAgentInboxes map[uuid.UUID]chan AgentComm
+	done             chan struct{}
+	once             sync.Once
 }
 
 func NewAgentComms() *AgentComms {
 	return &AgentComms{
-		sessionInbox: make(chan AgentComm),
-		agentInboxes: make(map[uuid.UUID]chan AgentComm),
-		done:         make(chan struct{}),
+		engineInbox:      make(chan AgentComm),
+		sessAgentInboxes: make(map[uuid.UUID]chan AgentComm),
+		done:             make(chan struct{}),
 	}
 }
 
-func (c *AgentComms) RegisterAgent(id uuid.UUID) error {
+func (c *AgentComms) RegisterSessionAgent(id uuid.UUID) error {
 	if id == uuid.Nil {
 		return errors.New("agent id is required")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, exists := c.agentInboxes[id]; exists {
+	if _, exists := c.sessAgentInboxes[id]; exists {
 		return errors.New("agent is already registered")
 	}
-	c.agentInboxes[id] = make(chan AgentComm)
+	c.sessAgentInboxes[id] = make(chan AgentComm)
 	return nil
 }
 
-func (c *AgentComms) UnregisterAgent(id uuid.UUID) {
+func (c *AgentComms) UnregisterSessionAgent(id uuid.UUID) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.agentInboxes, id)
+
+	delete(c.sessAgentInboxes, id)
 }
 
-func (c *AgentComms) SendToAgent(ctx context.Context, id uuid.UUID, msg AgentComm) error {
+// Used by engine to route msg to specific session agent
+func (c *AgentComms) SendToSessionAgent(ctx context.Context, id uuid.UUID, msg AgentComm) error {
 	c.mu.RLock()
-	inbox, ok := c.agentInboxes[id]
+	inbox, ok := c.sessAgentInboxes[id]
 	c.mu.RUnlock()
+
 	if !ok {
 		return ErrAgentNotRegistered
 	}
 	return sendComm(ctx, inbox, c.done, msg)
 }
 
-func (c *AgentComms) ReceiveFromAgents(ctx context.Context) (AgentComm, error) {
-	return receiveComm(ctx, c.sessionInbox, c.done)
+// Used by engine to Subscribe for events from SessionAgent
+func (c *AgentComms) ReceiveFromSessionAgents(ctx context.Context) (AgentComm, error) {
+	return receiveComm(ctx, c.engineInbox, c.done)
 }
 
-type IACChannel struct {
+type ISACChannel struct {
 	agentId uuid.UUID
 	c       *AgentComms
 }
 
-// IACChannel is Inter Agent Communication Channel only used for Agent to talk with session/engine.
-func (c *AgentComms) IACChannel(id uuid.UUID) *IACChannel {
-	return &IACChannel{id, c}
+// ISACChannel is [I]nter [S]ession [A]gent [C]ommunication Channel only used for Agent to talk with session/engine.
+func (c *AgentComms) NewSessionAgentComms(id uuid.UUID) *ISACChannel {
+	return &ISACChannel{id, c}
 }
 
-func (iac *IACChannel) Send(ctx context.Context, msg AgentComm) error {
-	return sendComm(ctx, iac.c.sessionInbox, iac.c.done, msg)
+func (iac *ISACChannel) Send(ctx context.Context, msg AgentComm) error {
+	return sendComm(ctx, iac.c.engineInbox, iac.c.done, msg)
 }
 
-func (iac *IACChannel) Receive(ctx context.Context) (AgentComm, error) {
+func (iac *ISACChannel) Subscribe(ctx context.Context) (AgentComm, error) {
 	return iac.c.receiveForAgent(ctx, iac.agentId)
 }
 
 func (c *AgentComms) receiveForAgent(ctx context.Context, id uuid.UUID) (AgentComm, error) {
 	c.mu.RLock()
-	inbox, ok := c.agentInboxes[id]
+	inbox, ok := c.sessAgentInboxes[id]
 	c.mu.RUnlock()
 	if !ok {
 		return AgentComm{}, ErrAgentNotRegistered

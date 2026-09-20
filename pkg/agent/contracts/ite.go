@@ -16,8 +16,8 @@ type ToolCall struct {
 
 // Function names the tool and carries the JSON-encoded argument object.
 type Function struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	Name      ToolType `json:"name"`
+	Arguments string   `json:"arguments"`
 }
 
 func NewToolMessage(callID, content string, status ToolExecutionStatus) ChatMessage {
