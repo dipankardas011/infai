@@ -186,7 +186,7 @@ func SerializeForCompaction(history []contracts.ChatMessage) string {
 			if len(m.ToolCalls) > 0 {
 				names := make([]string, 0, len(m.ToolCalls))
 				for _, tc := range m.ToolCalls {
-					names = append(names, tc.Function.Name)
+					names = append(names, string(tc.Function.Name))
 				}
 				b.WriteString(" called ")
 				b.WriteString(strings.Join(names, ", "))

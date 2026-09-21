@@ -111,7 +111,11 @@ func NewAgent(
 
 func (a *Agent) UpdateState(status contracts.AgentStatus) {
 	a.Status = status
-	a.eventStream <- contracts.NewEventStream(contracts.NotifyAgentSessionStatus, string(status))
+	a.eventStream <- contracts.EventStream{
+		Kind:      contracts.NotifyAgentSessionStatus,
+		Timestamp: time.Now().UTC(),
+		Content:   new(string(status)),
+	}
 }
 
 func (a *Agent) SetModel(model contracts.InfaiModelAdaptor) { a.model = model }
@@ -174,8 +178,13 @@ func (a *Agent) StartLoop(sessCtx context.Context) {
 	}()
 
 	handleStreamsFromModel := func(deltaKind contracts.EventStreamKind, text string) {
+		event := contracts.EventStream{
+			Kind:      deltaKind,
+			Timestamp: time.Now().UTC(),
+			Content:   new(text),
+		}
 		select {
-		case tmpAgentEvents <- contracts.NewEventStream(deltaKind, text):
+		case tmpAgentEvents <- event:
 		default:
 			// event buffer full — drop rather than stall generation;
 			// deltas are reconstructible from AOLStore, safe to lose
@@ -223,10 +232,11 @@ func (a *Agent) StartLoop(sessCtx context.Context) {
 					a.UpdateState(contracts.AgentClosed)
 					return
 				case curr := <-tc.C:
-					a.eventStream <- contracts.NewEventStream(
-						contracts.NotifyAgentMissingHistory,
-						fmt.Sprintf("waiting for the activeTimeline to be available. Since: %s", curr.Sub(start).Round(time.Second).String()),
-					)
+					a.eventStream <- contracts.EventStream{
+						Kind:      contracts.NotifyAgentMissingHistory,
+						Timestamp: time.Now().UTC(),
+						Content:   new(fmt.Sprintf("waiting for the activeTimeline to be available. Since: %s", curr.Sub(start).Round(time.Second).String())),
+					}
 				}
 			}
 		}
@@ -240,10 +250,11 @@ func (a *Agent) StartLoop(sessCtx context.Context) {
 			a.storeToTimeline <- unreadMessages
 			a.activeTimeline = append(a.activeTimeline, unreadMessages...)
 			for _, v := range unreadMessages {
-				a.eventStream <- contracts.NewEventStream(
-					contracts.DeltaUserPrompt,
-					v.Text(), // for the image based ones the text placeholder is there na? then we don't need anything
-				)
+				a.eventStream <- contracts.EventStream{
+					Kind:      contracts.DeltaUserPrompt,
+					Timestamp: time.Now().UTC(),
+					Content:   new(v.Text()), // for the image based ones the text placeholder is there na? then we don't need anything
+				}
 			}
 		case false:
 		}
@@ -267,13 +278,21 @@ func (a *Agent) StartLoop(sessCtx context.Context) {
 				return
 			}
 
-			a.eventStream <- contracts.NewEventStream(contracts.NotifyAgentModelError, err.Error())
+			a.eventStream <- contracts.EventStream{
+				Kind:      contracts.NotifyAgentModelError,
+				Timestamp: time.Now().UTC(),
+				Content:   new(err.Error()),
+			}
 
 			continue // to return back to the next iteration
 		}
 
 		if _u, err := json.Marshal(u); err == nil {
-			a.eventStream <- contracts.NewEventStream(contracts.NotifyAgentUsage, string(_u))
+			a.eventStream <- contracts.EventStream{
+				Kind:      contracts.NotifyAgentUsage,
+				Timestamp: time.Now().UTC(),
+				Content:   new(string(_u)),
+			}
 		}
 
 		if len(reply.ToolCalls) == 0 {
@@ -289,10 +308,11 @@ func (a *Agent) StartLoop(sessCtx context.Context) {
 			}
 		} else {
 			for _, toolCall := range reply.ToolCalls {
-				a.eventStream <- contracts.NewEventStream(
-					contracts.DeltaToolCall,
-					contracts.ToolCallDisplay(toolCall),
-				)
+				a.eventStream <- contracts.EventStream{
+					Kind:      contracts.DeltaToolCall,
+					Timestamp: time.Now().UTC(),
+					Content:   new(contracts.ToolCallDisplay(toolCall)),
+				}
 			}
 			x := append(
 				[]contracts.ChatMessage{reply},
@@ -305,13 +325,14 @@ func (a *Agent) StartLoop(sessCtx context.Context) {
 		if a.shouldCompact != nil && a.shouldCompact(u) {
 			a.activeTimeline = nil // explicitly made it zero.
 
-			a.eventStream <- contracts.NewEventStream(
-				contracts.NotifyAgentNeedsAutoCompaction,
-				fmt.Sprintf("Used: %d against Total: %d",
+			a.eventStream <- contracts.EventStream{
+				Kind:      contracts.NotifyAgentNeedsAutoCompaction,
+				Timestamp: time.Now().UTC(),
+				Content: new(fmt.Sprintf("Used: %d against Total: %d",
 					u.TotalTokens,
 					a.model.GetModelSpecs().Model().MaxContextLength,
-				),
-			)
+				)),
+			}
 		}
 	}
 }

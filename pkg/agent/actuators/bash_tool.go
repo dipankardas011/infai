@@ -3,6 +3,7 @@ package actuators
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -54,54 +55,52 @@ func BashTool() contracts.Tool {
 	)
 }
 
-func bashExecution(ctx context.Context) (string, error) {
-	var args bashArguments
-	if _, err := decodeArgs(ctx, &args); err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.BashTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
-		}
-		return "", execErr(contracts.BashTool, "invalid_arguments", "bash arguments could not be decoded", ResponsibilityAgent, err)
-	}
-	if err := bashToolValidate(args); err != nil {
+func (m *FileManager) BashExecution(ctx context.Context, tc contracts.ToolCall) (string, error) {
+	ctx, cancel := context.WithTimeoutCause(
+		ctx,
+		defaultBashTimeout,
+		fmt.Errorf("bash execution timeout"),
+	)
+	defer cancel() // Always defer cancel to clean up resources!
+
+	args, err := contracts.DecodeToolArguments[bashArguments](contracts.BashTool, tc)
+	if err != nil {
 		return "", err
 	}
-	m := FileManagerFromContext(ctx)
-	if m == nil {
-		return "", execErr(contracts.BashTool, "missing_file_manager", "a file manager is required to run commands", ResponsibilitySession, nil)
+	if err := bashToolValidate(args); err != nil {
+		return "", wrapToolError(contracts.BashTool, err, "invalid_arguments", "bash arguments are invalid")
 	}
+
 	result, err := m.Bash(ctx, args.Command, args.Workdir, args.Timeout)
 	if err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.BashTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
-		}
-		return "", execErr(contracts.BashTool, "bash_failed", "the command could not be run", ResponsibilityTool, err)
+		return "", wrapToolError(contracts.BashTool, err, "bash_failed", "the command could not be run")
 	}
 	return assemble(result)
 }
 
 func bashToolValidate(args bashArguments) error {
 	if args.Command == "" {
-		return execErr(contracts.BashTool, "invalid_arguments", "bash requires a command", ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.BashTool, "invalid_arguments", "bash requires a command", contracts.ResponsibilityAgent, nil)
 	}
-	if err := validateText(args.Command, ResponsibilityAgent); err != nil {
+	if err := validateText(args.Command, contracts.ResponsibilityAgent); err != nil {
 		return err
 	}
 	if strings.ContainsRune(args.Command, '\r') {
-		return execErr(contracts.BashTool, "invisible_character", "commands may not contain carriage returns", ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.BashTool, "invisible_character", "commands may not contain carriage returns", contracts.ResponsibilityAgent, nil)
 	}
 	if len(args.Command) > maxCommandBytes {
-		return execErr(contracts.BashTool, "command_too_large", "the command exceeds the size limit", ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.BashTool, "command_too_large", "the command exceeds the size limit", contracts.ResponsibilityAgent, nil)
 	}
-	if err := validateText(args.Workdir, ResponsibilityAgent); err != nil {
+	if err := validateText(args.Workdir, contracts.ResponsibilityAgent); err != nil {
 		return err
 	}
 	if args.Timeout != nil {
 		timeout := time.Duration(*args.Timeout) * time.Second
 		if timeout < time.Second {
-			return execErr(contracts.BashTool, "invalid_arguments", "timeout must be at least 1 second", ResponsibilityAgent, nil)
+			return contracts.NewToolExecutionError(contracts.BashTool, "invalid_arguments", "timeout must be at least 1 second", contracts.ResponsibilityAgent, nil)
 		}
 		if timeout > maxBashTimeout {
-			return execErr(contracts.BashTool, "invalid_arguments", "timeout exceeds the maximum of 900 seconds", ResponsibilityAgent, nil)
+			return contracts.NewToolExecutionError(contracts.BashTool, "invalid_arguments", "timeout exceeds the maximum of 900 seconds", contracts.ResponsibilityAgent, nil)
 		}
 	}
 	return checkDangerousCommand(args.Command)
@@ -122,7 +121,7 @@ func (m *FileManager) Bash(ctx context.Context, command, workdir string, timeout
 		deadline = time.Duration(*timeout) * time.Second
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, deadline)
+	runCtx, cancel := context.WithTimeoutCause(ctx, deadline, fmt.Errorf("bash exceeded the %s execution limit", deadline))
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, "bash", "-c", command)
@@ -143,14 +142,14 @@ func (m *FileManager) Bash(ctx context.Context, command, workdir string, timeout
 	}
 	if runCtx.Err() == context.DeadlineExceeded {
 		result.TimedOut = true
-		return result, filesystemErr("command_timed_out", "the command exceeded the runtime limit", ResponsibilityTool, nil)
+		return result, filesystemErr("command_timed_out", "the command exceeded the runtime limit", contracts.ResponsibilityTool, nil)
 	}
 	if err != nil {
 		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			result.ExitCode = exitErr.ExitCode()
 			return result, nil
 		}
-		return result, filesystemErr("command_failed", "the command could not be started", ResponsibilityEnvironment, err)
+		return result, filesystemErr("command_failed", "the command could not be started", contracts.ResponsibilityEnvironment, err)
 	}
 	return result, nil
 }

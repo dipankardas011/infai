@@ -207,16 +207,38 @@ func manager(t *testing.T, root string) *actuators.FileManager {
 	return m
 }
 
+// dispatch picks the executor the session dispatcher would call for a tool.
+func dispatch(t *testing.T, manager *actuators.FileManager, tool contracts.ToolType, arguments string) (string, error) {
+	t.Helper()
+	call := contracts.ToolCall{Function: contracts.Function{Name: tool, Arguments: arguments}}
+	ctx := context.Background()
+	switch tool {
+	case contracts.ReadTool:
+		return manager.ReadExecution(ctx, call)
+	case contracts.WriteTool:
+		return manager.WriteExecution(ctx, call)
+	case contracts.EditTool:
+		return manager.EditExecution(ctx, call)
+	case contracts.ListTool:
+		return manager.ListExecution(ctx, call)
+	case contracts.GlobTool:
+		return manager.GlobExecution(ctx, call)
+	case contracts.SearchTool:
+		return manager.SearchExecution(ctx, call)
+	case contracts.BashTool:
+		return manager.BashExecution(ctx, call)
+	}
+	t.Fatalf("unknown tool %s", tool)
+	return "", nil
+}
+
 func execute(t *testing.T, manager *actuators.FileManager, tool contracts.ToolType, args map[string]any) string {
 	t.Helper()
 	data, err := json.Marshal(args)
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := actuators.ExecuteToolCall(
-		actuators.WithFileManager(context.Background(), manager),
-		contracts.ToolCall{Function: contracts.Function{Name: string(tool), Arguments: string(data)}},
-	)
+	output, err := dispatch(t, manager, tool, string(data))
 	if err != nil {
 		t.Fatalf("%s: %v", tool, err)
 	}
@@ -234,10 +256,7 @@ func executeError(t *testing.T, manager *actuators.FileManager, tool contracts.T
 
 func executeRawError(t *testing.T, manager *actuators.FileManager, tool contracts.ToolType, arguments string) string {
 	t.Helper()
-	_, err := actuators.ExecuteToolCall(
-		actuators.WithFileManager(context.Background(), manager),
-		contracts.ToolCall{Function: contracts.Function{Name: string(tool), Arguments: arguments}},
-	)
+	_, err := dispatch(t, manager, tool, arguments)
 	if err == nil {
 		t.Fatalf("%s: expected error", tool)
 	}
@@ -246,10 +265,7 @@ func executeRawError(t *testing.T, manager *actuators.FileManager, tool contract
 
 func executeRaw(t *testing.T, manager *actuators.FileManager, tool contracts.ToolType, arguments string) string {
 	t.Helper()
-	output, err := actuators.ExecuteToolCall(
-		actuators.WithFileManager(context.Background(), manager),
-		contracts.ToolCall{Function: contracts.Function{Name: string(tool), Arguments: arguments}},
-	)
+	output, err := dispatch(t, manager, tool, arguments)
 	if err != nil {
 		t.Fatalf("%s: %v", tool, err)
 	}

@@ -337,7 +337,7 @@ func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess 
 	return sess.SetProviderAuth(providerName, refreshed)
 }
 
-func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, decision contracts.ApprovalDecisionFromClient) error {
+func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, decision contracts.ApprovalConclusion) error {
 	sess, ok := e.Session(id)
 	if !ok {
 		return harnessErr.ErrSessionNotFound

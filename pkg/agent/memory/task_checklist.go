@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/clipperhouse/uax29/v2/graphemes"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -88,40 +89,22 @@ type taskChecklistArguments struct {
 	Status      *contracts.TaskStatus `json:"status,omitempty"`
 }
 
-func taskChecklistExecution(ctx context.Context) (string, error) {
-	checklist := TaskChecklistFromContext(ctx)
-	if checklist == nil {
-		return "", errors.New("task_checklist: no checklist manager in context")
-	}
-	call, ok := ToolCallFromContext(ctx)
-	if !ok {
-		return "", errors.New("task_checklist: no tool call in context")
-	}
-
-	var args taskChecklistArguments
-	decoder := json.NewDecoder(strings.NewReader(call.Function.Arguments))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&args); err != nil {
-		return "", fmt.Errorf("task_checklist arguments: %w", err)
-	}
-
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return "", errors.New("task_checklist arguments must contain one JSON object")
-	}
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-
-	state, err := checklist.apply(args)
+func (t *TaskChecklist) TaskChecklistExecution(ctx context.Context, tc contracts.ToolCall) (string, error) {
+	args, err := contracts.DecodeToolArguments[taskChecklistArguments](contracts.TaskChecklistTool, tc)
 	if err != nil {
 		return "", err
 	}
-	output, err := json.Marshal(state)
-	if err != nil {
-		return "", fmt.Errorf("encode task_checklist state: %w", err)
-	}
-	return string(output), nil
+	return contracts.RunBounded(ctx, contracts.TaskChecklistTool, time.Second, func() (string, error) {
+		state, err := t.apply(args)
+		if err != nil {
+			return "", err
+		}
+		output, err := json.Marshal(state)
+		if err != nil {
+			return "", fmt.Errorf("encode task_checklist state: %w", err)
+		}
+		return string(output), nil
+	})
 }
 
 func (c *TaskChecklist) apply(args taskChecklistArguments) (contracts.TaskChecklistState, error) {

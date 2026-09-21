@@ -11,7 +11,7 @@ import (
 type ApprovalRequest struct {
 	ID          uuid.UUID `json:"id"`
 	SessionID   uuid.UUID `json:"session_id"`
-	AgentID     uuid.UUID `json:"agent_id"`
+	SessionName string    `json:"session_name"`
 	ToolCall    ToolCall  `json:"tool_call"`
 	Fingerprint string    `json:"fingerprint"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -25,7 +25,8 @@ const (
 	ApprovalDenyWithReason ApprovalDecision = "deny_with_reason"
 )
 
-type ApprovalDecisionFromClient struct {
+type ApprovalConclusion struct {
+	ReqID       uuid.UUID        `json:"req_id"`
 	Fingerprint string           `json:"fingerprint"`
 	Decision    ApprovalDecision `json:"decision"`
 	Reason      string           `json:"reason,omitempty"`

@@ -378,7 +378,7 @@ func (o *genericOpenAICompatableAPI) readStream(ctx context.Context, body io.Rea
 				if call.Type == "" {
 					call.Type = delta.Type
 				}
-				call.Function.Name += delta.Function.Name
+				call.Function.Name += contracts.ToolType(delta.Function.Name)
 				call.Function.Arguments += delta.Function.Arguments
 			}
 		}

@@ -2,11 +2,11 @@ package actuators
 
 import (
 	"context"
-	"errors"
 	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
@@ -29,41 +29,34 @@ func GlobTool() contracts.Tool {
 	)
 }
 
-func globExecution(ctx context.Context) (string, error) {
-	var args globArguments
-	if _, err := decodeArgs(ctx, &args); err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.GlobTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
-		}
-		return "", execErr(contracts.GlobTool, "invalid_arguments", "glob arguments could not be decoded", ResponsibilityAgent, err)
-	}
-	if err := globToolValidate(args); err != nil {
+func (m *FileManager) GlobExecution(ctx context.Context, tc contracts.ToolCall) (string, error) {
+	args, err := contracts.DecodeToolArguments[globArguments](contracts.GlobTool, tc)
+	if err != nil {
 		return "", err
 	}
-	m := FileManagerFromContext(ctx)
-	if m == nil {
-		return "", execErr(contracts.GlobTool, "missing_file_manager", "a file manager is required to search for files", ResponsibilitySession, nil)
+	if err := globToolValidate(args); err != nil {
+		return "", wrapToolError(contracts.GlobTool, err, "invalid_arguments", "glob arguments are invalid")
 	}
-	matches, err := m.Glob(args.Pattern)
-	if err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.GlobTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+
+	return contracts.RunBounded(ctx, contracts.GlobTool, 10*time.Second, func() (string, error) {
+		matches, err := m.glob(args.Pattern)
+		if err != nil {
+			return "", wrapToolError(contracts.GlobTool, err, "glob_failed", "the pattern could not be matched")
 		}
-		return "", execErr(contracts.GlobTool, "glob_failed", "the pattern could not be matched", ResponsibilityTool, err)
-	}
-	return assemble(matches)
+		return assemble(matches)
+	})
 }
 
-func (m *FileManager) Glob(pattern string) ([]string, error) {
+func (m *FileManager) glob(pattern string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if pattern == "" {
-		return nil, filesystemErr("invalid_pattern", "the glob pattern must not be empty", ResponsibilityAgent, nil)
+		return nil, filesystemErr("invalid_pattern", "the glob pattern must not be empty", contracts.ResponsibilityAgent, nil)
 	}
 	if filepath.IsAbs(pattern) || strings.ContainsRune(pattern, 0) {
-		return nil, filesystemErr("invalid_path", "the glob pattern must be workspace-relative", ResponsibilityAgent, nil)
+		return nil, filesystemErr("invalid_path", "the glob pattern must be workspace-relative", contracts.ResponsibilityAgent, nil)
 	}
-	if err := validateText(pattern, ResponsibilityAgent); err != nil {
+	if err := validateText(pattern, contracts.ResponsibilityAgent); err != nil {
 		return nil, err
 	}
 	pattern, err := normalizeGlobPattern(pattern)
@@ -84,19 +77,19 @@ func (m *FileManager) Glob(pattern string) ([]string, error) {
 			relative = ""
 		}
 		if globMatch(pattern, relative) {
-			if err := validateText(relative, ResponsibilityTool); err != nil {
+			if err := validateText(relative, contracts.ResponsibilityTool); err != nil {
 				return err
 			}
 			resolved, resolveErr := filepath.EvalSymlinks(path)
 			if resolveErr != nil {
-				return filesystemErr("path_unavailable", "a matching path could not be resolved", ResponsibilityEnvironment, resolveErr)
+				return filesystemErr("path_unavailable", "a matching path could not be resolved", contracts.ResponsibilityEnvironment, resolveErr)
 			}
 			if !withinDirectory(m.root, resolved) {
-				return filesystemErr("path_outside_workspace", "a matching path is outside the workspace", ResponsibilityAgent, nil)
+				return filesystemErr("path_outside_workspace", "a matching path is outside the workspace", contracts.ResponsibilityAgent, nil)
 			}
 			out = append(out, relative)
 			if len(out) > maxDirectoryEntries {
-				return filesystemErr("too_many_matches", "the glob matched too many paths; narrow the pattern or directory", ResponsibilityTool, nil)
+				return filesystemErr("too_many_matches", "the glob matched too many paths; narrow the pattern or directory", contracts.ResponsibilityTool, nil)
 			}
 		}
 		return nil
@@ -139,26 +132,26 @@ func normalizeGlobPattern(pattern string) (string, error) {
 			continue
 		}
 		if segment == ".." {
-			return "", filesystemErr("path_outside_workspace", "the pattern must remain inside the workspace", ResponsibilityAgent, nil)
+			return "", filesystemErr("path_outside_workspace", "the pattern must remain inside the workspace", contracts.ResponsibilityAgent, nil)
 		}
 		if segment == "**" {
 			clean = append(clean, segment)
 			continue
 		}
 		if _, err := filepath.Match(segment, ""); err != nil {
-			return "", filesystemErr("invalid_pattern", "the glob pattern is malformed", ResponsibilityAgent, err)
+			return "", filesystemErr("invalid_pattern", "the glob pattern is malformed", contracts.ResponsibilityAgent, err)
 		}
 		clean = append(clean, segment)
 	}
 	if len(clean) == 0 {
-		return "", filesystemErr("invalid_pattern", "the glob pattern must contain a path", ResponsibilityAgent, nil)
+		return "", filesystemErr("invalid_pattern", "the glob pattern must contain a path", contracts.ResponsibilityAgent, nil)
 	}
 	return strings.Join(clean, "/"), nil
 }
 
 func globToolValidate(args globArguments) error {
 	if args.Pattern == "" {
-		return execErr(contracts.GlobTool, "invalid_arguments", "glob requires pattern", ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.GlobTool, "invalid_arguments", "glob requires pattern", contracts.ResponsibilityAgent, nil)
 	}
 	return nil
 }

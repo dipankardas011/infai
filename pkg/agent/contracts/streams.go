@@ -35,16 +35,25 @@ const (
 	NotifyAgentNeedsAutoCompaction EventStreamKind = "agent_needs_auto_compat"
 	NotifyAgentMissingHistory      EventStreamKind = "agent_missing_history"
 	NotifyAgentSessionStatus       EventStreamKind = "agent_session_status"
+
+	/// ToolCall
+	EventToolCall   EventStreamKind = "tool_call"
+	EventToolResult EventStreamKind = "tool_result"
+
+	/// HITL
+	EventApprovalRequested EventStreamKind = "approval_requested"
+	EventApprovalResolved  EventStreamKind = "approval_resolved"
+	EventApprovalCanceled  EventStreamKind = "approval_canceled"
 )
 
 type EventStream struct {
-	Kind      EventStreamKind `json:"delta_kind,omitempty"`
-	Timestamp time.Time       `json:"ts"`
-	Text      string          `json:"text,omitempty"`
-}
-
-func NewEventStream(kind EventStreamKind, text string) EventStream {
-	return EventStream{kind, time.Now().UTC(), text}
+	Kind       EventStreamKind      `json:"delta_kind,omitempty"`
+	Timestamp  time.Time            `json:"ts"`
+	Content    *string              `json:"content"`
+	ToolCall   *ToolCall            `json:"tool_call"`
+	ToolResult *ToolExecutionResult `json:"tool_result"`
+	HITLCall   *ApprovalRequest     `json:"hitl_call"`
+	HITLResult *ApprovalConclusion  `json:"hitl_result"`
 }
 
 func ToolCallDisplay(call ToolCall) string {

@@ -585,7 +585,7 @@ func (o *openAICodexResponsesAPI) readStream(ctx context.Context, body io.Reader
 				toolIndexes[key] = len(toolCalls)
 				toolCalls = append(toolCalls, contracts.ToolCall{
 					ID: item.CallID, Type: "function",
-					Function: contracts.Function{Name: item.Name, Arguments: item.Arguments},
+					Function: contracts.Function{Name: contracts.ToolType(item.Name), Arguments: item.Arguments},
 				})
 			}
 			if item.Type == "message" {
@@ -633,7 +633,7 @@ func (o *openAICodexResponsesAPI) readStream(ctx context.Context, body io.Reader
 				}
 				toolCalls[index] = contracts.ToolCall{
 					ID: item.CallID, Type: "function",
-					Function: contracts.Function{Name: item.Name, Arguments: item.Arguments},
+					Function: contracts.Function{Name: contracts.ToolType(item.Name), Arguments: item.Arguments},
 				}
 			}
 		}

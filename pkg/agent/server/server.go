@@ -79,7 +79,7 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("invalid approval id"))
 		return
 	}
-	var req contracts.ApprovalDecisionFromClient
+	var req contracts.ApprovalConclusion
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return

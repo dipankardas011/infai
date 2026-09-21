@@ -2,11 +2,11 @@ package actuators
 
 import (
 	"context"
-	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -43,35 +43,28 @@ type SearchResult struct {
 
 const maxSearchOutputBytes = maxToolContentBytes
 
-func searchExecution(ctx context.Context) (string, error) {
-	var args searchArguments
-	if _, err := decodeArgs(ctx, &args); err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.SearchTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
-		}
-		return "", execErr(contracts.SearchTool, "invalid_arguments", "search arguments could not be decoded", ResponsibilityAgent, err)
+func (m *FileManager) SearchExecution(ctx context.Context, tc contracts.ToolCall) (string, error) {
+	args, err := contracts.DecodeToolArguments[searchArguments](contracts.SearchTool, tc)
+	if err != nil {
+		return "", err
 	}
 	if args.Path == "" {
 		args.Path = "."
 	}
 	if err := searchToolValidate(args); err != nil {
-		return "", err
+		return "", wrapToolError(contracts.SearchTool, err, "invalid_arguments", "search arguments are invalid")
 	}
-	m := FileManagerFromContext(ctx)
-	if m == nil {
-		return "", execErr(contracts.SearchTool, "missing_file_manager", "a file manager is required to search files", ResponsibilitySession, nil)
-	}
-	results, err := m.Search(args.Pattern, args.Path)
-	if err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.SearchTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+
+	return contracts.RunBounded(ctx, contracts.SearchTool, 10*time.Second, func() (string, error) {
+		results, err := m.search(args.Pattern, args.Path)
+		if err != nil {
+			return "", wrapToolError(contracts.SearchTool, err, "search_failed", "the search could not be completed")
 		}
-		return "", execErr(contracts.SearchTool, "search_failed", "the search could not be completed", ResponsibilityTool, err)
-	}
-	return assemble(results)
+		return assemble(results)
+	})
 }
 
-func (m *FileManager) Search(pattern, path string) ([]SearchResult, error) {
+func (m *FileManager) search(pattern, path string) ([]SearchResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -103,7 +96,7 @@ func (m *FileManager) Search(pattern, path string) ([]SearchResult, error) {
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return filesystemErr("search_failed", "a file could not be read during search", ResponsibilityEnvironment, err)
+			return filesystemErr("search_failed", "a file could not be read during search", contracts.ResponsibilityEnvironment, err)
 		}
 		if len(data) > maxReadBytes {
 			return nil
@@ -115,17 +108,17 @@ func (m *FileManager) Search(pattern, path string) ([]SearchResult, error) {
 		if err != nil {
 			return err
 		}
-		if err := validateText(relative, ResponsibilityTool); err != nil {
+		if err := validateText(relative, contracts.ResponsibilityTool); err != nil {
 			return err
 		}
 		for lineNumber, line := range strings.Split(string(data), "\n") {
 			if strings.Contains(line, pattern) {
-				if err := validateText(line, ResponsibilityTool); err != nil {
+				if err := validateText(line, contracts.ResponsibilityTool); err != nil {
 					return err
 				}
 				outputBytes += len(line)
 				if len(results) >= maxDirectoryEntries || outputBytes > maxSearchOutputBytes {
-					return filesystemErr("search_too_large", "the search produced too much output; narrow the path or pattern", ResponsibilityTool, nil)
+					return filesystemErr("search_too_large", "the search produced too much output; narrow the path or pattern", contracts.ResponsibilityTool, nil)
 				}
 				results = append(results, SearchResult{
 					Path: filepath.ToSlash(relative),
@@ -141,10 +134,10 @@ func (m *FileManager) Search(pattern, path string) ([]SearchResult, error) {
 
 func searchToolValidate(args searchArguments) error {
 	if args.Pattern == "" {
-		return execErr(contracts.SearchTool, "invalid_arguments", "search requires pattern", ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.SearchTool, "invalid_arguments", "search requires pattern", contracts.ResponsibilityAgent, nil)
 	}
 
-	if err := validateText(args.Pattern, ResponsibilityAgent); err != nil {
+	if err := validateText(args.Pattern, contracts.ResponsibilityAgent); err != nil {
 		return err
 	}
 

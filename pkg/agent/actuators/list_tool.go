@@ -2,11 +2,11 @@ package actuators
 
 import (
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
@@ -38,34 +38,25 @@ type ListEntry struct {
 
 const maxDirectoryEntries = 500
 
-func listExecution(ctx context.Context) (string, error) {
-	var args listArguments
-	if _, err := decodeArgs(ctx, &args); err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.ListTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
-		}
-		return "", execErr(contracts.ListTool, "invalid_arguments", "list arguments could not be decoded", ResponsibilityAgent, err)
+func (m *FileManager) ListExecution(ctx context.Context, tc contracts.ToolCall) (string, error) {
+	args, err := contracts.DecodeToolArguments[listArguments](contracts.ListTool, tc)
+	if err != nil {
+		return "", err
 	}
 	if args.Path == "" {
 		args.Path = "."
 	}
 
-	m := FileManagerFromContext(ctx)
-	if m == nil {
-		return "", execErr(contracts.ListTool, "missing_file_manager", "a file manager is required to list directories", ResponsibilitySession, nil)
-	}
-
-	entries, err := m.List(args.Path)
-	if err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.ListTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+	return contracts.RunBounded(ctx, contracts.ListTool, time.Second, func() (string, error) {
+		entries, err := m.list(args.Path)
+		if err != nil {
+			return "", wrapToolError(contracts.ListTool, err, "list_failed", "the directory could not be listed")
 		}
-		return "", execErr(contracts.ListTool, "list_failed", "the directory could not be listed", ResponsibilityTool, err)
-	}
-	return assemble(entries)
+		return assemble(entries)
+	})
 }
 
-func (m *FileManager) List(path string) ([]ListEntry, error) {
+func (m *FileManager) list(path string) ([]ListEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, err := m.resolve(path, true)
@@ -82,12 +73,12 @@ func (m *FileManager) List(path string) ([]ListEntry, error) {
 		return nil, err
 	}
 	if len(entries) > maxDirectoryEntries {
-		return nil, filesystemErr("directory_too_large", "the directory contains too many entries; list a narrower directory", ResponsibilityTool, nil)
+		return nil, filesystemErr("directory_too_large", "the directory contains too many entries; list a narrower directory", contracts.ResponsibilityTool, nil)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	out := make([]ListEntry, 0, len(entries))
 	for _, entry := range entries {
-		if err := validateText(entry.Name(), ResponsibilityTool); err != nil {
+		if err := validateText(entry.Name(), contracts.ResponsibilityTool); err != nil {
 			return nil, err
 		}
 		item := ListEntry{
@@ -100,7 +91,7 @@ func (m *FileManager) List(path string) ([]ListEntry, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := validateText(item.Symlink, ResponsibilityTool); err != nil {
+			if err := validateText(item.Symlink, contracts.ResponsibilityTool); err != nil {
 				return nil, err
 			}
 		}

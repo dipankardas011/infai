@@ -119,7 +119,6 @@ type Record struct {
 	Kind       RecordKind             `json:"kind"`
 	Timestamp  time.Time              `json:"ts"`
 	Message    *contracts.ChatMessage `json:"message,omitempty"`
-	DeltaKind  contracts.DeltaKind    `json:"delta_kind,omitempty"`
 	Text       string                 `json:"text,omitempty"`
 	ToolCall   *ToolCallRecord        `json:"tool_call,omitempty"`
 	ToolResult *ToolResultRecord      `json:"tool_result,omitempty"`

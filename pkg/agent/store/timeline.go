@@ -281,7 +281,7 @@ func buildEventPreview(record Record) *EventPreview {
 		if preview.Text == "" && len(message.ToolCalls) > 0 {
 			names := make([]string, 0, len(message.ToolCalls))
 			for _, call := range message.ToolCalls {
-				names = append(names, call.Function.Name)
+				names = append(names, string(call.Function.Name))
 			}
 			preview.Text = previewText(strings.Join(names, ", "))
 		}
@@ -302,7 +302,7 @@ func buildEventPreview(record Record) *EventPreview {
 		preview.Text = previewText("context compacted: " + record.Compaction.Summary)
 	case record.Approval != nil && record.Approval.ToolCall != nil:
 		preview.Role = "tool_call"
-		preview.Text = previewText(record.Approval.ToolCall.Function.Name)
+		preview.Text = previewText(string(record.Approval.ToolCall.Function.Name))
 	default:
 		preview.Role = "assistant"
 		preview.Text = previewText(record.Text)
