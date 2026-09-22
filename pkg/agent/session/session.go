@@ -1292,3 +1292,83 @@ func sessionNameFromPrompt(prompt string) string {
 	}
 	return strings.TrimSpace(string(runes[:cut])) + "…"
 }
+// These handle the state of the agent notify and also for sending to the different Subscribers of the TUI like thing.
+// Central Hub where broadcast of client facing events and platform session level is handled
+func (s *InfaiAgentSession) HandleAgentLoopEvents(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-s.sessionEventStream:
+			s.l.DebugContext(
+				context.TODO(), "loop event stream recieved",
+				"kind", event.Kind,
+				"ts", event.Timestamp,
+			)
+			switch event.Kind {
+			case contracts.DeltaContent,
+				contracts.DeltaReasoning,
+				contracts.DeltaStatus,
+				contracts.DeltaCompactionSummary,
+				contracts.DeltaToolCall,
+				contracts.DeltaToolResult,
+				contracts.DeltaSkillLoad,
+				contracts.DeltaTaskChecklist,
+				contracts.DeltaUserPrompt:
+				// we need a plumbing way
+				// we can send it to the events of whatever we need to.
+			case contracts.NotifyAgentSessionStatus:
+				// this needs to send the event about that went changed.
+
+			case contracts.NotifyAgentModelError,
+				contracts.NotifyAgentReachedMaxQ,
+				contracts.NotifyAgentUsage:
+
+			case contracts.NotifyAgentNeedsAutoCompaction:
+				// We need to make sure no new userPrompt get into the agentLoop aka a freeze!
+			case contracts.NotifyAgentMissingHistory:
+				s.l.WarnContext(
+					context.TODO(), "session history is missing",
+					"session_id", s.meta.ID,
+					"content", event.Content,
+				)
+			}
+		}
+	}
+}
+
+func (s *InfaiAgentSession) HandleTimelineAOL(
+	engineCtx context.Context,
+	recieveTimelineUpdates <-chan []contracts.ChatMessage,
+) {
+	for {
+		select {
+		case <-engineCtx.Done():
+			// we need to close stuff.
+			return
+		case msgs := <-recieveTimelineUpdates:
+			s.mu.Lock()
+
+			s.meta.UpdatedAt = time.Now().UTC()
+			if err := s.store.SaveMeta(s.meta); err != nil {
+				s.l.Error("persist session metadata", "session_id", s.meta.ID, "error", err)
+			}
+			s.activeTimeline = append(s.activeTimeline, msgs...)
+			for i := s.persisted; i < len(s.activeTimeline); i++ {
+				if _, err := s.timeline.AppendToHead(store.Record{
+					Kind:      store.KindMessage,
+					Timestamp: time.Now().UTC(),
+					Message:   &s.activeTimeline[i],
+				}); err != nil {
+					s.mu.Unlock()
+
+					s.l.Error("persist message", "session_id", s.meta.ID, "error", err)
+					return // FIXME: We need to make it visible to stop the process aka stop the session Completely?????????????
+				}
+			}
+			s.persisted = len(s.activeTimeline)
+
+			s.mu.Unlock()
+		}
+	}
+}
