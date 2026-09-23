@@ -2,18 +2,13 @@ package session
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"sync"
-	"text/template"
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/actuators"
@@ -65,10 +60,9 @@ type InfaiAgentSession struct {
 
 type pendingApproval struct {
 	request  contracts.ApprovalRequest
-	decision chan contracts.ApprovalDecisionFromClient
+	decision chan contracts.ApprovalConclusion
 }
 
-// NewSession creates a fresh session bound to the given provider and model.
 func NewSession(
 	id uuid.UUID,
 	l *slog.Logger,
@@ -925,54 +919,30 @@ func toolCallDisplay(call contracts.ToolCall) string {
 	return fmt.Sprintf("%s %s", call.Function.Name, call.Function.Arguments)
 }
 
-func (s *InfaiAgentSession) executeAfterApproval(ctx context.Context, agentID uuid.UUID, call contracts.ToolCall) error {
-	approvalID, err := uuid.NewV7()
-	if err != nil {
-		return err
+func (s *InfaiAgentSession) persistTimelineUpdate(update contracts.TimelineUpdate) error {
+	if update.Compaction != nil {
+		if _, err := s.timeline.AppendToHead(store.Record{
+			Kind:      store.KindCompaction,
+			Timestamp: time.Now().UTC(),
+			Compaction: &store.CompactionRecord{
+				Summary:       update.Compaction.Summary,
+				TaskChecklist: &update.Compaction.TaskChecklist,
+			},
+		}); err != nil {
+			return fmt.Errorf("persist compaction: %w", err)
+		}
+
+		s.mu.Lock()
+		s.activeTimeline = append([]contracts.ChatMessage(nil), update.Compaction.History...)
+		s.turnProgress = contracts.TurnProgress{}
+		s.mu.Unlock()
+
+		return nil
 	}
 
-	fingerprintInput := approvalID.String() + s.sessionID.String() + agentID.String() + call.ID + call.Function.Name + call.Function.Arguments
-	hash := sha256.Sum256([]byte(fingerprintInput))
-	fingerprint := hex.EncodeToString(hash[:])
-
-	request := contracts.ApprovalRequest{
-		ID:          approvalID,
-		SessionID:   s.sessionID,
-		AgentID:     agentID,
-		ToolCall:    call,
-		Fingerprint: fingerprint,
-		CreatedAt:   time.Now().UTC(),
+	if len(update.Messages) == 0 {
+		return nil
 	}
-
-	pending := &pendingApproval{
-		request:  request,
-		decision: make(chan contracts.ApprovalDecisionFromClient, 1),
-	}
-
-	s.approvalMu.Lock()
-	if s.pendingApproval != nil {
-		s.approvalMu.Unlock()
-		return errors.New("another tool approval is already pending")
-	}
-	s.pendingApproval = pending
-	s.approvalMu.Unlock()
-
-	s.events.Publish(store.Record{
-		Kind:      store.KindApprovalRequested,
-		Timestamp: time.Now().UTC(),
-		Approval: &store.ApprovalEvent{
-			ID:          request.ID,
-			SessionID:   request.SessionID,
-			AgentID:     request.AgentID,
-			Fingerprint: request.Fingerprint,
-			ToolCall:    &request.ToolCall,
-		},
-	})
-	s.l.InfoContext(ctx, "tool approval requested",
-		"approval_id", request.ID,
-		"agent_id", request.AgentID,
-		"tool", request.ToolCall.Function.Name,
-	)
 
 	select {
 	case decision := <-pending.decision:

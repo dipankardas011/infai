@@ -15,9 +15,9 @@ type Agent struct {
 	Kind contracts.AgentKind
 
 	mailbox        chan contracts.ChatMessage
-	timelineWrites chan<- contracts.TimelineUpdate
+	commitTimeline func(context.Context, []contracts.ChatMessage) error
 	eventStream    chan<- contracts.EventStream
-	historyUpdates chan []contracts.ChatMessage
+	workingHistory workingSessionMemory
 	systemPrompt   string
 
 	modelMu sync.RWMutex
@@ -27,6 +27,7 @@ type Agent struct {
 	tools []contracts.Tool
 
 	shouldAutoCompact  func(*contracts.TokenUsage) bool
+	autoCompact        func(context.Context) ([]contracts.ChatMessage, error)
 	toolCallDispatcher func([]contracts.ToolCall) []contracts.ChatMessage
 	evalFunc           func() bool
 }
@@ -35,6 +36,7 @@ type agentOption struct {
 	maxQ          uint64
 	tools         []contracts.Tool
 	shouldCompact func(*contracts.TokenUsage) bool
+	autoCompact   func(context.Context) ([]contracts.ChatMessage, error)
 	evalFunc      func() bool
 }
 
@@ -54,9 +56,10 @@ func WithTools(tools ...contracts.Tool) AgentOptions {
 	}
 }
 
-func WithAutoCompaction(check func(*contracts.TokenUsage) bool) AgentOptions {
+func WithAutoCompaction(shouldCompact func(*contracts.TokenUsage) bool, autoCompact func(context.Context) ([]contracts.ChatMessage, error)) AgentOptions {
 	return func(o *agentOption) error {
-		o.shouldCompact = check
+		o.shouldCompact = shouldCompact
+		o.autoCompact = autoCompact
 		return nil
 	}
 }
@@ -71,8 +74,7 @@ func WithEval(checkFunc func() bool) AgentOptions {
 func NewAgent(
 	model contracts.InfaiModelAdaptor,
 	kind contracts.AgentKind,
-	activeTimeline []contracts.ChatMessage,
-	timelineWrites chan<- contracts.TimelineUpdate,
+	commitTimeline func(context.Context, []contracts.ChatMessage) error,
 	eventStream chan<- contracts.EventStream,
 	toolCallDispatcher func([]contracts.ToolCall) []contracts.ChatMessage,
 	systemPrompt string,
@@ -88,13 +90,13 @@ func NewAgent(
 	return &Agent{
 		Kind:               kind,
 		mailbox:            make(chan contracts.ChatMessage, 10),
-		timelineWrites:     timelineWrites,
+		commitTimeline:     commitTimeline,
 		eventStream:        eventStream,
-		historyUpdates:     make(chan []contracts.ChatMessage, 1),
 		model:              model,
 		MaxQ:               o.maxQ,
 		tools:              o.tools,
 		shouldAutoCompact:  o.shouldCompact,
+		autoCompact:        o.autoCompact,
 		toolCallDispatcher: toolCallDispatcher,
 		systemPrompt:       systemPrompt,
 		evalFunc:           o.evalFunc,
@@ -116,14 +118,46 @@ func (a *Agent) Enqueue(ctx context.Context, message contracts.ChatMessage) erro
 	}
 }
 
+func (a *Agent) MailboxEmpty() bool {
+	return len(a.mailbox) == 0
+}
+
+type workingSessionMemory struct {
+	mu sync.RWMutex
+	h  []contracts.ChatMessage
+}
+
+func (wsm *workingSessionMemory) Set(newSessionHistory []contracts.ChatMessage) {
+	wsm.mu.Lock()
+	defer wsm.mu.Unlock()
+
+	wsm.h = append([]contracts.ChatMessage(nil), newSessionHistory...)
+}
+func (wsm *workingSessionMemory) Get() []contracts.ChatMessage {
+	wsm.mu.RLock()
+	defer wsm.mu.RUnlock()
+
+	return append([]contracts.ChatMessage(nil), wsm.h...)
+}
+
+// Append adds messages to the working history under the store's own lock. The
+// loop must use this instead of Get-then-Set, otherwise it writes back a slice
+// it read earlier and silently discards a replacement installed meanwhile.
+func (wsm *workingSessionMemory) Append(messages ...contracts.ChatMessage) {
+	wsm.mu.Lock()
+	defer wsm.mu.Unlock()
+
+	wsm.h = append(wsm.h, messages...)
+}
+
 func (a *Agent) ReplaceHistory(ctx context.Context, history []contracts.ChatMessage) error {
-	history = append([]contracts.ChatMessage(nil), history...)
 	select {
-	case a.historyUpdates <- history:
-		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	default:
+		a.workingHistory.Set(history)
 	}
+	return nil
 }
 
 func (a *Agent) modelClient() contracts.InfaiModelAdaptor {
@@ -150,24 +184,6 @@ func (a *Agent) updateState(ctx context.Context, status contracts.AgentStatus) b
 	})
 }
 
-func (a *Agent) commitActiveTimeline(ctx context.Context, messages []contracts.ChatMessage) error {
-	result := make(chan error, 1)
-
-	select {
-	case a.timelineWrites <- contracts.TimelineUpdate{Messages: append([]contracts.ChatMessage(nil), messages...), Result: result}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	// Waiting for the writer in the session for any error encountered
-	select {
-	case err := <-result:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
 func (a *Agent) drainInbox() []contracts.ChatMessage {
 	var batch []contracts.ChatMessage
 	for {
@@ -181,7 +197,7 @@ func (a *Agent) drainInbox() []contracts.ChatMessage {
 }
 
 func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMessage) {
-	history := append([]contracts.ChatMessage(nil), activeTimeline...)
+	a.workingHistory.Set(activeTimeline)
 
 	if !a.updateState(ctx, contracts.AgentIdle) {
 		return
@@ -204,10 +220,6 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 				select {
 				case <-ctx.Done():
 					return
-				case replacement := <-a.historyUpdates: // for manual compaction
-					history = replacement
-					iter = 0 // back to initial as a new history is there
-					continue
 				case message := <-a.mailbox:
 					unreadMessages = append(unreadMessages, message)
 				}
@@ -219,22 +231,26 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 		}
 
 		if len(unreadMessages) > 0 {
-			if err := a.commitActiveTimeline(ctx, unreadMessages); err != nil {
+			if err := a.commitTimeline(ctx, unreadMessages); err != nil {
 				return
 			}
 
-			history = append(history, unreadMessages...)
+			a.workingHistory.Append(unreadMessages...)
 			for _, message := range unreadMessages {
 				text := message.Text()
-				if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.DeltaUserPrompt, Timestamp: time.Now().UTC(), Content: &text}) {
+				if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventMessageFromAgentInbox, Timestamp: time.Now().UTC(), Content: &text}) {
 					return
 				}
 			}
 		}
 
-		requestMessages := make([]contracts.ChatMessage, 0, len(history)+1)
+		// Read the working history only after the loop has been woken, so a
+		// replacement installed while it was parked is the one that is used.
+		workingSessionMem := a.workingHistory.Get()
+
+		requestMessages := make([]contracts.ChatMessage, 0, len(workingSessionMem)+1)
 		requestMessages = append(requestMessages, contracts.NewSystemMessage(a.systemPrompt))
-		requestMessages = append(requestMessages, history...)
+		requestMessages = append(requestMessages, workingSessionMem...)
 
 		reply, usage, err := a.modelClient().Generate(ctx, requestMessages, a.tools, &contracts.GenerateOptions{
 			Stream: true,
@@ -266,7 +282,7 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 		if lastHadToolCalls {
 			for i := range reply.ToolCalls {
 				call := reply.ToolCalls[i]
-				if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.DeltaToolCall, Timestamp: time.Now().UTC(), ToolCall: &call}) {
+				if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventToolCall, Timestamp: time.Now().UTC(), ToolCall: &call}) { // for showing up that tool call is getting called.
 					return
 				}
 			}
@@ -276,23 +292,25 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 			messages = append(messages, contracts.NewUserMessage(fmt.Sprintf("evalFunc status: %t", result)))
 		}
 
-		if err := a.commitActiveTimeline(ctx, messages); err != nil {
+		if err := a.commitTimeline(ctx, messages); err != nil {
 			return
 		}
-		history = append(history, messages...)
+		a.workingHistory.Append(messages...)
 
 		if a.shouldAutoCompact != nil && a.shouldAutoCompact(usage) {
 			content := fmt.Sprintf("Used: %d against Total: %d", usage.TotalTokens, a.modelClient().GetModelSpecs().Model().MaxContextLength)
-			if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.NotifyAgentNeedsAutoCompaction, Timestamp: time.Now().UTC(), Content: &content}) {
+			if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventAutoCompactionTriggered, Timestamp: time.Now().UTC(), Content: &content}) {
 				return
 			}
 
-			select {
-			case history = <-a.historyUpdates: // for auto compaction
-				iter = 0
-			case <-ctx.Done():
+			replacement, err := a.autoCompact(ctx)
+			if err != nil {
 				return
 			}
+
+			// Continue the next iteration from the compacted history.
+			a.workingHistory.Set(replacement)
+			iter = 0
 		}
 	}
 

@@ -156,7 +156,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	wlog := newLogger(cfg.Logging.Level)
 	wlog.DebugContext(ctx, "Loaded config", "config", cfg)
 
-	eng, err := engine.NewInfaiAgentEngine(wlog, cfg)
+	eng, err := engine.NewInfaiAgentEngine(ctx, wlog, cfg)
 	if err != nil {
 		return err
 	}

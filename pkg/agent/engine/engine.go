@@ -26,6 +26,8 @@ import (
 type InfaiAgentEngine struct {
 	bgLogger  *slog.Logger
 	engineCfg *config.AgentEngineConfig
+	ctx       context.Context
+	cancel    context.CancelCauseFunc
 
 	providerMu   sync.Mutex
 	providers    contracts.LLMProviders
@@ -39,16 +41,24 @@ type InfaiAgentEngine struct {
 	stopCh   chan struct{}
 }
 
-func NewInfaiAgentEngine(bgLogger *slog.Logger, cfg *config.AgentEngineConfig) (*InfaiAgentEngine, error) {
+func NewInfaiAgentEngine(parent context.Context, bgLogger *slog.Logger, cfg *config.AgentEngineConfig) (*InfaiAgentEngine, error) {
 	sessionStore, err := store.OpenSessionStore()
 	if err != nil {
 		return nil, err
 	}
-	engine, err := NewInfaiAgentEngineAt(bgLogger, sessionStore)
-	if err != nil {
-		return nil, err
+
+	eCtx, eCancel := context.WithCancelCause(parent)
+	engine := &InfaiAgentEngine{
+		bgLogger:            bgLogger,
+		ctx:                 eCtx,
+		cancel:              eCancel,
+		providers:           contracts.LLMProviders{Providers: make(map[string]contracts.LLMProviderConfiguration)},
+		sessionStore:        sessionStore,
+		activeSessionAgents: make(map[uuid.UUID]*session.InfaiAgentSession),
+		stopCh:              make(chan struct{}),
+		aseComms:            comms.NewAgentComms(),
+		engineCfg:           cfg,
 	}
-	engine.engineCfg = cfg
 
 	ctx, cancel := context.WithTimeoutCause(context.Background(), time.Minute, fmt.Errorf("toke > 1minute to get provider configs"))
 	defer cancel()
@@ -70,23 +80,6 @@ func NewInfaiAgentEngine(bgLogger *slog.Logger, cfg *config.AgentEngineConfig) (
 	}
 
 	return engine, nil
-}
-
-// NewInfaiAgentEngineAt wires an engine to explicit stores. The harness uses
-// the config-driven constructor; tests inject sandboxed stores here.
-func NewInfaiAgentEngineAt(bgLogger *slog.Logger, sessionStore *store.SessionStore) (*InfaiAgentEngine, error) {
-	if sessionStore == nil {
-		return nil, errors.New("engine: stores required")
-	}
-
-	return &InfaiAgentEngine{
-		bgLogger:            bgLogger,
-		providers:           contracts.LLMProviders{Providers: make(map[string]contracts.LLMProviderConfiguration)},
-		sessionStore:        sessionStore,
-		activeSessionAgents: make(map[uuid.UUID]*session.InfaiAgentSession),
-		stopCh:              make(chan struct{}),
-		aseComms:            comms.NewAgentComms(),
-	}, nil
 }
 
 // ---- Sessions ----
@@ -132,6 +125,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	}
 
 	sess, err := session.NewSession(
+		e.ctx,
 		sessID,
 		e.bgLogger.WithGroup("session"),
 		contracts.NewProvisionedModel(
@@ -147,11 +141,21 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		e.aseComms.NewSessionAgentComms(sessID),
 	)
 	if err != nil {
+		e.aseComms.UnregisterSessionAgent(sessID)
 		return nil, err
 	}
 
 	e.mu.Lock()
-	e.activeSessionAgents[sessID] = sess
+	select {
+	case <-e.stopCh:
+		e.mu.Unlock()
+		sess.Close()
+		e.aseComms.UnregisterSessionAgent(sessID)
+		_ = e.sessionStore.Delete(sessID)
+		return nil, harnessErr.ErrEngineShuttingDown
+	default:
+		e.activeSessionAgents[sessID] = sess
+	}
 	e.mu.Unlock()
 
 	e.bgLogger.Info("session created", "session_id", sessID, "provider", opts.Provider, "model", modelConfig.Id)
@@ -208,6 +212,7 @@ func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgent
 	}
 
 	sess, err := session.NewResumedSession(
+		e.ctx,
 		e.bgLogger.WithGroup("session"),
 		contracts.NewProvisionedModel(
 			providerConfig.Id,
@@ -221,11 +226,19 @@ func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgent
 		e.aseComms.NewSessionAgentComms(sessionID),
 	)
 	if err != nil {
+		e.aseComms.UnregisterSessionAgent(sessionID)
 		_ = timeline.Close()
 		return nil, err
 	}
 
-	e.activeSessionAgents[sessionID] = sess
+	select {
+	case <-e.stopCh:
+		sess.Close()
+		e.aseComms.UnregisterSessionAgent(sessionID)
+		return nil, harnessErr.ErrEngineShuttingDown
+	default:
+		e.activeSessionAgents[sessionID] = sess
+	}
 
 	e.bgLogger.Info("session loaded", "session_id", sessionID, "provider", meta.Provider)
 	return sess, nil
@@ -276,34 +289,43 @@ func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId s
 	return sess, nil
 }
 
-// Chat runs one prompt against an existing session and returns the outcome.
-func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, input contracts.UserInput, opts contracts.ChatOptions) (*contracts.ChatResult, error) {
+// Chat validates and enqueues one prompt. Session execution continues on the
+// engine-owned lifecycle context after this request returns.
+func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, input contracts.UserInput, opts contracts.ChatOptions) error {
+	select {
+	case <-e.stopCh:
+		return harnessErr.ErrEngineShuttingDown
+	default:
+	}
 	e.mu.Lock()
 	sess, ok := e.activeSessionAgents[id]
 	e.mu.Unlock()
 	if !ok {
-		return nil, harnessErr.ErrSessionNotFound
+		return harnessErr.ErrSessionNotFound
 	}
-	needsRefresh, err := sess.ProviderAuthNeedsRefresh(time.Now().UTC())
-	if err != nil {
-		return nil, err
-	}
-	if needsRefresh {
+
+	if needsRefresh, err := sess.ProviderAuthNeedsRefresh(time.Now().UTC()); err != nil {
+		return err
+	} else if needsRefresh {
 		if err := e.refreshSessionProviderAuth(ctx, sess); err != nil {
-			return nil, err
+			return err
 		}
 	}
+
 	if sess.CurrentThinkingPattern() != opts.Thinking {
 		if err := sess.SetThinkingPattern(opts.Thinking); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	result, err := sess.Chat(ctx, input, opts)
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		meta := sess.Meta()
-		e.bgLogger.ErrorContext(ctx, "session chat failed", "session_id", id, "provider", meta.Provider, "model", meta.Model, "error", err)
+
+	if err := sess.EnqueueUserMessage(ctx, input, opts); err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			meta := sess.Meta()
+			e.bgLogger.ErrorContext(ctx, "session chat enqueue failed", "session_id", id, "provider", meta.Provider, "model", meta.Model, "error", err)
+		}
+		return err
 	}
-	return result, err
+	return nil
 }
 
 func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess *session.InfaiAgentSession) error {
@@ -335,6 +357,19 @@ func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess 
 	e.bgLogger.InfoContext(ctx, "provider credentials refreshed", "provider", providerName)
 
 	return sess.SetProviderAuth(providerName, refreshed)
+}
+
+func (e *InfaiAgentEngine) SubscribeEvents(id uuid.UUID) (session.SessionView, <-chan contracts.EventStream, func(), error) {
+	select {
+	case <-e.stopCh:
+		return session.SessionView{}, nil, nil, harnessErr.ErrEngineShuttingDown
+	default:
+	}
+	sess, ok := e.Session(id)
+	if !ok {
+		return session.SessionView{}, nil, nil, harnessErr.ErrSessionNotFound
+	}
+	return sess.JoinSessionEvents()
 }
 
 func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, decision contracts.ApprovalConclusion) error {
@@ -370,6 +405,7 @@ func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 		return harnessErr.ErrSessionNotFound
 	}
 	sess.Close()
+	e.aseComms.UnregisterSessionAgent(id)
 	if err := e.sessionStore.Delete(id); err != nil {
 		return err
 	}
@@ -418,7 +454,11 @@ func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 	defer e.mu.Unlock()
 	summaries := make([]contracts.SessionSummary, 0, len(metas))
 	for _, meta := range metas {
-		_, active := e.activeSessionAgents[meta.ID]
+		sess, active := e.activeSessionAgents[meta.ID]
+		status := contracts.SessionClosed
+		if active {
+			status = sess.Status()
+		}
 		summaries = append(summaries, contracts.SessionSummary{
 			ID:        meta.ID,
 			Name:      meta.Name,
@@ -428,6 +468,7 @@ func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 			CreatedAt: meta.CreatedAt,
 			UpdatedAt: meta.UpdatedAt,
 			Active:    active,
+			Status:    status,
 		})
 	}
 	return summaries

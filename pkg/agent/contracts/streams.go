@@ -16,29 +16,34 @@ const (
 	DeltaStatus EventStreamKind = "status"
 	// DeltaCompactionSummary is a live-only compaction summary for the UI.
 	DeltaCompactionSummary EventStreamKind = "compaction_summary"
-	// DeltaToolCall identifies a tool invocation requested by the model.
-	DeltaToolCall EventStreamKind = "tool_call"
-	// DeltaToolResult identifies the completion of a tool invocation.
-	DeltaToolResult EventStreamKind = "tool_result"
-	// DeltaSkillLoad identifies a skill being loaded from memory into context.
-	DeltaSkillLoad EventStreamKind = "skill_load"
-	// DeltaTaskChecklist carries the current structured task checklist state.
-	DeltaTaskChecklist EventStreamKind = "task_checklist"
-	// DeltaUserPrompt
-	DeltaUserPrompt EventStreamKind = "user_prompt"
 
 	//// Notify Session about Agent
+	NotifyAgentModelError     EventStreamKind = "agent_model_err"
+	NotifyAgentReachedMaxQ    EventStreamKind = "agent_at_max_q"
+	NotifyAgentUsage          EventStreamKind = "agent_usage"
+	NotifyAgentMissingHistory EventStreamKind = "agent_missing_history"
+	NotifyAgentSessionStatus  EventStreamKind = "agent_session_status"
 
-	NotifyAgentModelError          EventStreamKind = "agent_model_err"
-	NotifyAgentReachedMaxQ         EventStreamKind = "agent_at_max_q"
-	NotifyAgentUsage               EventStreamKind = "agent_usage"
-	NotifyAgentNeedsAutoCompaction EventStreamKind = "agent_needs_auto_compat"
-	NotifyAgentMissingHistory      EventStreamKind = "agent_missing_history"
-	NotifyAgentSessionStatus       EventStreamKind = "agent_session_status"
+	// Session-owned runtime notifications exposed to observers.
+	EventSessionStatus EventStreamKind = "session_status"
+	EventSessionFatal  EventStreamKind = "session_fatal"
+	EventSubscriberGap EventStreamKind = "subscriber_gap"
 
 	/// ToolCall
 	EventToolCall   EventStreamKind = "tool_call"
 	EventToolResult EventStreamKind = "tool_result"
+
+	/// TaskChecklist
+	EventToolTaskCheckList EventStreamKind = "task_checklist_result"
+	// SkillLoaded
+	EventSkillLoad EventStreamKind = "skill_load"
+
+	/// User Prompt
+	EventMessageFromAgentInbox EventStreamKind = "message_from_agent_inbox"
+
+	/// CompactionTriggered
+	EventManualCompactionTriggered EventStreamKind = "session_manual_compaction"
+	EventAutoCompactionTriggered   EventStreamKind = "session_auto_compaction"
 
 	/// HITL
 	EventApprovalRequested EventStreamKind = "approval_requested"
