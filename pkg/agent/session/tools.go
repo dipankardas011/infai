@@ -88,7 +88,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 				status = contracts.ToolExecutionDenied
 				content = "tool execution was denied by session policy"
 				toolMessages = append(toolMessages, contracts.NewToolMessage(tc.ID, content, status))
-				s.sessionEventStream <- contracts.EventStream{
+				s.agentEvents <- contracts.EventStream{
 					Kind:      contracts.EventToolResult,
 					Timestamp: time.Now().UTC(),
 					ToolResult: &contracts.ToolExecutionResult{
@@ -119,7 +119,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 					if content == "" {
 						content = err.Error()
 					}
-					s.sessionEventStream <- contracts.EventStream{
+					s.agentEvents <- contracts.EventStream{
 						Kind:      contracts.EventToolResult,
 						Timestamp: time.Now().UTC(),
 						ToolResult: &contracts.ToolExecutionResult{
@@ -160,7 +160,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 					content = output
 				}
 
-				s.sessionEventStream <- contracts.EventStream{
+				s.agentEvents <- contracts.EventStream{
 					Kind:       contracts.EventToolResult,
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
@@ -184,7 +184,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 					content = output
 				}
 
-				s.sessionEventStream <- contracts.EventStream{
+				s.agentEvents <- contracts.EventStream{
 					Kind:       contracts.EventToolResult,
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
@@ -208,7 +208,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 					content = output
 				}
 
-				s.sessionEventStream <- contracts.EventStream{
+				s.agentEvents <- contracts.EventStream{
 					Kind:       contracts.EventToolResult,
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
@@ -232,7 +232,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 					content = output
 				}
 
-				s.sessionEventStream <- contracts.EventStream{
+				s.agentEvents <- contracts.EventStream{
 					Kind:       contracts.EventToolResult,
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
@@ -256,7 +256,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 					content = output
 				}
 
-				s.sessionEventStream <- contracts.EventStream{
+				s.agentEvents <- contracts.EventStream{
 					Kind:       contracts.EventToolResult,
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
@@ -280,7 +280,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 					content = output
 				}
 
-				s.sessionEventStream <- contracts.EventStream{
+				s.agentEvents <- contracts.EventStream{
 					Kind:       contracts.EventToolResult,
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
@@ -304,7 +304,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 					content = output
 				}
 
-				s.sessionEventStream <- contracts.EventStream{
+				s.agentEvents <- contracts.EventStream{
 					Kind:       contracts.EventToolResult,
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
@@ -328,7 +328,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 					content = output
 				}
 
-				s.sessionEventStream <- contracts.EventStream{
+				s.agentEvents <- contracts.EventStream{
 					Kind:       contracts.DeltaSkillLoad,
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
@@ -352,21 +352,21 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 					content = output
 				}
 
-				s.sessionEventStream <- contracts.EventStream{
+				s.agentEvents <- contracts.EventStream{
 					Kind:       contracts.DeltaTaskChecklist,
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
 				}
 			default:
 				status = contracts.ToolExecutionError
-				content = contracts.NewExecutionError(
+				content = contracts.NewToolExecutionError(
 					tc.Function.Name,
 					"unknown_tool",
 					"the requested tool is not available in this session",
 					contracts.ResponsibilityAgent,
 					nil,
 				).Error()
-				s.sessionEventStream <- contracts.EventStream{
+				s.agentEvents <- contracts.EventStream{
 					Kind:      contracts.EventToolResult,
 					Timestamp: time.Now().UTC(),
 					ToolResult: &contracts.ToolExecutionResult{
@@ -398,7 +398,6 @@ func (s *InfaiAgentSession) performHITL(ctx context.Context, agentID uuid.UUID, 
 	request := contracts.ApprovalRequest{
 		ID:          approvalID,
 		SessionID:   s.meta.ID,
-		SessionName: s.meta.Name,
 		ToolCall:    call,
 		Fingerprint: fingerprint,
 		CreatedAt:   time.Now().UTC(),
@@ -410,22 +409,19 @@ func (s *InfaiAgentSession) performHITL(ctx context.Context, agentID uuid.UUID, 
 	}
 
 	s.mu.Lock()
+
 	if s.pendingApproval != nil {
 		s.mu.Unlock()
 		return errors.New("another tool approval is already pending")
 	}
-	s.pendingApproval = pending
-	s.mu.Unlock()
 
-	s.sessionEventStream <- contracts.EventStream{
-		Kind:       contracts.EventApprovalRequested,
-		Timestamp:  time.Now().UTC(),
-		Content:    nil,
-		ToolCall:   nil,
-		ToolResult: nil,
-		HITLCall:   &request,
-		HITLResult: nil,
-	}
+	pending.request.SessionName = s.meta.Name
+	request = pending.request
+	s.pendingApproval = pending
+	s.status = contracts.SessionWaitingApproval
+	event := contracts.EventStream{Kind: contracts.EventApprovalRequested, Timestamp: time.Now().UTC(), HITLCall: &request}
+
+	s.mu.Unlock()
 
 	s.l.InfoContext(ctx, "tool approval requested",
 		"approval_id", request.ID,
@@ -436,7 +432,7 @@ func (s *InfaiAgentSession) performHITL(ctx context.Context, agentID uuid.UUID, 
 	select {
 	case decision := <-pending.decision:
 
-		s.sessionEventStream <- contracts.EventStream{
+		s.agentEvents <- contracts.EventStream{
 			Kind:       contracts.EventApprovalResolved,
 			Timestamp:  time.Now().UTC(),
 			Content:    nil,
@@ -460,7 +456,7 @@ func (s *InfaiAgentSession) performHITL(ctx context.Context, agentID uuid.UUID, 
 		}
 		s.mu.Unlock()
 
-		s.sessionEventStream <- contracts.EventStream{
+		s.agentEvents <- contracts.EventStream{
 			Kind:       contracts.EventApprovalCanceled,
 			Timestamp:  time.Now().UTC(),
 			Content:    nil,

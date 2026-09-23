@@ -248,14 +248,12 @@ func (s *InfaiAgentSession) Meta() store.SessionMeta {
 	return s.meta
 }
 
-// EventHub exposes the session's live broadcaster so the server can attach the
-// live SSE sink per request.
-func (s *InfaiAgentSession) EventHub() *store.SessionEventHub {
-	return s.events
+func (s *InfaiAgentSession) Status() contracts.SessionStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.status
 }
 
-// Timeline returns every event in the session graph. Blob-backed records remain
-// placeholders until explicitly resolved.
 func (s *InfaiAgentSession) Timeline() ([]store.Event, uuid.UUID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

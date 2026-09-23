@@ -48,17 +48,19 @@ func (s *InfaiAgentSession) SetModel(choosenModel contracts.ProvisionedModel) er
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.model = model
-	if a := s.Agents[s.sessionAgentId]; a != nil {
-		a.SetModel(s.model)
+	if s.status != contracts.SessionIdle {
+		s.mu.Unlock()
+		return errors.New("session must be idle to change models")
 	}
+	s.model = model
+	s.agent.SetModel(model)
 	s.meta.Provider = model.GetModelSpecs().ProviderName()
 	s.meta.Model = model.GetModelSpecs().Model().Id
 	s.meta.UpdatedAt = time.Now().UTC()
-	if err := s.store.SaveMeta(s.meta); err != nil {
-		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
+	meta := s.meta
+	s.mu.Unlock()
+	if err := s.store.SaveMeta(meta); err != nil {
+		s.l.Error("persist session metadata", "session_id", meta.ID, "error", err)
 	}
 	return nil
 }
@@ -67,9 +69,13 @@ func (s *InfaiAgentSession) SetThinkingPattern(pattern contracts.InfaiThinkingLe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.closed {
+	if s.status != contracts.SessionIdle {
+		return errors.New("session must be idle to change thinking")
+	}
+	if s.status == contracts.SessionClosed {
 		return harnessErr.ErrSessionClosed
 	}
+
 	provisioned, err := s.model.GetModelSpecs().WithThinkingPattern(pattern)
 	if err != nil {
 		return err
@@ -78,10 +84,12 @@ func (s *InfaiAgentSession) SetThinkingPattern(pattern contracts.InfaiThinkingLe
 	if err != nil {
 		return err
 	}
-	s.model = model
-	if a := s.Agents[s.sessionAgentId]; a != nil {
-		a.SetModel(model)
+
+	if s.status != contracts.SessionIdle {
+		return errors.New("session became busy while changing thinking")
 	}
+	s.model = model
+	s.agent.SetModel(model)
 	return nil
 }
 
@@ -89,6 +97,9 @@ func (s *InfaiAgentSession) SetProviderAuth(providerName string, auth contracts.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.status != contracts.SessionIdle {
+		return errors.New("session must be idle to refresh provider authentication")
+	}
 	current := s.model.GetModelSpecs()
 	if current.ProviderName() != providerName {
 		return nil
@@ -109,10 +120,11 @@ func (s *InfaiAgentSession) SetProviderAuth(providerName string, auth contracts.
 		return err
 	}
 
-	s.model = model
-	if agent := s.Agents[s.sessionAgentId]; agent != nil {
-		agent.SetModel(model)
+	if s.status != contracts.SessionIdle {
+		return errors.New("session became busy while refreshing provider authentication")
 	}
+	s.model = model
+	s.agent.SetModel(model)
 
 	return nil
 }

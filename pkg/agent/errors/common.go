@@ -7,7 +7,8 @@ var (
 	ErrEngineShuttingDown = errors.New("engine is shutting down")
 	// ErrInvalidInput marks a request the client can fix (empty message,
 	// unsupported modality, bad image bytes) so the server can return 400.
-	ErrInvalidInput = errors.New("invalid input")
+	ErrInvalidInput   = errors.New("invalid input")
+	ErrTooManyClients = errors.New("too many session observers")
 )
 
 var (
