@@ -6,6 +6,20 @@ import (
 	"github.com/google/uuid"
 )
 
+type SessionStatus string
+
+const (
+	SessionIdle            SessionStatus = "idle"
+	SessionBusy            SessionStatus = "busy"
+	SessionWaitingApproval SessionStatus = "waiting_approval"
+	SessionCompacting      SessionStatus = "compacting"
+
+	// Concluded states: the session will not serve another turn.
+	SessionCompleted             SessionStatus = "completed"
+	SessionMaxIterationExhausted SessionStatus = "max_iteration_exhausted"
+	SessionTombstone             SessionStatus = "tombstone"
+)
+
 // SessionSummary combines persisted identity with engine-owned runtime state
 // for session-list API consumers.
 type SessionSummary struct {

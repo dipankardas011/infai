@@ -151,7 +151,8 @@ func TestTimelineLargePayloadUsesSHA256Blob(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := bytes.Repeat([]byte("x"), blobBytesThreshold)
-	record := Record{Kind: KindToolResult, Text: string(payload)}
+	content := string(payload)
+	record := Record{Kind: KindMessage, Message: &contracts.ChatMessage{Role: "tool", ToolCallID: "c", Status: contracts.ToolExecutionSuccess, Content: &content}}
 	event, err := timeline.AppendToHead(record)
 	if err != nil {
 		t.Fatal(err)
@@ -174,7 +175,7 @@ func TestTimelineLargePayloadUsesSHA256Blob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Record == nil || got.Record.Text != record.Text {
+	if got.Record == nil || got.Record.Message == nil || got.Record.Message.Text() != content {
 		t.Fatal("blob payload changed")
 	}
 	if err := timeline.Close(); err != nil {
@@ -187,7 +188,7 @@ func TestTimelineLargePayloadUsesSHA256Blob(t *testing.T) {
 	defer reloaded.Close()
 
 	got, err = reloaded.LoadEvent(event.ID)
-	if err != nil || got.Record == nil || got.Record.Text != record.Text {
+	if err != nil || got.Record == nil || got.Record.Message == nil || got.Record.Message.Text() != content {
 		t.Fatalf("reloaded blob event=%+v err=%v", got, err)
 	}
 }
@@ -387,7 +388,8 @@ func TestTimelineRejectsCorruptedBlob(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := bytes.Repeat([]byte("x"), blobBytesThreshold)
-	event, err := timeline.AppendToHead(Record{Kind: KindToolResult, Text: string(payload)})
+	content := string(payload)
+	event, err := timeline.AppendToHead(Record{Kind: KindMessage, Message: &contracts.ChatMessage{Role: "tool", ToolCallID: "c", Status: contracts.ToolExecutionSuccess, Content: &content}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,7 +595,8 @@ func TestTimelinePreviewIsBounded(t *testing.T) {
 	defer timeline.Close()
 
 	payload := bytes.Repeat([]byte("x"), blobBytesThreshold)
-	if _, err := timeline.AppendToHead(Record{Kind: KindToolResult, Timestamp: time.Now().UTC(), ToolResult: &ToolResultRecord{CallID: "c", Status: "success", Output: string(payload)}}); err != nil {
+	content := string(payload)
+	if _, err := timeline.AppendToHead(Record{Kind: KindMessage, Timestamp: time.Now().UTC(), Message: &contracts.ChatMessage{Role: "tool", ToolCallID: "c", Status: contracts.ToolExecutionSuccess, Content: &content}}); err != nil {
 		t.Fatal(err)
 	}
 	events, err := timeline.LoadEntireTimeline()

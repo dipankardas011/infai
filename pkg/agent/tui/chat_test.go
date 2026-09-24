@@ -92,7 +92,7 @@ func TestComposerGrowthKeepsTranscriptAtBottom(t *testing.T) {
 
 func TestChecklistDeltaIsNotRenderedAsTranscriptText(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
-	m.appendDelta(contracts.DeltaTaskChecklist, `{"items":[]}`)
+	m.appendDelta(contracts.EventToolTaskCheckList, `{"items":[]}`)
 
 	if len(m.blocks) != 0 {
 		t.Fatalf("checklist delta created %d transcript blocks", len(m.blocks))
@@ -680,7 +680,7 @@ func TestApprovalModalRendersEditDiff(t *testing.T) {
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
 	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
 		Function: contracts.Function{
-			Name:      string(contracts.EditTool),
+			Name:      contracts.EditTool,
 			Arguments: `{"path":"main.go","old_string":"return old","new_string":"return new"}`,
 		},
 	}})
@@ -703,7 +703,7 @@ func TestEditDiffWrapsAndKeepsActionsPinned(t *testing.T) {
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
 		Function: contracts.Function{
-			Name:      string(contracts.EditTool),
+			Name:      contracts.EditTool,
 			Arguments: `{"path":"x.md","old_string":"` + long + `","new_string":"` + long + ` changed"}`,
 		},
 	}})
@@ -726,7 +726,7 @@ func TestApprovalModalRendersWriteAdditions(t *testing.T) {
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
 	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
 		Function: contracts.Function{
-			Name:      string(contracts.WriteTool),
+			Name:      contracts.WriteTool,
 			Arguments: `{"path":"notes.txt","content":"first line\nsecond line"}`,
 		},
 	}})
@@ -769,7 +769,7 @@ func TestApprovalToolCallFormatting(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			title, body, script := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: string(tt.tool), Arguments: tt.arguments}})
+			title, body, script := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: tt.tool, Arguments: tt.arguments}})
 			formatted := title + "\n" + body + "\n" + script
 			for _, want := range tt.want {
 				if !strings.Contains(formatted, want) {
@@ -785,7 +785,7 @@ func TestApprovalModalRendersBashAsCode(t *testing.T) {
 	m.modal = nil
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
 	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{
-		Name:      string(contracts.BashTool),
+		Name:      contracts.BashTool,
 		Arguments: `{"command":"if test -f go.mod; then\n  go test ./...\nfi","workdir":"."}`,
 	}}})
 
@@ -948,7 +948,7 @@ func TestTimelineRoleColors(t *testing.T) {
 }
 
 func TestTimelineEventDisplayUsesSupportedRoles(t *testing.T) {
-	call := contracts.ToolCall{Function: contracts.Function{Name: string(contracts.ReadSkillTool), Arguments: `{"name":"code-review"}`}}
+	call := contracts.ToolCall{Function: contracts.Function{Name: contracts.ReadSkillTool, Arguments: `{"name":"code-review"}`}}
 	displays := timelineEventDisplays(TimelineEvent{Record: &store.Record{
 		Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}},
 	}})
@@ -999,9 +999,10 @@ func TestBlocksFromRecordsShowsToolCallsAndResults(t *testing.T) {
 			Arguments: `{"path":"README.md"}`,
 		},
 	}
+	toolResult := contracts.NewToolMessage(call.ID, `{"content":"hello"}`, contracts.ToolExecutionSuccess)
 	records := []store.Record{
 		{Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}}},
-		{Kind: store.KindToolResult, ToolResult: &store.ToolResultRecord{CallID: call.ID, Status: "success", Output: `{"content":"hello"}`}},
+		{Kind: store.KindMessage, Message: &toolResult},
 	}
 
 	blocks := blocksFromRecords(records)
@@ -1038,12 +1039,12 @@ func TestReadToolResultSummaryPreservesErrors(t *testing.T) {
 func TestLiveAndResumedBashResultsMatch(t *testing.T) {
 	payload := `{"exit_code":7,"output":"full output\n","truncated":true}`
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
-	m.appendDelta(contracts.DeltaToolResult, "bash [success]\n"+payload)
+	m.appendDelta(contracts.EventToolResult, "bash [success]\n"+payload)
 	if len(m.blocks) != 1 {
 		t.Fatalf("live blocks=%d", len(m.blocks))
 	}
 
-	call := contracts.ToolCall{ID: "call-1", Type: "function", Function: contracts.Function{Name: string(contracts.BashTool)}}
+	call := contracts.ToolCall{ID: "call-1", Type: "function", Function: contracts.Function{Name: contracts.BashTool}}
 	toolMessage := contracts.NewToolMessage(call.ID, payload, contracts.ToolExecutionSuccess)
 	resumed := blocksFromRecords([]store.Record{
 		{Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}}},
@@ -1153,8 +1154,14 @@ func TestSessionLoadClearsPendingAttachments(t *testing.T) {
 
 type stubChatClient struct{}
 
-func (stubChatClient) Chat(context.Context, contracts.UserInput, contracts.InfaiThinkingLevel, func(contracts.DeltaKind, string), func(ApprovalUpdate)) (*ChatReply, error) {
+func (stubChatClient) Chat(context.Context, contracts.UserInput, contracts.InfaiThinkingLevel, func(contracts.EventStreamKind, string), func(ApprovalUpdate)) (*ChatReply, error) {
 	return &ChatReply{}, nil
+}
+func (stubChatClient) SendMessage(context.Context, contracts.UserInput, contracts.InfaiThinkingLevel) error {
+	return nil
+}
+func (stubChatClient) JoinSession(context.Context, uuid.UUID, func(glue.SessionView), func(contracts.EventStream)) error {
+	return nil
 }
 func (stubChatClient) ResolveApproval(context.Context, Approval, string, string) error { return nil }
 func (stubChatClient) SetSession(uuid.UUID)                                            {}

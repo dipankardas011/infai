@@ -12,22 +12,24 @@ const (
 	DeltaContent EventStreamKind = "content"
 	// DeltaReasoning is the model's reasoning text (shown separately).
 	DeltaReasoning EventStreamKind = "reasoning"
-	// DeltaStatus is a live UI status update, not model output.
-	DeltaStatus EventStreamKind = "status"
 	// DeltaCompactionSummary is a live-only compaction summary for the UI.
 	DeltaCompactionSummary EventStreamKind = "compaction_summary"
 
-	//// Notify Session about Agent
-	NotifyAgentModelError     EventStreamKind = "agent_model_err"
-	NotifyAgentReachedMaxQ    EventStreamKind = "agent_at_max_q"
-	NotifyAgentUsage          EventStreamKind = "agent_usage"
-	NotifyAgentMissingHistory EventStreamKind = "agent_missing_history"
-	NotifyAgentSessionStatus  EventStreamKind = "agent_session_status"
+	// EventProviderEvent is the model provider speaking for itself: a retry
+	// notice, a failed request, an endpoint-level message.
+	EventProviderEvent EventStreamKind = "provider_event"
+
+	// NotifyAgentUsage reports token usage for the last model request.
+	NotifyAgentUsage EventStreamKind = "agent_usage"
 
 	// Session-owned runtime notifications exposed to observers.
-	EventSessionStatus EventStreamKind = "session_status"
 	EventSessionFatal  EventStreamKind = "session_fatal"
 	EventSubscriberGap EventStreamKind = "subscriber_gap"
+
+	// EventSessionTransitionState carries the session status in Content.
+	// It is the only kind that moves the status, whether the transition comes
+	// from the agent's own loop or from a session operation.
+	EventSessionTransitionState EventStreamKind = "session_transition_state"
 
 	/// ToolCall
 	EventToolCall   EventStreamKind = "tool_call"
@@ -67,12 +69,3 @@ func ToolCallDisplay(call ToolCall) string {
 	}
 	return fmt.Sprintf("%s %s", call.Function.Name, call.Function.Arguments)
 }
-
-type AgentStatus string
-
-const (
-	AgentIdle      AgentStatus = "idle"
-	AgentBusy      AgentStatus = "busy"
-	AgentClosed    AgentStatus = "closed"
-	AgentCompleted AgentStatus = "completed"
-)

@@ -285,24 +285,9 @@ func buildEventPreview(record Record) *EventPreview {
 			}
 			preview.Text = previewText(strings.Join(names, ", "))
 		}
-	case record.ToolCall != nil:
-		preview.Role = "tool_call"
-		preview.Text = previewText(record.ToolCall.Name + " " + record.ToolCall.Arguments)
-	case record.ToolResult != nil:
-		preview.Role = "tool_result"
-		text := record.ToolResult.Status
-		if record.ToolResult.Error != "" {
-			text += ": " + record.ToolResult.Error
-		} else if record.ToolResult.Output != "" {
-			text += ": " + record.ToolResult.Output
-		}
-		preview.Text = previewText(text)
 	case record.Compaction != nil:
 		preview.Role = "assistant"
 		preview.Text = previewText("context compacted: " + record.Compaction.Summary)
-	case record.Approval != nil && record.Approval.ToolCall != nil:
-		preview.Role = "tool_call"
-		preview.Text = previewText(string(record.Approval.ToolCall.Function.Name))
 	default:
 		preview.Role = "assistant"
 		preview.Text = previewText(record.Text)

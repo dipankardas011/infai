@@ -13,6 +13,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/config"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
+	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/session"
 	"github.com/dipankardas011/infai/pkg/agent/store"
@@ -318,7 +319,7 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, input contrac
 		}
 	}
 
-	if err := sess.EnqueueUserMessage(ctx, input, opts); err != nil {
+	if err := sess.EnqueueUserMessage(ctx, input); err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			meta := sess.Meta()
 			e.bgLogger.ErrorContext(ctx, "session chat enqueue failed", "session_id", id, "provider", meta.Provider, "model", meta.Model, "error", err)
@@ -359,15 +360,15 @@ func (e *InfaiAgentEngine) refreshSessionProviderAuth(ctx context.Context, sess 
 	return sess.SetProviderAuth(providerName, refreshed)
 }
 
-func (e *InfaiAgentEngine) SubscribeEvents(id uuid.UUID) (session.SessionView, <-chan contracts.EventStream, func(), error) {
+func (e *InfaiAgentEngine) SubscribeEvents(id uuid.UUID) (glue.SessionView, <-chan contracts.EventStream, func(), error) {
 	select {
 	case <-e.stopCh:
-		return session.SessionView{}, nil, nil, harnessErr.ErrEngineShuttingDown
+		return glue.SessionView{}, nil, nil, harnessErr.ErrEngineShuttingDown
 	default:
 	}
 	sess, ok := e.Session(id)
 	if !ok {
-		return session.SessionView{}, nil, nil, harnessErr.ErrSessionNotFound
+		return glue.SessionView{}, nil, nil, harnessErr.ErrSessionNotFound
 	}
 	return sess.JoinSessionEvents()
 }
@@ -406,9 +407,6 @@ func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 	}
 	sess.Close()
 	e.aseComms.UnregisterSessionAgent(id)
-	if err := e.sessionStore.Delete(id); err != nil {
-		return err
-	}
 	e.bgLogger.Info("session closed", "session_id", id)
 	return nil
 }
@@ -455,7 +453,9 @@ func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 	summaries := make([]contracts.SessionSummary, 0, len(metas))
 	for _, meta := range metas {
 		sess, active := e.activeSessionAgents[meta.ID]
-		status := contracts.SessionClosed
+		// A session that is not resident has no runtime state left to report,
+		// so it is concluded rather than runnable.
+		status := contracts.SessionTombstone
 		if active {
 			status = sess.Status()
 		}
@@ -491,13 +491,13 @@ func (e *InfaiAgentEngine) GetSessionRecords(id uuid.UUID) (store.SessionMeta, [
 	if err != nil {
 		return store.SessionMeta{}, nil, err
 	}
-	records, err := session.TimelineRecords(timeline, events)
+	records, err := session.CompleteResolveRawTimelineEventsToRecords(timeline, events)
 	return meta, records, err
 }
 
 func (e *InfaiAgentEngine) GetTimeline(id uuid.UUID) (store.SessionMeta, []store.Event, uuid.UUID, error) {
 	if sess, ok := e.Session(id); ok {
-		events, head, err := sess.Timeline()
+		events, head, err := sess.ViewTimeline()
 		if err != nil {
 			return store.SessionMeta{}, nil, uuid.Nil, err
 		}
@@ -534,13 +534,25 @@ func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
 
 	e.stopOnce.Do(func() {
 		close(e.stopCh)
+		e.cancel(harnessErr.ErrEngineShuttingDown)
 	})
 	e.mu.Lock()
+	sessions := make(map[uuid.UUID]*session.InfaiAgentSession, len(e.activeSessionAgents))
 	for id, sess := range e.activeSessionAgents {
-		sess.Close()
+		sessions[id] = sess
 		delete(e.activeSessionAgents, id)
 	}
 	e.mu.Unlock()
+
+	for id, sess := range sessions {
+		sess.Close()
+		e.aseComms.UnregisterSessionAgent(id)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
 	e.aseComms.Close()
 
 	e.bgLogger.DebugContext(ctx, "engine shutdown complete")

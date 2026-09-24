@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,36 +25,57 @@ import (
 )
 
 type InfaiAgentSession struct {
-	l    *slog.Logger
-	mu   sync.Mutex
-	meta store.SessionMeta
+	l  *slog.Logger
+	mu sync.Mutex
 
-	closed bool
+	// Lifecycle: derived from the engine's context, ended by Close or by a
+	// fatal persistence error.
+	ctx       context.Context
+	cancel    context.CancelCauseFunc
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+	closeDone chan struct{}
 
-	model contracts.InfaiModelAdaptor
-
+	// Durable state: the on-disk timeline and its lightweight session index.
+	meta     store.SessionMeta
 	timeline *store.Timeline
 	store    *store.SessionStore
-	events   *store.SessionEventHub
 
-	persisted           int
+	// Session state visible to joined clients. status mirrors the status the
+	// agent reports for itself; the session's own operations (compacting,
+	// switching branches, waiting on approval) set it directly, and every one
+	// of them runs while the agent cannot report a status of its own.
+	// activeTimeline holds only messages already committed to the timeline,
+	// inFlight holds the events of the generation still in progress, and the
+	// two together are everything a joining client needs to render the session.
+	status         contracts.SessionStatus
+	fatalErr       error
+	inFlight       []contracts.EventStream
+	activeTimeline []contracts.ChatMessage
+
+	// Decisions the session is waiting on: a tool approval from the user, or
+	// the agent adopting a branch point on its next write.
+	pendingApproval     *pendingApproval
 	pendingBranchParent uuid.UUID
 
-	auditorPolicy *auditor.AuditorPolicy
+	// The principal agent and the model it runs on.
+	agent *agent.Agent
+	model contracts.InfaiModelAdaptor
 
+	// Capabilities the agent runs with.
+	auditorPolicy   *auditor.AuditorPolicy
 	availableTools  []contracts.Tool
 	availableSkills []contracts.Skill
 	fileManager     *actuators.FileManager
 	skillRegistry   *memory.SkillRegistry
 	taskChecklist   *memory.TaskChecklist
 
-	agent *agent.Agent
+	// Observation: the agent's live events and the clients joined to them.
+	eventBus    chan contracts.EventStream
+	subscribers map[*subscriber]struct{}
 
-	activeTimeline []contracts.ChatMessage
-
-	aeComms            *comms.ISACChannel
-	aolTimeline        chan []contracts.ChatMessage
-	sessionEventStream chan contracts.EventStream
+	// Peer messaging, carried but not yet consumed.
+	aeComms *comms.ISACChannel
 }
 
 type pendingApproval struct {
@@ -64,176 +84,153 @@ type pendingApproval struct {
 }
 
 func NewSession(
+	engineCtx context.Context,
 	id uuid.UUID,
 	l *slog.Logger,
-	choosenModel contracts.ProvisionedModel,
+	chosenModel contracts.ProvisionedModel,
 	cwd string,
 	ss *store.SessionStore,
 	aeComms *comms.ISACChannel,
 ) (*InfaiAgentSession, error) {
-	model, err := models.ProvisionModelClient(choosenModel)
+	model, err := models.ProvisionModelClient(chosenModel)
 	if err != nil {
 		return nil, err
 	}
 
-	o := &InfaiAgentSession{
-		l:             l,
-		model:         model,
-		store:         ss,
-		auditorPolicy: auditor.NewAuditorPolicy(),
-		taskChecklist: memory.NewTaskChecklist(),
-		aeComms:       aeComms,
-	}
-
-	o.fileManager, err = actuators.NewFileManager(cwd)
-	if err != nil {
-		return nil, fmt.Errorf("session workspace: %w", err)
-	}
-	cwd = o.fileManager.Root()
-
 	now := time.Now().UTC()
-	o.meta = store.SessionMeta{
+	meta := store.SessionMeta{
 		ID:        id,
-		Provider:  o.model.GetModelSpecs().ProviderName(),
-		Model:     o.model.GetModelSpecs().Model().Id,
+		Provider:  model.GetModelSpecs().ProviderName(),
+		Model:     model.GetModelSpecs().Model().Id,
 		Cwd:       cwd,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	if err := ss.SaveMeta(o.meta); err != nil {
+	if err := ss.SaveMeta(meta); err != nil {
 		return nil, err
 	}
-
-	o.events = store.NewSessionEventHub()
-
-	timeline, err := ss.LoadSessionTimelineClient(o.meta.ID)
-	if err != nil {
-		return nil, err
-	}
-	o.timeline = timeline
-
-	o.configureFileTools()
-	if o.skillRegistry, err = memory.LoadSkillRegistry(cwd); err != nil {
-		return nil, fmt.Errorf("load skill registry: %w", err)
-	}
-	o.configureMemoryTools()
-
-	systemPrompt, err := prompts.GetBasicSystemPrompt(o.availableTools, o.availableSkills, cwd)
+	timeline, err := ss.LoadSessionTimelineClient(id)
 	if err != nil {
 		return nil, err
 	}
 
-	o.activeTimeline = []contracts.ChatMessage{}
-	o.aolTimeline = make(chan []contracts.ChatMessage)
-	o.sessionEventStream = make(chan contracts.EventStream)
-
-	go o.HandleTimelineAOL(context.TODO(), o.aolTimeline)
-	go o.HandleAgentLoopEvents(context.TODO())
-
-	o.agent, err = agent.NewAgent(
-		context.TODO(), // FIXME: please fix the context things.
-		o.model,
-		contracts.InteractiveAgent, // TODO: need this to be coming from engine
-		o.activeTimeline,
-		chan<- []contracts.ChatMessage(o.aolTimeline),
-		chan<- contracts.EventStream(o.sessionEventStream),
-		o.GenToolCallDispatchHandler(context.TODO()),
-		systemPrompt,
-		agent.WithMaxTurns(1000),
-		agent.WithTools(o.availableTools...),
-		agent.WithAutoCompaction(o.shouldCompact),
-	)
+	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, aeComms)
 	if err != nil {
+		_ = timeline.Close()
 		return nil, err
 	}
-
-	return o, nil
+	return sess, nil
 }
 
-// NewResumedSession rebuilds a session from the active timeline ancestry. The
-// caller resolves lazy blob records before constructing the chat history.
 func NewResumedSession(
+	engineCtx context.Context,
 	l *slog.Logger,
-	choosenModel contracts.ProvisionedModel,
+	chosenModel contracts.ProvisionedModel,
 	meta store.SessionMeta,
 	history []contracts.ChatMessage,
 	timeline *store.Timeline,
 	sessionStore *store.SessionStore,
 	aeComms *comms.ISACChannel,
 ) (*InfaiAgentSession, error) {
-	model, err := models.ProvisionModelClient(choosenModel)
+	model, err := models.ProvisionModelClient(chosenModel)
 	if err != nil {
 		return nil, err
 	}
+	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, aeComms)
+}
 
-	o := &InfaiAgentSession{
+func newRuntimeSession(
+	engineCtx context.Context,
+	l *slog.Logger,
+	model contracts.InfaiModelAdaptor,
+	meta store.SessionMeta,
+	history []contracts.ChatMessage,
+	timeline *store.Timeline,
+	sessionStore *store.SessionStore,
+	aeComms *comms.ISACChannel,
+) (*InfaiAgentSession, error) {
+	if engineCtx == nil {
+		return nil, errors.New("session: engine context is required")
+	}
+	ctx, cancel := context.WithCancelCause(engineCtx)
+	s := &InfaiAgentSession{
 		l:              l,
-		model:          model,
+		ctx:            ctx,
+		cancel:         cancel,
+		closeDone:      make(chan struct{}),
 		meta:           meta,
-		store:          sessionStore,
-		activeTimeline: history,
-		persisted:      len(history),
+		status:         contracts.SessionIdle,
+		model:          model,
 		timeline:       timeline,
-		events:         store.NewSessionEventHub(),
+		store:          sessionStore,
 		auditorPolicy:  auditor.NewAuditorPolicy(),
 		taskChecklist:  memory.NewTaskChecklist(),
+		activeTimeline: append([]contracts.ChatMessage(nil), history...),
+		eventBus:       make(chan contracts.EventStream, 256),
+		subscribers:    make(map[*subscriber]struct{}),
 		aeComms:        aeComms,
 	}
 
-	o.fileManager, err = actuators.NewFileManager(meta.Cwd)
+	var err error
+	s.fileManager, err = actuators.NewFileManager(meta.Cwd)
 	if err != nil {
+		cancel(err)
 		return nil, fmt.Errorf("session workspace: %w", err)
 	}
-	meta.Cwd = o.fileManager.Root()
-	o.meta = meta
-
-	if err := sessionStore.SaveMeta(meta); err != nil {
+	s.meta.Cwd = s.fileManager.Root()
+	if err := sessionStore.SaveMeta(s.meta); err != nil {
+		cancel(err)
 		return nil, err
 	}
 
-	o.configureFileTools()
-	if o.skillRegistry, err = memory.LoadSkillRegistry(meta.Cwd); err != nil {
+	s.configureFileTools()
+	s.skillRegistry, err = memory.LoadSkillRegistry(s.meta.Cwd)
+	if err != nil {
+		cancel(err)
 		return nil, fmt.Errorf("load skill registry: %w", err)
 	}
-	o.configureMemoryTools()
+	s.configureMemoryTools()
 
-	systemPrompt, err := prompts.GetBasicSystemPrompt(o.availableTools, o.availableSkills, meta.Cwd)
+	systemPrompt, err := prompts.GetBasicSystemPrompt(s.availableTools, s.availableSkills, s.meta.Cwd)
 	if err != nil {
+		cancel(err)
 		return nil, err
 	}
 
-	o.aolTimeline = make(chan []contracts.ChatMessage)
-	o.sessionEventStream = make(chan contracts.EventStream)
-
-	go o.HandleTimelineAOL(context.TODO(), o.aolTimeline)
-	go o.HandleAgentLoopEvents(context.TODO())
-
-	o.agent, err = agent.NewAgent(
-		context.TODO(), // FIXME: please fix the context things.
-		o.model,
-		contracts.InteractiveAgent, // TODO: need this to be coming from engine
-		o.activeTimeline,
-		chan<- []contracts.ChatMessage(o.aolTimeline),
-		chan<- contracts.EventStream(o.sessionEventStream),
-		o.GenToolCallDispatchHandler(context.TODO()),
+	s.agent, err = agent.NewAgent(
+		s.model,
+		contracts.InteractiveAgent,
+		s.commitMessages,
+		s.eventBus,
+		s.GenToolCallDispatchHandler(s.ctx),
 		systemPrompt,
 		agent.WithMaxTurns(1000),
-		agent.WithTools(o.availableTools...),
-		agent.WithAutoCompaction(o.shouldCompact),
+		agent.WithTools(s.availableTools...),
+		agent.WithAutoCompaction(s.shouldCompact, s.autoCompact),
 	)
 	if err != nil {
+		cancel(err)
 		return nil, err
 	}
 
-	state, err := getLatestTaskChecklist(o.timeline, o.timeline.CurrentHeadEventID())
+	state, err := getLatestTaskChecklist(s.timeline, s.timeline.CurrentHeadEventID())
 	if err != nil {
+		cancel(err)
 		return nil, fmt.Errorf("reconstruct task checklist: %w", err)
 	}
-	if err := o.taskChecklist.Restore(state); err != nil {
+	if err := s.taskChecklist.Restore(state); err != nil {
+		cancel(err)
 		return nil, fmt.Errorf("restore task checklist: %w", err)
 	}
 
-	return o, nil
+	s.wg.Go(func() {
+		s.handlerForSessionEvents(s.ctx)
+	})
+	s.wg.Go(func() {
+		s.agent.StartLoop(s.ctx, s.activeTimeline)
+	})
+
+	return s, nil
 }
 
 func (s *InfaiAgentSession) Meta() store.SessionMeta {
@@ -248,7 +245,7 @@ func (s *InfaiAgentSession) Status() contracts.SessionStatus {
 	return s.status
 }
 
-func (s *InfaiAgentSession) Timeline() ([]store.Event, uuid.UUID, error) {
+func (s *InfaiAgentSession) ViewTimeline() ([]store.Event, uuid.UUID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	events, err := s.timeline.LoadEntireTimeline()
@@ -261,830 +258,393 @@ func (s *InfaiAgentSession) Timeline() ([]store.Event, uuid.UUID, error) {
 
 func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) (contracts.TaskChecklistState, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.status != contracts.SessionIdle {
+		s.mu.Unlock()
+		return contracts.TaskChecklistState{}, fmt.Errorf("session must be idle before selecting a branch")
+	}
+	if !s.agent.MailboxEmpty() {
+		s.mu.Unlock()
+		return contracts.TaskChecklistState{}, errors.New("session has queued messages")
+	}
+	s.mu.Unlock()
+
 	if _, err := s.timeline.LoadEvent(eventID); err != nil {
 		return contracts.TaskChecklistState{}, err
 	}
+
 	checklist, err := getLatestTaskChecklist(s.timeline, eventID)
 	if err != nil {
 		return contracts.TaskChecklistState{}, err
 	}
+
+	if err := memory.NewTaskChecklist().Restore(checklist); err != nil {
+		return contracts.TaskChecklistState{}, err
+	}
+
+	events, err := s.timeline.LoadActiveContextAt(eventID)
+	if err != nil {
+		return contracts.TaskChecklistState{}, err
+	}
+
+	history, err := TimelineHistory(s.timeline, events)
+	if err != nil {
+		return contracts.TaskChecklistState{}, err
+	}
+
+	if err := s.agent.ReplaceHistory(s.ctx, history); err != nil {
+		return contracts.TaskChecklistState{}, err
+	}
+
+	s.mu.Lock()
+	if !s.agent.MailboxEmpty() {
+		s.mu.Unlock()
+		return contracts.TaskChecklistState{}, errors.New("session received a queued message while switching branches")
+	}
 	if err := s.taskChecklist.Restore(checklist); err != nil {
+		s.mu.Unlock()
 		return contracts.TaskChecklistState{}, err
 	}
 	s.pendingBranchParent = eventID
+	s.activeTimeline = append([]contracts.ChatMessage(nil), history...)
+	s.mu.Unlock()
 	return checklist, nil
 }
 
-// Rename persists a new display name for the session.
 func (s *InfaiAgentSession) Rename(name string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return harnessErr.ErrSessionClosed
+
+	switch s.status {
+	case contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone:
+		fatalErr := s.fatalErr
+		s.mu.Unlock()
+		if fatalErr != nil {
+			return fmt.Errorf("session is concluded: %w", fatalErr)
+		}
+		return errors.New("session is concluded")
 	}
+
 	s.meta.Name = name
 	s.meta.UpdatedAt = time.Now().UTC()
-	return s.store.SaveMeta(s.meta)
+	meta := s.meta
+	s.mu.Unlock()
+	return s.store.SaveMeta(meta)
 }
 
-// SetModel rebuilds the session's model adapter for the given provider and
-// model and records the change in the session meta.
-func (s *InfaiAgentSession) SetModel(choosenModel contracts.ProvisionedModel) error {
-	model, err := models.ProvisionModelClient(choosenModel)
-	if err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.model = model
-	if a := s.Agents[s.sessionAgentId]; a != nil {
-		a.SetModel(s.model)
-	}
-	s.meta.Provider = model.GetModelSpecs().ProviderName()
-	s.meta.Model = model.GetModelSpecs().Model().Id
-	s.meta.UpdatedAt = time.Now().UTC()
-	if err := s.store.SaveMeta(s.meta); err != nil {
-		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
-	}
-	return nil
-}
-
-func (s *InfaiAgentSession) SetProviderAuth(providerName string, auth contracts.LLMProviderAuth) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	current := s.model.GetModelSpecs()
-	if current.ProviderName() != providerName {
-		return nil
-	}
-
-	provisioned := contracts.NewProvisionedModel(
-		current.ProviderSlug(), current.ProviderName(), current.BaseEndpoint(), current.APIType(), auth, current.Model(),
-	)
-	var err error
-	if current.ThinkingPattern() != "" {
-		provisioned, err = provisioned.WithThinkingPattern(current.ThinkingPattern())
-		if err != nil {
-			return err
-		}
-	}
-	model, err := models.ProvisionModelClient(provisioned)
-	if err != nil {
-		return err
-	}
-
-	s.model = model
-	if agent := s.Agents[s.sessionAgentId]; agent != nil {
-		agent.SetModel(model)
-	}
-
-	return nil
-}
-
-func (s *InfaiAgentSession) SetThinkingPattern(pattern contracts.InfaiThinkingLevel) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return harnessErr.ErrSessionClosed
-	}
-	provisioned, err := s.model.GetModelSpecs().WithThinkingPattern(pattern)
-	if err != nil {
-		return err
-	}
-	model, err := models.ProvisionModelClient(provisioned)
-	if err != nil {
-		return err
-	}
-	s.model = model
-	if a := s.Agents[s.sessionAgentId]; a != nil {
-		a.SetModel(model)
-	}
-	return nil
-}
-
-// CompactChat generates and persists a continuation summary, advances the
-// timeline HEAD with a compaction event, and resets active history.
-func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed {
-		return harnessErr.ErrSessionClosed
-	}
-	if s.pendingBranchParent != uuid.Nil { // Avoids manual compaction when the BranchParent is under Dirty Write of branch switch
-		return errors.New("session: submit a message on the selected branch before compacting")
-	}
-	s.l.Info("manual compaction requested", "history_messages", len(s.history))
-
-	prevCheckpoint, err := s.timeline.LastCompactionSummary()
-	if err != nil {
-		s.l.Error("read last compaction from timeline", "error", err)
-		return err
-	}
-	toCompact, retained := prompts.PlanCompaction(s.history, false)
-	if len(toCompact) == 0 {
-		s.l.Info("manual compaction skipped: nothing to compact")
-		return nil
-	}
-
-	checklist := s.taskChecklist.Snapshot()
-	checklistContext, err := taskChecklistContextForCompaction(checklist)
-	if err != nil {
-		return err
-	}
-	systemPrompt, history, err := prompts.CompactionInput(toCompact, prevCheckpoint, checklistContext)
-	if err != nil {
-		s.l.Error("manual compaction input failed", "error", err)
-		return err
-	}
-	if err := s.compactChat(ctx, systemPrompt, history, retained, checklist, checklistContext); err != nil {
-		s.l.Error("manual compaction failed", "error", err)
-		return err
-	}
-	s.meta.UpdatedAt = time.Now().UTC()
-	if err := s.store.SaveMeta(s.meta); err != nil {
-		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
-	}
-	return nil
-}
-
-// Chat runs the base agent loop for one user prompt against the session's
-// persistent history and returns the outcome. The session stays registered
-// and idle after the call; the next Chat reuses the same conversation. New
-// messages, usage and meta are persisted through the recorder as they settle.
-func (s *InfaiAgentSession) Chat(ctx context.Context, input contracts.UserInput, opts contracts.ChatOptions) (*contracts.ChatResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed {
-		return nil, harnessErr.ErrSessionClosed
-	}
-
+func (s *InfaiAgentSession) EnqueueUserMessage(ctx context.Context, input contracts.UserInput) error {
 	if input.Empty() {
-		return nil, fmt.Errorf("%w: message is required", harnessErr.ErrInvalidInput)
-	}
-
-	modelConfig := s.model.GetModelSpecs().Model()
-	if err := contracts.ValidateUserInput(modelConfig, input); err != nil {
-		return nil, fmt.Errorf("%w: %v", harnessErr.ErrInvalidInput, err)
+		return fmt.Errorf("%w: message is required", harnessErr.ErrInvalidInput)
 	}
 	images, err := vision.ValidateInputs(input.Images)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", harnessErr.ErrInvalidInput, err)
+		return fmt.Errorf("%w: %v", harnessErr.ErrInvalidInput, err)
 	}
 	input.Images = images
 
-	parentID := s.timeline.CurrentHeadEventID()
-	switch {
-	case s.pendingBranchParent != uuid.Nil:
-		events, err := s.timeline.LoadActiveContextAt(s.pendingBranchParent)
-		if err != nil {
-			return nil, err
+	s.mu.Lock()
+
+	switch s.status {
+	case contracts.SessionCompacting:
+		s.mu.Unlock()
+		return errors.New("session is compacting")
+	case contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone:
+		fatalErr := s.fatalErr
+		s.mu.Unlock()
+		if fatalErr != nil {
+			return fmt.Errorf("session is concluded: %w", fatalErr)
 		}
-		history, err := TimelineHistory(s.timeline, events)
-		if err != nil {
-			return nil, err
+		return errors.New("session is concluded")
+	default:
+		select {
+		case <-s.ctx.Done():
+			s.mu.Unlock()
+			return context.Cause(s.ctx)
+		default:
 		}
-		checklist, err := getLatestTaskChecklist(s.timeline, s.pendingBranchParent)
-		if err != nil {
-			return nil, err
+
+		if err := contracts.ValidateUserInput(s.model.GetModelSpecs().Model(), input); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("%w: %v", harnessErr.ErrInvalidInput, err)
 		}
-		if err := s.taskChecklist.Restore(checklist); err != nil {
-			return nil, err
+
+		select {
+		case <-ctx.Done():
+			s.mu.Unlock()
+			return ctx.Err()
+		default:
 		}
-		s.history = history
-		s.persisted = len(history)
-		parentID = s.pendingBranchParent
-		s.pendingBranchParent = uuid.Nil
-	}
-	if err := s.publishTaskChecklist(); err != nil {
-		return nil, err
 	}
 
-	s.history = append(s.history, contracts.NewUserMessageWithInput(input))
-
-	// Persist the user's message before generation so a hard crash can never
-	// lose what was typed. The reply is synced at turn end; an interrupted
-	// reply is the only thing a crash can take.
-	msg := s.history[len(s.history)-1]
-
-	var appendErr error
-	if parentID == s.timeline.CurrentHeadEventID() {
-		_, appendErr = s.timeline.AppendToHead(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &msg})
-	} else {
-		_, appendErr = s.timeline.BranchFromEventID(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &msg}, parentID)
-	}
-	if appendErr != nil {
-		s.l.Error("persist user message", "session_id", s.sessionID, "error", appendErr)
-		return nil, fmt.Errorf("persist user message: %w", appendErr)
-	}
 	if s.meta.Name == "" {
 		s.meta.Name = sessionNameFromPrompt(input.Text)
 		s.meta.UpdatedAt = time.Now().UTC()
-		if err := s.store.SaveMeta(s.meta); err != nil {
-			s.l.Error("persist session name", "session_id", s.sessionID, "error", err)
-		}
+	}
+	meta := s.meta
+	s.mu.Unlock()
+
+	if err := s.store.SaveMeta(meta); err != nil {
+		s.l.Error("persist session metadata", "session_id", meta.ID, "error", err)
 	}
 
-	s.persisted = len(s.history)
-
-	agentLoop := s.Agents[s.sessionAgentId]
-	if agentLoop == nil {
-		return nil, errors.New("session: base agent missing")
-	}
-	agentLoop.SetDeltaHook(func(kind contracts.DeltaKind, text string) {
-		s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: kind, Text: text})
-	})
-
-	result, err := s.runAgent(ctx, agentLoop)
-	toolCalls := 0
-	for _, message := range result.Messages {
-		toolCalls += len(message.ToolCalls)
-	}
-	s.l.DebugContext(ctx, "agent invocation completed",
-		"status", result.Status.String(),
-		"messages", len(result.Messages),
-		"tool_calls", toolCalls,
-		"usage", result.Usage != nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	compacted := false
-	if result.Status == contracts.TurnNeedsCompaction {
-		s.l.InfoContext(ctx, "automatic compaction requested", "session_id", s.sessionID)
-		if result.Usage != nil {
-			s.l.Warn("automatic compaction triggered",
-				"prompt_tokens", result.Usage.PromptTokens,
-				"completion_tokens", result.Usage.CompletionTokens,
-				"total_tokens", result.Usage.TotalTokens,
-				"context_window", s.model.GetModelSpecs().Model().MaxContextLength,
-				"threshold_percent", 80,
-			)
-		}
-		prevCheckpoint, err := s.timeline.LastCompactionSummary()
-		if err != nil {
-			s.l.Error("read last compaction from timeline", "error", err)
-			return nil, err
-		}
-		toCompact, retained := prompts.PlanCompaction(s.history, true)
-		if len(toCompact) == 0 {
-			s.l.Warn("automatic compaction requested but nothing outside the retained tail")
-			return nil, nil
-		}
-		checklist := s.taskChecklist.Snapshot()
-		checklistContext, err := taskChecklistContextForCompaction(checklist)
-		if err != nil {
-			return nil, err
-		}
-		systemPrompt, history, err := prompts.CompactionInput(toCompact, prevCheckpoint, checklistContext)
-		if err != nil {
-			s.l.Error("automatic compaction input failed", "error", err)
-			return nil, err
-		}
-		if err := s.compactChat(ctx, systemPrompt, history, retained, checklist, checklistContext); err != nil {
-			s.l.Error("automatic compaction failed", "error", err)
-			return nil, err
-		}
-		compacted = true
-		result, err = s.runAgent(ctx, agentLoop)
-		if err != nil {
-			return nil, err
-		}
-		if result.Status == contracts.TurnNeedsCompaction {
-			s.l.Warn("automatic compaction requested again; stopping after one continuation", "session_id", s.sessionID)
-		}
-	}
-	s.meta.UpdatedAt = time.Now().UTC()
-	if err := s.store.SaveMeta(s.meta); err != nil {
-		s.l.Error("persist session metadata", "session_id", s.sessionID, "error", err)
-	}
-
-	contextTokens := uint64(0)
-	if !compacted && result.Usage != nil {
-		contextTokens = result.Usage.TotalTokens
-		if contextTokens <= 0 {
-			contextTokens = result.Usage.PromptTokens + result.Usage.CompletionTokens
-		}
-	}
-	reply := ""
-	reasoning := ""
-	if result.Status != contracts.TurnCanceled {
-		reply = lastAssistantText(result.Messages)
-		reasoning = lastAssistantReasoning(result.Messages)
-	}
-	return &contracts.ChatResult{
-		SessionID:        s.sessionID,
-		Status:           result.Status,
-		Reply:            reply,
-		ReasoningContent: reasoning,
-		Pending:          nil, // populated by the session approval coordinator
-		Usage:            result.Usage,
-		ContextTokens:    contextTokens,
-	}, nil
-}
-
-// runAgent owns one complete agent/comms invocation and persists the messages
-// it produced before returning control to Chat.
-func (s *InfaiAgentSession) runAgent(ctx context.Context, agentLoop *agent.Agent) (contracts.TurnResult, error) {
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	commErr := make(chan error, 1)
-	go func() {
-		commErr <- s.handleAgentComms(runCtx)
-	}()
-
-	agentErr := make(chan error, 1)
-	var result contracts.TurnResult
-	var err error
-	go func() {
-		result, err = agentLoop.Invoke(runCtx, s.history)
-		agentErr <- err
-	}()
-
-	var commRunErr error
-	select {
-	case err = <-agentErr:
-		cancel()
-		commRunErr = <-commErr
-	case commRunErr = <-commErr:
-		cancel()
-		err = <-agentErr
-	}
-	if err == nil && commRunErr != nil && !errors.Is(commRunErr, context.Canceled) {
-		err = commRunErr
-	}
-
-	if result.Messages != nil {
-		s.history = result.Messages
-		if persistErr := s.persistMessagesLocked(); persistErr != nil {
-			return result, persistErr
-		}
-	}
-	return result, err
-}
-
-func (s *InfaiAgentSession) rebuildHistoryLocked(summary string, retained []contracts.ChatMessage, checklistContext string) error {
-	contextMessage, err := continuationContext(summary, checklistContext)
-	if err != nil {
+	if err := s.agent.Enqueue(ctx, contracts.NewUserMessageWithInput(input)); err != nil {
 		return err
 	}
-	history := []contracts.ChatMessage{contracts.NewUserMessage(contextMessage)}
-	history = append(history, retained...)
-	s.history = history
-	s.persisted = len(s.history)
-	s.l.Info("session context compacted", "session_id", s.sessionID, "context_window", s.model.GetModelSpecs().Model().MaxContextLength, "retained", len(retained))
 	return nil
 }
 
-// Compact is kept as an alias for CompactChat.
-func (s *InfaiAgentSession) Compact(ctx context.Context) error {
-	return s.CompactChat(ctx)
-}
-
-func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
-	if usage == nil || s.model.GetModelSpecs().Model().MaxContextLength <= 0 {
-		s.l.Debug("automatic compaction not evaluated",
-			"has_usage", usage != nil,
-			"context_window", s.model.GetModelSpecs().Model().MaxContextLength,
-		)
-		return false
-	}
-	used := usage.TotalTokens
-	if used <= 0 {
-		used = usage.PromptTokens + usage.CompletionTokens
-	}
-	threshold := float64(s.model.GetModelSpecs().Model().MaxContextLength) * float64(0.8)
-	shouldCompact := float64(used) >= threshold
-	s.l.Debug("automatic compaction evaluated",
-		"used_tokens", used,
-		"prompt_tokens", usage.PromptTokens,
-		"completion_tokens", usage.CompletionTokens,
-		"total_tokens", usage.TotalTokens,
-		"context_window", s.model.GetModelSpecs().Model().MaxContextLength,
-		"threshold_tokens", threshold,
-		"threshold_percent", 80,
-		"should_compact", shouldCompact,
-	)
-	return shouldCompact
-}
-
-func (s *InfaiAgentSession) compactChat(ctx context.Context, systemPrompt string, history []contracts.ChatMessage, retained []contracts.ChatMessage, checklist contracts.TaskChecklistState, checklistContext string) error {
-	s.l.Debug("compaction started", "input_messages", len(history), "retained", len(retained))
-	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacting"})
-	result, err := s.summarize(ctx, systemPrompt, history)
-	if err != nil {
-		s.l.Error("compaction summary generation failed", "error", err)
-		return err
-	}
-	if result.Summary == "" {
-		err := errors.New("session: compaction produced an empty summary")
-		s.l.Error("compaction summary is empty", "error", err)
-		return err
-	}
-	if _, err := s.timeline.AppendToHead(store.Record{
-		Kind: store.KindCompaction, Timestamp: time.Now().UTC(),
-		Compaction: &store.CompactionRecord{Summary: result.Summary, TaskChecklist: &checklist},
-	}); err != nil {
-		s.l.Error("persist compaction event failed", "error", err)
-		return err
-	}
-	if err := s.rebuildHistoryLocked(result.Summary, retained, checklistContext); err != nil {
-		return fmt.Errorf("rebuild compacted session history: %w", err)
-	}
-	s.l.InfoContext(ctx, "compaction completed", "summary_chars", len(result.Summary))
-	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaCompactionSummary, Text: result.Summary})
-	s.events.Publish(store.Record{Kind: store.KindDelta, Timestamp: time.Now().UTC(), DeltaKind: contracts.DeltaStatus, Text: "compacted"})
-	return nil
-}
-
-func (s *InfaiAgentSession) summarize(ctx context.Context, systemPrompt string, history []contracts.ChatMessage) (contracts.CompactionResult, error) {
-	id, err := uuid.NewV7()
-	if err != nil {
-		return contracts.CompactionResult{}, err
-	}
-	compactionAgent, err := s.registerTransientAgent(id, systemPrompt)
-	if err != nil {
-		return contracts.CompactionResult{}, err
-	}
-	defer s.removeAgent(id)
-
-	compactionAgent.SetModel(s.model)
-	result, err := compactionAgent.Invoke(ctx, history)
-	if err != nil {
-		return contracts.CompactionResult{}, err
-	}
-	return contracts.CompactionResult{Summary: lastAssistantText(result.Messages)}, nil
-}
-
-func (s *InfaiAgentSession) Close() {
+func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision contracts.ApprovalConclusion) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.closed = true
-	if s.events != nil {
-		s.events.Close()
-	}
-	if s.agentComms != nil {
-		s.agentComms.Close()
-	}
-	if s.timeline != nil {
-		_ = s.timeline.Close()
-	}
-}
 
-func (s *InfaiAgentSession) handleAgentComms(ctx context.Context) error {
-	for {
-		msg, err := s.agentComms.ReceiveFromAgents(ctx)
-		if err != nil {
-			return err
-		}
-
-		switch msg.Kind {
-		case comms.AgentCommTool:
-			if err := s.toolCallDispatcher(ctx, msg); err != nil {
-				return err
-			}
-		case comms.AgentCommSubagent:
-			if err := s.handleSubagentComm(ctx, msg); err != nil {
-				return err
-			}
-		}
-	}
-}
-
-func (s *InfaiAgentSession) toolCallDispatcher(ctx context.Context, msg comms.AgentComm) error {
-	var calls []contracts.ToolCall
-	if err := json.Unmarshal(msg.Payload, &calls); err != nil {
-		return err
-	}
-
-	toolMessages := make([]contracts.ChatMessage, 0, len(calls))
-	for _, call := range calls {
-		toolType := contracts.ToolType(call.Function.Name)
-		policy := s.auditorPolicy.Check(toolType)
-
-		s.l.DebugContext(ctx, "tool call received",
-			"agent_id", msg.From,
-			"call_id", call.ID,
-			"tool", call.Function.Name,
-			"policy", policy.String(),
-		)
-
-		status := contracts.ToolExecutionSuccess
-		var content string
-
-		func() {
-			var err error
-
-			s.events.Publish(store.Record{
-				Kind:      store.KindDelta,
-				Timestamp: time.Now().UTC(),
-				DeltaKind: contracts.DeltaToolCall,
-				Text:      toolCallDisplay(call),
-			})
-
-			switch policy {
-			case auditor.DenyPolicy:
-				status = contracts.ToolExecutionDenied
-				content = "tool execution was denied by session policy"
-				s.events.Publish(store.Record{
-					Kind:      store.KindDelta,
-					Timestamp: time.Now().UTC(),
-					DeltaKind: contracts.DeltaToolResult,
-					Text:      toolResultEventText(call.Function.Name, status, content),
-				})
-				return
-			case auditor.HumanPolicy:
-				if err := s.executeAfterApproval(ctx, msg.From, call); err != nil {
-					if errors.Is(err, harnessErr.ErrApprovalDenied) {
-						status = contracts.ToolExecutionDenied
-					} else if errors.Is(err, context.Canceled) {
-						status = contracts.ToolExecutionError
-						content = "tool execution was canceled by the user before completion"
-					} else {
-						status = contracts.ToolExecutionError
-					}
-					if content == "" {
-						content = err.Error()
-					}
-					s.events.Publish(store.Record{
-						Kind:      store.KindDelta,
-						Timestamp: time.Now().UTC(),
-						DeltaKind: contracts.DeltaToolResult,
-						Text:      toolResultEventText(call.Function.Name, status, content),
-					})
-					return
-				}
-			}
-
-			toolCtx := memory.WithTaskChecklist(
-				memory.WithSkillRegistry(
-					actuators.WithFileManager(
-						ctx, s.fileManager,
-					), s.skillRegistry,
-				), s.taskChecklist,
-			)
-
-			if memory.IsMemoryToolCall(toolType) {
-				content, err = memory.ExecuteMemoryToolCall(toolCtx, call)
-				if err != nil {
-					status = contracts.ToolExecutionError
-					content = err.Error()
-					s.events.Publish(store.Record{
-						Kind:      store.KindDelta,
-						Timestamp: time.Now().UTC(),
-						DeltaKind: contracts.DeltaToolResult,
-						Text:      toolResultEventText(call.Function.Name, status, content),
-					})
-					return
-				}
-				if contracts.IsToolTypeSkill(toolType) {
-					s.events.Publish(store.Record{
-						Kind:      store.KindDelta,
-						Timestamp: time.Now().UTC(),
-						DeltaKind: contracts.DeltaSkillLoad,
-						Text:      memory.ReadSkillNameFromCall(call),
-					})
-				} else if toolType == contracts.TaskChecklistTool {
-					s.events.Publish(store.Record{
-						Kind:      store.KindDelta,
-						Timestamp: time.Now().UTC(),
-						DeltaKind: contracts.DeltaTaskChecklist,
-						Text:      content,
-					})
-				} else {
-					s.events.Publish(store.Record{
-						Kind:      store.KindDelta,
-						Timestamp: time.Now().UTC(),
-						DeltaKind: contracts.DeltaToolResult,
-						Text:      fmt.Sprintf("%s [%s]", call.Function.Name, status),
-					})
-				}
-				return
-			}
-
-			content, err = actuators.ExecuteToolCall(toolCtx, call)
-			if err != nil {
-				status = contracts.ToolExecutionError
-				content = err.Error()
-			}
-			s.events.Publish(store.Record{
-				Kind:      store.KindDelta,
-				Timestamp: time.Now().UTC(),
-				DeltaKind: contracts.DeltaToolResult,
-				Text:      toolResultEventText(call.Function.Name, status, content),
-			})
-		}()
-
-		s.l.DebugContext(ctx, "tool call completed",
-			"agent_id", msg.From,
-			"call_id", call.ID,
-			"tool", call.Function.Name,
-			"status", status,
-		)
-
-		toolMessages = append(toolMessages, contracts.NewToolMessage(call.ID, content, status))
-	}
-	payload, err := json.Marshal(toolMessages)
-	if err != nil {
-		return err
-	}
-	return s.agentComms.SendToAgent(ctx, msg.From, comms.AgentComm{
-		ID:      uuid.New(),
-		ReplyTo: msg.ID,
-		From:    s.sessionID,
-		To:      msg.From,
-		Kind:    comms.AgentCommMessage,
-		Payload: payload,
-	})
-}
-
-func toolResultEventText(name string, status contracts.ToolExecutionStatus, content string) string {
-	result := fmt.Sprintf("%s [%s]", name, status)
-	if status == contracts.ToolExecutionSuccess && name == string(contracts.BashTool) && content != "" {
-		result += "\n" + content
-	} else if status != contracts.ToolExecutionSuccess && content != "" {
-		result += ": " + content
-	}
-	return result
-}
-
-func toolCallDisplay(call contracts.ToolCall) string {
-	if call.Function.Arguments == "" {
-		return call.Function.Name
-	}
-	return fmt.Sprintf("%s %s", call.Function.Name, call.Function.Arguments)
-}
-
-func (s *InfaiAgentSession) persistTimelineUpdate(update contracts.TimelineUpdate) error {
-	if update.Compaction != nil {
-		if _, err := s.timeline.AppendToHead(store.Record{
-			Kind:      store.KindCompaction,
-			Timestamp: time.Now().UTC(),
-			Compaction: &store.CompactionRecord{
-				Summary:       update.Compaction.Summary,
-				TaskChecklist: &update.Compaction.TaskChecklist,
-			},
-		}); err != nil {
-			return fmt.Errorf("persist compaction: %w", err)
-		}
-
-		s.mu.Lock()
-		s.activeTimeline = append([]contracts.ChatMessage(nil), update.Compaction.History...)
-		s.turnProgress = contracts.TurnProgress{}
+	switch s.status {
+	case contracts.SessionCompacting:
 		s.mu.Unlock()
-
-		return nil
-	}
-
-	if len(update.Messages) == 0 {
-		return nil
-	}
-
-	select {
-	case decision := <-pending.decision:
-		s.events.Publish(store.Record{
-			Kind:      store.KindApprovalResolved,
-			Timestamp: time.Now().UTC(),
-			Approval: &store.ApprovalEvent{
-				ID:          request.ID,
-				SessionID:   request.SessionID,
-				AgentID:     request.AgentID,
-				Fingerprint: request.Fingerprint,
-				Decision:    string(decision.Decision),
-				Reason:      decision.Reason,
-			},
-		})
-		s.l.InfoContext(ctx, "tool approval resolved",
-			"approval_id", request.ID,
-			"decision", decision.Decision,
-		)
-		if decision.Decision != contracts.ApprovalApprove {
-			return harnessErr.ErrApprovalDenied
+		return errors.New("session is compacting")
+	case contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone:
+		fatalErr := s.fatalErr
+		s.mu.Unlock()
+		if fatalErr != nil {
+			return fmt.Errorf("session is concluded: %w", fatalErr)
 		}
-	case <-ctx.Done():
-		s.approvalMu.Lock()
-		if s.pendingApproval == pending {
-			s.pendingApproval = nil
+		return errors.New("session is concluded")
+
+	default:
+		if s.pendingApproval == nil || s.pendingApproval.request.ID != id {
+			s.mu.Unlock()
+			return errors.New("approval not found or already resolved")
 		}
-		s.approvalMu.Unlock()
-		s.events.Publish(store.Record{
-			Kind:      store.KindApprovalCanceled,
-			Timestamp: time.Now().UTC(),
-			Approval: &store.ApprovalEvent{
-				ID:          request.ID,
-				SessionID:   request.SessionID,
-				AgentID:     request.AgentID,
-				Fingerprint: request.Fingerprint,
-			},
-		})
-		return ctx.Err()
-	}
 
-	return nil
-}
+		if subtle.ConstantTimeCompare([]byte(s.pendingApproval.request.Fingerprint), []byte(decision.Fingerprint)) != 1 {
+			s.mu.Unlock()
+			return errors.New("invalid approval fingerprint")
+		}
 
-func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision contracts.ApprovalDecisionFromClient) error {
-	s.approvalMu.Lock()
-	defer s.approvalMu.Unlock()
-
-	if s.pendingApproval == nil || s.pendingApproval.request.ID != id {
-		return errors.New("approval not found or already resolved")
-	}
-	if subtle.ConstantTimeCompare(
-		[]byte(s.pendingApproval.request.Fingerprint),
-		[]byte(decision.Fingerprint),
-	) != 1 {
-		return errors.New("invalid approval fingerprint")
-	}
-	if decision.Decision != contracts.ApprovalApprove && decision.Decision != contracts.ApprovalDeny && decision.Decision != contracts.ApprovalDenyWithReason {
-		return errors.New("invalid approval decision")
+		if decision.Decision != contracts.ApprovalApprove && decision.Decision != contracts.ApprovalDeny && decision.Decision != contracts.ApprovalDenyWithReason {
+			s.mu.Unlock()
+			return errors.New("invalid approval decision")
+		}
 	}
 
 	pending := s.pendingApproval
 	s.pendingApproval = nil
+	request := pending.request
+	s.mu.Unlock()
+
+	// The decision is validated and released here; moving the session's status
+	// is the hub's decision, taken from the event.
+	s.publish(contracts.EventStream{Kind: contracts.EventApprovalResolved, Timestamp: time.Now().UTC(), HITLCall: &request, HITLResult: &decision})
 	pending.decision <- decision
+
 	return nil
 }
 
-func (s *InfaiAgentSession) handleSubagentComm(context.Context, comms.AgentComm) error {
-	panic("not implemented yet")
-}
+func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
+	for {
+		var event contracts.EventStream
 
-func (s *InfaiAgentSession) registerNewParentAgent(systemPrompt string) (*agent.Agent, error) {
-	id, err := uuid.NewV7()
-	if err != nil {
-		return nil, err
-	}
+		select {
+		case <-ctx.Done():
+			return
+		case event = <-s.eventBus:
+		}
 
-	s.agentMapping[id] = ds.NewSet[uuid.UUID]()
-	if err := s.agentComms.RegisterAgent(id); err != nil {
-		return nil, err
-	}
-	s.Agents[id], err = agent.NewAgent(
-		id,
-		systemPrompt,
-		agent.WithMaxTurns(100),
-		agent.WithTools(s.availableTools...),
-		agent.WithIAC(s.agentComms.IACChannel(id)),
-		agent.WithCompactionCheck(s.shouldCompact),
-	)
-	if err != nil {
-		return nil, err
-	}
-	s.Agents[id].SetModel(s.model)
-	return s.Agents[id], nil
-}
+		switch event.Kind {
+		case contracts.DeltaContent,
+			contracts.DeltaReasoning,
+			contracts.EventProviderEvent,
+			contracts.EventToolCall,
+			contracts.EventToolResult,
+			contracts.EventToolTaskCheckList,
+			contracts.EventSkillLoad,
+			contracts.EventMessageFromAgentInbox,
+			contracts.NotifyAgentUsage,
+			contracts.EventApprovalCanceled:
+			s.mu.Lock()
+			s.inFlight = append(s.inFlight, event)
+			s.notifySubscribers(event)
+			s.mu.Unlock()
 
-func (s *InfaiAgentSession) registerTransientAgent(id uuid.UUID, systemPrompt string) (*agent.Agent, error) {
-	transient, err := agent.NewAgent(id, systemPrompt, agent.WithMaxTurns(1), agent.WithIAC(s.agentComms.IACChannel(id)))
-	if err != nil {
-		return nil, err
-	}
-	s.agentMapping[id] = ds.NewSet[uuid.UUID]()
-	if err := s.agentComms.RegisterAgent(id); err != nil {
-		return nil, err
-	}
-	s.Agents[id] = transient
-	return transient, nil
-}
+		case contracts.EventSessionTransitionState:
+			// The agent reports the eventStatus of its own loop. A runnable report
+			// must not end an operation the session is running: the agent
+			// publishes idle just before it parks, so that report can arrive
+			// after the session has already moved on.
+			eventStatus := contracts.SessionStatus(*event.Content)
 
-func (s *InfaiAgentSession) removeAgent(id uuid.UUID) {
-	delete(s.Agents, id)
-	delete(s.agentMapping, id)
-	s.agentComms.UnregisterAgent(id)
-}
+			s.mu.Lock()
+			if eventStatus == contracts.SessionIdle || eventStatus == contracts.SessionBusy {
+				if s.status == contracts.SessionIdle || s.status == contracts.SessionBusy {
+					s.status = eventStatus
+				}
+			} else {
+				s.status = eventStatus
+			}
+			s.inFlight = append(s.inFlight, event)
+			s.notifySubscribers(event)
+			s.mu.Unlock()
 
-// lastAssistantText extracts the agent's answer from the full history. It
-// lives here (the API boundary) because the wire format wants a plain reply
-// string — the agent itself only returns history.
-func lastAssistantText(messages []contracts.ChatMessage) string {
-	for _, message := range slices.Backward(messages) {
-		if message.Role == "assistant" {
-			return message.Text()
+		case contracts.EventManualCompactionTriggered,
+			contracts.EventAutoCompactionTriggered:
+			s.mu.Lock()
+			s.status = contracts.SessionCompacting
+			s.inFlight = append(s.inFlight, event)
+			s.notifySubscribers(event)
+			s.mu.Unlock()
+
+		case contracts.DeltaCompactionSummary:
+			// The summary is published once the replacement history is
+			// installed, so the session is runnable again at this point. An
+			// automatic compaction is followed by the agent's next busy report,
+			// which is what returns it to a running turn.
+			s.mu.Lock()
+			s.status = contracts.SessionIdle
+			s.inFlight = append(s.inFlight, event)
+			s.notifySubscribers(event)
+			s.mu.Unlock()
+
+		case contracts.EventApprovalRequested:
+			// The approval request itself is in the joined view; the status says
+			// the session is not runnable until it is resolved.
+			s.mu.Lock()
+			s.status = contracts.SessionWaitingApproval
+			s.inFlight = append(s.inFlight, event)
+			s.notifySubscribers(event)
+			s.mu.Unlock()
+
+		case contracts.EventApprovalResolved:
+			// Resolving an approval only releases the waiting tool call. The
+			// agent is the one that reports the session busy again, so that is
+			// the status the resolution moves to.
+			s.mu.Lock()
+			s.status = contracts.SessionBusy
+			s.inFlight = append(s.inFlight, event)
+			s.notifySubscribers(event)
+			s.mu.Unlock()
+
+		case contracts.EventSessionFatal:
+			reason := "session concluded"
+			if event.Content != nil {
+				reason = *event.Content
+			}
+			cause := errors.New(reason)
+
+			// The reason reaches the clients before the context dies, because
+			// the cancellation is what ends this loop.
+			s.mu.Lock()
+			s.fatalErr = cause
+			s.status = contracts.SessionTombstone
+			s.inFlight = append(s.inFlight, event)
+			s.notifySubscribers(event)
+			s.mu.Unlock()
+			s.cancel(cause)
+
+		default:
+			s.l.Warn("session received an event no case handles so dropping it", "session_id", s.meta.ID, "kind", event.Kind)
 		}
 	}
-	return ""
 }
 
-// lastAssistantReasoning extracts the reasoning text of the final assistant
-// message, or "" when the provider returned none.
-func lastAssistantReasoning(messages []contracts.ChatMessage) string {
-	for _, m := range slices.Backward(messages) {
-		if m.Role == "assistant" && m.ReasoningContent != "" {
-			return m.ReasoningContent
+// commitMessages durably appends one batch of agent messages and only then
+// exposes them in the session's committed history. The agent loop calls it
+// through its commit callback and blocks until it returns. A durable write
+// failure is fatal to the session, so the write path owns that transition.
+func (s *InfaiAgentSession) commitMessages(ctx context.Context, messages []contracts.ChatMessage) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	branchParent := s.pendingBranchParent
+	s.mu.Unlock()
+
+	for i := range messages {
+		message := messages[i]
+		record := store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &message}
+
+		var err error
+		// The first message after a branch selection re-parents itself onto the
+		// selected event; every later message walks forward from it.
+		if i == 0 && branchParent != uuid.Nil {
+			_, err = s.timeline.BranchFromEventID(record, branchParent)
+		} else {
+			_, err = s.timeline.AppendToHead(record)
+		}
+		if err != nil {
+			commitErr := fmt.Errorf("persist message: %w", err)
+			s.l.ErrorContext(ctx, "session could not persist its timeline", "session_id", s.meta.ID, "error", err)
+
+			reason := commitErr.Error()
+			s.publish(contracts.EventStream{Kind: contracts.EventSessionFatal, Timestamp: time.Now().UTC(), Content: &reason})
+
+			return commitErr
 		}
 	}
-	return ""
+
+	s.mu.Lock()
+	s.activeTimeline = append(s.activeTimeline, messages...)
+	if branchParent != uuid.Nil && s.pendingBranchParent == branchParent {
+		s.pendingBranchParent = uuid.Nil
+	}
+	// Everything a client has been sent up to here is durable now and part of
+	// activeTimeline, so the in-flight log starts empty and a client that joins
+	// later reads the same content out of history instead.
+	s.inFlight = s.inFlight[:0]
+	s.meta.UpdatedAt = time.Now().UTC()
+	meta := s.meta
+	s.mu.Unlock()
+
+	if err := s.store.SaveMeta(meta); err != nil {
+		s.l.Error("persist session metadata", "session_id", meta.ID, "error", err)
+	}
+	return nil
+}
+
+// commitCompaction durably records a checkpoint and replaces the committed
+// history with the continuation the agent should continue from.
+func (s *InfaiAgentSession) commitCompaction(commit compactionCommit) error {
+	if _, err := s.timeline.AppendToHead(store.Record{
+		Kind:      store.KindCompaction,
+		Timestamp: time.Now().UTC(),
+		Compaction: &store.CompactionRecord{
+			Summary:       commit.Summary,
+			TaskChecklist: &commit.TaskChecklist,
+		},
+	}); err != nil {
+		return fmt.Errorf("persist compaction: %w", err)
+	}
+
+	s.mu.Lock()
+	s.activeTimeline = append([]contracts.ChatMessage(nil), commit.History...)
+	s.inFlight = s.inFlight[:0]
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *InfaiAgentSession) Close() {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		// Teardown leaves the concluded status readable, so a client that asks
+		// after the session is gone still learns it is gone. The hub is already
+		// stopping, so this is the one status the hub does not write.
+		s.status = contracts.SessionTombstone
+		s.mu.Unlock()
+		s.cancel(harnessErr.ErrSessionClosed)
+		s.wg.Wait()
+
+		s.mu.Lock()
+		for sub := range s.subscribers {
+			delete(s.subscribers, sub)
+			close(sub.events)
+		}
+		s.mu.Unlock()
+		if s.timeline != nil {
+			_ = s.timeline.Close()
+		}
+		close(s.closeDone)
+	})
+	<-s.closeDone
 }
 
 func TimelineHistory(timeline *store.Timeline, events []store.Event) ([]contracts.ChatMessage, error) {
-	// Timeline loads events lazily so inspection stays cheap. Resuming a
-	// session is the boundary where blob-backed records must become messages.
-	records, err := TimelineRecords(timeline, events)
+	records, err := CompleteResolveRawTimelineEventsToRecords(timeline, events)
 	if err != nil {
 		return nil, err
 	}
@@ -1093,36 +653,34 @@ func TimelineHistory(timeline *store.Timeline, events []store.Event) ([]contract
 		switch record.Kind {
 		case store.KindMessage:
 			if record.Message != nil {
-				if record.Message.Role == "system" {
-					continue
-				}
 				history = append(history, *record.Message)
 			}
 		case store.KindCompaction:
-			if record.Compaction != nil {
-				checklist := contracts.TaskChecklistState{Items: []contracts.TaskChecklistItem{}}
-				if record.Compaction.TaskChecklist != nil {
-					checklist = *record.Compaction.TaskChecklist
-				}
-				if err := memory.ValidateTaskChecklistState(checklist); err != nil {
-					return nil, fmt.Errorf("invalid compacted task checklist: %w", err)
-				}
-				checklistContext, err := taskChecklistContextForCompaction(checklist)
-				if err != nil {
-					return nil, err
-				}
-				content, err := continuationContext(record.Compaction.Summary, checklistContext)
-				if err != nil {
-					return nil, err
-				}
-				history = append(history, contracts.NewUserMessage(content))
+			if record.Compaction == nil {
+				continue
 			}
+			checklist := contracts.TaskChecklistState{Items: []contracts.TaskChecklistItem{}}
+			if record.Compaction.TaskChecklist != nil {
+				checklist = *record.Compaction.TaskChecklist
+			}
+			if err := memory.ValidateTaskChecklistState(checklist); err != nil {
+				return nil, fmt.Errorf("invalid compacted task checklist: %w", err)
+			}
+			checklistContext, err := taskChecklistContextForCompaction(checklist)
+			if err != nil {
+				return nil, err
+			}
+			content, err := continuationContext(record.Compaction.Summary, checklistContext)
+			if err != nil {
+				return nil, err
+			}
+			history = append(history, contracts.NewUserMessage(content))
 		}
 	}
 	return history, nil
 }
 
-func TimelineRecords(timeline *store.Timeline, events []store.Event) ([]store.Record, error) {
+func CompleteResolveRawTimelineEventsToRecords(timeline *store.Timeline, events []store.Event) ([]store.Record, error) {
 	records := make([]store.Record, 0, len(events))
 	for _, event := range events {
 		record := event.Record
@@ -1136,109 +694,6 @@ func TimelineRecords(timeline *store.Timeline, events []store.Event) ([]store.Re
 		records = append(records, *record)
 	}
 	return records, nil
-}
-
-func getLatestTaskChecklist(timeline *store.Timeline, head uuid.UUID) (contracts.TaskChecklistState, error) {
-	state := contracts.TaskChecklistState{Items: []contracts.TaskChecklistItem{}}
-	if head == uuid.Nil {
-		return state, nil
-	}
-	events, err := timeline.LoadActiveContextAt(head)
-	if err != nil {
-		return state, err
-	}
-	records, err := TimelineRecords(timeline, events)
-	if err != nil {
-		return state, err
-	}
-
-	toolResults := make(map[string]string)
-	for _, record := range slices.Backward(records) {
-		switch record.Kind {
-		case store.KindMessage:
-			if record.Message == nil {
-				continue
-			}
-			message := record.Message
-			if message.Role == "tool" {
-				if message.Status != contracts.ToolExecutionSuccess {
-					continue
-				}
-				toolResults[message.ToolCallID] = message.Text()
-				continue
-			}
-			if message.Role != "assistant" {
-				continue
-			}
-			for _, call := range slices.Backward(message.ToolCalls) {
-
-				output, ok := toolResults[call.ID]
-				if !ok {
-					continue
-				}
-				delete(toolResults, call.ID)
-				if call.Function.Name != contracts.TaskChecklistTool {
-					continue
-				}
-				checklist, err := memory.DecodeTaskChecklistState(output)
-				if err == nil {
-					return checklist, nil
-				}
-			}
-
-		case store.KindCompaction:
-			if record.Compaction == nil || record.Compaction.TaskChecklist == nil {
-				return state, nil
-			}
-			if err := memory.ValidateTaskChecklistState(*record.Compaction.TaskChecklist); err != nil {
-				return state, fmt.Errorf("invalid compacted task checklist: %w", err)
-			}
-			return *record.Compaction.TaskChecklist, nil
-		}
-	}
-
-	return state, nil
-}
-
-func taskChecklistContextForCompaction(state contracts.TaskChecklistState) (string, error) {
-	data, err := json.Marshal(state)
-	if err != nil {
-		return "", fmt.Errorf("encode task checklist context: %w", err)
-	}
-	var escaped strings.Builder
-	if err := xml.EscapeText(&escaped, data); err != nil {
-		return "", fmt.Errorf("escape task checklist context: %w", err)
-	}
-	tpl, err := template.New("task_checklist_context").Parse(`<task_checklist source="harness">
-{{.}}
-</task_checklist>`)
-	if err != nil {
-		return "", fmt.Errorf("parse task checklist context template: %w", err)
-	}
-	var output strings.Builder
-	if err := tpl.Execute(&output, escaped.String()); err != nil {
-		return "", fmt.Errorf("render task checklist context: %w", err)
-	}
-	return output.String(), nil
-}
-
-func continuationContext(summary, checklist string) (string, error) {
-	tpl, err := template.New("continuation_context").Parse(`<context-summary>
-{{.Summary}}
-</context-summary>
-
-{{.Checklist}}`)
-	if err != nil {
-		return "", fmt.Errorf("parse continuation context template: %w", err)
-	}
-	var output strings.Builder
-	if err := tpl.Execute(&output, struct {
-		Summary   string
-		Checklist string
-	}{summary, checklist}); err != nil {
-		return "", fmt.Errorf("render continuation context: %w", err)
-	}
-	return output.String(), nil
 }
 
 func sessionNameFromPrompt(prompt string) string {
@@ -1259,84 +714,4 @@ func sessionNameFromPrompt(prompt string) string {
 		}
 	}
 	return strings.TrimSpace(string(runes[:cut])) + "…"
-}
-// These handle the state of the agent notify and also for sending to the different Subscribers of the TUI like thing.
-// Central Hub where broadcast of client facing events and platform session level is handled
-func (s *InfaiAgentSession) HandleAgentLoopEvents(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event := <-s.sessionEventStream:
-			s.l.DebugContext(
-				context.TODO(), "loop event stream recieved",
-				"kind", event.Kind,
-				"ts", event.Timestamp,
-			)
-			switch event.Kind {
-			case contracts.DeltaContent,
-				contracts.DeltaReasoning,
-				contracts.DeltaStatus,
-				contracts.DeltaCompactionSummary,
-				contracts.DeltaToolCall,
-				contracts.DeltaToolResult,
-				contracts.DeltaSkillLoad,
-				contracts.DeltaTaskChecklist,
-				contracts.DeltaUserPrompt:
-				// we need a plumbing way
-				// we can send it to the events of whatever we need to.
-			case contracts.NotifyAgentSessionStatus:
-				// this needs to send the event about that went changed.
-
-			case contracts.NotifyAgentModelError,
-				contracts.NotifyAgentReachedMaxQ,
-				contracts.NotifyAgentUsage:
-
-			case contracts.NotifyAgentNeedsAutoCompaction:
-				// We need to make sure no new userPrompt get into the agentLoop aka a freeze!
-			case contracts.NotifyAgentMissingHistory:
-				s.l.WarnContext(
-					context.TODO(), "session history is missing",
-					"session_id", s.meta.ID,
-					"content", event.Content,
-				)
-			}
-		}
-	}
-}
-
-func (s *InfaiAgentSession) HandleTimelineAOL(
-	engineCtx context.Context,
-	recieveTimelineUpdates <-chan []contracts.ChatMessage,
-) {
-	for {
-		select {
-		case <-engineCtx.Done():
-			// we need to close stuff.
-			return
-		case msgs := <-recieveTimelineUpdates:
-			s.mu.Lock()
-
-			s.meta.UpdatedAt = time.Now().UTC()
-			if err := s.store.SaveMeta(s.meta); err != nil {
-				s.l.Error("persist session metadata", "session_id", s.meta.ID, "error", err)
-			}
-			s.activeTimeline = append(s.activeTimeline, msgs...)
-			for i := s.persisted; i < len(s.activeTimeline); i++ {
-				if _, err := s.timeline.AppendToHead(store.Record{
-					Kind:      store.KindMessage,
-					Timestamp: time.Now().UTC(),
-					Message:   &s.activeTimeline[i],
-				}); err != nil {
-					s.mu.Unlock()
-
-					s.l.Error("persist message", "session_id", s.meta.ID, "error", err)
-					return // FIXME: We need to make it visible to stop the process aka stop the session Completely?????????????
-				}
-			}
-			s.persisted = len(s.activeTimeline)
-
-			s.mu.Unlock()
-		}
-	}
 }

@@ -69,24 +69,47 @@ type chatModel struct {
 	commandMenu      bool
 	commandSelection int
 
-	working      bool
-	workBegan    time.Time
-	workStatus   string
-	cancelArmed  bool
-	cancelArmID  uint64
-	cancelStatus string
-	turnCancel   context.CancelFunc
-	stream       chan tea.Msg
-	initCmd      tea.Cmd
-	streaming    bool
-	streamingAt  int
-	streamTick   bool
-	streamTickID uint64
-	streamDirty  bool
+	working           bool
+	workBegan         time.Time
+	workStatus        string
+	cancelArmed       bool
+	cancelArmID       uint64
+	cancelStatus      string
+	turnCancel        context.CancelFunc
+	stream            chan tea.Msg
+	sessionCancel     context.CancelFunc
+	sessionStream     chan tea.Msg
+	sessionObserverID uint64
+	initCmd           tea.Cmd
+	streaming         bool
+	streamingAt       int
+	streamTick        bool
+	streamTickID      uint64
+	streamDirty       bool
 }
 
+type sessionViewMsg struct {
+	sessionID  uuid.UUID
+	observerID uint64
+	view       glue.SessionView
+}
+
+type sessionEventMsg struct {
+	sessionID  uuid.UUID
+	observerID uint64
+	event      contracts.EventStream
+}
+
+type sessionJoinDoneMsg struct {
+	sessionID  uuid.UUID
+	observerID uint64
+	err        error
+}
+
+type messageSentMsg struct{ err error }
+
 type streamDeltaMsg struct {
-	kind contracts.DeltaKind
+	kind contracts.EventStreamKind
 	text string
 }
 
@@ -209,15 +232,53 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.reflow(true)
 		m.streamDirty = false
 		return m, nil
+	case sessionViewMsg:
+		if msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
+			return m, nil
+		}
+		m.applySessionView(msg.view)
+		m.refreshTranscript(true)
+		m.reflow(false)
+		return m, waitStream(m.ctx, m.sessionStream)
+	case sessionEventMsg:
+		if msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
+			return m, nil
+		}
+		m.applySessionEvent(msg.event)
+		m.refreshTranscript(true)
+		m.reflow(false)
+		if msg.event.Kind == contracts.EventSubscriberGap {
+			return m, m.startSessionObserver(msg.sessionID)
+		}
+		return m, waitStream(m.ctx, m.sessionStream)
+	case sessionJoinDoneMsg:
+		if msg.sessionID == m.session.ID && msg.observerID == m.sessionObserverID && msg.err != nil && !errors.Is(msg.err, context.Canceled) {
+			m.appendError(msg.err)
+			m.refreshTranscript(true)
+		}
+		return m, nil
+	case messageSentMsg:
+		m.turnCancel = nil
+		if msg.err != nil {
+			m.working = false
+			m.workStatus = ""
+			m.appendError(msg.err)
+			m.refreshTranscript(true)
+			m.reflow(false)
+			if m.session.ID != uuid.Nil {
+				return m, m.startSessionObserver(m.session.ID)
+			}
+		}
+		return m, nil
 	case streamDeltaMsg:
-		if msg.kind == contracts.DeltaStatus {
+		if msg.kind == contracts.EventProviderEvent {
 			status := statusLabel(msg.text)
 			if m.cancelArmed {
 				m.cancelStatus = status
 			} else {
 				m.workStatus = status
 			}
-		} else if msg.kind == contracts.DeltaTaskChecklist {
+		} else if msg.kind == contracts.EventToolTaskCheckList {
 			if state, err := decodeTaskChecklist(msg.text); err == nil {
 				m.checklist = state
 			}
@@ -234,7 +295,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamDirty = true
 			return m, wait
 		}
-		if msg.kind != contracts.DeltaTaskChecklist {
+		if msg.kind != contracts.EventToolTaskCheckList {
 			m.stopStreamRefresh()
 			m.refreshTranscript(true)
 		}
@@ -256,7 +317,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelStatus = ""
 		m.workStatus = ""
 		if errors.Is(msg.err, context.Canceled) || msg.reply != nil && msg.reply.Status == "canceled" {
-			m.appendDelta(contracts.DeltaStatus, "generation canceled")
+			m.blocks = append(m.blocks, block{role: "status", text: statusLabel("generation canceled")})
 		} else if msg.err != nil {
 			m.appendError(msg.err)
 		} else if msg.reply != nil {
@@ -294,7 +355,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.checklist = taskChecklistFromRecords(msg.records)
 		m.modal = nil
 		m.refreshTranscript(true)
-		return m, nil
+		return m, m.startSessionObserver(msg.output.ID)
 	case sessionsListedMsg:
 		if msg.err != nil {
 			m.showNotice("Could not list sessions", msg.err.Error(), false)
@@ -327,7 +388,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.used = 0
 		m.modal = nil
 		m.refreshTranscript(true)
-		return m, nil
+		return m, m.startSessionObserver(msg.output.ID)
 	case modelSetMsg:
 		if msg.err != nil {
 			m.appendError(msg.err)
@@ -719,36 +780,173 @@ func (m *chatModel) submit() tea.Cmd {
 	m.reflow(false)
 
 	input := contracts.UserInput{Text: prompt, Images: images}
-	m.blocks = append(m.blocks, block{role: "user", text: prompt, imageCount: len(images)})
 	m.working = true
 	m.workBegan = time.Now()
 	m.workStatus = "working"
 	m.cancelArmed = false
 	m.refreshTranscript(true)
-	m.stream = make(chan tea.Msg, 256)
-	stream := m.stream
 	thinking := m.thinking
 	turnCtx, cancel := context.WithCancel(m.ctx)
 	m.turnCancel = cancel
-	emit := func(message tea.Msg) bool {
-		select {
-		case stream <- message:
-			return true
-		case <-m.ctx.Done():
-			return false
-		}
-	}
-	go func() {
-		reply, err := m.client.Chat(turnCtx, input, thinking, func(kind contracts.DeltaKind, text string) {
-			emit(streamDeltaMsg{kind: kind, text: text})
-		}, func(update ApprovalUpdate) {
-			emit(streamApprovalMsg{update: update})
-		})
-		emit(turnDoneMsg{reply: reply, err: err})
-	}()
 	// Attachments are consumed only once dispatch has successfully begun.
 	m.pending = nil
-	return tea.Batch(waitStream(m.ctx, stream), animationTickCmd())
+	return tea.Batch(func() tea.Msg {
+		return messageSentMsg{err: m.client.SendMessage(turnCtx, input, thinking)}
+	}, animationTickCmd())
+}
+
+func (m *chatModel) startSessionObserver(sessionID uuid.UUID) tea.Cmd {
+	if m.sessionCancel != nil {
+		m.sessionCancel()
+	}
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.sessionCancel = cancel
+	m.sessionObserverID++
+	observerID := m.sessionObserverID
+	m.sessionStream = make(chan tea.Msg, 256)
+	stream := m.sessionStream
+	emit := func(message tea.Msg) {
+		select {
+		case stream <- message:
+		case <-ctx.Done():
+		}
+	}
+	join := func() tea.Msg {
+		defer cancel()
+		err := m.client.JoinSession(ctx, sessionID, func(view glue.SessionView) {
+			emit(sessionViewMsg{sessionID: sessionID, observerID: observerID, view: view})
+		}, func(event contracts.EventStream) {
+			emit(sessionEventMsg{sessionID: sessionID, observerID: observerID, event: event})
+		})
+		return sessionJoinDoneMsg{sessionID: sessionID, observerID: observerID, err: err}
+	}
+	return tea.Batch(waitStream(ctx, stream), join)
+}
+
+func (m *chatModel) applySessionView(view glue.SessionView) {
+	m.session = view.Meta
+	m.blocks = blocksFromMessages(view.History)
+	m.checklist = taskChecklistFromMessages(view.History)
+	// The in-flight log is replayed through the same handler the live stream
+	// uses, so a client that joins mid-generation renders the generation the
+	// same way it would have rendered it live.
+	for _, event := range view.InFlight {
+		m.applySessionEvent(event)
+	}
+	m.applySessionStatus(view.Status)
+	if view.PendingApproval != nil {
+		m.showApproval(approvalFromRequest(view.PendingApproval))
+	} else if m.modal != nil && m.modal.kind == modalApproval {
+		m.modal = nil
+	}
+}
+
+func (m *chatModel) applySessionStatus(status contracts.SessionStatus) {
+	switch status {
+	case contracts.SessionBusy:
+		m.working = true
+		m.workStatus = "working"
+	case contracts.SessionWaitingApproval:
+		m.working = true
+		m.workStatus = "waiting for approval"
+	case contracts.SessionCompacting:
+		m.working = true
+		m.workStatus = "compacting"
+	case contracts.SessionIdle:
+		m.stopStreamRefresh()
+		m.working = false
+		m.streaming = false
+		m.workStatus = ""
+		m.cancelArmed = false
+	case contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone:
+		m.stopStreamRefresh()
+		m.working = false
+		m.streaming = false
+		m.workStatus = string(status)
+	}
+	if m.working && m.workBegan.IsZero() {
+		m.workBegan = time.Now()
+	}
+}
+
+func (m *chatModel) applySessionEvent(event contracts.EventStream) {
+	content := ""
+	if event.Content != nil {
+		content = *event.Content
+	}
+	switch event.Kind {
+	case contracts.EventSessionTransitionState:
+		m.applySessionStatus(contracts.SessionStatus(content))
+	case contracts.EventSessionFatal:
+		m.applySessionStatus(contracts.SessionTombstone)
+		m.appendError(errors.New(content))
+	case contracts.EventSubscriberGap:
+		m.appendError(errors.New(content))
+	case contracts.EventMessageFromAgentInbox:
+		m.blocks = append(m.blocks, block{role: "user", text: content})
+	case contracts.EventToolCall:
+		if event.ToolCall != nil {
+			m.appendToolEvent("call", contracts.ToolCallDisplay(*event.ToolCall))
+		} else {
+			m.appendToolEvent("call", content)
+		}
+	case contracts.EventToolResult:
+		if event.ToolResult == nil {
+			m.appendToolEvent("result", content)
+			break
+		}
+		result := string(event.ToolResult.CallName) + " [" + string(event.ToolResult.Status) + "]"
+		if event.ToolResult.Error != "" {
+			result += ": " + event.ToolResult.Error
+		} else if event.ToolResult.Output != "" {
+			result += "\n" + event.ToolResult.Output
+		}
+		m.appendToolEvent("result", result)
+	case contracts.EventToolTaskCheckList:
+		if event.ToolResult != nil {
+			if state, err := decodeTaskChecklist(event.ToolResult.Output); err == nil {
+				m.checklist = state
+			}
+		} else if state, err := decodeTaskChecklist(content); err == nil {
+			m.checklist = state
+		}
+	case contracts.EventSkillLoad:
+		if event.ToolResult != nil {
+			content = event.ToolResult.Output
+		}
+		m.appendDelta(event.Kind, content)
+	case contracts.EventApprovalRequested:
+		if event.HITLCall != nil {
+			m.showApproval(approvalFromRequest(event.HITLCall))
+		}
+	case contracts.EventApprovalResolved, contracts.EventApprovalCanceled:
+		m.handleApprovalUpdate(ApprovalUpdate{Type: string(event.Kind), Approval: approvalFromRequest(event.HITLCall)})
+	case contracts.NotifyAgentUsage:
+		var usage contracts.TokenUsage
+		if json.Unmarshal([]byte(content), &usage) == nil {
+			m.used = usage.TotalTokens
+		}
+	default:
+		m.appendDelta(event.Kind, content)
+	}
+}
+
+func blocksFromMessages(history []contracts.ChatMessage) []block {
+	records := make([]store.Record, 0, len(history))
+	for i := range history {
+		message := history[i]
+		records = append(records, store.Record{Kind: store.KindMessage, Message: &message})
+	}
+	return blocksFromRecords(records)
+}
+
+func taskChecklistFromMessages(history []contracts.ChatMessage) contracts.TaskChecklistState {
+	records := make([]store.Record, 0, len(history))
+	for i := range history {
+		message := history[i]
+		records = append(records, store.Record{Kind: store.KindMessage, Message: &message})
+	}
+	return taskChecklistFromRecords(records)
 }
 
 func waitStream(ctx context.Context, stream <-chan tea.Msg) tea.Cmd {
@@ -1909,7 +2107,7 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string, string) {
 		return "Edit file", fmt.Sprintf("TARGET  %s\nMODE    %s", path, mode), ""
 	}
 
-	return strings.ReplaceAll(call.Function.Name, "_", " ") + " tool call", prettyToolArguments(call.Function.Arguments), ""
+	return strings.ReplaceAll(string(call.Function.Name), "_", " ") + " tool call", prettyToolArguments(call.Function.Arguments), ""
 }
 
 func prettyToolArguments(arguments string) string {
@@ -2048,11 +2246,10 @@ func readToolCallPreview(arguments string) (string, bool) {
 }
 
 func (m *chatModel) handleApprovalUpdate(update ApprovalUpdate) {
-	if update.Approval == nil {
-		return
-	}
 	if update.Type == "approval_requested" {
-		m.showApproval(update.Approval)
+		if update.Approval != nil {
+			m.showApproval(update.Approval)
+		}
 		return
 	}
 	if m.modal != nil && m.modal.kind == modalApproval {
@@ -2106,30 +2303,33 @@ func loadingModal(label string) *modalModel {
 	return &modalModel{kind: modalNotice, title: label, body: "Please wait...", required: true}
 }
 
-func (m *chatModel) appendDelta(kind contracts.DeltaKind, text string) {
+func (m *chatModel) appendDelta(kind contracts.EventStreamKind, text string) {
 	role := "assistant"
 	switch kind {
 	case contracts.DeltaReasoning:
 		role = "thinking"
-	case contracts.DeltaStatus:
+	case contracts.EventProviderEvent:
 		m.streaming = false
 		role, text = "status", statusLabel(text)
 	case contracts.DeltaCompactionSummary:
 		m.streaming = false
 		role = "compaction"
-	case contracts.DeltaToolCall:
+	case contracts.EventManualCompactionTriggered, contracts.EventAutoCompactionTriggered:
+		m.streaming = false
+		role, text = "status", statusLabel(text)
+	case contracts.EventToolCall:
 		m.streaming = false
 		m.appendToolEvent("call", text)
 		return
-	case contracts.DeltaToolResult:
+	case contracts.EventToolResult:
 		m.streaming = false
 		m.appendToolEvent("result", text)
 		return
-	case contracts.DeltaSkillLoad:
+	case contracts.EventSkillLoad:
 		m.streaming = false
 		m.blocks = append(m.blocks, block{role: "skill", text: text})
 		return
-	case contracts.DeltaTaskChecklist:
+	case contracts.EventToolTaskCheckList:
 		// Checklist state is rendered in the header, never as transcript text.
 		return
 	}
@@ -2294,15 +2494,13 @@ func blocksFromRecords(records []store.Record) []block {
 	skillCallIDs := make(map[string]struct{})
 	toolCallNames := make(map[string]string)
 	for _, record := range records {
-		if record.ToolCall != nil {
-			toolCallNames[record.ToolCall.ID] = record.ToolCall.Name
-		}
 		if record.Message == nil || record.Message.Role != "assistant" {
 			continue
 		}
 		for _, call := range record.Message.ToolCalls {
-			toolCallNames[call.ID] = call.Function.Name
-			if isSkillTool(call.Function.Name) {
+			typename := string(call.Function.Name)
+			toolCallNames[call.ID] = typename
+			if isSkillTool(typename) {
 				skillCallIDs[call.ID] = struct{}{}
 			}
 		}
@@ -2312,17 +2510,6 @@ func blocksFromRecords(records []store.Record) []block {
 		case store.KindCompaction:
 			if record.Compaction != nil {
 				blocks = append(blocks, block{role: "compaction", text: record.Compaction.Summary})
-			}
-		case store.KindToolCall:
-			if record.ToolCall != nil && !isChecklistTool(record.ToolCall.Name) {
-				blocks = append(blocks, block{role: "tool", text: toolCallRecordDisplay(record.ToolCall), toolKind: "call", toolName: record.ToolCall.Name, toolArgs: record.ToolCall.Arguments})
-			}
-		case store.KindToolResult:
-			if record.ToolResult != nil {
-				toolName := toolCallNames[record.ToolResult.CallID]
-				if _, skill := skillCallIDs[record.ToolResult.CallID]; !skill && !isChecklistTool(toolName) {
-					blocks = append(blocks, block{role: "tool", text: transcriptToolResultDisplay(toolName, record.ToolResult.Status, record.ToolResult.Output, record.ToolResult.Error), toolKind: "result", toolStatus: record.ToolResult.Status, toolName: toolName})
-				}
 			}
 		case store.KindMessage:
 			if record.Message == nil {
@@ -2340,14 +2527,15 @@ func blocksFromRecords(records []store.Record) []block {
 					blocks = append(blocks, block{role: "assistant", text: message.Text()})
 				}
 				for _, call := range message.ToolCalls {
-					if isSkillTool(call.Function.Name) {
+					toolName := string(call.Function.Name)
+					if isSkillTool(toolName) {
 						blocks = append(blocks, block{role: "skill", text: skillNameFromCall(call)})
 						continue
 					}
-					if isChecklistTool(call.Function.Name) {
+					if isChecklistTool(toolName) {
 						continue
 					}
-					blocks = append(blocks, block{role: "tool", text: toolCallPreview(call.Function.Name, call.Function.Arguments), toolKind: "call", toolName: call.Function.Name, toolArgs: call.Function.Arguments})
+					blocks = append(blocks, block{role: "tool", text: toolCallPreview(toolName, call.Function.Arguments), toolKind: "call", toolName: toolName, toolArgs: call.Function.Arguments})
 				}
 			case "tool":
 				toolName := toolCallNames[message.ToolCallID]
@@ -2388,23 +2576,15 @@ func taskChecklistFromRecords(records []store.Record) contracts.TaskChecklistSta
 	state := contracts.TaskChecklistState{}
 	toolNames := make(map[string]string)
 	for _, record := range records {
-		if record.ToolCall != nil {
-			toolNames[record.ToolCall.ID] = record.ToolCall.Name
-		}
 		if record.Message != nil && record.Message.Role == "assistant" {
 			for _, call := range record.Message.ToolCalls {
-				toolNames[call.ID] = call.Function.Name
+				toolNames[call.ID] = string(call.Function.Name)
 			}
 		}
 	}
 	for _, record := range records {
 		if record.Compaction != nil && record.Compaction.TaskChecklist != nil {
 			state = *record.Compaction.TaskChecklist
-		}
-		if record.ToolResult != nil && isChecklistTool(toolNames[record.ToolResult.CallID]) {
-			if next, err := decodeTaskChecklist(record.ToolResult.Output); err == nil {
-				state = next
-			}
 		}
 		if record.Message != nil && record.Message.Role == "tool" && isChecklistTool(toolNames[record.Message.ToolCallID]) {
 			if next, err := decodeTaskChecklist(record.Message.Text()); err == nil {
@@ -2425,26 +2605,19 @@ func truncateLine(value string, width int) string {
 
 func toolCallDisplay(call contracts.ToolCall) string {
 	if call.Function.Arguments == "" {
-		return call.Function.Name
+		return string(call.Function.Name)
 	}
-	return call.Function.Name + " " + call.Function.Arguments
+	return string(call.Function.Name) + " " + call.Function.Arguments
 }
 
-func toolCallRecordDisplay(call *store.ToolCallRecord) string {
-	if call.Arguments == "" {
-		return call.Name
+func toolResultDisplay(status, output, resultErr string) string {
+	if resultErr != "" {
+		return status + ": " + resultErr
 	}
-	return toolCallPreview(call.Name, call.Arguments)
-}
-
-func toolResultDisplay(result *store.ToolResultRecord) string {
-	if result.Error != "" {
-		return result.Status + ": " + result.Error
+	if output != "" {
+		return status + "\n" + output
 	}
-	if result.Output != "" {
-		return result.Status + "\n" + result.Output
-	}
-	return result.Status
+	return status
 }
 
 func transcriptToolResultDisplay(name, status, output, resultErr string) string {
@@ -2470,7 +2643,7 @@ func transcriptToolResultDisplay(name, status, output, resultErr string) string 
 		}
 	}
 	if name != string(contracts.ReadTool) || status != string(contracts.ToolExecutionSuccess) || resultErr != "" {
-		return toolResultDisplay(&store.ToolResultRecord{Status: status, Output: output, Error: resultErr})
+		return toolResultDisplay(status, output, resultErr)
 	}
 	lines := 0
 	if output != "" {
@@ -2581,28 +2754,6 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 	if event.Record == nil {
 		return previewDisplays(event.Preview)
 	}
-	if event.Record.ToolCall != nil {
-		call := event.Record.ToolCall
-		if isChecklistTool(call.Name) {
-			return []timelineDisplay{{role: "system", text: "task checklist updated"}}
-		}
-		if isSkillTool(call.Name) {
-			var args struct {
-				Name string `json:"name"`
-			}
-			if json.Unmarshal([]byte(call.Arguments), &args) == nil && args.Name != "" {
-				return []timelineDisplay{{role: "skill", text: args.Name}}
-			}
-			return []timelineDisplay{{role: "skill", text: call.Name}}
-		}
-		return []timelineDisplay{{role: "tool_call", text: singleLine(toolCallRecordDisplay(call))}}
-	}
-	if event.Record.ToolResult != nil {
-		if _, err := decodeTaskChecklist(event.Record.ToolResult.Output); err == nil {
-			return []timelineDisplay{{role: "system", text: "task checklist updated"}}
-		}
-		return []timelineDisplay{{role: "tool_result", text: singleLine(toolResultDisplay(event.Record.ToolResult))}}
-	}
 	if event.Record.Message != nil {
 		message := event.Record.Message
 		if message.Role == "user" {
@@ -2622,11 +2773,12 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 			displays = append(displays, timelineDisplay{role: "assistant", text: singleLine(message.Text())})
 		}
 		for _, call := range message.ToolCalls {
-			if isSkillTool(call.Function.Name) {
+			toolName := string(call.Function.Name)
+			if isSkillTool(toolName) {
 				displays = append(displays, timelineDisplay{role: "skill", text: skillNameFromCall(call)})
 				continue
 			}
-			if isChecklistTool(call.Function.Name) {
+			if isChecklistTool(toolName) {
 				continue
 			}
 			displays = append(displays, timelineDisplay{role: "tool_call", text: singleLine(toolCallDisplay(call))})
@@ -2638,9 +2790,6 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 	}
 	if event.Record.Compaction != nil {
 		return []timelineDisplay{{role: "assistant", text: "context compacted: " + singleLine(event.Record.Compaction.Summary)}}
-	}
-	if event.Record.Approval != nil && event.Record.Approval.ToolCall != nil {
-		return []timelineDisplay{{role: "tool_call", text: singleLine(toolCallDisplay(*event.Record.Approval.ToolCall))}}
 	}
 	text := singleLine(event.Record.Text)
 	if text == "" {

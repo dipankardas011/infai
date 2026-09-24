@@ -175,10 +175,10 @@ func (a *Agent) publishEvent(ctx context.Context, event contracts.EventStream) b
 	}
 }
 
-func (a *Agent) updateState(ctx context.Context, status contracts.AgentStatus) bool {
+func (a *Agent) updateState(ctx context.Context, status contracts.SessionStatus) bool {
 	value := string(status)
 	return a.publishEvent(ctx, contracts.EventStream{
-		Kind:      contracts.NotifyAgentSessionStatus,
+		Kind:      contracts.EventSessionTransitionState,
 		Timestamp: time.Now().UTC(),
 		Content:   &value,
 	})
@@ -199,22 +199,18 @@ func (a *Agent) drainInbox() []contracts.ChatMessage {
 func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMessage) {
 	a.workingHistory.Set(activeTimeline)
 
-	if !a.updateState(ctx, contracts.AgentIdle) {
-		return
-	}
-
 	lastHadToolCalls := false
 	for iter := uint64(1); iter <= a.MaxQ; iter++ {
 		unreadMessages := a.drainInbox()
 
 		if !lastHadToolCalls && len(unreadMessages) == 0 {
-			if !a.updateState(ctx, contracts.AgentIdle) {
+			if !a.updateState(ctx, contracts.SessionIdle) {
 				return
 			}
 
 			switch a.Kind {
 			case contracts.SingleLoopAgent:
-				_ = a.updateState(ctx, contracts.AgentCompleted)
+				_ = a.updateState(ctx, contracts.SessionCompleted)
 				return
 			case contracts.InteractiveAgent:
 				select {
@@ -226,22 +222,26 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 			}
 		}
 
-		if !a.updateState(ctx, contracts.AgentBusy) {
+		if !a.updateState(ctx, contracts.SessionBusy) {
 			return
 		}
 
 		if len(unreadMessages) > 0 {
-			if err := a.commitTimeline(ctx, unreadMessages); err != nil {
-				return
-			}
-
-			a.workingHistory.Append(unreadMessages...)
+			// The echo must be published before the commit that makes these
+			// messages durable: a client joining between the two is given the
+			// committed history plus the session's in-flight log, so an echo
+			// sent after its own commit would reach that client twice.
 			for _, message := range unreadMessages {
 				text := message.Text()
 				if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventMessageFromAgentInbox, Timestamp: time.Now().UTC(), Content: &text}) {
 					return
 				}
 			}
+
+			if err := a.commitTimeline(ctx, unreadMessages); err != nil {
+				return
+			}
+			a.workingHistory.Append(unreadMessages...)
 		}
 
 		// Read the working history only after the loop has been woken, so a
@@ -263,7 +263,7 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 				return
 			}
 			message := err.Error()
-			if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.NotifyAgentModelError, Timestamp: time.Now().UTC(), Content: &message}) {
+			if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventProviderEvent, Timestamp: time.Now().UTC(), Content: &message}) {
 				return
 			}
 			lastHadToolCalls = false
@@ -314,5 +314,5 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 		}
 	}
 
-	a.publishEvent(ctx, contracts.EventStream{Kind: contracts.NotifyAgentReachedMaxQ, Timestamp: time.Now().UTC()})
+	a.updateState(ctx, contracts.SessionMaxIterationExhausted)
 }

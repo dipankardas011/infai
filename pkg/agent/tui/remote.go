@@ -50,48 +50,166 @@ func (c *RemoteClient) SessionID() uuid.UUID {
 	return c.sessionID
 }
 
-func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
-	c.mu.Lock()
-	sessionID := c.sessionID
-	c.mu.Unlock()
+func (c *RemoteClient) SendMessage(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel) error {
+	sessionID := c.SessionID()
+	if sessionID == uuid.Nil {
+		return ErrNoSession
+	}
+	payload := struct {
+		Prompt   string                       `json:"prompt"`
+		Images   []contracts.ImageInput       `json:"images,omitempty"`
+		Thinking contracts.InfaiThinkingLevel `json:"thinking"`
+	}{Prompt: input.Text, Images: input.Images, Thinking: thinking}
+	return c.postJSON(ctx, "/v1/sessions/"+sessionID.String()+"/chat", payload, http.StatusAccepted)
+}
+
+func (c *RemoteClient) JoinSession(ctx context.Context, id uuid.UUID, onView func(glue.SessionView), onEvent func(contracts.EventStream)) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions/"+id.String()+"/join-stream", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return readAPIError(resp)
+	}
+
+	decoder := models.NewDecoder(resp.Body)
+	first := true
+	for {
+		event, err := decoder.Decode()
+		if err == io.EOF && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return err
+		}
+		if first {
+			var view glue.SessionView
+			if err := json.Unmarshal([]byte(event.Data), &view); err != nil {
+				return err
+			}
+			first = false
+			if onView != nil {
+				onView(view)
+			}
+			continue
+		}
+		var live contracts.EventStream
+		if err := json.Unmarshal([]byte(event.Data), &live); err != nil {
+			return err
+		}
+		if onEvent != nil {
+			onEvent(live)
+		}
+	}
+}
+
+func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.EventStreamKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
+	sessionID := c.SessionID()
 	if sessionID == uuid.Nil {
 		return nil, ErrNoSession
 	}
 
-	payload, err := json.Marshal(struct {
-		Prompt   string                       `json:"prompt"`
-		Images   []contracts.ImageInput       `json:"images,omitempty"`
-		Thinking contracts.InfaiThinkingLevel `json:"thinking"`
-	}{Prompt: input.Text, Images: input.Images, Thinking: thinking})
-	if err != nil {
+	joinCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	views := make(chan glue.SessionView, 1)
+	events := make(chan contracts.EventStream, 128)
+	joinErr := make(chan error, 1)
+	go func() {
+		joinErr <- c.JoinSession(joinCtx, sessionID, func(view glue.SessionView) {
+			views <- view
+		}, func(event contracts.EventStream) {
+			select {
+			case events <- event:
+			case <-joinCtx.Done():
+			}
+		})
+	}()
+
+	var view glue.SessionView
+	select {
+	case view = <-views:
+	case err := <-joinErr:
 		return nil, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/v1/sessions/"+sessionID.String()+"/chat", bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.URL.RawQuery = "stream=true"
-	req.Header.Set("Accept", "text/event-stream")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
-	}
-
-	reply, err := c.readStream(resp.Body, onDelta, onApproval)
-	if err != nil && ctx.Err() != nil {
+	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	return reply, err
+	if err := c.SendMessage(ctx, input, thinking); err != nil {
+		return nil, err
+	}
+
+	reply := &ChatReply{SessionID: sessionID, Model: view.Meta.Model, Name: view.Meta.Name}
+	sawRunning := false
+	for {
+		select {
+		case event := <-events:
+			content := ""
+			if event.Content != nil {
+				content = *event.Content
+			}
+			switch event.Kind {
+			case contracts.EventSessionTransitionState:
+				status := contracts.SessionStatus(content)
+				if status == contracts.SessionBusy || status == contracts.SessionWaitingApproval || status == contracts.SessionCompacting {
+					sawRunning = true
+				}
+				if status == contracts.SessionIdle && sawRunning {
+					reply.Status = string(status)
+					return reply, nil
+				}
+			case contracts.EventSessionFatal:
+				return nil, errors.New(content)
+			case contracts.EventApprovalRequested:
+				if onApproval != nil && event.HITLCall != nil {
+					onApproval(ApprovalUpdate{Type: string(event.Kind), Approval: approvalFromRequest(event.HITLCall)})
+				}
+			case contracts.EventApprovalResolved, contracts.EventApprovalCanceled:
+				if onApproval != nil {
+					onApproval(ApprovalUpdate{Type: string(event.Kind)})
+				}
+			case contracts.NotifyAgentUsage:
+				var usage contracts.TokenUsage
+				if json.Unmarshal([]byte(content), &usage) == nil {
+					reply.Usage = &usage
+					reply.ContextTokens = usage.TotalTokens
+				}
+			default:
+				if event.Kind == contracts.DeltaContent {
+					reply.Reply += content
+				} else if event.Kind == contracts.DeltaReasoning {
+					reply.ReasoningContent += content
+				}
+				if onDelta != nil && content != "" {
+					onDelta(event.Kind, content)
+				}
+			}
+		case err := <-joinErr:
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func approvalFromRequest(request *contracts.ApprovalRequest) *Approval {
+	if request == nil {
+		return nil
+	}
+	toolCall := request.ToolCall
+	return &Approval{
+		ID:          request.ID,
+		SessionID:   request.SessionID,
+		Fingerprint: request.Fingerprint,
+		ToolCall:    &toolCall,
+	}
 }
 
 func (c *RemoteClient) ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error {
@@ -123,7 +241,7 @@ func (c *RemoteClient) ResolveApproval(ctx context.Context, approval Approval, d
 
 // readStream consumes the SSE chat stream, delivering deltas to onDelta and
 // returning the final reply.
-func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
+func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.EventStreamKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
 	dec := models.NewDecoder(body)
 
 	var reply ChatReply
@@ -183,18 +301,18 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.De
 			switch sseEv.Kind {
 			case "reasoning":
 				kind = contracts.DeltaReasoning
-			case "status":
-				kind = contracts.DeltaStatus
+			case "provider_event":
+				kind = contracts.EventProviderEvent
 			case "compaction_summary":
 				kind = contracts.DeltaCompactionSummary
 			case "tool_call":
-				kind = contracts.DeltaToolCall
+				kind = contracts.EventToolCall
 			case "tool_result":
-				kind = contracts.DeltaToolResult
+				kind = contracts.EventToolResult
 			case "skill_load":
-				kind = contracts.DeltaSkillLoad
+				kind = contracts.EventSkillLoad
 			case "task_checklist":
-				kind = contracts.DeltaTaskChecklist
+				kind = contracts.EventToolTaskCheckList
 			}
 			if kind == contracts.DeltaContent {
 				reply.Reply += sseEv.Delta

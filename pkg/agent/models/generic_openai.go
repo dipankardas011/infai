@@ -255,7 +255,7 @@ func (o *genericOpenAICompatableAPI) waitForRetry(ctx context.Context, attempt i
 		delay = maxDelay
 	}
 	if opts != nil && opts.OnDelta != nil {
-		opts.OnDelta(contracts.DeltaStatus, fmt.Sprintf("LLM endpoint unavailable; retrying in %s (attempt %d/%d)", delay, attempt+1, o.maxAttempts))
+		opts.OnDelta(contracts.EventProviderEvent, fmt.Sprintf("LLM endpoint unavailable; retrying in %s (attempt %d/%d)", delay, attempt+1, o.maxAttempts))
 	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()

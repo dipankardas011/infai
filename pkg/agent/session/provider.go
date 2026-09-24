@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
-	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/models"
 )
 
@@ -71,9 +70,6 @@ func (s *InfaiAgentSession) SetThinkingPattern(pattern contracts.InfaiThinkingLe
 
 	if s.status != contracts.SessionIdle {
 		return errors.New("session must be idle to change thinking")
-	}
-	if s.status == contracts.SessionClosed {
-		return harnessErr.ErrSessionClosed
 	}
 
 	provisioned, err := s.model.GetModelSpecs().WithThinkingPattern(pattern)
