@@ -7,6 +7,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
+	"github.com/dipankardas011/infai/pkg/agent/store"
 )
 
 const (
@@ -59,6 +60,28 @@ func (s *InfaiAgentSession) JoinSessionEvents() (glue.SessionView, <-chan contra
 		})
 	}
 	return view, sub.events, unsubscribe, nil
+}
+
+// recordSessionConclusion writes how the session ended to its index, once. The
+// timeline is the record of what a session did; this is the record of how it
+// stopped, so anything listing sessions later does not have to guess. It is
+// never rewritten: the first conclusion is the one that happened.
+//
+// The caller must not hold s.mu, and a failure to write never fails the session.
+func (s *InfaiAgentSession) recordSessionConclusion(status contracts.SessionStatus, reason string) {
+	s.mu.Lock()
+	if s.meta.Conclusion != nil {
+		s.mu.Unlock()
+		return
+	}
+	s.meta.Conclusion = &store.SessionConclusion{Status: status, Reason: reason}
+	s.meta.UpdatedAt = time.Now().UTC()
+	meta := s.meta
+	s.mu.Unlock()
+
+	if err := s.store.SaveMeta(meta); err != nil {
+		s.l.Error("persist session conclusion", "session_id", meta.ID, "status", status, "error", err)
+	}
 }
 
 // publish hands one event to the session's hub.

@@ -22,15 +22,26 @@ type SessionMeta struct {
 	Cwd       string    `json:"cwd,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// Conclusion records how the session ended, written once when it does and
+	// never rewritten. Nil while the session has not ended.
+	Conclusion *SessionConclusion `json:"conclusion,omitempty"`
+}
+
+type SessionConclusion struct {
+	// Status is the settled status the session ended on.
+	Status contracts.SessionStatus `json:"status"`
+	Reason string                  `json:"reason,omitempty"`
 }
 
 type sessionFile struct {
-	ID           uuid.UUID    `json:"id"`
-	Name         string       `json:"name,omitempty"`
-	Cwd          string       `json:"cwd,omitempty"`
-	CurrentModel currentModel `json:"current_model"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
+	ID           uuid.UUID          `json:"id"`
+	Name         string             `json:"name,omitempty"`
+	Cwd          string             `json:"cwd,omitempty"`
+	CurrentModel currentModel       `json:"current_model"`
+	CreatedAt    time.Time          `json:"created_at"`
+	UpdatedAt    time.Time          `json:"updated_at"`
+	Conclusion   *SessionConclusion `json:"conclusion,omitempty"`
 }
 
 // this helps when we resume we can use this to get the client connection up.
@@ -40,7 +51,7 @@ type currentModel struct {
 }
 
 func newSessionFile(meta SessionMeta) sessionFile {
-	return sessionFile{
+	file := sessionFile{
 		ID:   meta.ID,
 		Name: meta.Name,
 		Cwd:  meta.Cwd,
@@ -51,10 +62,15 @@ func newSessionFile(meta SessionMeta) sessionFile {
 		CreatedAt: meta.CreatedAt,
 		UpdatedAt: meta.UpdatedAt,
 	}
+	if meta.Conclusion != nil {
+		conclusion := *meta.Conclusion
+		file.Conclusion = &conclusion
+	}
+	return file
 }
 
 func (f sessionFile) meta() SessionMeta {
-	return SessionMeta{
+	meta := SessionMeta{
 		ID:        f.ID,
 		Name:      f.Name,
 		Provider:  f.CurrentModel.Provider,
@@ -63,6 +79,11 @@ func (f sessionFile) meta() SessionMeta {
 		CreatedAt: f.CreatedAt,
 		UpdatedAt: f.UpdatedAt,
 	}
+	if f.Conclusion != nil {
+		conclusion := *f.Conclusion
+		meta.Conclusion = &conclusion
+	}
+	return meta
 }
 
 // RecordKind identifies the durable event type written to a session timeline.

@@ -453,11 +453,13 @@ func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 	summaries := make([]contracts.SessionSummary, 0, len(metas))
 	for _, meta := range metas {
 		sess, active := e.activeSessionAgents[meta.ID]
-		// A session that is not resident has no runtime state left to report,
-		// so it is concluded rather than runnable.
+		// A session that is not resident has no runtime state left to report, so
+		// it reports the conclusion it recorded, and concludes otherwise.
 		status := contracts.SessionTombstone
 		if active {
 			status = sess.Status()
+		} else if meta.Conclusion != nil {
+			status = meta.Conclusion.Status
 		}
 		summaries = append(summaries, contracts.SessionSummary{
 			ID:        meta.ID,

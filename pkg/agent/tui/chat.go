@@ -2311,7 +2311,7 @@ func (m *chatModel) appendDelta(kind contracts.EventStreamKind, text string) {
 	case contracts.EventProviderEvent:
 		m.streaming = false
 		role, text = "status", statusLabel(text)
-	case contracts.DeltaCompactionSummary:
+	case contracts.CompactionSummary:
 		m.streaming = false
 		role = "compaction"
 	case contracts.EventManualCompactionTriggered, contracts.EventAutoCompactionTriggered:

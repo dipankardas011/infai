@@ -12,8 +12,10 @@ const (
 	DeltaContent EventStreamKind = "content"
 	// DeltaReasoning is the model's reasoning text (shown separately).
 	DeltaReasoning EventStreamKind = "reasoning"
-	// DeltaCompactionSummary is a live-only compaction summary for the UI.
-	DeltaCompactionSummary EventStreamKind = "compaction_summary"
+	// CompactionSummary is the summary a compaction produced. It is published
+	// once the compacted history is installed, so it marks the session as
+	// runnable again rather than mid-compaction.
+	CompactionSummary EventStreamKind = "compaction_summary"
 
 	// EventProviderEvent is the model provider speaking for itself: a retry
 	// notice, a failed request, an endpoint-level message.

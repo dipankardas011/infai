@@ -107,7 +107,7 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 	// Published after the install so the session is never reported runnable
 	// while a stale history is still installed.
 	if summary != "" {
-		s.publish(contracts.EventStream{Kind: contracts.DeltaCompactionSummary, Timestamp: time.Now().UTC(), Content: &summary})
+		s.publish(contracts.EventStream{Kind: contracts.CompactionSummary, Timestamp: time.Now().UTC(), Content: &summary})
 	}
 	return nil
 }
@@ -125,7 +125,7 @@ func (s *InfaiAgentSession) autoCompact(ctx context.Context) ([]contracts.ChatMe
 		return nil, err
 	}
 	if summary != "" {
-		s.publish(contracts.EventStream{Kind: contracts.DeltaCompactionSummary, Timestamp: time.Now().UTC(), Content: &summary})
+		s.publish(contracts.EventStream{Kind: contracts.CompactionSummary, Timestamp: time.Now().UTC(), Content: &summary})
 	}
 	return replacement, nil
 }

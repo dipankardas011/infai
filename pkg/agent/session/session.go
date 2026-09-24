@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -277,9 +278,17 @@ func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) (contracts.TaskCheck
 		return contracts.TaskChecklistState{}, err
 	}
 
-	if err := memory.NewTaskChecklist().Restore(checklist); err != nil {
+	// Validated before anything is changed, because a corrupted checklist must
+	// not leave the session half-switched onto the branch.
+	if err := memory.ValidateTaskChecklistState(checklist); err != nil {
 		return contracts.TaskChecklistState{}, err
 	}
+
+	encoded, err := json.Marshal(checklist)
+	if err != nil {
+		return contracts.TaskChecklistState{}, fmt.Errorf("encode task checklist for clients: %w", err)
+	}
+	payload := string(encoded)
 
 	events, err := s.timeline.LoadActiveContextAt(eventID)
 	if err != nil {
@@ -307,6 +316,10 @@ func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) (contracts.TaskCheck
 	s.pendingBranchParent = eventID
 	s.activeTimeline = append([]contracts.ChatMessage(nil), history...)
 	s.mu.Unlock()
+
+	// The checklist now belongs to the branch, and a joined client renders it
+	// from this event, so tell them rather than let the header go stale.
+	s.publish(contracts.EventStream{Kind: contracts.EventToolTaskCheckList, Timestamp: time.Now().UTC(), Content: &payload})
 	return checklist, nil
 }
 
@@ -481,6 +494,12 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			s.notifySubscribers(event)
 			s.mu.Unlock()
 
+			// The loop is not coming back from here, so this is how the session
+			// ended. The status says why on its own, so no reason is recorded.
+			if eventStatus == contracts.SessionCompleted || eventStatus == contracts.SessionMaxIterationExhausted {
+				s.recordSessionConclusion(eventStatus, "")
+			}
+
 		case contracts.EventManualCompactionTriggered,
 			contracts.EventAutoCompactionTriggered:
 			s.mu.Lock()
@@ -489,11 +508,10 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			s.notifySubscribers(event)
 			s.mu.Unlock()
 
-		case contracts.DeltaCompactionSummary:
-			// The summary is published once the replacement history is
-			// installed, so the session is runnable again at this point. An
-			// automatic compaction is followed by the agent's next busy report,
-			// which is what returns it to a running turn.
+		case contracts.CompactionSummary:
+			// A compaction is over and its continuation is installed, so the
+			// session is runnable again. An automatic compaction is followed by
+			// the agent's next busy report, which is what resumes that turn.
 			s.mu.Lock()
 			s.status = contracts.SessionIdle
 			s.inFlight = append(s.inFlight, event)
@@ -535,6 +553,8 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			s.notifySubscribers(event)
 			s.mu.Unlock()
 			s.cancel(cause)
+
+			s.recordSessionConclusion(contracts.SessionTombstone, reason)
 
 		default:
 			s.l.Warn("session received an event no case handles so dropping it", "session_id", s.meta.ID, "kind", event.Kind)
@@ -626,6 +646,9 @@ func (s *InfaiAgentSession) Close() {
 		// stopping, so this is the one status the hub does not write.
 		s.status = contracts.SessionTombstone
 		s.mu.Unlock()
+		// A session that already concluded keeps the conclusion it recorded;
+		// one that is only being closed records that, which is what happened.
+		s.recordSessionConclusion(contracts.SessionTombstone, "session closed")
 		s.cancel(harnessErr.ErrSessionClosed)
 		s.wg.Wait()
 

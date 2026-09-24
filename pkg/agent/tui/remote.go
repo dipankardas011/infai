@@ -304,7 +304,7 @@ func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.Ev
 			case "provider_event":
 				kind = contracts.EventProviderEvent
 			case "compaction_summary":
-				kind = contracts.DeltaCompactionSummary
+				kind = contracts.CompactionSummary
 			case "tool_call":
 				kind = contracts.EventToolCall
 			case "tool_result":
