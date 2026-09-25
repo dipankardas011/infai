@@ -502,39 +502,58 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 
 		case contracts.EventManualCompactionTriggered,
 			contracts.EventAutoCompactionTriggered:
+			// A status that moves without a status report is announced as one,
+			// otherwise a client following only the stream keeps believing the
+			// session is runnable while it is busy compacting.
+			compacting := string(contracts.SessionCompacting)
+			compactingEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &compacting}
+
 			s.mu.Lock()
 			s.status = contracts.SessionCompacting
-			s.inFlight = append(s.inFlight, event)
+			s.inFlight = append(s.inFlight, event, compactingEvent)
 			s.notifySubscribers(event)
+			s.notifySubscribers(compactingEvent)
 			s.mu.Unlock()
 
 		case contracts.CompactionSummary:
 			// A compaction is over and its continuation is installed, so the
 			// session is runnable again. An automatic compaction is followed by
 			// the agent's next busy report, which is what resumes that turn.
+			idle := string(contracts.SessionIdle)
+			idleEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &idle}
+
 			s.mu.Lock()
 			s.status = contracts.SessionIdle
-			s.inFlight = append(s.inFlight, event)
+			s.inFlight = append(s.inFlight, event, idleEvent)
 			s.notifySubscribers(event)
+			s.notifySubscribers(idleEvent)
 			s.mu.Unlock()
 
 		case contracts.EventApprovalRequested:
 			// The approval request itself is in the joined view; the status says
 			// the session is not runnable until it is resolved.
+			waiting := string(contracts.SessionWaitingApproval)
+			waitingEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &waiting}
+
 			s.mu.Lock()
 			s.status = contracts.SessionWaitingApproval
-			s.inFlight = append(s.inFlight, event)
+			s.inFlight = append(s.inFlight, event, waitingEvent)
 			s.notifySubscribers(event)
+			s.notifySubscribers(waitingEvent)
 			s.mu.Unlock()
 
 		case contracts.EventApprovalResolved:
 			// Resolving an approval only releases the waiting tool call. The
 			// agent is the one that reports the session busy again, so that is
 			// the status the resolution moves to.
+			busy := string(contracts.SessionBusy)
+			busyEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &busy}
+
 			s.mu.Lock()
 			s.status = contracts.SessionBusy
-			s.inFlight = append(s.inFlight, event)
+			s.inFlight = append(s.inFlight, event, busyEvent)
 			s.notifySubscribers(event)
+			s.notifySubscribers(busyEvent)
 			s.mu.Unlock()
 
 		case contracts.EventSessionFatal:
