@@ -3,12 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 )
 
 type Agent struct {
@@ -28,7 +30,8 @@ type Agent struct {
 
 	shouldAutoCompact  func(*contracts.TokenUsage) bool
 	autoCompact        func(context.Context) ([]contracts.ChatMessage, error)
-	toolCallDispatcher func([]contracts.ToolCall) []contracts.ChatMessage
+	userCancellation   <-chan struct{}
+	toolCallDispatcher func([]contracts.ToolCall) ([]contracts.ChatMessage, bool)
 	evalFunc           func() bool
 }
 
@@ -76,7 +79,8 @@ func NewAgent(
 	kind contracts.AgentKind,
 	commitTimeline func(context.Context, []contracts.ChatMessage) error,
 	eventStream chan<- contracts.EventStream,
-	toolCallDispatcher func([]contracts.ToolCall) []contracts.ChatMessage,
+	userCancellation <-chan struct{},
+	toolCallDispatcher func([]contracts.ToolCall) ([]contracts.ChatMessage, bool),
 	systemPrompt string,
 	opts ...AgentOptions,
 ) (*Agent, error) {
@@ -97,6 +101,7 @@ func NewAgent(
 		tools:              o.tools,
 		shouldAutoCompact:  o.shouldCompact,
 		autoCompact:        o.autoCompact,
+		userCancellation:   userCancellation,
 		toolCallDispatcher: toolCallDispatcher,
 		systemPrompt:       systemPrompt,
 		evalFunc:           o.evalFunc,
@@ -242,6 +247,13 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 				return
 			}
 			a.workingHistory.Append(unreadMessages...)
+
+			select {
+			case <-a.userCancellation:
+				lastHadToolCalls = false
+				continue
+			default:
+			}
 		}
 
 		// Read the working history only after the loop has been woken, so a
@@ -254,11 +266,22 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 
 		reply, usage, err := a.modelClient().Generate(ctx, requestMessages, a.tools, &contracts.GenerateOptions{
 			Stream: true,
-			OnDelta: func(kind contracts.EventStreamKind, text string) {
-				a.publishEvent(ctx, contracts.EventStream{Kind: kind, Timestamp: time.Now().UTC(), Content: &text})
+			OnDelta: func(kind contracts.EventStreamKind, text string) (isCanceled bool) {
+				select {
+				case <-a.userCancellation:
+					return true
+				case a.eventStream <- contracts.EventStream{Kind: kind, Timestamp: time.Now().UTC(), Content: &text}:
+					return false
+				case <-ctx.Done():
+					return false
+				}
 			},
 		})
 		if err != nil {
+			if errors.Is(err, harnessErr.ErrTurnCanceled) {
+				lastHadToolCalls = false
+				continue
+			}
 			if ctx.Err() != nil {
 				return
 			}
@@ -286,7 +309,12 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 					return
 				}
 			}
-			messages = append(messages, a.toolCallDispatcher(reply.ToolCalls)...)
+			toolMessages, dispatcherCanceled := a.toolCallDispatcher(reply.ToolCalls)
+			if dispatcherCanceled {
+				lastHadToolCalls = false
+				continue
+			}
+			messages = append(messages, toolMessages...)
 		} else if a.evalFunc != nil {
 			result := a.evalFunc()
 			messages = append(messages, contracts.NewUserMessage(fmt.Sprintf("evalFunc status: %t", result)))

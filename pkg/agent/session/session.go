@@ -54,8 +54,10 @@ type InfaiAgentSession struct {
 	inFlight       []contracts.EventStream
 	activeTimeline []contracts.ChatMessage
 
-	// Decisions the session is waiting on: a tool approval from the user, or
-	// the agent adopting a branch point on its next write.
+	// Decisions the session is waiting on: a user cancellation, a tool
+	// approval from the user, or the agent adopting a branch point on its next
+	// write. The agent is the sole receiver of userCancellation.
+	userCancellation    chan struct{}
 	pendingApproval     *pendingApproval
 	pendingBranchParent uuid.UUID
 
@@ -83,6 +85,8 @@ type pendingApproval struct {
 	request  contracts.ApprovalRequest
 	decision chan contracts.ApprovalConclusion
 }
+
+const userCanceledApprovalReason = "user canceled"
 
 func NewSession(
 	engineCtx context.Context,
@@ -155,21 +159,22 @@ func newRuntimeSession(
 	}
 	ctx, cancel := context.WithCancelCause(engineCtx)
 	s := &InfaiAgentSession{
-		l:              l,
-		ctx:            ctx,
-		cancel:         cancel,
-		closeDone:      make(chan struct{}),
-		meta:           meta,
-		status:         contracts.SessionIdle,
-		model:          model,
-		timeline:       timeline,
-		store:          sessionStore,
-		auditorPolicy:  auditor.NewAuditorPolicy(),
-		taskChecklist:  memory.NewTaskChecklist(),
-		activeTimeline: append([]contracts.ChatMessage(nil), history...),
-		eventBus:       make(chan contracts.EventStream, 256),
-		subscribers:    make(map[*subscriber]struct{}),
-		aeComms:        aeComms,
+		l:                l,
+		ctx:              ctx,
+		cancel:           cancel,
+		closeDone:        make(chan struct{}),
+		userCancellation: make(chan struct{}, 1),
+		meta:             meta,
+		status:           contracts.SessionIdle,
+		model:            model,
+		timeline:         timeline,
+		store:            sessionStore,
+		auditorPolicy:    auditor.NewAuditorPolicy(),
+		taskChecklist:    memory.NewTaskChecklist(),
+		activeTimeline:   append([]contracts.ChatMessage(nil), history...),
+		eventBus:         make(chan contracts.EventStream, 256),
+		subscribers:      make(map[*subscriber]struct{}),
+		aeComms:          aeComms,
 	}
 
 	var err error
@@ -203,7 +208,8 @@ func newRuntimeSession(
 		contracts.InteractiveAgent,
 		s.commitMessages,
 		s.eventBus,
-		s.GenToolCallDispatchHandler(s.ctx),
+		s.userCancellation,
+		s.GenToolCallDispatchHandler(),
 		systemPrompt,
 		agent.WithMaxTurns(1000),
 		agent.WithTools(s.availableTools...),
@@ -404,6 +410,40 @@ func (s *InfaiAgentSession) EnqueueUserMessage(ctx context.Context, input contra
 	return nil
 }
 
+func (s *InfaiAgentSession) CancelTurn() error {
+	s.mu.Lock()
+	if s.ctx.Err() != nil || (s.status != contracts.SessionBusy && s.status != contracts.SessionWaitingApproval) {
+		s.mu.Unlock()
+		return harnessErr.ErrNoTurnToCancel
+	}
+
+	select {
+	case s.userCancellation <- struct{}{}:
+	default:
+	}
+
+	pending := s.pendingApproval
+	s.pendingApproval = nil
+	s.mu.Unlock()
+
+	if pending != nil {
+		decision := contracts.ApprovalConclusion{
+			ReqID:       pending.request.ID,
+			Fingerprint: pending.request.Fingerprint,
+			Decision:    contracts.ApprovalDeny,
+			Reason:      userCanceledApprovalReason,
+		}
+		s.publish(contracts.EventStream{
+			Kind:       contracts.EventApprovalResolved,
+			Timestamp:  time.Now().UTC(),
+			HITLCall:   &pending.request,
+			HITLResult: &decision,
+		})
+		pending.decision <- decision
+	}
+	return nil
+}
+
 func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision contracts.ApprovalConclusion) error {
 	s.mu.Lock()
 
@@ -468,8 +508,7 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			contracts.EventToolTaskCheckList,
 			contracts.EventSkillLoad,
 			contracts.EventMessageFromAgentInbox,
-			contracts.NotifyAgentUsage,
-			contracts.EventApprovalCanceled:
+			contracts.NotifyAgentUsage:
 			s.mu.Lock()
 			s.inFlight = append(s.inFlight, event)
 			s.notifySubscribers(event)

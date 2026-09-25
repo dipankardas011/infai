@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 )
 
 type genericOpenAICompatableAPI struct {
@@ -254,8 +255,8 @@ func (o *genericOpenAICompatableAPI) waitForRetry(ctx context.Context, attempt i
 	if delay > maxDelay {
 		delay = maxDelay
 	}
-	if opts != nil && opts.OnDelta != nil {
-		opts.OnDelta(contracts.EventProviderEvent, fmt.Sprintf("LLM endpoint unavailable; retrying in %s (attempt %d/%d)", delay, attempt+1, o.maxAttempts))
+	if opts != nil && opts.OnDelta != nil && opts.OnDelta(contracts.EventProviderEvent, fmt.Sprintf("LLM endpoint unavailable; retrying in %s (attempt %d/%d)", delay, attempt+1, o.maxAttempts)) {
+		return harnessErr.ErrTurnCanceled
 	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
@@ -354,14 +355,14 @@ func (o *genericOpenAICompatableAPI) readStream(ctx context.Context, body io.Rea
 			d := chunk.Choices[0].Delta
 			if d.Content != "" {
 				content.WriteString(d.Content)
-				if opts.OnDelta != nil {
-					opts.OnDelta(contracts.DeltaContent, d.Content)
+				if opts.OnDelta != nil && opts.OnDelta(contracts.DeltaContent, d.Content) {
+					return contracts.ChatMessage{}, usage, harnessErr.ErrTurnCanceled
 				}
 			}
 			if d.ReasoningContent != "" {
 				reasoning.WriteString(d.ReasoningContent)
-				if opts.OnDelta != nil {
-					opts.OnDelta(contracts.DeltaReasoning, d.ReasoningContent)
+				if opts.OnDelta != nil && opts.OnDelta(contracts.DeltaReasoning, d.ReasoningContent) {
+					return contracts.ChatMessage{}, usage, harnessErr.ErrTurnCanceled
 				}
 			}
 			for _, delta := range d.ToolCalls {

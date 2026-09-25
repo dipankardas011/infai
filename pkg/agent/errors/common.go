@@ -13,6 +13,8 @@ var (
 
 var (
 	ErrSessionClosed  = errors.New("session closed")
+	ErrNoTurnToCancel = errors.New("no turn is in flight")
+	ErrTurnCanceled   = errors.New("turn canceled by user")
 	ErrNoProvider     = errors.New("engine: no provider configured")
 	ErrApprovalDenied = errors.New("tool execution was denied by the user")
 )

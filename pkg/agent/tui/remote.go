@@ -168,7 +168,7 @@ func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thin
 				if onApproval != nil && event.HITLCall != nil {
 					onApproval(ApprovalUpdate{Type: string(event.Kind), Approval: approvalFromRequest(event.HITLCall)})
 				}
-			case contracts.EventApprovalResolved, contracts.EventApprovalCanceled:
+			case contracts.EventApprovalResolved:
 				if onApproval != nil {
 					onApproval(ApprovalUpdate{Type: string(event.Kind)})
 				}

@@ -74,21 +74,22 @@ func newBareRuntimeSession(t *testing.T, model contracts.InfaiModelAdaptor, time
 		t.Fatal(err)
 	}
 	s := &InfaiAgentSession{
-		l:              slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ctx:            ctx,
-		cancel:         cancel,
-		closeDone:      make(chan struct{}),
-		meta:           meta,
-		status:         contracts.SessionIdle,
-		model:          model,
-		timeline:       timeline,
-		store:          sessionStore,
-		taskChecklist:  memory.NewTaskChecklist(),
-		activeTimeline: append([]contracts.ChatMessage(nil), history...),
-		eventBus:       make(chan contracts.EventStream, 256),
-		subscribers:    make(map[*subscriber]struct{}),
+		l:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ctx:              ctx,
+		cancel:           cancel,
+		closeDone:        make(chan struct{}),
+		userCancellation: make(chan struct{}, 1),
+		meta:             meta,
+		status:           contracts.SessionIdle,
+		model:            model,
+		timeline:         timeline,
+		store:            sessionStore,
+		taskChecklist:    memory.NewTaskChecklist(),
+		activeTimeline:   append([]contracts.ChatMessage(nil), history...),
+		eventBus:         make(chan contracts.EventStream, 256),
+		subscribers:      make(map[*subscriber]struct{}),
 	}
-	s.agent, err = agent.NewAgent(model, contracts.InteractiveAgent, s.commitMessages, s.eventBus, func([]contracts.ToolCall) []contracts.ChatMessage { return nil }, "test system prompt", agent.WithMaxTurns(100), agent.WithAutoCompaction(s.shouldCompact, s.autoCompact))
+	s.agent, err = agent.NewAgent(model, contracts.InteractiveAgent, s.commitMessages, s.eventBus, s.userCancellation, func([]contracts.ToolCall) ([]contracts.ChatMessage, bool) { return nil, false }, "test system prompt", agent.WithMaxTurns(100), agent.WithAutoCompaction(s.shouldCompact, s.autoCompact))
 	if err != nil {
 		t.Fatal(err)
 	}

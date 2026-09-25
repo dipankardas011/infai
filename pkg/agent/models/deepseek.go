@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 )
 
 func deepSeekAuthMethods() []contracts.ProviderAuthMethod {
@@ -278,14 +279,14 @@ func (d *deepSeekAPI) readStream(ctx context.Context, body io.Reader, opts *cont
 			}
 			if choice.Delta.Content != "" {
 				content.WriteString(choice.Delta.Content)
-				if opts.OnDelta != nil {
-					opts.OnDelta(contracts.DeltaContent, choice.Delta.Content)
+				if opts.OnDelta != nil && opts.OnDelta(contracts.DeltaContent, choice.Delta.Content) {
+					return contracts.ChatMessage{}, usage, harnessErr.ErrTurnCanceled
 				}
 			}
 			if choice.Delta.ReasoningContent != "" {
 				reasoning.WriteString(choice.Delta.ReasoningContent)
-				if opts.OnDelta != nil {
-					opts.OnDelta(contracts.DeltaReasoning, choice.Delta.ReasoningContent)
+				if opts.OnDelta != nil && opts.OnDelta(contracts.DeltaReasoning, choice.Delta.ReasoningContent) {
+					return contracts.ChatMessage{}, usage, harnessErr.ErrTurnCanceled
 				}
 			}
 			for _, delta := range choice.Delta.ToolCalls {

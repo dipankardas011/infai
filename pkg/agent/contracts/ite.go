@@ -93,6 +93,7 @@ const (
 	ResponsibilitySession     FailureResponsibility = "session"
 	ResponsibilityEnvironment FailureResponsibility = "environment"
 	ResponsibilityTool        FailureResponsibility = "tool"
+	ResponsibilityUser        FailureResponsibility = "user"
 )
 
 // ExecutionError is the failure shape every tool executor returns. Error is safe
@@ -151,9 +152,9 @@ func DecodeToolArguments[T any](tool ToolType, tc ToolCall) (T, error) {
 // cannot be interrupted once started — neither a syscall nor a locked in-memory
 // mutation — so the worker finishes and discards its result. Only this tool's
 // own deadline is reported as a timeout; an outer cancellation is passed through.
-func RunBounded(ctx context.Context, tool ToolType, timeout time.Duration, run func() (string, error)) (string, error) {
+func RunBounded(sessionCtx context.Context, tool ToolType, timeout time.Duration, run func() (string, error)) (string, error) {
 	timeoutCause := fmt.Errorf("%s exceeded the %s execution limit", tool, timeout)
-	ctx, cancel := context.WithTimeoutCause(ctx, timeout, timeoutCause)
+	ctx, cancel := context.WithTimeoutCause(sessionCtx, timeout, timeoutCause)
 	defer cancel()
 
 	results := make(chan toolResult, 1)

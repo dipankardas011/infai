@@ -52,7 +52,6 @@ const (
 	/// HITL
 	EventApprovalRequested EventStreamKind = "approval_requested"
 	EventApprovalResolved  EventStreamKind = "approval_resolved"
-	EventApprovalCanceled  EventStreamKind = "approval_canceled"
 )
 
 type EventStream struct {

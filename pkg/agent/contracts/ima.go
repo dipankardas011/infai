@@ -88,7 +88,7 @@ type GenerateOptions struct {
 	// (typed by DeltaKind, in stream order) are delivered to OnDelta; the
 	// full message is still returned as usual.
 	Stream  bool
-	OnDelta func(kind EventStreamKind, text string)
+	OnDelta func(kind EventStreamKind, text string) bool
 }
 
 type LLMProviders struct {

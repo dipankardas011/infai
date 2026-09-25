@@ -44,9 +44,7 @@ func (s *InfaiAgentSession) configureMemoryTools() {
 	s.availableTools = append(s.availableTools, memoryTools...)
 }
 
-func (s *InfaiAgentSession) GenToolCallDispatchHandler(
-	ctx context.Context,
-) func([]contracts.ToolCall) []contracts.ChatMessage {
+func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCall) ([]contracts.ChatMessage, bool) {
 
 	checkIfAllowedToolCall := func(tc contracts.ToolCall) bool {
 		if len(s.availableTools) == 0 {
@@ -60,16 +58,40 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 		return false
 	}
 
-	return func(tcs []contracts.ToolCall) []contracts.ChatMessage {
+	return func(tcs []contracts.ToolCall) ([]contracts.ChatMessage, bool) {
 		toolMessages := make([]contracts.ChatMessage, 0, len(tcs))
+		turnCanceled := false
 
 		for _, tc := range tcs {
+			if turnCanceled {
+				status := contracts.ToolExecutionDenied
+				content := contracts.NewToolExecutionError(
+					tc.Function.Name,
+					"turn_canceled",
+					"the turn was canceled by the user before this tool ran",
+					contracts.ResponsibilityUser,
+					nil,
+				).Error()
+				toolMessages = append(toolMessages, contracts.NewToolMessage(tc.ID, content, status))
+				s.publish(contracts.EventStream{
+					Kind:      contracts.EventToolResult,
+					Timestamp: time.Now().UTC(),
+					ToolResult: &contracts.ToolExecutionResult{
+						Status:   status,
+						CallID:   tc.ID,
+						CallName: tc.Function.Name,
+						Error:    content,
+					},
+				})
+				continue
+			}
+
 			policy := s.auditorPolicy.Check(tc.Function.Name)
 			if !checkIfAllowedToolCall(tc) {
 				policy = auditor.DenyPolicy
 			}
 
-			s.l.DebugContext(ctx, "tool call received",
+			s.l.DebugContext(s.ctx, "tool call received",
 				"agent_id", s.meta.ID,
 				"call_id", tc.ID,
 				"tool", tc.Function.Name,
@@ -80,7 +102,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 
 			switch policy {
 			case auditor.DenyPolicy:
-				s.l.InfoContext(ctx, "tool call denied",
+				s.l.InfoContext(s.ctx, "tool call denied",
 					"agent_id", s.meta.ID,
 					"call_id", tc.ID,
 					"tool", tc.Function.Name,
@@ -101,14 +123,24 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 				continue
 
 			case auditor.HumanPolicy:
-				s.l.InfoContext(ctx, "tool call HITL",
+				s.l.InfoContext(s.ctx, "tool call HITL",
 					"agent_id", s.meta.ID,
 					"call_id", tc.ID,
 					"tool", tc.Function.Name,
 				)
 
-				if err := s.performHITL(ctx, s.meta.ID, tc); err != nil {
-					if errors.Is(err, harnessErr.ErrApprovalDenied) {
+				if err := s.performHITL(s.ctx, s.meta.ID, tc); err != nil {
+					if errors.Is(err, harnessErr.ErrTurnCanceled) {
+						turnCanceled = true
+						status = contracts.ToolExecutionDenied
+						content = contracts.NewToolExecutionError(
+							tc.Function.Name,
+							"turn_canceled",
+							"the turn was canceled by the user before this tool ran",
+							contracts.ResponsibilityUser,
+							err,
+						).Error()
+					} else if errors.Is(err, harnessErr.ErrApprovalDenied) {
 						status = contracts.ToolExecutionDenied
 					} else if errors.Is(err, context.Canceled) {
 						status = contracts.ToolExecutionError
@@ -134,7 +166,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 				}
 
 			case auditor.AllowPolicy:
-				s.l.InfoContext(ctx, "tool call allowed",
+				s.l.InfoContext(s.ctx, "tool call allowed",
 					"agent_id", s.meta.ID,
 					"call_id", tc.ID,
 					"tool", tc.Function.Name,
@@ -143,7 +175,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 
 			switch tc.Function.Name {
 			case contracts.ReadTool:
-				output, err := s.fileManager.ReadExecution(ctx, tc)
+				output, err := s.fileManager.ReadExecution(s.ctx, tc)
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
@@ -167,7 +199,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 				})
 
 			case contracts.WriteTool:
-				output, err := s.fileManager.WriteExecution(ctx, tc)
+				output, err := s.fileManager.WriteExecution(s.ctx, tc)
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
@@ -191,7 +223,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 				})
 
 			case contracts.EditTool:
-				output, err := s.fileManager.EditExecution(ctx, tc)
+				output, err := s.fileManager.EditExecution(s.ctx, tc)
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
@@ -215,7 +247,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 				})
 
 			case contracts.GlobTool:
-				output, err := s.fileManager.GlobExecution(ctx, tc)
+				output, err := s.fileManager.GlobExecution(s.ctx, tc)
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
@@ -239,7 +271,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 				})
 
 			case contracts.ListTool:
-				output, err := s.fileManager.ListExecution(ctx, tc)
+				output, err := s.fileManager.ListExecution(s.ctx, tc)
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
@@ -263,7 +295,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 				})
 
 			case contracts.SearchTool:
-				output, err := s.fileManager.SearchExecution(ctx, tc)
+				output, err := s.fileManager.SearchExecution(s.ctx, tc)
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
@@ -287,7 +319,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 				})
 
 			case contracts.BashTool:
-				output, err := s.fileManager.BashExecution(ctx, tc)
+				output, err := s.fileManager.BashExecution(s.ctx, tc)
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
@@ -311,7 +343,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 				})
 
 			case contracts.ReadSkillTool:
-				output, err := s.skillRegistry.LoadSkillExecution(ctx, tc)
+				output, err := s.skillRegistry.LoadSkillExecution(s.ctx, tc)
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
@@ -338,7 +370,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 				})
 
 			case contracts.TaskChecklistTool:
-				output, err := s.taskChecklist.TaskChecklistExecution(ctx, tc)
+				output, err := s.taskChecklist.TaskChecklistExecution(s.ctx, tc)
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
@@ -384,7 +416,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler(
 			toolMessages = append(toolMessages, contracts.NewToolMessage(tc.ID, content, status))
 		}
 
-		return toolMessages
+		return toolMessages, turnCanceled
 	}
 }
 
@@ -412,6 +444,11 @@ func (s *InfaiAgentSession) performHITL(ctx context.Context, agentID uuid.UUID, 
 	}
 
 	s.mu.Lock()
+
+	if len(s.userCancellation) > 0 {
+		s.mu.Unlock()
+		return harnessErr.ErrTurnCanceled
+	}
 
 	if s.pendingApproval != nil {
 		s.mu.Unlock()
@@ -445,7 +482,7 @@ func (s *InfaiAgentSession) performHITL(ctx context.Context, agentID uuid.UUID, 
 		s.mu.Unlock()
 
 		s.publish(contracts.EventStream{
-			Kind:      contracts.EventApprovalCanceled,
+			Kind:      contracts.EventApprovalResolved,
 			Timestamp: time.Now().UTC(),
 			HITLCall:  &request,
 			HITLResult: &contracts.ApprovalConclusion{
@@ -463,6 +500,9 @@ func (s *InfaiAgentSession) performHITL(ctx context.Context, agentID uuid.UUID, 
 		"decision", decision.Decision,
 	)
 	if decision.Decision != contracts.ApprovalApprove {
+		if decision.Reason == userCanceledApprovalReason {
+			return harnessErr.ErrTurnCanceled
+		}
 		return harnessErr.ErrApprovalDenied
 	}
 	return nil

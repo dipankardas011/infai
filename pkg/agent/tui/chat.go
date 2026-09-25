@@ -919,7 +919,7 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 		if event.HITLCall != nil {
 			m.showApproval(approvalFromRequest(event.HITLCall))
 		}
-	case contracts.EventApprovalResolved, contracts.EventApprovalCanceled:
+	case contracts.EventApprovalResolved:
 		m.handleApprovalUpdate(ApprovalUpdate{Type: string(event.Kind), Approval: approvalFromRequest(event.HITLCall)})
 	case contracts.NotifyAgentUsage:
 		var usage contracts.TokenUsage

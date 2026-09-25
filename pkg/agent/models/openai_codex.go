@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 )
 
 const codexOAuthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -565,13 +566,19 @@ func (o *openAICodexResponsesAPI) readStream(ctx context.Context, body io.Reader
 		case "response.output_text.delta", "response.refusal.delta":
 			hasMessage = true
 			content.WriteString(value.Delta)
-			emitCodexDelta(opts, contracts.DeltaContent, value.Delta)
+			if emitCodexDelta(opts, contracts.DeltaContent, value.Delta) {
+				return contracts.ChatMessage{}, usage, harnessErr.ErrTurnCanceled
+			}
 		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 			reasoning.WriteString(value.Delta)
-			emitCodexDelta(opts, contracts.DeltaReasoning, value.Delta)
+			if emitCodexDelta(opts, contracts.DeltaReasoning, value.Delta) {
+				return contracts.ChatMessage{}, usage, harnessErr.ErrTurnCanceled
+			}
 		case "response.reasoning_summary_part.done":
 			reasoning.WriteString("\n\n")
-			emitCodexDelta(opts, contracts.DeltaReasoning, "\n\n")
+			if emitCodexDelta(opts, contracts.DeltaReasoning, "\n\n") {
+				return contracts.ChatMessage{}, usage, harnessErr.ErrTurnCanceled
+			}
 		case "response.output_item.added":
 			item, err := decodeCodexOutputItem(value.Item)
 			if err != nil {
@@ -665,10 +672,8 @@ func decodeCodexOutputItem(raw json.RawMessage) (codexOutputItem, error) {
 	return item, nil
 }
 
-func emitCodexDelta(opts *contracts.GenerateOptions, kind contracts.EventStreamKind, text string) {
-	if text != "" && opts != nil && opts.OnDelta != nil {
-		opts.OnDelta(kind, text)
-	}
+func emitCodexDelta(opts *contracts.GenerateOptions, kind contracts.EventStreamKind, text string) bool {
+	return text != "" && opts != nil && opts.OnDelta != nil && opts.OnDelta(kind, text)
 }
 
 func codexStreamError(event codexStreamEvent) error {
