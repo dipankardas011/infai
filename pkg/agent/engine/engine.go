@@ -381,6 +381,14 @@ func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, d
 	return sess.ResolveApproval(approvalID, decision)
 }
 
+func (e *InfaiAgentEngine) CancelTurn(id uuid.UUID) error {
+	sess, ok := e.Session(id)
+	if !ok {
+		return harnessErr.ErrSessionNotFound
+	}
+	return sess.CancelTurn()
+}
+
 // CompactSession creates a continuation checkpoint for an active session.
 func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) error {
 	e.mu.Lock()

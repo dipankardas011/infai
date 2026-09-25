@@ -55,6 +55,7 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("POST /v1/sessions/{id}/model", s.handleSetSessionModel)
 	mux.HandleFunc("GET /v1/sessions/{id}/join-stream", s.handleJoinSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/chat", s.handleChat)
+	mux.HandleFunc("POST /v1/sessions/{id}/cancel", s.handleCancelTurn)
 	mux.HandleFunc("POST /v1/sessions/{id}/approvals/{approvalID}", s.handleApproval)
 	mux.HandleFunc("POST /v1/sessions/{id}/compact", s.handleCompact)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
@@ -66,6 +67,25 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 		WriteTimeout: 0, // chats can take a while
 	}
 	return s
+}
+
+func (s *Server) handleCancelTurn(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+
+	switch err := s.engine.CancelTurn(id); {
+	case errors.Is(err, harnessErr.ErrSessionNotFound):
+		s.writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, harnessErr.ErrNoTurnToCancel):
+		s.writeError(w, http.StatusConflict, err)
+	case err != nil:
+		s.writeError(w, http.StatusInternalServerError, err)
+	default:
+		s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+	}
 }
 
 func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
