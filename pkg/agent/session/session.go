@@ -237,6 +237,11 @@ func newRuntimeSession(
 		s.agent.StartLoop(s.ctx, s.activeTimeline)
 	})
 
+	s.wg.Go(func() {
+		<-s.ctx.Done()
+		s.releaseSubscribers()
+	})
+
 	return s, nil
 }
 
@@ -696,6 +701,18 @@ func (s *InfaiAgentSession) commitCompaction(commit compactionCommit) error {
 	return nil
 }
 
+// releaseSubscribers ends every attached client's stream, so a client's
+// read loop returns instead of waiting on a session that is gone.
+func (s *InfaiAgentSession) releaseSubscribers() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for sub := range s.subscribers {
+		delete(s.subscribers, sub)
+		close(sub.events)
+	}
+}
+
 func (s *InfaiAgentSession) Close() {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
@@ -710,12 +727,7 @@ func (s *InfaiAgentSession) Close() {
 		s.cancel(harnessErr.ErrSessionClosed)
 		s.wg.Wait()
 
-		s.mu.Lock()
-		for sub := range s.subscribers {
-			delete(s.subscribers, sub)
-			close(sub.events)
-		}
-		s.mu.Unlock()
+		s.releaseSubscribers()
 		if s.timeline != nil {
 			_ = s.timeline.Close()
 		}

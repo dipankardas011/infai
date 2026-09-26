@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	MAX_SESSION_CLIENTS = 4
+	MAX_SESSION_CLIENTS = 2
 
 	SUBSCRIBER_BUFFER = 64
 )
