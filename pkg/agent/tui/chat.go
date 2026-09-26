@@ -1249,9 +1249,14 @@ func (m *chatModel) statusView() string {
 		}
 		fields := []string{
 			m.styles.status.Render(fmt.Sprintf("%s (%s)", m.session.Model, m.session.Provider)),
-			m.styles.active.Render("thinking " + string(thinking)),
-			m.styles.status.Render("ctx ") + contextProgressBar(m.styles, pct, 10) + m.styles.status.Render(fmt.Sprintf(" %d%% %s/%s", pct, tokenCount(m.used), tokenCount(m.contextWindow))),
 		}
+		if m.session.Cwd != "" {
+			fields = append(fields, m.styles.status.Render(m.session.Cwd))
+		}
+		fields = append(fields,
+			m.styles.active.Render("thinking "+string(thinking)),
+			m.styles.status.Render("ctx ")+contextProgressBar(m.styles, pct, 6)+m.styles.status.Render(fmt.Sprintf(" %d%% %s/%s", pct, tokenCount(m.used), tokenCount(m.contextWindow))),
+		)
 		rest = strings.Join(fields, separator)
 	}
 	if !m.viewport.AtBottom() {
@@ -1349,15 +1354,24 @@ func tokenCount(tokens uint64) string {
 	return fmt.Sprintf("%d", tokens)
 }
 
+// contextBarLevels splits a cell into eighths, so a short bar still moves in
+// small steps: six cells carry forty-eight positions instead of six.
+var contextBarLevels = [...]string{"", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"}
+
+// contextProgressBar draws the context bar as a run of filled cells, a partial
+// boundary cell, and dim cells for what is left.
 func contextProgressBar(styles harnessStyles, percent, width int) string {
-	filled := percent * width / 100
-	if percent > 0 && filled == 0 {
-		filled = 1
+	eighths := min(max(percent, 0), 100) * width * 8 / 100
+	full, partial := eighths/8, eighths%8
+	if percent > 0 && full == 0 && partial == 0 {
+		partial = 1
 	}
-	filled = min(max(filled, 0), width)
-	empty := width - filled
-	return styles.active.Render("["+strings.Repeat("█", filled)) +
-		lipgloss.NewStyle().Foreground(everforest.SurfaceAlt).Render(strings.Repeat("░", empty)+"]")
+	if full >= width {
+		full, partial = width, 0
+	}
+	filled := strings.Repeat("█", full) + contextBarLevels[partial]
+	return styles.active.Render(filled) +
+		lipgloss.NewStyle().Foreground(everforest.SurfaceAlt).Render(strings.Repeat("░", max(width-lipgloss.Width(filled), 0)))
 }
 
 func (m *chatModel) taskChecklistView(width int) string {

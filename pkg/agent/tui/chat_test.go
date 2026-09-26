@@ -131,7 +131,7 @@ func TestWorkingStatusIsProminentAndOmitsTurns(t *testing.T) {
 	if strings.Contains(normalStatus, "turn") {
 		t.Fatalf("status contains turn count: %q", normalStatus)
 	}
-	for _, want := range []string{"gemma4-e2b-it (infai)", "thinking low", "[█░░░░░░░░░] 6% 6/100"} {
+	for _, want := range []string{"gemma4-e2b-it (infai)", "thinking low", "ctx ▎░░░░░ 6% 6/100"} {
 		if !strings.Contains(normalStatus, want) {
 			t.Fatalf("status lacks %q: %q", want, normalStatus)
 		}
