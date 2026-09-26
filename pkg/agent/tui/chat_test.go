@@ -630,67 +630,91 @@ func TestApprovalOverlayKeepsTranscriptVisible(t *testing.T) {
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 20})
 	m.showApproval(&Approval{Message: "Run this command?"})
 
-	content := m.View().Content
+	collapsed := ansi.Strip(m.View().Content)
+	for _, want := range []string{"transcript remains visible", "TOOL", "[A]llow", "[D]eny"} {
+		if !strings.Contains(collapsed, want) {
+			t.Fatalf("approval view does not contain %q:\n%s", want, collapsed)
+		}
+	}
+	// The message is part of the detail, so it arrives with the expansion.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
+	expanded := ansi.Strip(m.View().Content)
 	for _, want := range []string{"transcript remains visible", "APPROVAL REQUIRED", "Run this command?", "[A]llow", "[D]eny"} {
-		if !strings.Contains(content, want) {
-			t.Fatalf("approval view does not contain %q", want)
+		if !strings.Contains(expanded, want) {
+			t.Fatalf("expanded approval view does not contain %q:\n%s", want, expanded)
 		}
 	}
 }
 
-func TestApprovalModalPinsActionsWhileBodyScrolls(t *testing.T) {
-	lines := make([]string, 30)
-	for i := range lines {
-		lines[i] = fmt.Sprintf("review line %02d", i+1)
-	}
-	modal := &modalModel{
-		kind: modalApproval, title: "Approval required", body: strings.Join(lines, "\n"),
-		options: []modalOption{
-			{label: "Allow", shortcut: 'a'},
-			{label: "Deny", shortcut: 'd'},
-		},
-	}
-	rendered := ansi.Strip(renderModal(modal, 70, 12, newHarnessStyles()))
-	for _, want := range []string{"review line 01", "[A]llow", "[D]eny", "review lines 1-"} {
-		if !strings.Contains(rendered, want) {
-			t.Fatalf("approval modal lacks %q: %q", want, rendered)
-		}
-	}
-
-	modal.bodyOffset = 8
-	rendered = ansi.Strip(renderModal(modal, 70, 12, newHarnessStyles()))
-	if strings.Contains(rendered, "review line 01") || !strings.Contains(rendered, "review line 09") {
-		t.Fatalf("approval body did not scroll: %q", rendered)
-	}
-}
-
-func TestApprovalReviewScrollControls(t *testing.T) {
+func TestApprovalReservesOneLineAndExpandsIntoTheTranscript(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
-	m.width, m.height = 70, 12
-	m.modal = &modalModel{kind: modalApproval, title: "Approval", body: strings.Repeat("review line\n", 30)}
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
+		Function: contracts.Function{
+			Name:      contracts.BashTool,
+			Arguments: `{"command":"rm -rf ./build\nmake all","workdir":"/w","timeout":30}`,
+		},
+	}})
 
-	_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown}))
-	if m.modal.bodyOffset != 3 {
-		t.Fatalf("mouse wheel body offset=%d want 3", m.modal.bodyOffset)
+	// Collapsed: one reserved line that carries the answers and hides the body.
+	collapsed := ansi.Strip(m.View().Content)
+	for _, want := range []string{"bash", "[A]llow", "[D]eny", "[R]eason", "ctrl+g"} {
+		if !strings.Contains(collapsed, want) {
+			t.Fatalf("pending block lacks %q:\n%s", want, collapsed)
+		}
 	}
-	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
-	if m.modal.bodyOffset != 11 {
-		t.Fatalf("page down body offset=%d want 11", m.modal.bodyOffset)
+	// The answers get their own row rather than crowding the preview.
+	if !strings.Contains(collapsed, "\n   [A]llow   [D]eny   [R]eason") {
+		t.Fatalf("answers are not on their own row:\n%s", collapsed)
 	}
-	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
-	if m.modal.bodyOffset != 3 {
-		t.Fatalf("page up body offset=%d want 3", m.modal.bodyOffset)
+	if strings.Contains(collapsed, "WORKING DIRECTORY") {
+		t.Fatalf("collapsed approval already shows the body:\n%s", collapsed)
 	}
-	for range 100 {
-		_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown}))
+
+	// Expanded: the detail joins the transcript, which owns the scrolling.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
+	expanded := ansi.Strip(m.View().Content)
+	for _, want := range []string{"WORKING DIRECTORY  /w", "[A]llow", "[D]eny", "ctrl+g"} {
+		if !strings.Contains(expanded, want) {
+			t.Fatalf("expanded approval lacks %q:\n%s", want, expanded)
+		}
 	}
-	maxOffset := approvalMaxBodyOffset(m.modal, m.width, m.height, m.styles)
-	if m.modal.bodyOffset != maxOffset {
-		t.Fatalf("overscroll body offset=%d want bounded maximum %d", m.modal.bodyOffset, maxOffset)
+	if height := lipgloss.Height(m.View().Content); height != 24 {
+		t.Fatalf("approval frame height=%d want 24", height)
 	}
-	_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelUp}))
-	if m.modal.bodyOffset != max(maxOffset-3, 0) {
-		t.Fatalf("reverse scroll body offset=%d did not move immediately from maximum %d", m.modal.bodyOffset, maxOffset)
+}
+
+func TestApprovalKeysAnswerTheDecision(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	approval := &Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{Name: contracts.BashTool, Arguments: `{"command":"ls"}`}}}
+	m.showApproval(approval)
+
+	// A pending decision owns the keyboard: a stray letter must not reach the
+	// composer, where it could look like a prompt.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
+	if m.composer.Value() != "" {
+		t.Fatalf("pending approval let %q into the composer", m.composer.Value())
+	}
+
+	// [R]eason hands the composer to the reason and sends it with the denial.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'r', Text: "r"}))
+	if m.composer.Prompt != "" && !strings.Contains(m.composer.View(), "why") {
+		t.Fatal("reason mode did not mark the composer")
+	}
+	m.composer.SetValue("delete only inside build")
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd == nil {
+		t.Fatal("reason was not dispatched")
+	}
+	if m.approval != nil {
+		t.Fatal("approval still pending after a denial")
+	}
+	last := m.blocks[len(m.blocks)-1]
+	if !strings.Contains(last.text, "deny_with_reason") || !strings.Contains(last.text, "delete only inside build") {
+		t.Fatalf("transcript recorded %q", last.text)
 	}
 }
 
@@ -705,6 +729,7 @@ func TestApprovalModalRendersEditDiff(t *testing.T) {
 		},
 	}})
 
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	content := ansi.Strip(m.View().Content)
 	for _, want := range []string{"EDIT FILE", "TARGET  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new", "[A]llow", "[D]eny"} {
 		if !strings.Contains(content, want) {
@@ -728,9 +753,10 @@ func TestEditDiffWrapsAndKeepsActionsPinned(t *testing.T) {
 		},
 	}})
 
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	view := m.View().Content
-	if height := lipgloss.Height(view); height > 20 {
-		t.Fatalf("modal view height=%d exceeds terminal height 20", height)
+	if height := lipgloss.Height(view); height != 20 {
+		t.Fatalf("approval view height=%d want 20", height)
 	}
 	content := ansi.Strip(view)
 	for _, want := range []string{"[A]llow", "[D]eny"} {
@@ -751,6 +777,7 @@ func TestApprovalModalRendersWriteAdditions(t *testing.T) {
 		},
 	}})
 
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	content := ansi.Strip(m.View().Content)
 	for _, want := range []string{"WRITE FILE", "TARGET  notes.txt", "1 + first line", "2 + second line"} {
 		if !strings.Contains(content, want) {
@@ -808,6 +835,7 @@ func TestApprovalModalRendersBashAsCode(t *testing.T) {
 		Name:      contracts.BashTool,
 		Arguments: `{"command":"if test -f go.mod; then\n  go test ./...\nfi","workdir":"."}`,
 	}}})
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 
 	content := ansi.Strip(m.View().Content)
 	for _, want := range []string{"BASH TOOL CALL", "SCRIPT", "if test -f go.mod; then", "go test ./...", "fi"} {
@@ -820,8 +848,8 @@ func TestApprovalModalRendersBashAsCode(t *testing.T) {
 	}
 
 	highlighted := renderApprovalScript("nvidia-smi", 40, newHarnessStyles())
-	if !strings.Contains(highlighted, "\x1b[48;2;46;56;60m") {
-		t.Fatalf("bash approval script does not use modal surface background: %q", highlighted)
+	if !strings.Contains(highlighted, "\x1b[48;2;77;76;67m") {
+		t.Fatalf("bash approval script does not use the attention band background: %q", highlighted)
 	}
 	if strings.Contains(highlighted, "\x1b[48;2;39;46;51m") {
 		t.Fatalf("bash approval script uses app background: %q", highlighted)

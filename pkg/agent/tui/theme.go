@@ -28,6 +28,10 @@ var everforest = struct {
 	// Diff row backgrounds (Everforest bg_red / bg_green).
 	DiffInsertBg color.Color
 	DiffDeleteBg color.Color
+
+	// AttentionBg is the band a pending human decision sits on: Everforest's
+	// bg_yellow, the palette's own surface for a highlighted region.
+	AttentionBg color.Color
 }{
 	Background: lipgloss.Color("#272e33"),
 	Surface:    lipgloss.Color("#2e383c"),
@@ -44,6 +48,8 @@ var everforest = struct {
 
 	DiffInsertBg: lipgloss.Color("#425047"),
 	DiffDeleteBg: lipgloss.Color("#514045"),
+
+	AttentionBg: lipgloss.Color("#4d4c43"), // Everforest bg_yellow
 }
 
 type harnessStyles struct {
@@ -56,6 +62,14 @@ type harnessStyles struct {
 	statusBusy    lipgloss.Style
 	statusWaiting lipgloss.Style
 	statusRow     lipgloss.Style
+	hitl          lipgloss.Style
+	hitlFlag      lipgloss.Style
+	hitlTitle     lipgloss.Style
+	hitlName      lipgloss.Style
+	hitlBody      lipgloss.Style
+	hitlMuted     lipgloss.Style
+	hitlAllow     lipgloss.Style
+	hitlDeny      lipgloss.Style
 	sessionName   lipgloss.Style
 	muted         lipgloss.Style
 	userMarker    lipgloss.Style
@@ -93,30 +107,44 @@ func newHarnessStyles() harnessStyles {
 		statusBusy:    lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
 		statusWaiting: lipgloss.NewStyle().Foreground(everforest.Orange).Bold(true),
 		statusRow:     lipgloss.NewStyle().Foreground(everforest.Muted).PaddingRight(1),
-		sessionName:   lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
-		muted:         lipgloss.NewStyle().Foreground(everforest.Muted),
-		userMarker:    lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
-		assistant:     lipgloss.NewStyle().Foreground(everforest.Text),
-		imageBadge:    lipgloss.NewStyle().Background(everforest.Green).Foreground(everforest.Background).Bold(true),
-		thinking:      lipgloss.NewStyle().Foreground(everforest.Muted).Italic(true),
-		system:        lipgloss.NewStyle().Foreground(everforest.Purple),
-		error:         lipgloss.NewStyle().Foreground(everforest.Red),
-		tool:          lipgloss.NewStyle().Foreground(everforest.Muted),
-		skill:         lipgloss.NewStyle().Foreground(everforest.Aqua),
-		modal:         lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Border(lipgloss.RoundedBorder()).BorderForeground(everforest.Green).Padding(1, 2),
-		modalTitle:    lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Green).Bold(true),
-		modalBody:     lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Muted),
-		modalOption:   lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).PaddingLeft(2),
-		modalActive:   lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true).PaddingLeft(1),
-		screenTitle:   lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
-		screenBody:    lipgloss.NewStyle().Foreground(everforest.Muted),
-		screenRow:     lipgloss.NewStyle().Foreground(everforest.Text),
-		screenSel:     lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
-		active:        lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
-		inactive:      lipgloss.NewStyle().Foreground(everforest.Muted),
-		menu:          lipgloss.NewStyle().Background(everforest.Surface).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(everforest.Green),
-		menuRow:       lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text),
-		menuActive:    lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
+		// A pending decision gets a tinted band instead of a border, so it reads
+		// as reserved space without any frame to get wrong. Every style on the
+		// band carries the band's own background: a foreground-only style would
+		// punch the terminal's background through the row.
+		hitl:      lipgloss.NewStyle().Background(everforest.AttentionBg),
+		hitlFlag:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Yellow).Bold(true),
+		hitlName:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Purple).Bold(true),
+		hitlBody:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Text),
+		hitlMuted: lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Muted),
+		hitlAllow: lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Green).Bold(true),
+		hitlDeny:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Red).Bold(true),
+		// The expanded detail is the same band: one block of attention, whether
+		// the decision is collapsed into the reserved rows or opened up.
+		hitlTitle:   lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Orange).Bold(true),
+		sessionName: lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
+		muted:       lipgloss.NewStyle().Foreground(everforest.Muted),
+		userMarker:  lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
+		assistant:   lipgloss.NewStyle().Foreground(everforest.Text),
+		imageBadge:  lipgloss.NewStyle().Background(everforest.Green).Foreground(everforest.Background).Bold(true),
+		thinking:    lipgloss.NewStyle().Foreground(everforest.Muted).Italic(true),
+		system:      lipgloss.NewStyle().Foreground(everforest.Purple),
+		error:       lipgloss.NewStyle().Foreground(everforest.Red),
+		tool:        lipgloss.NewStyle().Foreground(everforest.Muted),
+		skill:       lipgloss.NewStyle().Foreground(everforest.Aqua),
+		modal:       lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Border(lipgloss.RoundedBorder()).BorderForeground(everforest.Green).Padding(1, 2),
+		modalTitle:  lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Green).Bold(true),
+		modalBody:   lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Muted),
+		modalOption: lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).PaddingLeft(2),
+		modalActive: lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true).PaddingLeft(1),
+		screenTitle: lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
+		screenBody:  lipgloss.NewStyle().Foreground(everforest.Muted),
+		screenRow:   lipgloss.NewStyle().Foreground(everforest.Text),
+		screenSel:   lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
+		active:      lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
+		inactive:    lipgloss.NewStyle().Foreground(everforest.Muted),
+		menu:        lipgloss.NewStyle().Background(everforest.Surface).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(everforest.Green),
+		menuRow:     lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text),
+		menuActive:  lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
 	}
 }
 

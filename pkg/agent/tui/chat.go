@@ -65,6 +65,9 @@ type chatModel struct {
 	composer         textarea.Model
 	checklist        contracts.TaskChecklistState
 	status           contracts.SessionStatus
+	approval         *Approval
+	approvalShown    bool
+	approvalReason   bool
 	modal            *modalModel
 	commandMenu      bool
 	commandSelection int
@@ -188,13 +191,6 @@ func runChatTUI(ctx context.Context, client Client, sessions []contracts.Session
 
 func newChatModel(ctx context.Context, client Client, sessions []contracts.SessionSummary, opts RunOptions) *chatModel {
 	input := textarea.New()
-	const inputMark = "∞ "
-	input.SetPromptFunc(lipgloss.Width(inputMark), func(info textarea.PromptInfo) string {
-		if info.LineNumber == 0 {
-			return inputMark
-		}
-		return strings.Repeat(" ", lipgloss.Width(inputMark))
-	})
 	input.Placeholder = "Ask, plan, build..."
 	input.ShowLineNumbers = false
 	input.DynamicHeight = true
@@ -226,7 +222,32 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 	} else {
 		m.showSessions(sessions, true)
 	}
+	m.refreshInputMark()
 	return m
+}
+
+// inputMark opens the composer: "∞" while it takes a prompt, "why" while it is
+// capturing the reason a decision was denied.
+const inputMark = "∞ "
+
+// refreshInputMark names what the composer is currently for, and pads the
+// continuation rows of a wrapped draft to the same width. The placeholder spells
+// out how to finish a reason, so the reserved block above does not have to.
+func (m *chatModel) refreshInputMark() {
+	mark := inputMark
+	placeholder := "Ask, plan, build..."
+	if m.approvalReason {
+		mark = "why▸ "
+		placeholder = "(reason to deny  ·  ⏎ send  ·  esc cancel)"
+	}
+	m.composer.Placeholder = placeholder
+	width := lipgloss.Width(mark)
+	m.composer.SetPromptFunc(width, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
+			return mark
+		}
+		return strings.Repeat(" ", width)
+	})
 }
 
 func (m *chatModel) Init() tea.Cmd {
@@ -237,7 +258,6 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.scrollApproval(0)
 		m.reflow(true)
 		m.streamDirty = false
 		return m, nil
@@ -505,15 +525,6 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
-		if m.modal != nil && m.modal.kind == modalApproval {
-			switch msg.Mouse().Button {
-			case tea.MouseWheelUp:
-				m.scrollApproval(-3)
-			case tea.MouseWheelDown:
-				m.scrollApproval(3)
-			}
-			return m, nil
-		}
 		if m.modal == nil {
 			mouse := msg.Mouse()
 			if len(m.areas) > 1 && (mouse.Y < m.areas[1].y || mouse.Y >= m.areas[1].y+m.areas[1].height) {
@@ -541,6 +552,11 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	if key == "ctrl+c" {
 		return m, tea.Quit
+	}
+	// A pending decision owns the keyboard: the turn is blocked until it is
+	// answered, so the composer is not accepting prompts anyway.
+	if model, cmd, handled := m.handleApprovalKey(key); handled {
+		return model, cmd
 	}
 	if m.working && key == "esc" {
 		if !m.cancelArmed {
@@ -657,6 +673,68 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// handleApprovalKey routes a key to a pending decision. It reports whether it
+// consumed the key; while a reason is being typed every other key belongs to the
+// composer, and the transcript scroll keys always work so the context stays
+// readable.
+func (m *chatModel) handleApprovalKey(key string) (tea.Model, tea.Cmd, bool) {
+	if m.approval == nil {
+		return m, nil, false
+	}
+	if m.approvalReason {
+		switch key {
+		case "esc":
+			m.approvalReason = false
+			m.composer.Reset()
+			m.reflow(false)
+			return m, nil, true
+		case "enter":
+			return m, m.resolveApproval(string(contracts.ApprovalDenyWithReason), strings.TrimSpace(m.composer.Value())), true
+		}
+		return m, nil, false
+	}
+	switch key {
+	case "a":
+		return m, m.resolveApproval(string(contracts.ApprovalApprove), ""), true
+	case "d":
+		return m, m.resolveApproval(string(contracts.ApprovalDeny), ""), true
+	case "r":
+		m.approvalReason = true
+		m.composer.Reset()
+		m.refreshInputMark()
+		m.reflow(false)
+		return m, nil, true
+	case "ctrl+g":
+		m.approvalShown = !m.approvalShown
+		m.refreshTranscript(true)
+		m.reflow(false)
+		return m, nil, true
+	case "pgup", "pgdown", "ctrl+up", "ctrl+down":
+		return m, nil, false
+	}
+	return m, nil, true
+}
+
+// resolveApproval answers the pending decision and records what was answered.
+func (m *chatModel) resolveApproval(decision, reason string) tea.Cmd {
+	approval := m.approval
+	if approval == nil {
+		return nil
+	}
+	m.approval = nil
+	m.approvalShown = false
+	m.approvalReason = false
+	m.composer.Reset()
+	note := "Approval " + decision
+	if reason != "" {
+		note += ": " + reason
+	}
+	m.blocks = append(m.blocks, block{role: "system", text: note})
+	m.refreshTranscript(true)
+	m.reflow(false)
+	return resolveApprovalCmd(m.ctx, m.client, approval, decision, reason)
+}
+
 func (m *chatModel) cycleThinking() {
 	if len(m.availableThinking) == 0 {
 		m.showNotice("Thinking unavailable", "The current model does not support configurable thinking.", false)
@@ -685,22 +763,6 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.modal.move(1)
 	case "shift+tab":
 		m.modal.move(-1)
-	case "pgup":
-		if m.modal.kind == modalApproval {
-			m.scrollApproval(-8)
-		}
-	case "pgdown":
-		if m.modal.kind == modalApproval {
-			m.scrollApproval(8)
-		}
-	case "ctrl+up":
-		if m.modal.kind == modalApproval {
-			m.scrollApproval(-1)
-		}
-	case "ctrl+down":
-		if m.modal.kind == modalApproval {
-			m.scrollApproval(1)
-		}
 	case "esc":
 		if !m.modal.required {
 			m.modal = nil
@@ -718,14 +780,6 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 	return nil
-}
-
-func (m *chatModel) scrollApproval(delta int) {
-	if m.modal == nil || m.modal.kind != modalApproval || m.width <= 0 || m.height <= 0 {
-		return
-	}
-	maxOffset := approvalMaxBodyOffset(m.modal, m.width, m.height, m.styles)
-	m.modal.bodyOffset = clamp(m.modal.bodyOffset+delta, 0, maxOffset)
 }
 
 func (m *chatModel) activateModal(index int) tea.Cmd {
@@ -749,12 +803,6 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 		return createSessionCmd(m.ctx, m.client, option.provider, option.model)
 	case modalCommands:
 		m.modal = nil
-	case modalApproval:
-		approval := modal.approval
-		m.modal = nil
-		m.blocks = append(m.blocks, block{role: "system", text: "Approval " + option.decision})
-		m.refreshTranscript(true)
-		return resolveApprovalCmd(m.ctx, m.client, approval, option.decision)
 	case modalTimeline:
 		if option.event != nil {
 			m.modal = loadingModal("Selecting branch")
@@ -862,8 +910,8 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 	m.applySessionStatus(view.Status)
 	if view.PendingApproval != nil {
 		m.showApproval(approvalFromRequest(view.PendingApproval))
-	} else if m.modal != nil && m.modal.kind == modalApproval {
-		m.modal = nil
+	} else {
+		m.clearApproval()
 	}
 }
 
@@ -883,6 +931,7 @@ func (m *chatModel) applySessionStatus(status contracts.SessionStatus) {
 		m.working = false
 		m.streaming = false
 		m.workStatus = ""
+		m.clearApproval()
 	}
 	if m.working && m.workBegan.IsZero() {
 		m.workBegan = time.Now()
@@ -1166,12 +1215,13 @@ func (m *chatModel) View() tea.View {
 	status := m.statusView()
 	statusRow := m.statusRowView()
 	checklist := m.checklistView()
+	hitl := m.hitlView()
 	commands := m.commandMenuView()
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	parts := []string{header, m.viewport.View(), checklist, statusRow, commands, attachments, composer, status}
+	parts := []string{header, m.viewport.View(), checklist, hitl, statusRow, commands, attachments, composer, status}
 	if len(m.areas) == len(parts) {
-		parts[4] = m.commandMenuViewForHeight(m.areas[4].height)
+		parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
 		for i := range parts {
 			parts[i] = fitArea(m.areas[i], parts[i])
 		}
@@ -1183,7 +1233,7 @@ func (m *chatModel) View() tea.View {
 		}
 	}
 	base := lipgloss.JoinVertical(lipgloss.Left, visibleParts...)
-	if m.modal != nil && m.modal.kind != modalApproval && m.modal.kind != modalTimeline {
+	if m.modal != nil && m.modal.kind != modalTimeline {
 		base = renderSelectionScreen(m.modal, m.width, m.height, m.styles)
 	} else if m.modal != nil {
 		dialog := renderModal(m.modal, m.width, m.height, m.styles)
@@ -1207,15 +1257,17 @@ func (m *chatModel) reflow(follow bool) {
 	}
 	previousViewportWidth := m.viewport.Width()
 	wasAtBottom := m.viewport.AtBottom()
+	m.refreshInputMark()
 	m.composer.SetWidth(contentWidth(m.styles.composer, m.width))
 	header := m.headerView()
 	status := m.statusView()
 	statusRow := m.statusRowView()
 	checklist := m.checklistView()
+	hitl := m.hitlView()
 	commands := m.commandMenuView()
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(checklist), intrinsic(statusRow), intrinsic(commands), intrinsic(attachments), intrinsic(composer), intrinsic(status))
+	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(checklist), intrinsic(hitl), intrinsic(statusRow), intrinsic(commands), intrinsic(attachments), intrinsic(composer), intrinsic(status))
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
@@ -1463,6 +1515,11 @@ func (m *chatModel) renderTranscript() string {
 		if strings.TrimSpace(content) != "" {
 			rendered = append(rendered, strings.Trim(content, "\n"))
 		}
+	}
+	if m.approval != nil && m.approvalShown {
+		view := newApprovalView(m.approval)
+		detail := append([]string{fullWidth(m.styles.hitlTitle, width, strings.ToUpper(view.title))}, approvalDetailLines(view, width, m.styles)...)
+		rendered = append(rendered, strings.Join(detail, "\n"))
 	}
 	if len(rendered) == 0 {
 		return m.styles.muted.Render("\nStart with a question, a task, or / for commands.")
@@ -2121,24 +2178,134 @@ func (m *chatModel) showModels(models []glue.ListModelOutput, switching bool) {
 	m.modal = &modalModel{kind: modalModels, title: "Choose a model", body: "The model is applied to this session.", options: options, switching: switching}
 }
 
+// showApproval records the pending human decision. It is a reserved block in the
+// bottom stack rather than a dialog, so the transcript stays readable while the
+// decision is being made.
 func (m *chatModel) showApproval(approval *Approval) {
-	title, body := "Approval required", approval.Message
-	script := ""
-	var diffRows []diffRow
-	if approval.ToolCall != nil {
-		title, body, script = formatApprovalToolCall(*approval.ToolCall)
-		if approval.Message != "" {
-			body = approval.Message + "\n\n" + body
+	m.approval = approval
+	m.approvalShown = false
+	m.approvalReason = false
+	m.reflow(false)
+}
+
+// clearApproval drops a decision that is no longer ours to make: another client
+// answered it, the session concluded, or this client just answered it.
+func (m *chatModel) clearApproval() {
+	if m.approval == nil {
+		return
+	}
+	m.approval = nil
+	m.approvalShown = false
+	m.approvalReason = false
+	m.composer.Reset()
+	m.reflow(false)
+}
+
+// approvalView is the reviewed content of a pending decision: the harness's
+// explanation, the script or diff, and the structured change rows.
+type approvalView struct {
+	title  string
+	body   string
+	script string
+	rows   []diffRow
+}
+
+func newApprovalView(approval *Approval) approvalView {
+	if approval == nil {
+		return approvalView{title: "Approval required"}
+	}
+	view := approvalView{title: "Approval required", body: approval.Message}
+	if approval.ToolCall == nil {
+		return view
+	}
+	view.title, view.body, view.script = formatApprovalToolCall(*approval.ToolCall)
+	if approval.Message != "" {
+		view.body = approval.Message + "\n\n" + view.body
+	}
+	view.rows = approvalDiffRows(*approval.ToolCall)
+	return view
+}
+
+// hitlView is the reserved block for a pending decision. The first row names the
+// tool and previews what it would do; the second carries the answers, with the
+// way to expand the detail right-aligned. It sits between the task checklist and
+// the status row, so a blocked turn stays visible without covering anything.
+func (m *chatModel) hitlView() string {
+	if m.approval == nil {
+		return ""
+	}
+	band := m.styles.hitl
+	name, preview := approvalSubject(m.approval)
+	head := m.styles.hitlFlag.Render(" ⚑ ") + m.styles.hitlName.Render(name)
+	first := head
+	if room := m.width - lipgloss.Width(head) - 2; room > 8 {
+		first += band.Render("  ") + m.styles.hitlBody.Render(truncateLine(preview, room))
+	}
+
+	answers := band.Render("   ") + m.styles.hitlAllow.Render("[A]llow") +
+		band.Render("   ") + m.styles.hitlDeny.Render("[D]eny") +
+		band.Render("   ") + m.styles.hitlBody.Render("[R]eason")
+	second := answers
+	if m.approvalReason {
+		// The composer is taking the reason, so the answers are not live; the row
+		// names the mode instead of offering keys that would type instead.
+		second = band.Render("   ") + m.styles.hitlMuted.Render("deny with reason")
+	}
+	hint := "(expand with ctrl+g)"
+	if m.approvalShown {
+		hint = "(collapse with ctrl+g)"
+	}
+	// The hint is the same subdued grey as a muted span: it is an aside, so it
+	// stays on the band instead of carving a darker island out of the tint.
+	styled := m.styles.hitlMuted.Render(hint)
+	if gap := m.width - lipgloss.Width(second) - lipgloss.Width(styled) - 1; gap >= 2 {
+		second += band.Render(strings.Repeat(" ", gap)) + styled
+	}
+	return m.padBand(first) + "\n" + m.padBand(second)
+}
+
+// padBand fills a band row out to the full width with the band's own
+// background. The terminal drops the background at every style boundary, so the
+// spaces between two styled spans and the tail of the row are holes in the tint
+// unless they carry the band themselves.
+func (m *chatModel) padBand(row string) string {
+	if fill := m.width - lipgloss.Width(row); fill > 0 {
+		return row + m.styles.hitl.Render(strings.Repeat(" ", fill))
+	}
+	return row
+}
+
+// approvalSubject is the decision in two pieces: the tool it is about, and the
+// one line preview of what it would do.
+func approvalSubject(approval *Approval) (name, preview string) {
+	if approval == nil || approval.ToolCall == nil {
+		return "TOOL", "tool call"
+	}
+	call := *approval.ToolCall
+	return string(call.Function.Name), singleLine(toolCallPreview(string(call.Function.Name), call.Function.Arguments))
+}
+
+// approvalDetailLines renders the reviewed content for the transcript: the
+// metadata first, then the script or the structured diff.
+func approvalDetailLines(view approvalView, width int, styles harnessStyles) []string {
+	var lines []string
+	if view.body != "" {
+		lines = append(lines, strings.Split(renderApprovalBody(view.body, width, styles), "\n")...)
+	}
+	if view.script != "" {
+		lines = append(lines, strings.Split(renderApprovalScript(view.script, width, styles), "\n")...)
+	}
+	if len(view.rows) > 0 {
+		if len(lines) > 0 {
+			lines = append(lines, "")
 		}
-		diffRows = approvalDiffRows(*approval.ToolCall)
+		oldWidth, newWidth := diffGutterWidths(view.rows)
+		codeWidth := max(width-(oldWidth+newWidth+4), 1)
+		for _, row := range view.rows {
+			lines = append(lines, renderDiffRow(row, oldWidth, newWidth, codeWidth, styles)...)
+		}
 	}
-	m.modal = &modalModel{
-		kind: modalApproval, title: title, body: body, script: script, diffRows: diffRows, required: true, approval: approval,
-		options: []modalOption{
-			{label: "Allow", shortcut: 'a', decision: "approve"},
-			{label: "Deny", shortcut: 'd', decision: "deny"},
-		},
-	}
+	return lines
 }
 
 // approvalDiffRows returns structured diff rows for edit/write tool calls so the
@@ -2356,9 +2523,8 @@ func (m *chatModel) handleApprovalUpdate(update ApprovalUpdate) {
 		}
 		return
 	}
-	if m.modal != nil && m.modal.kind == modalApproval {
-		m.modal = nil
-	}
+	// Resolved or canceled elsewhere: the decision is no longer ours to make.
+	m.clearApproval()
 }
 
 func (m *chatModel) showTimeline(view *TimelineView) {
@@ -2580,14 +2746,10 @@ func selectBranchCmd(ctx context.Context, client Client, sessionID uuid.UUID, ev
 	}
 }
 
-func resolveApprovalCmd(ctx context.Context, client Client, approval *Approval, decision string) tea.Cmd {
+func resolveApprovalCmd(ctx context.Context, client Client, approval *Approval, decision, reason string) tea.Cmd {
 	return func() tea.Msg {
 		if approval == nil {
 			return approvalResolvedMsg{err: errors.New("approval is unavailable")}
-		}
-		reason := ""
-		if decision == "deny" {
-			reason = "denied by user"
 		}
 		return approvalResolvedMsg{err: client.ResolveApproval(ctx, *approval, decision, reason)}
 	}
