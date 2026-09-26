@@ -286,7 +286,13 @@ type openAICodexResponsesAPI struct {
 	b        contracts.ProvisionedModel
 	endpoint *url.URL
 	client   *http.Client
+	retry    retryPolicy
 }
+
+// codexRetryPolicy is gentler than defaultRetryPolicy: the ChatGPT backend is
+// rate limited per account, so hammering it with ten attempts over roughly a
+// minute mostly produces more rate limiting.
+var codexRetryPolicy = retryPolicy{maxAttempts: 5, base: time.Second, maxDelay: time.Minute}
 
 func NewOpenAICodexResponsesAPI(b contracts.ProvisionedModel) (*openAICodexResponsesAPI, error) {
 	base, err := url.Parse(b.BaseEndpoint())
@@ -307,6 +313,7 @@ func NewOpenAICodexResponsesAPI(b contracts.ProvisionedModel) (*openAICodexRespo
 		b:        b,
 		endpoint: base,
 		client:   &http.Client{Transport: transport},
+		retry:    codexRetryPolicy,
 	}, nil
 }
 
@@ -380,7 +387,7 @@ func (o *openAICodexResponsesAPI) Generate(ctx context.Context, messages []contr
 	if err != nil {
 		return contracts.ChatMessage{}, nil, err
 	}
-	resp, err := o.send(ctx, raw)
+	resp, err := o.send(ctx, raw, opts)
 	if err != nil {
 		return contracts.ChatMessage{}, nil, err
 	}
@@ -431,7 +438,10 @@ func codexInput(messages []contracts.ChatMessage) (string, []any, error) {
 	return strings.Join(instructions, "\n\n"), input, nil
 }
 
-func (o *openAICodexResponsesAPI) send(ctx context.Context, body []byte) (*http.Response, error) {
+// send performs the Responses call under the adapter's retry policy. It returns
+// as soon as the response headers arrive: the stream, including any in-band
+// failure event, is consumed by readStream and is never retried.
+func (o *openAICodexResponsesAPI) send(ctx context.Context, body []byte, opts *contracts.GenerateOptions) (*http.Response, error) {
 	auth := o.b.Auth()
 	if auth.Method != contracts.OAuth2 || strings.TrimSpace(auth.AccessToken) == "" {
 		return nil, errors.New("openai codex responses api: OAuth access token is required")
@@ -440,35 +450,20 @@ func (o *openAICodexResponsesAPI) send(ctx context.Context, body []byte) (*http.
 		return nil, errors.New("openai codex responses api: ChatGPT account ID is required")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.endpoint.String(), bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+auth.AccessToken)
-	req.Header.Set("chatgpt-account-id", auth.AccountID)
-	req.Header.Set("originator", "infai")
-	req.Header.Set("User-Agent", fmt.Sprintf("infaiw (%s; %s)", runtime.GOOS, runtime.GOARCH))
-	req.Header.Set("OpenAI-Beta", "responses=experimental")
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := o.client.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	return o.retry.send(ctx, "openai codex responses api", o.client, opts, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.endpoint.String(), bytes.NewReader(body))
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("openai codex responses api: request failed: %w", err)
-	}
-	if resp.StatusCode == http.StatusOK {
-		// Generate consumes and closes successful streaming responses.
-		return resp, nil
-	}
-	defer resp.Body.Close()
-	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	statusErr := fmt.Errorf("openai codex responses api: status %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
-	if readErr != nil {
-		statusErr = fmt.Errorf("%w: read response body: %v", statusErr, readErr)
-	}
-	return nil, statusErr
+		req.Header.Set("Authorization", "Bearer "+auth.AccessToken)
+		req.Header.Set("chatgpt-account-id", auth.AccountID)
+		req.Header.Set("originator", "infai")
+		req.Header.Set("User-Agent", fmt.Sprintf("infaiw (%s; %s)", runtime.GOOS, runtime.GOARCH))
+		req.Header.Set("OpenAI-Beta", "responses=experimental")
+		req.Header.Set("Accept", "text/event-stream")
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	})
 }
 
 type codexStreamEvent struct {

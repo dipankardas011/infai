@@ -99,10 +99,12 @@ func (c *AgentComms) SendToSessionAgent(ctx context.Context, id uuid.UUID, msg *
 	inbox, ok := c.sessAgentInboxes[id]
 
 	if !ok {
+		c.mu.RUnlock()
 		return ErrAgentNotRegistered
 	}
 	ch, ok := inbox[msg.Kind]
 	if !ok {
+		c.mu.RUnlock()
 		return ErrUnknownKind
 	}
 	c.mu.RUnlock()
