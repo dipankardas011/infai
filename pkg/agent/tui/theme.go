@@ -47,72 +47,76 @@ var everforest = struct {
 }
 
 type harnessStyles struct {
-	app         lipgloss.Style
-	header      lipgloss.Style
-	brand       lipgloss.Style
-	headerMeta  lipgloss.Style
-	composer    lipgloss.Style
-	status      lipgloss.Style
-	statusBusy  lipgloss.Style
-	sessionName lipgloss.Style
-	muted       lipgloss.Style
-	userMarker  lipgloss.Style
-	assistant   lipgloss.Style
-	imageBadge  lipgloss.Style
-	thinking    lipgloss.Style
-	system      lipgloss.Style
-	error       lipgloss.Style
-	tool        lipgloss.Style
-	skill       lipgloss.Style
-	modal       lipgloss.Style
-	modalTitle  lipgloss.Style
-	modalBody   lipgloss.Style
-	modalOption lipgloss.Style
-	modalActive lipgloss.Style
-	screenTitle lipgloss.Style
-	screenBody  lipgloss.Style
-	screenRow   lipgloss.Style
-	screenSel   lipgloss.Style
-	active      lipgloss.Style
-	inactive    lipgloss.Style
-	menu        lipgloss.Style
-	menuRow     lipgloss.Style
-	menuActive  lipgloss.Style
+	app           lipgloss.Style
+	header        lipgloss.Style
+	brand         lipgloss.Style
+	headerMeta    lipgloss.Style
+	composer      lipgloss.Style
+	status        lipgloss.Style
+	statusBusy    lipgloss.Style
+	statusWaiting lipgloss.Style
+	statusRow     lipgloss.Style
+	sessionName   lipgloss.Style
+	muted         lipgloss.Style
+	userMarker    lipgloss.Style
+	assistant     lipgloss.Style
+	imageBadge    lipgloss.Style
+	thinking      lipgloss.Style
+	system        lipgloss.Style
+	error         lipgloss.Style
+	tool          lipgloss.Style
+	skill         lipgloss.Style
+	modal         lipgloss.Style
+	modalTitle    lipgloss.Style
+	modalBody     lipgloss.Style
+	modalOption   lipgloss.Style
+	modalActive   lipgloss.Style
+	screenTitle   lipgloss.Style
+	screenBody    lipgloss.Style
+	screenRow     lipgloss.Style
+	screenSel     lipgloss.Style
+	active        lipgloss.Style
+	inactive      lipgloss.Style
+	menu          lipgloss.Style
+	menuRow       lipgloss.Style
+	menuActive    lipgloss.Style
 }
 
 func newHarnessStyles() harnessStyles {
 	return harnessStyles{
-		app:         lipgloss.NewStyle().Background(everforest.Background).Foreground(everforest.Text),
-		header:      lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Padding(0, 1),
-		brand:       lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
-		headerMeta:  lipgloss.NewStyle().Foreground(everforest.Muted),
-		composer:    lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
-		status:      lipgloss.NewStyle().Foreground(everforest.Muted),
-		statusBusy:  lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
-		sessionName: lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
-		muted:       lipgloss.NewStyle().Foreground(everforest.Muted),
-		userMarker:  lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
-		assistant:   lipgloss.NewStyle().Foreground(everforest.Text),
-		imageBadge:  lipgloss.NewStyle().Background(everforest.Green).Foreground(everforest.Background).Bold(true),
-		thinking:    lipgloss.NewStyle().Foreground(everforest.Muted).Italic(true),
-		system:      lipgloss.NewStyle().Foreground(everforest.Purple),
-		error:       lipgloss.NewStyle().Foreground(everforest.Red),
-		tool:        lipgloss.NewStyle().Foreground(everforest.Muted),
-		skill:       lipgloss.NewStyle().Foreground(everforest.Aqua),
-		modal:       lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Border(lipgloss.RoundedBorder()).BorderForeground(everforest.Green).Padding(1, 2),
-		modalTitle:  lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Green).Bold(true),
-		modalBody:   lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Muted),
-		modalOption: lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).PaddingLeft(2),
-		modalActive: lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true).PaddingLeft(1),
-		screenTitle: lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
-		screenBody:  lipgloss.NewStyle().Foreground(everforest.Muted),
-		screenRow:   lipgloss.NewStyle().Foreground(everforest.Text),
-		screenSel:   lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
-		active:      lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
-		inactive:    lipgloss.NewStyle().Foreground(everforest.Muted),
-		menu:        lipgloss.NewStyle().Background(everforest.Surface).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(everforest.Green),
-		menuRow:     lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text),
-		menuActive:  lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
+		app:           lipgloss.NewStyle().Background(everforest.Background).Foreground(everforest.Text),
+		header:        lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Padding(0, 1),
+		brand:         lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
+		headerMeta:    lipgloss.NewStyle().Foreground(everforest.Muted),
+		composer:      lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
+		status:        lipgloss.NewStyle().Foreground(everforest.Muted),
+		statusBusy:    lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
+		statusWaiting: lipgloss.NewStyle().Foreground(everforest.Orange).Bold(true),
+		statusRow:     lipgloss.NewStyle().Foreground(everforest.Muted).PaddingRight(1),
+		sessionName:   lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
+		muted:         lipgloss.NewStyle().Foreground(everforest.Muted),
+		userMarker:    lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
+		assistant:     lipgloss.NewStyle().Foreground(everforest.Text),
+		imageBadge:    lipgloss.NewStyle().Background(everforest.Green).Foreground(everforest.Background).Bold(true),
+		thinking:      lipgloss.NewStyle().Foreground(everforest.Muted).Italic(true),
+		system:        lipgloss.NewStyle().Foreground(everforest.Purple),
+		error:         lipgloss.NewStyle().Foreground(everforest.Red),
+		tool:          lipgloss.NewStyle().Foreground(everforest.Muted),
+		skill:         lipgloss.NewStyle().Foreground(everforest.Aqua),
+		modal:         lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Border(lipgloss.RoundedBorder()).BorderForeground(everforest.Green).Padding(1, 2),
+		modalTitle:    lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Green).Bold(true),
+		modalBody:     lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Muted),
+		modalOption:   lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).PaddingLeft(2),
+		modalActive:   lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true).PaddingLeft(1),
+		screenTitle:   lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
+		screenBody:    lipgloss.NewStyle().Foreground(everforest.Muted),
+		screenRow:     lipgloss.NewStyle().Foreground(everforest.Text),
+		screenSel:     lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
+		active:        lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
+		inactive:      lipgloss.NewStyle().Foreground(everforest.Muted),
+		menu:          lipgloss.NewStyle().Background(everforest.Surface).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(everforest.Green),
+		menuRow:       lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text),
+		menuActive:    lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
 	}
 }
 

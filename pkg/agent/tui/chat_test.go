@@ -6,7 +6,6 @@ import (
 	"image/color"
 	"strings"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -125,24 +124,28 @@ func TestWorkingStatusIsProminentAndOmitsTurns(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.width = 120
-	sessionID := uuid.New()
-	m.session = store.SessionMeta{ID: sessionID, Provider: "infai", Model: "gemma4-e2b-it"}
+	m.session = store.SessionMeta{ID: uuid.New(), Provider: "infai", Model: "gemma4-e2b-it"}
 	m.thinking = contracts.ThinkingLow
 	m.used, m.contextWindow = 6, 100
 	normalStatus := ansi.Strip(m.statusView())
 	if strings.Contains(normalStatus, "turn") {
 		t.Fatalf("status contains turn count: %q", normalStatus)
 	}
-	for _, want := range []string{"gemma4-e2b-it (infai)", "thinking low", "[█░░░░░░░░░] 6%", sessionID.String()} {
+	for _, want := range []string{"gemma4-e2b-it (infai)", "thinking low", "[█░░░░░░░░░] 6% 6/100"} {
 		if !strings.Contains(normalStatus, want) {
 			t.Fatalf("status lacks %q: %q", want, normalStatus)
 		}
 	}
-	m.working = true
-	m.workBegan = time.Now()
-	workingStatus := ansi.Strip(m.statusView())
-	if !strings.Contains(workingStatus, "working") {
-		t.Fatalf("working status lacks activity label: %q", workingStatus)
+	if strings.Contains(normalStatus, m.session.ID.String()) {
+		t.Fatalf("status still shows the session id: %q", normalStatus)
+	}
+	m.applySessionStatus(contracts.SessionBusy)
+	workingStatus := ansi.Strip(m.statusRowView())
+	if !strings.Contains(workingStatus, "busy") {
+		t.Fatalf("working status row lacks the session status: %q", workingStatus)
+	}
+	if !strings.Contains(workingStatus, spinnerFrame(m.workBegan)) || !strings.Contains(workingStatus, "0s") {
+		t.Fatalf("working status row lacks the spinner and timer: %q", workingStatus)
 	}
 	if m.styles.statusBusy.GetForeground() != everforest.Yellow {
 		t.Fatalf("working status foreground=%v want yellow", m.styles.statusBusy.GetForeground())

@@ -64,6 +64,7 @@ type chatModel struct {
 	viewport         viewport.Model
 	composer         textarea.Model
 	checklist        contracts.TaskChecklistState
+	status           contracts.SessionStatus
 	modal            *modalModel
 	commandMenu      bool
 	commandSelection int
@@ -187,7 +188,13 @@ func runChatTUI(ctx context.Context, client Client, sessions []contracts.Session
 
 func newChatModel(ctx context.Context, client Client, sessions []contracts.SessionSummary, opts RunOptions) *chatModel {
 	input := textarea.New()
-	input.Prompt = "λ "
+	const inputMark = "∞ "
+	input.SetPromptFunc(lipgloss.Width(inputMark), func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
+			return inputMark
+		}
+		return strings.Repeat(" ", lipgloss.Width(inputMark))
+	})
 	input.Placeholder = "Ask, plan, build..."
 	input.ShowLineNumbers = false
 	input.DynamicHeight = true
@@ -264,6 +271,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			// Only a send that opened the turn may close it; a refused queued
 			// prompt leaves the running turn's status alone.
 			if msg.ownsWork {
+				m.status = contracts.SessionIdle
 				m.working = false
 				m.workStatus = ""
 			}
@@ -792,9 +800,10 @@ func (m *chatModel) submit() tea.Cmd {
 	// events reported it.
 	ownsWork := !m.working
 	if ownsWork {
+		// The status the session will confirm; the events overwrite it.
+		m.status = contracts.SessionBusy
 		m.working = true
 		m.workBegan = time.Now()
-		m.workStatus = "working"
 	}
 	m.cancelArmed = false
 	m.refreshTranscript(true)
@@ -859,16 +868,10 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 }
 
 func (m *chatModel) applySessionStatus(status contracts.SessionStatus) {
+	m.status = status
 	switch status {
-	case contracts.SessionBusy:
+	case contracts.SessionBusy, contracts.SessionWaitingApproval, contracts.SessionCompacting:
 		m.working = true
-		m.workStatus = "working"
-	case contracts.SessionWaitingApproval:
-		m.working = true
-		m.workStatus = "waiting for approval"
-	case contracts.SessionCompacting:
-		m.working = true
-		m.workStatus = "compacting"
 	case contracts.SessionIdle:
 		m.stopStreamRefresh()
 		m.working = false
@@ -879,7 +882,7 @@ func (m *chatModel) applySessionStatus(status contracts.SessionStatus) {
 		m.stopStreamRefresh()
 		m.working = false
 		m.streaming = false
-		m.workStatus = string(status)
+		m.workStatus = ""
 	}
 	if m.working && m.workBegan.IsZero() {
 		m.workBegan = time.Now()
@@ -1166,12 +1169,14 @@ func (m *chatModel) View() tea.View {
 	}
 	header := m.headerView()
 	status := m.statusView()
+	statusRow := m.statusRowView()
+	checklist := m.checklistView()
 	commands := m.commandMenuView()
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	parts := []string{header, m.viewport.View(), status, commands, attachments, composer}
+	parts := []string{header, m.viewport.View(), checklist, statusRow, commands, attachments, composer, status}
 	if len(m.areas) == len(parts) {
-		parts[3] = m.commandMenuViewForHeight(m.areas[3].height)
+		parts[4] = m.commandMenuViewForHeight(m.areas[4].height)
 		for i := range parts {
 			parts[i] = fitArea(m.areas[i], parts[i])
 		}
@@ -1210,10 +1215,12 @@ func (m *chatModel) reflow(follow bool) {
 	m.composer.SetWidth(contentWidth(m.styles.composer, m.width))
 	header := m.headerView()
 	status := m.statusView()
+	statusRow := m.statusRowView()
+	checklist := m.checklistView()
 	commands := m.commandMenuView()
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(status), intrinsic(commands), intrinsic(attachments), intrinsic(composer))
+	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(checklist), intrinsic(statusRow), intrinsic(commands), intrinsic(attachments), intrinsic(composer), intrinsic(status))
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
@@ -1245,19 +1252,12 @@ func (m *chatModel) statusView() string {
 		if thinking == "" {
 			thinking = "off"
 		}
-		rest = strings.Join([]string{
+		fields := []string{
 			m.styles.status.Render(fmt.Sprintf("%s (%s)", m.session.Model, m.session.Provider)),
 			m.styles.active.Render("thinking " + string(thinking)),
-			m.styles.status.Render("ctx ") + contextProgressBar(m.styles, pct, 10) + m.styles.status.Render(fmt.Sprintf(" %d%%", pct)),
-			m.styles.status.Render(m.session.ID.String()),
-		}, separator)
-	}
-	if m.working {
-		workStatus := m.workStatus
-		if workStatus == "" {
-			workStatus = "working"
+			m.styles.status.Render("ctx ") + contextProgressBar(m.styles, pct, 10) + m.styles.status.Render(fmt.Sprintf(" %d%% %s/%s", pct, tokenCount(m.used), tokenCount(m.contextWindow))),
 		}
-		rest = m.styles.statusBusy.Render(fmt.Sprintf("%s  ·  %s %s %s", m.session.Model, spinnerFrame(m.workBegan), workStatus, time.Since(m.workBegan).Round(time.Second)))
+		rest = strings.Join(fields, separator)
 	}
 	if !m.viewport.AtBottom() {
 		rest += separator + m.styles.status.Render("viewing earlier output")
@@ -1265,10 +1265,84 @@ func (m *chatModel) statusView() string {
 	if name != "" {
 		rest = m.styles.sessionName.Render(name) + separator + rest
 	}
-	if checklist := m.taskChecklistView(max(m.width-2, 1)); checklist != "" {
-		rest = checklist + "\n" + rest
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, rest)
+}
+
+// checklistView is the task checklist, rendered above the status row. It is
+// turn state rather than chrome, so it sits with the transcript instead of
+// stacking on top of the input.
+func (m *chatModel) checklistView() string {
+	checklist := m.taskChecklistView(max(m.width-2, 1))
+	if checklist == "" {
+		return ""
 	}
-	return fullWidth(lipgloss.NewStyle().PaddingTop(1).PaddingLeft(1).PaddingRight(1), m.width, rest)
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, checklist)
+}
+
+// statusRowView is the session status, right-aligned on its own row above the
+// composer. The spinner and the elapsed time belong to the turn in flight, so
+// they sit beside the status only while one is running.
+func (m *chatModel) statusRowView() string {
+	if m.session.ID == uuid.Nil {
+		return ""
+	}
+	separator := m.styles.status.Render("  ·  ")
+	fields := []string{m.sessionStatusView()}
+	if m.working {
+		fields = append(fields, m.styles.statusBusy.Render(fmt.Sprintf("%s %s", spinnerFrame(m.workBegan), time.Since(m.workBegan).Round(time.Second))))
+	}
+	// Transient activity: a provider retry notice, or the cancel prompt.
+	if detail := m.workStatus; detail != "" {
+		fields = append(fields, m.styles.statusBusy.Render(detail))
+	}
+	content := strings.Join(fields, separator)
+	padding := max(m.width-2-lipgloss.Width(content), 0)
+	// The blank row above the status is what separates it from the transcript;
+	// the bottom line sits flush against the composer.
+	return m.styles.statusRow.PaddingTop(1).Render(" " + strings.Repeat(" ", padding) + content + " ")
+}
+
+// sessionStatusView renders the status the session reported for itself. Every
+// status has its own label and colour, so a session waiting on an approval or
+// one that has concluded never reads the same as one that is simply idle.
+func (m *chatModel) sessionStatusView() string {
+	switch m.status {
+	case contracts.SessionBusy:
+		return m.styles.statusBusy.Render("busy")
+	case contracts.SessionWaitingApproval:
+		return m.styles.statusWaiting.Render("waiting for approval")
+	case contracts.SessionCompacting:
+		return m.styles.statusBusy.Render("compacting")
+	case contracts.SessionCompleted:
+		return m.styles.active.Render("completed")
+	case contracts.SessionMaxIterationExhausted:
+		return m.styles.error.Render("max iterations reached")
+	case contracts.SessionTombstone:
+		return m.styles.error.Render("closed")
+	default:
+		return m.styles.status.Render("idle")
+	}
+}
+
+// tokenCount renders a token total compactly: 950, 41.2k, 128k, 1.2M. The
+// status line has one row to say how much context is in use, and a raw 128000
+// does not fit beside the bar.
+func tokenCount(tokens uint64) string {
+	for _, unit := range []struct {
+		divisor uint64
+		suffix  string
+	}{{1_000_000, "M"}, {1_000, "k"}} {
+		if tokens < unit.divisor {
+			continue
+		}
+		whole := tokens / unit.divisor
+		remainder := (tokens % unit.divisor) * 10 / unit.divisor
+		if whole < 100 && remainder > 0 {
+			return fmt.Sprintf("%d.%d%s", whole, remainder, unit.suffix)
+		}
+		return fmt.Sprintf("%d%s", whole, unit.suffix)
+	}
+	return fmt.Sprintf("%d", tokens)
 }
 
 func contextProgressBar(styles harnessStyles, percent, width int) string {
