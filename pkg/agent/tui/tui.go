@@ -35,12 +35,13 @@ type ChatReply struct {
 }
 
 // Approval is a human-in-the-loop checkpoint the agent reached; the turn
-// pauses until the user decides.
+// pauses until the user decides. It carries exactly what the server's
+// contracts.ApprovalRequest carries: there is no message to show, the tool call
+// is the message.
 type Approval struct {
 	ID          uuid.UUID
 	SessionID   uuid.UUID
 	Fingerprint string
-	Message     string
 	ToolCall    *contracts.ToolCall
 }
 
@@ -61,8 +62,11 @@ type SessionCreateOptions struct {
 // Client is the CLI's view of the engine. RemoteClient is the HTTP transport
 // to a running <binary> server.
 type Client interface {
-	Chat(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
+	Chat(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.EventStreamKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error)
+	SendMessage(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel) error
+	JoinSession(ctx context.Context, id uuid.UUID, onView func(glue.SessionView), onEvent func(contracts.EventStream)) error
 	ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error
+	CancelTurn(ctx context.Context, id uuid.UUID) error
 	SetSession(id uuid.UUID)
 	CreateSession(ctx context.Context, opts SessionCreateOptions) (*glue.SessionOutput, error)
 	LoadSession(ctx context.Context, id uuid.UUID) (*glue.SessionOutput, error)
@@ -234,7 +238,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 
 		thinkingShown := false
 		contentStarted := false
-		reply, err := c.Chat(ctx, contracts.UserInput{Text: prompt}, state.thinking, func(kind contracts.DeltaKind, text string) {
+		reply, err := c.Chat(ctx, contracts.UserInput{Text: prompt}, state.thinking, func(kind contracts.EventStreamKind, text string) {
 			switch kind {
 			case contracts.DeltaReasoning:
 				if !thinkingShown {
@@ -251,17 +255,17 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 					contentStarted = true
 				}
 				cAssistant.Fprint(out, text)
-			case contracts.DeltaStatus:
+			case contracts.EventProviderEvent:
 				cSystem.Fprintln(out, statusLabel(text))
-			case contracts.DeltaCompactionSummary:
+			case contracts.CompactionSummary:
 				printCompactionSummary(out, text)
-			case contracts.DeltaToolCall:
+			case contracts.EventToolCall:
 				cSystem.Fprintf(out, "  ↳ tool call %s\n", text)
-			case contracts.DeltaToolResult:
+			case contracts.EventToolResult:
 				cSystem.Fprintf(out, "  ↳ tool result %s\n", text)
-			case contracts.DeltaSkillLoad:
+			case contracts.EventSkillLoad:
 				cSkill.Fprintf(out, "  ✦ skill %s\n", text)
-			case contracts.DeltaTaskChecklist:
+			case contracts.EventToolTaskCheckList:
 				if state, err := decodeTaskChecklist(text); err == nil {
 					completed := 0
 					for _, item := range state.Items {
@@ -293,21 +297,6 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 // prompt are skipped.
 func renderHistory(out io.Writer, records []store.Record) {
 	for _, rec := range records {
-		if rec.Kind == store.KindToolCall && rec.ToolCall != nil {
-			cSystem.Fprint(out, "  ▲ ")
-			cToolCallText.Fprintf(out, "tool call %s\n", toolCallRecordDisplay(rec.ToolCall))
-			continue
-		}
-		if rec.Kind == store.KindToolResult && rec.ToolResult != nil {
-			cSystem.Fprint(out, "  ▲")
-			if rec.ToolResult.Status == "success" {
-				cAssistant.Fprint(out, "▲")
-			} else {
-				cError.Fprint(out, "▲")
-			}
-			cToolResultText.Fprintf(out, " tool result [%s] %s\n", rec.ToolResult.Status, rec.ToolResult.Output)
-			continue
-		}
 		if rec.Kind != store.KindMessage || rec.Message == nil {
 			continue
 		}
@@ -565,7 +554,11 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 				fork = ""
 			}
 			fmt.Fprintf(out, "  %d  %s%s%s", len(options), current, tree, fork)
-			timelineRoleColor(display.role).Fprintf(out, "%s:", display.role)
+			if roleColor := timelineRoleColor(display.role); roleColor != nil {
+				roleColor.Fprintf(out, "%s:", display.role)
+			} else {
+				fmt.Fprintf(out, "%s:", display.role)
+			}
 			fmt.Fprintf(out, " %s\n", display.text)
 			options = append(options, row.event)
 		}

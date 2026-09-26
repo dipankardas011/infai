@@ -6,15 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/engine"
+	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
-	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
 )
 
@@ -53,10 +53,13 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("POST /v1/sessions/{id}/load", s.handleLoadSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/rename", s.handleRenameSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/model", s.handleSetSessionModel)
+	mux.HandleFunc("GET /v1/sessions/{id}/join-stream", s.handleJoinSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/chat", s.handleChat)
+	mux.HandleFunc("POST /v1/sessions/{id}/cancel", s.handleCancelTurn)
 	mux.HandleFunc("POST /v1/sessions/{id}/approvals/{approvalID}", s.handleApproval)
 	mux.HandleFunc("POST /v1/sessions/{id}/compact", s.handleCompact)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
+	mux.HandleFunc("POST /v1/sessions/{id}/close", s.handleCloseSession)
 
 	s.httpSrv = &http.Server{
 		Addr:         addr,
@@ -65,6 +68,25 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 		WriteTimeout: 0, // chats can take a while
 	}
 	return s
+}
+
+func (s *Server) handleCancelTurn(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+
+	switch err := s.engine.CancelTurn(id); {
+	case errors.Is(err, harnessErr.ErrSessionNotFound):
+		s.writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, harnessErr.ErrNoTurnToCancel):
+		s.writeError(w, http.StatusConflict, err)
+	case err != nil:
+		s.writeError(w, http.StatusInternalServerError, err)
+	default:
+		s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+	}
 }
 
 func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
@@ -78,13 +100,13 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("invalid approval id"))
 		return
 	}
-	var req engine.ApprovalDecisionFromClient
+	var req contracts.ApprovalConclusion
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	if err := s.engine.ResolveApproval(sessionID, approvalID, req); err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -101,7 +123,7 @@ func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.engine.CompactSession(r.Context(), id); err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -110,7 +132,7 @@ func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, ok := s.engine.Session(id)
 	if !ok {
-		s.writeError(w, http.StatusNotFound, engine.ErrSessionNotFound)
+		s.writeError(w, http.StatusNotFound, harnessErr.ErrSessionNotFound)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, sess.Meta())
@@ -197,7 +219,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, _ *http.Request) {
 // ---- sessions ----
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
-	var req CreateSessionRequest
+	var req glue.CreateSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -209,7 +231,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Cwd:      req.Cwd,
 	})
 	if err != nil {
-		if errors.Is(err, engine.ErrEngineShuttingDown) {
+		if errors.Is(err, harnessErr.ErrEngineShuttingDown) {
 			s.writeError(w, http.StatusServiceUnavailable, err)
 			return
 		}
@@ -237,14 +259,14 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	}
 	meta, records, err := s.engine.GetSessionRecords(id)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
+		if errors.Is(err, fs.ErrNotExist) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
 		s.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, SessionDetailResponse{Meta: meta, Records: records})
+	s.writeJSON(w, http.StatusOK, glue.SessionDetailResponse{Meta: meta, Records: records})
 }
 
 func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
@@ -258,9 +280,9 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusNotFound, err)
 		return
 	}
-	response := TimelineResponse{Meta: meta, Head: head, Events: make([]TimelineEventResponse, 0, len(events))}
+	response := glue.TimelineResponse{Meta: meta, Head: head, Events: make([]glue.TimelineEventResponse, 0, len(events))}
 	for _, event := range events {
-		response.Events = append(response.Events, TimelineEventResponse{ID: event.ID, ParentID: event.ParentID, BranchFrom: event.BranchFrom, Kind: event.Kind, BlobHash: event.BlobHash, Preview: event.Preview, Record: event.Record})
+		response.Events = append(response.Events, glue.TimelineEventResponse{ID: event.ID, ParentID: event.ParentID, BranchFrom: event.BranchFrom, Kind: event.Kind, BlobHash: event.BlobHash, Preview: event.Preview, Record: event.Record})
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }
@@ -271,14 +293,14 @@ func (s *Server) handleBranchTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
 		return
 	}
-	var req BranchRequest
+	var req glue.BranchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.EventID == uuid.Nil {
 		s.writeError(w, http.StatusBadRequest, errors.New("event_id is required"))
 		return
 	}
 	checklist, err := s.engine.SelectBranch(id, req.EventID)
 	if err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -296,7 +318,7 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := s.engine.LoadSession(id)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) || errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -318,14 +340,14 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
 		return
 	}
-	var req RenameSessionRequest
+	var req glue.RenameSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	meta, err := s.engine.RenameSession(id, req.Name)
 	if err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -341,7 +363,7 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
 		return
 	}
-	var req SetSessionModelRequest
+	var req glue.SetSessionModelRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -357,7 +379,7 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 
 	sess, err := s.engine.SetSessionModel(id, req.Provider, req.Model)
 	if err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -380,11 +402,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Images travel inline as base64, so the chat endpoint gets a dedicated
-	// body limit before any decoding happens.
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatBodyBytes)
-
-	var req ChatRequest
+	var req glue.ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("chat request body exceeds the %d MB limit", maxChatBodyBytes>>20))
@@ -399,117 +418,74 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess, ok := s.engine.Session(id)
-	if !ok {
-		s.writeError(w, http.StatusNotFound, engine.ErrSessionNotFound)
-		return
-	}
-
-	stream := r.URL.Query().Get("stream") == "true" || strings.Contains(r.Header.Get("Accept"), "text/event-stream")
-
-	opts := engine.ChatOptions{Thinking: req.Thinking}
-	if stream {
-		if _, ok := w.(http.Flusher); !ok {
-			s.writeError(w, http.StatusBadRequest, errors.New("streaming not supported"))
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.WriteHeader(http.StatusOK)
-
-		// The session's recorder is the multi-writer: it feeds this SSE sink
-		// for the live stream; durable records are written to the timeline.
-		remove := sess.EventHub().Subscribe(func(rec store.Record) error {
-			var event any
-			switch rec.Kind {
-			case store.KindDelta:
-				event = ChatDeltaEvent{Kind: string(rec.DeltaKind), Delta: rec.Text}
-			case store.KindApprovalRequested, store.KindApprovalResolved, store.KindApprovalCanceled:
-				event = approvalSSEEvent(rec)
-			default:
-				return nil
-			}
-			if err := s.writeSSE(w, event); err != nil {
-				s.logger.Debug("stream write failed", "session_id", id, "error", err)
-				return err
-			}
-			s.flush(w)
-			return nil
-		})
-		defer remove()
-	}
-
-	res, err := s.engine.Chat(r.Context(), id, input, opts)
-	if errors.Is(err, engine.ErrSessionNotFound) {
+	err = s.engine.Chat(r.Context(), id, input, contracts.ChatOptions{Thinking: req.Thinking})
+	switch {
+	case errors.Is(err, harnessErr.ErrSessionNotFound):
 		s.writeError(w, http.StatusNotFound, err)
-		return
+	case errors.Is(err, harnessErr.ErrEngineShuttingDown):
+		s.writeError(w, http.StatusServiceUnavailable, err)
+	case errors.Is(err, harnessErr.ErrInvalidInput):
+		s.writeError(w, http.StatusBadRequest, err)
+	case err != nil:
+		s.writeError(w, http.StatusConflict, err)
+	default:
+		s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 	}
-	if err != nil {
-		if stream {
-			if werr := s.writeSSE(w, ChatErrorEvent{Error: err.Error()}); werr != nil {
-				s.logger.Debug("stream error event failed", "session_id", id, "error", werr)
-			}
-			s.flush(w)
-			return
-		}
-		if errors.Is(err, engine.ErrInvalidInput) {
-			s.writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		s.writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	meta := sess.Meta()
-	if stream {
-		done := ChatDoneEvent{
-			Done:             true,
-			SessionID:        res.SessionID,
-			Status:           res.Status.String(),
-			Reply:            res.Reply,
-			ReasoningContent: res.ReasoningContent,
-			Model:            meta.Model,
-			ContextWindow:    sess.CurrentSessionModelContextWindow(),
-			Pending:          res.Pending,
-			Usage:            res.Usage,
-			ContextTokens:    res.ContextTokens,
-		}
-		if werr := s.writeSSE(w, done); werr != nil {
-			s.logger.Debug("stream done event failed", "session_id", id, "error", werr)
-		}
-		s.flush(w)
-		return
-	}
-
-	body := ChatResponse{
-		SessionID:        res.SessionID,
-		Status:           res.Status.String(),
-		Reply:            res.Reply,
-		Model:            meta.Model,
-		ContextWindow:    sess.CurrentSessionModelContextWindow(),
-		ReasoningContent: res.ReasoningContent,
-		Pending:          res.Pending,
-		Usage:            res.Usage,
-		ContextTokens:    res.ContextTokens,
-	}
-	s.writeJSON(w, http.StatusOK, body)
 }
 
-func approvalSSEEvent(rec store.Record) any {
-	event := ApprovalSSEEvent{Type: string(rec.Kind)}
-	if rec.Approval != nil {
-		event.ID = rec.Approval.ID
-		event.SessionID = rec.Approval.SessionID
-		event.AgentID = rec.Approval.AgentID
-		event.Fingerprint = rec.Approval.Fingerprint
-		event.Decision = rec.Approval.Decision
-		event.Reason = rec.Approval.Reason
-		if rec.Approval.ToolCall != nil {
-			event.ToolCall = rec.Approval.ToolCall
+func (s *Server) handleJoinSession(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	if _, ok := w.(http.Flusher); !ok {
+		s.writeError(w, http.StatusInternalServerError, errors.New("streaming not supported"))
+		return
+	}
+
+	view, events, unsubscribe, err := s.engine.SubscribeEvents(id)
+	if err != nil {
+		switch {
+		case errors.Is(err, harnessErr.ErrSessionNotFound):
+			s.writeError(w, http.StatusNotFound, err)
+		case errors.Is(err, harnessErr.ErrEngineShuttingDown):
+			s.writeError(w, http.StatusServiceUnavailable, err)
+		case errors.Is(err, harnessErr.ErrTooManyClients):
+			s.writeError(w, http.StatusConflict, err)
+		default:
+			s.writeError(w, http.StatusConflict, err)
+		}
+		return
+	}
+	defer unsubscribe()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	if err := s.writeSSE(w, view); err != nil {
+		return
+	}
+	s.flush(w)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			if err := s.writeSSE(w, event); err != nil {
+				return
+			}
+			s.flush(w)
+			if event.Kind == contracts.EventSubscriberGap {
+				return
+			}
 		}
 	}
-	return event
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
@@ -518,8 +494,25 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
 		return
 	}
+	if err := s.engine.DeleteSession(id); err != nil {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCloseSession(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
 	if err := s.engine.CloseSession(id); err != nil {
-		if errors.Is(err, engine.ErrSessionNotFound) {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return
 		}
@@ -538,7 +531,7 @@ func (s *Server) writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func (s *Server) writeError(w http.ResponseWriter, code int, err error) {
-	s.writeJSON(w, code, ErrorResponse{Error: err.Error()})
+	s.writeJSON(w, code, glue.ErrorResponse{Error: err.Error()})
 }
 
 // writeSSE emits one Server-Sent Event carrying a JSON payload. Returns the

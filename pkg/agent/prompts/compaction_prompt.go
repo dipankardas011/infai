@@ -1,4 +1,4 @@
-package engine
+package prompts
 
 import (
 	"fmt"
@@ -21,10 +21,10 @@ const (
 	contextSummaryOpenTag = "<context-summary>"
 )
 
-// planCompaction splits history for compaction. keepRecentTurns keeps the last
+// PlanCompaction splits history for compaction. keepRecentTurns keeps the last
 // retentionEvents turns raw; manual /compact folds everything after the
 // checkpoint message. Never returns nil slices.
-func planCompaction(history []contracts.ChatMessage, keepRecentTurns bool) (toCompact, retained []contracts.ChatMessage) {
+func PlanCompaction(history []contracts.ChatMessage, keepRecentTurns bool) (toCompact, retained []contracts.ChatMessage) {
 	start := 0
 	if len(history) > 0 && strings.HasPrefix(history[0].Text(), contextSummaryOpenTag) {
 		start = 1
@@ -48,6 +48,36 @@ func planCompaction(history []contracts.ChatMessage, keepRecentTurns bool) (toCo
 	}
 
 	return history[start:split], history[split:]
+}
+
+// CompactionInput assembles the summarizer's request: the serialized toCompact
+// messages wrapped in <conversation> tags, followed by the 7 Ws instruction.
+func CompactionInput(toCompact []contracts.ChatMessage, prevCheckpoint, taskChecklist string) (string, []contracts.ChatMessage, error) {
+	systemPrompt, err := CompactionAgentSystemPrompt()
+	if err != nil {
+		return "", nil, err
+	}
+	transcript := SerializeForCompaction(toCompact)
+	instruction, err := BuildCompactionInstruction(prevCheckpoint, taskChecklist)
+	if err != nil {
+		return "", nil, err
+	}
+	tpl, err := template.New("compaction_input").Parse(`<conversation>
+{{.Transcript}}
+</conversation>
+
+{{.Instruction}}`)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse compaction input template: %w", err)
+	}
+	var prompt strings.Builder
+	if err := tpl.Execute(&prompt, struct {
+		Transcript  string
+		Instruction string
+	}{transcript, instruction}); err != nil {
+		return "", nil, fmt.Errorf("render compaction input: %w", err)
+	}
+	return systemPrompt, []contracts.ChatMessage{contracts.NewUserMessage(prompt.String())}, nil
 }
 
 func CompactionAgentSystemPrompt() (string, error) {
@@ -156,7 +186,7 @@ func SerializeForCompaction(history []contracts.ChatMessage) string {
 			if len(m.ToolCalls) > 0 {
 				names := make([]string, 0, len(m.ToolCalls))
 				for _, tc := range m.ToolCalls {
-					names = append(names, tc.Function.Name)
+					names = append(names, string(tc.Function.Name))
 				}
 				b.WriteString(" called ")
 				b.WriteString(strings.Join(names, ", "))
@@ -216,36 +246,6 @@ func sanitizeMarkerName(name string) string {
 		name = string(runes[:64])
 	}
 	return name
-}
-
-// compactionInput assembles the summarizer's request: the serialized toCompact
-// messages wrapped in <conversation> tags, followed by the 7 Ws instruction.
-func compactionInput(toCompact []contracts.ChatMessage, prevCheckpoint, taskChecklist string) (string, []contracts.ChatMessage, error) {
-	systemPrompt, err := CompactionAgentSystemPrompt()
-	if err != nil {
-		return "", nil, err
-	}
-	transcript := SerializeForCompaction(toCompact)
-	instruction, err := BuildCompactionInstruction(prevCheckpoint, taskChecklist)
-	if err != nil {
-		return "", nil, err
-	}
-	tpl, err := template.New("compaction_input").Parse(`<conversation>
-{{.Transcript}}
-</conversation>
-
-{{.Instruction}}`)
-	if err != nil {
-		return "", nil, fmt.Errorf("parse compaction input template: %w", err)
-	}
-	var prompt strings.Builder
-	if err := tpl.Execute(&prompt, struct {
-		Transcript  string
-		Instruction string
-	}{transcript, instruction}); err != nil {
-		return "", nil, fmt.Errorf("render compaction input: %w", err)
-	}
-	return systemPrompt, []contracts.ChatMessage{contracts.NewUserMessage(prompt.String())}, nil
 }
 
 // truncateRunes caps a string at n runes, marking the cut.

@@ -50,48 +50,188 @@ func (c *RemoteClient) SessionID() uuid.UUID {
 	return c.sessionID
 }
 
-func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
-	c.mu.Lock()
-	sessionID := c.sessionID
-	c.mu.Unlock()
+func (c *RemoteClient) SendMessage(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel) error {
+	sessionID := c.SessionID()
+	if sessionID == uuid.Nil {
+		return ErrNoSession
+	}
+	payload := struct {
+		Prompt   string                       `json:"prompt"`
+		Images   []contracts.ImageInput       `json:"images,omitempty"`
+		Thinking contracts.InfaiThinkingLevel `json:"thinking"`
+	}{Prompt: input.Text, Images: input.Images, Thinking: thinking}
+	return c.postJSON(ctx, "/v1/sessions/"+sessionID.String()+"/chat", payload, http.StatusAccepted)
+}
+
+func (c *RemoteClient) JoinSession(ctx context.Context, id uuid.UUID, onView func(glue.SessionView), onEvent func(contracts.EventStream)) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions/"+id.String()+"/join-stream", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return readAPIError(resp)
+	}
+
+	decoder := models.NewDecoder(resp.Body)
+	first := true
+	for {
+		event, err := decoder.Decode()
+		if err == io.EOF && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return err
+		}
+		if first {
+			var view glue.SessionView
+			if err := json.Unmarshal([]byte(event.Data), &view); err != nil {
+				return err
+			}
+			first = false
+			if onView != nil {
+				onView(view)
+			}
+			continue
+		}
+		var live contracts.EventStream
+		if err := json.Unmarshal([]byte(event.Data), &live); err != nil {
+			return err
+		}
+		if onEvent != nil {
+			onEvent(live)
+		}
+	}
+}
+
+func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel, onDelta func(kind contracts.EventStreamKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
+	sessionID := c.SessionID()
 	if sessionID == uuid.Nil {
 		return nil, ErrNoSession
 	}
 
-	payload, err := json.Marshal(struct {
-		Prompt   string                       `json:"prompt"`
-		Images   []contracts.ImageInput       `json:"images,omitempty"`
-		Thinking contracts.InfaiThinkingLevel `json:"thinking"`
-	}{Prompt: input.Text, Images: input.Images, Thinking: thinking})
-	if err != nil {
+	joinCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	views := make(chan glue.SessionView, 1)
+	events := make(chan contracts.EventStream, 128)
+	joinErr := make(chan error, 1)
+	go func() {
+		joinErr <- c.JoinSession(joinCtx, sessionID, func(view glue.SessionView) {
+			views <- view
+		}, func(event contracts.EventStream) {
+			select {
+			case events <- event:
+			case <-joinCtx.Done():
+			}
+		})
+	}()
+
+	var view glue.SessionView
+	select {
+	case view = <-views:
+	case err := <-joinErr:
 		return nil, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/v1/sessions/"+sessionID.String()+"/chat", bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.URL.RawQuery = "stream=true"
-	req.Header.Set("Accept", "text/event-stream")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
-	}
-
-	reply, err := c.readStream(resp.Body, onDelta, onApproval)
-	if err != nil && ctx.Err() != nil {
+	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	return reply, err
+	if err := c.SendMessage(ctx, input, thinking); err != nil {
+		return nil, err
+	}
+
+	reply := &ChatReply{SessionID: sessionID, Model: view.Meta.Model, Name: view.Meta.Name}
+	sawRunning := false
+	for {
+		select {
+		case event := <-events:
+			content := ""
+			if event.Content != nil {
+				content = *event.Content
+			}
+			switch event.Kind {
+			case contracts.EventSessionTransitionState:
+				status := contracts.SessionStatus(content)
+				if status == contracts.SessionBusy || status == contracts.SessionWaitingApproval || status == contracts.SessionCompacting {
+					sawRunning = true
+				}
+				if status == contracts.SessionIdle && sawRunning {
+					reply.Status = string(status)
+					return reply, nil
+				}
+			case contracts.EventSessionFatal:
+				return nil, errors.New(content)
+			case contracts.EventApprovalRequested:
+				if onApproval != nil && event.HITLCall != nil {
+					onApproval(ApprovalUpdate{Type: string(event.Kind), Approval: approvalFromRequest(event.HITLCall)})
+				}
+			case contracts.EventApprovalResolved:
+				if onApproval != nil {
+					onApproval(ApprovalUpdate{Type: string(event.Kind)})
+				}
+			case contracts.NotifyAgentUsage:
+				var usage contracts.TokenUsage
+				if json.Unmarshal([]byte(content), &usage) == nil {
+					reply.Usage = &usage
+					reply.ContextTokens = usage.TotalTokens
+				}
+			case contracts.DeltaContent:
+				reply.Reply += content
+				if onDelta != nil && content != "" {
+					onDelta(event.Kind, content)
+				}
+			case contracts.DeltaReasoning:
+				reply.ReasoningContent += content
+				if onDelta != nil && content != "" {
+					onDelta(event.Kind, content)
+				}
+			default:
+				if onDelta != nil && content != "" {
+					onDelta(event.Kind, content)
+				}
+			}
+		case err := <-joinErr:
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func approvalFromRequest(request *contracts.ApprovalRequest) *Approval {
+	if request == nil {
+		return nil
+	}
+	toolCall := request.ToolCall
+	return &Approval{
+		ID:          request.ID,
+		SessionID:   request.SessionID,
+		Fingerprint: request.Fingerprint,
+		ToolCall:    &toolCall,
+	}
+}
+
+func (c *RemoteClient) CancelTurn(ctx context.Context, id uuid.UUID) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/sessions/"+id.String()+"/cancel", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
 }
 
 func (c *RemoteClient) ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error {
@@ -119,108 +259,6 @@ func (c *RemoteClient) ResolveApproval(ctx context.Context, approval Approval, d
 		return fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
-}
-
-// readStream consumes the SSE chat stream, delivering deltas to onDelta and
-// returning the final reply.
-func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.DeltaKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
-	dec := models.NewDecoder(body)
-
-	var reply ChatReply
-	done := false
-	for {
-		ev, err := dec.Decode()
-		if err == io.EOF {
-			if !done {
-				return nil, io.ErrUnexpectedEOF
-			}
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		var sseEv struct {
-			Kind             string                `json:"kind"`
-			Delta            string                `json:"delta"`
-			Done             bool                  `json:"done"`
-			Reply            string                `json:"reply"`
-			ReasoningContent string                `json:"reasoning_content"`
-			Status           string                `json:"status"`
-			Error            string                `json:"error"`
-			SessionID        uuid.UUID             `json:"session_id"`
-			Model            string                `json:"model"`
-			Name             string                `json:"name,omitempty"`
-			ContextWindow    uint64                `json:"ctx_window"`
-			Usage            *contracts.TokenUsage `json:"usage"`
-			ContextTokens    uint64                `json:"context_tokens"`
-			Pending          *Approval             `json:"pending"`
-			Type             string                `json:"type"`
-			ID               uuid.UUID             `json:"id"`
-			Fingerprint      string                `json:"fingerprint"`
-			ToolCall         *contracts.ToolCall   `json:"tool_call"`
-			Decision         string                `json:"decision"`
-			Reason           string                `json:"reason"`
-		}
-		if err := json.Unmarshal([]byte(ev.Data), &sseEv); err != nil {
-			return nil, err
-		}
-		if sseEv.Type != "" && onApproval != nil {
-			onApproval(ApprovalUpdate{
-				Type: sseEv.Type,
-				Approval: &Approval{
-					ID: sseEv.ID, SessionID: sseEv.SessionID,
-					Fingerprint: sseEv.Fingerprint, ToolCall: sseEv.ToolCall,
-				},
-				Decision: sseEv.Decision, Reason: sseEv.Reason,
-			})
-		}
-		if sseEv.Error != "" {
-			return nil, fmt.Errorf("server: %s", sseEv.Error)
-		}
-		if sseEv.Delta != "" {
-			kind := contracts.DeltaContent
-			switch sseEv.Kind {
-			case "reasoning":
-				kind = contracts.DeltaReasoning
-			case "status":
-				kind = contracts.DeltaStatus
-			case "compaction_summary":
-				kind = contracts.DeltaCompactionSummary
-			case "tool_call":
-				kind = contracts.DeltaToolCall
-			case "tool_result":
-				kind = contracts.DeltaToolResult
-			case "skill_load":
-				kind = contracts.DeltaSkillLoad
-			case "task_checklist":
-				kind = contracts.DeltaTaskChecklist
-			}
-			if kind == contracts.DeltaContent {
-				reply.Reply += sseEv.Delta
-			} else if kind == contracts.DeltaReasoning {
-				reply.ReasoningContent += sseEv.Delta
-			}
-			if onDelta != nil {
-				onDelta(kind, sseEv.Delta)
-			}
-		}
-		if sseEv.Done {
-			done = true
-			reply.Reply = sseEv.Reply
-			reply.ReasoningContent = sseEv.ReasoningContent
-			reply.Status = sseEv.Status
-			reply.SessionID = sseEv.SessionID
-			reply.Model = sseEv.Model
-			reply.ContextWindow = sseEv.ContextWindow
-			reply.Name = sseEv.Name
-			reply.Usage = sseEv.Usage
-			reply.ContextTokens = sseEv.ContextTokens
-			reply.Pending = sseEv.Pending
-		}
-	}
-
-	return &reply, nil
 }
 
 // ---- providers ----

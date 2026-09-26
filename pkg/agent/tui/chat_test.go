@@ -2,11 +2,10 @@ package tui
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"image/color"
 	"strings"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -92,7 +91,7 @@ func TestComposerGrowthKeepsTranscriptAtBottom(t *testing.T) {
 
 func TestChecklistDeltaIsNotRenderedAsTranscriptText(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
-	m.appendDelta(contracts.DeltaTaskChecklist, `{"items":[]}`)
+	m.appendDelta(contracts.EventToolTaskCheckList, `{"items":[]}`)
 
 	if len(m.blocks) != 0 {
 		t.Fatalf("checklist delta created %d transcript blocks", len(m.blocks))
@@ -125,24 +124,28 @@ func TestWorkingStatusIsProminentAndOmitsTurns(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.width = 120
-	sessionID := uuid.New()
-	m.session = store.SessionMeta{ID: sessionID, Provider: "infai", Model: "gemma4-e2b-it"}
+	m.session = store.SessionMeta{ID: uuid.New(), Provider: "infai", Model: "gemma4-e2b-it"}
 	m.thinking = contracts.ThinkingLow
 	m.used, m.contextWindow = 6, 100
 	normalStatus := ansi.Strip(m.statusView())
 	if strings.Contains(normalStatus, "turn") {
 		t.Fatalf("status contains turn count: %q", normalStatus)
 	}
-	for _, want := range []string{"gemma4-e2b-it (infai)", "thinking low", "[█░░░░░░░░░] 6%", sessionID.String()} {
+	for _, want := range []string{"gemma4-e2b-it (infai)", "thinking low", "ctx ▎░░░░░ 6% 6/100"} {
 		if !strings.Contains(normalStatus, want) {
 			t.Fatalf("status lacks %q: %q", want, normalStatus)
 		}
 	}
-	m.working = true
-	m.workBegan = time.Now()
-	workingStatus := ansi.Strip(m.statusView())
-	if !strings.Contains(workingStatus, "working") {
-		t.Fatalf("working status lacks activity label: %q", workingStatus)
+	if strings.Contains(normalStatus, m.session.ID.String()) {
+		t.Fatalf("status still shows the session id: %q", normalStatus)
+	}
+	m.applySessionStatus(contracts.SessionBusy)
+	workingStatus := ansi.Strip(m.statusRowView())
+	if !strings.Contains(workingStatus, "busy") {
+		t.Fatalf("working status row lacks the session status: %q", workingStatus)
+	}
+	if !strings.Contains(workingStatus, spinnerFrame(m.workBegan)) || !strings.Contains(workingStatus, "0s") {
+		t.Fatalf("working status row lacks the spinner and timer: %q", workingStatus)
 	}
 	if m.styles.statusBusy.GetForeground() != everforest.Yellow {
 		t.Fatalf("working status foreground=%v want yellow", m.styles.statusBusy.GetForeground())
@@ -490,35 +493,55 @@ func TestSessionWorkspaceShowsBrandAndSections(t *testing.T) {
 	}
 }
 
-func TestWorkingTurnDoesNotQueueInputOrOpenSessions(t *testing.T) {
+func TestWorkingTurnQueuesInputWithoutReplacingStatus(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.working = true
-	turnCtx, cancel := context.WithCancel(context.Background())
-	m.turnCancel = cancel
+	m.workStatus = "waiting for approval"
+	m.session = store.SessionMeta{ID: uuid.New(), Model: "test-model"}
 	_ = m.composer.Focus()
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
 	_, _ = m.Update(tea.PasteMsg{Content: "queued"})
+	if m.composer.Value() != "xqueued" {
+		t.Fatalf("composer while working = %q, want the typed text", m.composer.Value())
+	}
+
+	// A queued prompt must leave the running turn's status to the events.
+	if cmd := m.submit(); cmd == nil {
+		t.Fatal("prompt sent while working was dropped")
+	}
+	if m.workStatus != "waiting for approval" {
+		t.Fatalf("queued prompt replaced the running status with %q", m.workStatus)
+	}
+	if !m.working {
+		t.Fatal("queued prompt ended the running turn")
+	}
+	if m.composer.Value() != "" {
+		t.Fatalf("queued prompt left the composer holding %q", m.composer.Value())
+	}
+}
+
+func TestWorkingTurnKeepsWorkspaceClosedAndCancelArmed(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.working = true
+	m.workStatus = "working"
+
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
+	if m.modal != nil {
+		t.Fatal("working turn opened the session workspace")
+	}
+
 	escape := tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
 	_, cmd := m.Update(escape)
-	if turnCtx.Err() != nil {
-		t.Fatal("first escape canceled the working turn")
-	}
 	if cmd == nil || !m.cancelArmed {
 		t.Fatal("first escape did not arm cancellation timeout")
 	}
-	_, _ = m.Update(escape)
-	if !errors.Is(turnCtx.Err(), context.Canceled) {
-		t.Fatal("second escape did not cancel the working turn")
-	}
-
-	if m.composer.Value() != "" {
-		t.Fatalf("working turn queued composer input %q", m.composer.Value())
-	}
-	if m.modal != nil {
-		t.Fatal("working turn opened the session workspace")
+	_, cmd = m.Update(escape)
+	if cmd == nil || m.workStatus != "canceling" {
+		t.Fatal("second escape did not request turn cancellation")
 	}
 }
 
@@ -527,9 +550,6 @@ func TestWorkingTurnCancelArmExpires(t *testing.T) {
 	m.modal = nil
 	m.working = true
 	m.workStatus = "working"
-	turnCtx, cancel := context.WithCancel(context.Background())
-	m.turnCancel = cancel
-	t.Cleanup(cancel)
 
 	escape := tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
 	_, _ = m.Update(escape)
@@ -542,9 +562,9 @@ func TestWorkingTurnCancelArmExpires(t *testing.T) {
 		t.Fatalf("work status after timeout = %q, want working", m.workStatus)
 	}
 
-	_, _ = m.Update(escape)
-	if turnCtx.Err() != nil {
-		t.Fatal("escape after timeout acted as the second escape")
+	_, cmd := m.Update(escape)
+	if cmd == nil || !m.cancelArmed {
+		t.Fatal("escape after timeout did not start a new cancellation sequence")
 	}
 	_, _ = m.Update(cancelArmTimeoutMsg{id: armID})
 	if !m.cancelArmed {
@@ -603,96 +623,122 @@ func TestLongModalAndShortLayoutStayWithinTerminal(t *testing.T) {
 	}
 }
 
-func TestApprovalOverlayKeepsTranscriptVisible(t *testing.T) {
+func TestApprovalBandKeepsTranscriptVisible(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.blocks = []block{{role: "system", text: "transcript remains visible"}}
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 20})
-	m.showApproval(&Approval{Message: "Run this command?"})
+	m.showApproval(&Approval{})
 
-	content := m.View().Content
-	for _, want := range []string{"transcript remains visible", "APPROVAL REQUIRED", "Run this command?", "[A]llow", "[D]eny"} {
-		if !strings.Contains(content, want) {
-			t.Fatalf("approval view does not contain %q", want)
+	collapsed := ansi.Strip(m.View().Content)
+	for _, want := range []string{"transcript remains visible", "TOOL", "[A]llow", "[D]eny"} {
+		if !strings.Contains(collapsed, want) {
+			t.Fatalf("approval view does not contain %q:\n%s", want, collapsed)
+		}
+	}
+	// The detail arrives with the expansion, into the transcript that keeps its
+	// content visible behind it.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
+	expanded := ansi.Strip(m.View().Content)
+	for _, want := range []string{"transcript remains visible", "Human In the Loop", "tool_call: TOOL", "[A]llow", "[D]eny"} {
+		if !strings.Contains(expanded, want) {
+			t.Fatalf("expanded approval view does not contain %q:\n%s", want, expanded)
 		}
 	}
 }
 
-func TestApprovalModalPinsActionsWhileBodyScrolls(t *testing.T) {
-	lines := make([]string, 30)
-	for i := range lines {
-		lines[i] = fmt.Sprintf("review line %02d", i+1)
-	}
-	modal := &modalModel{
-		kind: modalApproval, title: "Approval required", body: strings.Join(lines, "\n"),
-		options: []modalOption{
-			{label: "Allow", shortcut: 'a'},
-			{label: "Deny", shortcut: 'd'},
-		},
-	}
-	rendered := ansi.Strip(renderModal(modal, 70, 12, newHarnessStyles()))
-	for _, want := range []string{"review line 01", "[A]llow", "[D]eny", "review lines 1-"} {
-		if !strings.Contains(rendered, want) {
-			t.Fatalf("approval modal lacks %q: %q", want, rendered)
-		}
-	}
-
-	modal.bodyOffset = 8
-	rendered = ansi.Strip(renderModal(modal, 70, 12, newHarnessStyles()))
-	if strings.Contains(rendered, "review line 01") || !strings.Contains(rendered, "review line 09") {
-		t.Fatalf("approval body did not scroll: %q", rendered)
-	}
-}
-
-func TestApprovalReviewScrollControls(t *testing.T) {
+func TestApprovalReservesOneLineAndExpandsIntoTheTranscript(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
-	m.width, m.height = 70, 12
-	m.modal = &modalModel{kind: modalApproval, title: "Approval", body: strings.Repeat("review line\n", 30)}
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
+		Function: contracts.Function{
+			Name:      contracts.BashTool,
+			Arguments: `{"command":"rm -rf ./build\nmake all","workdir":"/w","timeout":30}`,
+		},
+	}})
 
-	_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown}))
-	if m.modal.bodyOffset != 3 {
-		t.Fatalf("mouse wheel body offset=%d want 3", m.modal.bodyOffset)
+	// Collapsed: one reserved line that carries the answers and hides the body.
+	collapsed := ansi.Strip(m.View().Content)
+	for _, want := range []string{"bash", "[A]llow", "[D]eny", "[R]eason", "ctrl+g"} {
+		if !strings.Contains(collapsed, want) {
+			t.Fatalf("pending block lacks %q:\n%s", want, collapsed)
+		}
 	}
-	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
-	if m.modal.bodyOffset != 11 {
-		t.Fatalf("page down body offset=%d want 11", m.modal.bodyOffset)
+	// The answers get their own row rather than crowding the preview.
+	if !strings.Contains(collapsed, "\n   [A]llow   [D]eny   [R]eason") {
+		t.Fatalf("answers are not on their own row:\n%s", collapsed)
 	}
-	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
-	if m.modal.bodyOffset != 3 {
-		t.Fatalf("page up body offset=%d want 3", m.modal.bodyOffset)
+	if strings.Contains(collapsed, "WORKING DIRECTORY") {
+		t.Fatalf("collapsed approval already shows the body:\n%s", collapsed)
 	}
-	for range 100 {
-		_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown}))
+
+	// Expanded: the detail joins the transcript, which owns the scrolling.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
+	expanded := ansi.Strip(m.View().Content)
+	for _, want := range []string{"WORKING DIRECTORY  /w", "[A]llow", "[D]eny", "ctrl+g"} {
+		if !strings.Contains(expanded, want) {
+			t.Fatalf("expanded approval lacks %q:\n%s", want, expanded)
+		}
 	}
-	maxOffset := approvalMaxBodyOffset(m.modal, m.width, m.height, m.styles)
-	if m.modal.bodyOffset != maxOffset {
-		t.Fatalf("overscroll body offset=%d want bounded maximum %d", m.modal.bodyOffset, maxOffset)
-	}
-	_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelUp}))
-	if m.modal.bodyOffset != max(maxOffset-3, 0) {
-		t.Fatalf("reverse scroll body offset=%d did not move immediately from maximum %d", m.modal.bodyOffset, maxOffset)
+	if height := lipgloss.Height(m.View().Content); height != 24 {
+		t.Fatalf("approval frame height=%d want 24", height)
 	}
 }
 
-func TestApprovalModalRendersEditDiff(t *testing.T) {
+func TestApprovalKeysAnswerTheDecision(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	approval := &Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{Name: contracts.BashTool, Arguments: `{"command":"ls"}`}}}
+	m.showApproval(approval)
+
+	// A pending decision owns the keyboard: a stray letter must not reach the
+	// composer, where it could look like a prompt.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
+	if m.composer.Value() != "" {
+		t.Fatalf("pending approval let %q into the composer", m.composer.Value())
+	}
+
+	// [R]eason hands the composer to the reason and sends it with the denial.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'r', Text: "r"}))
+	if m.composer.Prompt != "" && !strings.Contains(m.composer.View(), "why") {
+		t.Fatal("reason mode did not mark the composer")
+	}
+	m.composer.SetValue("delete only inside build")
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd == nil {
+		t.Fatal("reason was not dispatched")
+	}
+	if m.approval != nil {
+		t.Fatal("approval still pending after a denial")
+	}
+	last := m.blocks[len(m.blocks)-1]
+	if !strings.Contains(last.text, "deny_with_reason") || !strings.Contains(last.text, "delete only inside build") {
+		t.Fatalf("transcript recorded %q", last.text)
+	}
+}
+
+func TestApprovalDetailRendersEditDiff(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
 	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
 		Function: contracts.Function{
-			Name:      string(contracts.EditTool),
+			Name:      contracts.EditTool,
 			Arguments: `{"path":"main.go","old_string":"return old","new_string":"return new"}`,
 		},
 	}})
 
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"EDIT FILE", "TARGET  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new", "[A]llow", "[D]eny"} {
+	for _, want := range []string{"Human In the Loop", "tool_call: edit", "TARGET  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new", "[A]llow", "[D]eny"} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("edit approval modal lacks %q:\n%s", want, content)
+			t.Fatalf("edit approval detail lacks %q:\n%s", want, content)
 		}
 	}
 	if strings.Contains(content, "BEFORE") || strings.Contains(content, "AFTER") {
-		t.Fatalf("edit approval modal still shows BEFORE/AFTER:\n%s", content)
+		t.Fatalf("edit approval detail still shows BEFORE/AFTER:\n%s", content)
 	}
 }
 
@@ -703,14 +749,15 @@ func TestEditDiffWrapsAndKeepsActionsPinned(t *testing.T) {
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
 		Function: contracts.Function{
-			Name:      string(contracts.EditTool),
+			Name:      contracts.EditTool,
 			Arguments: `{"path":"x.md","old_string":"` + long + `","new_string":"` + long + ` changed"}`,
 		},
 	}})
 
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	view := m.View().Content
-	if height := lipgloss.Height(view); height > 20 {
-		t.Fatalf("modal view height=%d exceeds terminal height 20", height)
+	if height := lipgloss.Height(view); height != 20 {
+		t.Fatalf("approval view height=%d want 20", height)
 	}
 	content := ansi.Strip(view)
 	for _, want := range []string{"[A]llow", "[D]eny"} {
@@ -720,21 +767,22 @@ func TestEditDiffWrapsAndKeepsActionsPinned(t *testing.T) {
 	}
 }
 
-func TestApprovalModalRendersWriteAdditions(t *testing.T) {
+func TestApprovalDetailRendersWriteAdditions(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
 	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{
 		Function: contracts.Function{
-			Name:      string(contracts.WriteTool),
+			Name:      contracts.WriteTool,
 			Arguments: `{"path":"notes.txt","content":"first line\nsecond line"}`,
 		},
 	}})
 
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"WRITE FILE", "TARGET  notes.txt", "1 + first line", "2 + second line"} {
+	for _, want := range []string{"Human In the Loop", "tool_call: write", "TARGET  notes.txt", "1 + first line", "2 + second line"} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("write approval modal lacks %q:\n%s", want, content)
+			t.Fatalf("write approval detail lacks %q:\n%s", want, content)
 		}
 	}
 }
@@ -749,28 +797,28 @@ func TestApprovalToolCallFormatting(t *testing.T) {
 		{
 			name: "read", tool: contracts.ReadTool,
 			arguments: `{"path":"pkg/agent/tui/chat.go","offset":10,"limit":25}`,
-			want:      []string{"Read file", "SOURCE  pkg/agent/tui/chat.go", "lines 10-34"},
+			want:      []string{"SOURCE  pkg/agent/tui/chat.go", "lines 10-34"},
 		},
 		{
 			name: "bash", tool: contracts.BashTool,
 			arguments: `{"command":"printf 'hello\\nworld'\nprintf done","workdir":"scripts","timeout":30}`,
-			want:      []string{"Bash tool call", "WORKING DIRECTORY  scripts", "TIMEOUT            30 seconds", "printf 'hello\\nworld'\nprintf done"},
+			want:      []string{"WORKING DIRECTORY  scripts", "TIMEOUT            30 seconds", "printf 'hello\\nworld'\nprintf done"},
 		},
 		{
 			name: "write", tool: contracts.WriteTool,
 			arguments: `{"path":"notes.txt","content":"first line\nsecond line"}`,
-			want:      []string{"Write file", "TARGET  notes.txt", "2 lines", "EFFECT  Replace complete file contents"},
+			want:      []string{"TARGET  notes.txt", "2 lines", "EFFECT  Replace complete file contents"},
 		},
 		{
 			name: "edit", tool: contracts.EditTool,
 			arguments: `{"path":"main.go","old_string":"old\ntext","new_string":"new\ntext","replace_all":true}`,
-			want:      []string{"Edit file", "TARGET  main.go", "Replace every exact match"},
+			want:      []string{"TARGET  main.go", "Replace every exact match"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			title, body, script := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: string(tt.tool), Arguments: tt.arguments}})
-			formatted := title + "\n" + body + "\n" + script
+			body, script := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: tt.tool, Arguments: tt.arguments}})
+			formatted := body + "\n" + script
 			for _, want := range tt.want {
 				if !strings.Contains(formatted, want) {
 					t.Fatalf("formatted approval lacks %q: %q", want, formatted)
@@ -780,31 +828,33 @@ func TestApprovalToolCallFormatting(t *testing.T) {
 	}
 }
 
-func TestApprovalModalRendersBashAsCode(t *testing.T) {
+func TestApprovalDetailRendersBashAsCode(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
 	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{
-		Name:      string(contracts.BashTool),
+		Name:      contracts.BashTool,
 		Arguments: `{"command":"if test -f go.mod; then\n  go test ./...\nfi","workdir":"."}`,
 	}}})
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"BASH TOOL CALL", "SCRIPT", "if test -f go.mod; then", "go test ./...", "fi"} {
+	for _, want := range []string{"Human In the Loop", "tool_call: bash", "SCRIPT", "if test -f go.mod; then", "go test ./...", "fi"} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("bash approval modal lacks %q:\n%s", want, content)
+			t.Fatalf("bash approval detail lacks %q:\n%s", want, content)
 		}
 	}
 	if strings.Contains(content, "```bash") {
-		t.Fatalf("bash approval modal exposes Markdown fence:\n%s", content)
+		t.Fatalf("bash approval detail exposes Markdown fence:\n%s", content)
 	}
 
+	// The code sits on the one inset a diff uses, never on the attention band.
 	highlighted := renderApprovalScript("nvidia-smi", 40, newHarnessStyles())
-	if !strings.Contains(highlighted, "\x1b[48;2;46;56;60m") {
-		t.Fatalf("bash approval script does not use modal surface background: %q", highlighted)
+	if !strings.Contains(highlighted, "\x1b[48;2;39;46;51m") {
+		t.Fatalf("bash approval script does not use the code inset: %q", highlighted)
 	}
-	if strings.Contains(highlighted, "\x1b[48;2;39;46;51m") {
-		t.Fatalf("bash approval script uses app background: %q", highlighted)
+	if strings.Contains(highlighted, "\x1b[48;2;77;76;67m") {
+		t.Fatalf("bash approval script is painted on the attention band: %q", highlighted)
 	}
 	if got := strings.TrimSpace(ansi.Strip(highlighted)); got != "nvidia-smi" {
 		t.Fatalf("bash approval script=%q", got)
@@ -935,20 +985,25 @@ func TestTimelineOriginalHasNoTextLabel(t *testing.T) {
 }
 
 func TestTimelineRoleColors(t *testing.T) {
-	tests := map[string]string{
-		"user": "4", "thinking": "8", "assistant": "10",
-		"tool_call": "13", "tool_result": "13", "skill": "6",
+	tests := map[string]color.Color{
+		"user":        everforest.Blue,
+		"assistant":   everforest.Green,
+		"thinking":    everforest.Muted,
+		"system":      everforest.Purple,
+		"tool_call":   everforest.Text,
+		"tool_result": everforest.Muted,
+		"skill":       everforest.Aqua,
 	}
 	for role, want := range tests {
 		got := timelineRoleStyle(lipgloss.NewStyle(), role).GetForeground()
-		if got != lipgloss.Color(want) {
-			t.Errorf("role %s color=%v want=%v", role, got, lipgloss.Color(want))
+		if got != want {
+			t.Errorf("role %s color=%v want=%v", role, got, want)
 		}
 	}
 }
 
 func TestTimelineEventDisplayUsesSupportedRoles(t *testing.T) {
-	call := contracts.ToolCall{Function: contracts.Function{Name: string(contracts.ReadSkillTool), Arguments: `{"name":"code-review"}`}}
+	call := contracts.ToolCall{Function: contracts.Function{Name: contracts.ReadSkillTool, Arguments: `{"name":"code-review"}`}}
 	displays := timelineEventDisplays(TimelineEvent{Record: &store.Record{
 		Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}},
 	}})
@@ -999,9 +1054,10 @@ func TestBlocksFromRecordsShowsToolCallsAndResults(t *testing.T) {
 			Arguments: `{"path":"README.md"}`,
 		},
 	}
+	toolResult := contracts.NewToolMessage(call.ID, `{"content":"hello"}`, contracts.ToolExecutionSuccess)
 	records := []store.Record{
 		{Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}}},
-		{Kind: store.KindToolResult, ToolResult: &store.ToolResultRecord{CallID: call.ID, Status: "success", Output: `{"content":"hello"}`}},
+		{Kind: store.KindMessage, Message: &toolResult},
 	}
 
 	blocks := blocksFromRecords(records)
@@ -1038,12 +1094,12 @@ func TestReadToolResultSummaryPreservesErrors(t *testing.T) {
 func TestLiveAndResumedBashResultsMatch(t *testing.T) {
 	payload := `{"exit_code":7,"output":"full output\n","truncated":true}`
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
-	m.appendDelta(contracts.DeltaToolResult, "bash [success]\n"+payload)
+	m.appendDelta(contracts.EventToolResult, "bash [success]\n"+payload)
 	if len(m.blocks) != 1 {
 		t.Fatalf("live blocks=%d", len(m.blocks))
 	}
 
-	call := contracts.ToolCall{ID: "call-1", Type: "function", Function: contracts.Function{Name: string(contracts.BashTool)}}
+	call := contracts.ToolCall{ID: "call-1", Type: "function", Function: contracts.Function{Name: contracts.BashTool}}
 	toolMessage := contracts.NewToolMessage(call.ID, payload, contracts.ToolExecutionSuccess)
 	resumed := blocksFromRecords([]store.Record{
 		{Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}}},
@@ -1153,10 +1209,17 @@ func TestSessionLoadClearsPendingAttachments(t *testing.T) {
 
 type stubChatClient struct{}
 
-func (stubChatClient) Chat(context.Context, contracts.UserInput, contracts.InfaiThinkingLevel, func(contracts.DeltaKind, string), func(ApprovalUpdate)) (*ChatReply, error) {
+func (stubChatClient) Chat(context.Context, contracts.UserInput, contracts.InfaiThinkingLevel, func(contracts.EventStreamKind, string), func(ApprovalUpdate)) (*ChatReply, error) {
 	return &ChatReply{}, nil
 }
+func (stubChatClient) SendMessage(context.Context, contracts.UserInput, contracts.InfaiThinkingLevel) error {
+	return nil
+}
+func (stubChatClient) JoinSession(context.Context, uuid.UUID, func(glue.SessionView), func(contracts.EventStream)) error {
+	return nil
+}
 func (stubChatClient) ResolveApproval(context.Context, Approval, string, string) error { return nil }
+func (stubChatClient) CancelTurn(context.Context, uuid.UUID) error                     { return nil }
 func (stubChatClient) SetSession(uuid.UUID)                                            {}
 func (stubChatClient) CreateSession(context.Context, SessionCreateOptions) (*glue.SessionOutput, error) {
 	return &glue.SessionOutput{}, nil

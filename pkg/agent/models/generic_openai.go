@@ -7,24 +7,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 )
 
 type genericOpenAICompatableAPI struct {
 	b        contracts.ProvisionedModel
 	endpoint *url.URL
 
-	client        *http.Client
-	maxAttempts   int
-	retryBase     time.Duration
-	retryMaxDelay time.Duration
+	client *http.Client
+	retry  retryPolicy
 }
 
 func NewOpenAICompatableAPI(b contracts.ProvisionedModel) (*genericOpenAICompatableAPI, error) {
@@ -37,12 +34,10 @@ func NewOpenAICompatableAPI(b contracts.ProvisionedModel) (*genericOpenAICompata
 	transport.ResponseHeaderTimeout = 5 * time.Minute
 
 	return &genericOpenAICompatableAPI{
-		b:             b,
-		endpoint:      baseEndpoint.JoinPath("chat", "completions"),
-		client:        &http.Client{Transport: transport},
-		maxAttempts:   10,
-		retryBase:     5 * time.Second,
-		retryMaxDelay: time.Minute,
+		b:        b,
+		endpoint: baseEndpoint.JoinPath("chat", "completions"),
+		client:   &http.Client{Transport: transport},
+		retry:    defaultRetryPolicy,
 	}, nil
 }
 
@@ -169,12 +164,11 @@ func (o *genericOpenAICompatableAPI) buildRequest(messages []contracts.ChatMessa
 	return json.Marshal(reqBody)
 }
 
+// sendChatRequest performs the Chat Completions call under the adapter's retry
+// policy. It returns as soon as the response headers arrive, so retries never
+// run after a stream has started.
 func (o *genericOpenAICompatableAPI) sendChatRequest(ctx context.Context, body []byte, opts *contracts.GenerateOptions) (*http.Response, error) {
-	maxAttempts := o.maxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = 1
-	}
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	return o.retry.send(ctx, "openai compatible api", o.client, opts, func() (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.endpoint.String(), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
@@ -191,112 +185,8 @@ func (o *genericOpenAICompatableAPI) sendChatRequest(ctx context.Context, body [
 		default:
 			return nil, fmt.Errorf("openai compatible api: unsupported auth method %q", auth.Method)
 		}
-
-		resp, err := o.client.Do(req)
-		if err != nil {
-			if resp != nil && resp.Body != nil {
-				_ = resp.Body.Close()
-			}
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			if attempt == maxAttempts || !isRetryableTransportError(err) {
-				return nil, fmt.Errorf("openai compatible api: request failed after %d attempt(s): %w", attempt, err)
-			}
-			if err := o.waitForRetry(ctx, attempt, 0, opts); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		if resp.StatusCode == http.StatusOK {
-			return resp, nil
-		}
-
-		responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
-		closeErr := resp.Body.Close()
-		statusErr := fmt.Errorf("openai compatible api: status %d: %s", resp.StatusCode, string(responseBody))
-		if readErr != nil {
-			statusErr = fmt.Errorf("%w: read response body: %v", statusErr, readErr)
-		}
-		if closeErr != nil {
-			statusErr = fmt.Errorf("%w: close response body: %v", statusErr, closeErr)
-		}
-		if attempt == maxAttempts || !isRetryableStatus(resp.StatusCode) {
-			return nil, statusErr
-		}
-		if err := o.waitForRetry(ctx, attempt, retryAfter, opts); err != nil {
-			return nil, err
-		}
-	}
-	return nil, errors.New("openai compatible api: retry loop exhausted")
-}
-
-func (o *genericOpenAICompatableAPI) waitForRetry(ctx context.Context, attempt int, retryAfter time.Duration, opts *contracts.GenerateOptions) error {
-	delay := o.retryBase
-	if delay <= 0 {
-		delay = 5 * time.Second
-	}
-	maxDelay := o.retryMaxDelay
-	if maxDelay <= 0 {
-		maxDelay = time.Minute
-	}
-	for i := 1; i < attempt; i++ {
-		if delay >= maxDelay>>1 {
-			delay = maxDelay
-			break
-		}
-		delay *= 2
-	}
-	if retryAfter > delay {
-		delay = retryAfter
-	}
-	if delay > maxDelay {
-		delay = maxDelay
-	}
-	if opts != nil && opts.OnDelta != nil {
-		opts.OnDelta(contracts.DeltaStatus, fmt.Sprintf("LLM endpoint unavailable; retrying in %s (attempt %d/%d)", delay, attempt+1, o.maxAttempts))
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func isRetryableStatus(status int) bool {
-	switch status {
-	case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooEarly, http.StatusTooManyRequests,
-		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return true
-	default:
-		return false
-	}
-}
-
-func isRetryableTransportError(err error) bool {
-	var netErr net.Error
-	return errors.As(err, &netErr)
-}
-
-func parseRetryAfter(value string, now time.Time) time.Duration {
-	if value == "" {
-		return 0
-	}
-	if seconds, err := strconv.Atoi(value); err == nil {
-		if seconds > 0 {
-			return time.Duration(seconds) * time.Second
-		}
-		return 0
-	}
-	when, err := http.ParseTime(value)
-	if err != nil || !when.After(now) {
-		return 0
-	}
-	return when.Sub(now)
+		return req, nil
+	})
 }
 
 type openAIStreamChunk struct {
@@ -354,14 +244,14 @@ func (o *genericOpenAICompatableAPI) readStream(ctx context.Context, body io.Rea
 			d := chunk.Choices[0].Delta
 			if d.Content != "" {
 				content.WriteString(d.Content)
-				if opts.OnDelta != nil {
-					opts.OnDelta(contracts.DeltaContent, d.Content)
+				if opts.OnDelta != nil && opts.OnDelta(contracts.DeltaContent, d.Content) {
+					return contracts.ChatMessage{}, usage, harnessErr.ErrTurnCanceled
 				}
 			}
 			if d.ReasoningContent != "" {
 				reasoning.WriteString(d.ReasoningContent)
-				if opts.OnDelta != nil {
-					opts.OnDelta(contracts.DeltaReasoning, d.ReasoningContent)
+				if opts.OnDelta != nil && opts.OnDelta(contracts.DeltaReasoning, d.ReasoningContent) {
+					return contracts.ChatMessage{}, usage, harnessErr.ErrTurnCanceled
 				}
 			}
 			for _, delta := range d.ToolCalls {
@@ -378,7 +268,7 @@ func (o *genericOpenAICompatableAPI) readStream(ctx context.Context, body io.Rea
 				if call.Type == "" {
 					call.Type = delta.Type
 				}
-				call.Function.Name += delta.Function.Name
+				call.Function.Name += contracts.ToolType(delta.Function.Name)
 				call.Function.Arguments += delta.Function.Arguments
 			}
 		}

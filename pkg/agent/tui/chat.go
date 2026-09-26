@@ -38,7 +38,6 @@ type block struct {
 	toolStatus    string
 	toolName      string
 	toolArgs      string
-	skillName     string
 	rendered      string
 	renderedWidth int
 	renderedValid bool
@@ -65,28 +64,58 @@ type chatModel struct {
 	viewport         viewport.Model
 	composer         textarea.Model
 	checklist        contracts.TaskChecklistState
+	status           contracts.SessionStatus
+	approval         *Approval
+	approvalShown    bool
+	approvalReason   bool
 	modal            *modalModel
 	commandMenu      bool
 	commandSelection int
 
-	working      bool
-	workBegan    time.Time
-	workStatus   string
-	cancelArmed  bool
-	cancelArmID  uint64
-	cancelStatus string
-	turnCancel   context.CancelFunc
-	stream       chan tea.Msg
-	initCmd      tea.Cmd
-	streaming    bool
-	streamingAt  int
-	streamTick   bool
-	streamTickID uint64
-	streamDirty  bool
+	working           bool
+	workBegan         time.Time
+	workStatus        string
+	cancelArmed       bool
+	cancelArmID       uint64
+	cancelStatus      string
+	stream            chan tea.Msg
+	sessionCancel     context.CancelFunc
+	sessionStream     chan tea.Msg
+	sessionObserverID uint64
+	initCmd           tea.Cmd
+	streaming         bool
+	streamingAt       int
+	streamTick        bool
+	streamTickID      uint64
+	streamDirty       bool
 }
 
+type sessionViewMsg struct {
+	sessionID  uuid.UUID
+	observerID uint64
+	view       glue.SessionView
+}
+
+type sessionEventMsg struct {
+	sessionID  uuid.UUID
+	observerID uint64
+	event      contracts.EventStream
+}
+
+type sessionJoinDoneMsg struct {
+	sessionID  uuid.UUID
+	observerID uint64
+	err        error
+}
+
+type messageSentMsg struct {
+	ownsWork bool
+	err      error
+}
+type turnCanceledMsg struct{ err error }
+
 type streamDeltaMsg struct {
-	kind contracts.DeltaKind
+	kind contracts.EventStreamKind
 	text string
 }
 
@@ -162,7 +191,6 @@ func runChatTUI(ctx context.Context, client Client, sessions []contracts.Session
 
 func newChatModel(ctx context.Context, client Client, sessions []contracts.SessionSummary, opts RunOptions) *chatModel {
 	input := textarea.New()
-	input.Prompt = "λ "
 	input.Placeholder = "Ask, plan, build..."
 	input.ShowLineNumbers = false
 	input.DynamicHeight = true
@@ -194,7 +222,32 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 	} else {
 		m.showSessions(sessions, true)
 	}
+	m.refreshInputMark()
 	return m
+}
+
+// inputMark opens the composer: "∞" while it takes a prompt, "why" while it is
+// capturing the reason a decision was denied.
+const inputMark = "∞ "
+
+// refreshInputMark names what the composer is currently for, and pads the
+// continuation rows of a wrapped draft to the same width. The placeholder spells
+// out how to finish a reason, so the reserved block above does not have to.
+func (m *chatModel) refreshInputMark() {
+	mark := inputMark
+	placeholder := "Ask, plan, build..."
+	if m.approvalReason {
+		mark = "why▸ "
+		placeholder = "(reason to deny  ·  ⏎ send  ·  esc cancel)"
+	}
+	m.composer.Placeholder = placeholder
+	width := lipgloss.Width(mark)
+	m.composer.SetPromptFunc(width, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
+			return mark
+		}
+		return strings.Repeat(" ", width)
+	})
 }
 
 func (m *chatModel) Init() tea.Cmd {
@@ -205,19 +258,71 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.scrollApproval(0)
 		m.reflow(true)
 		m.streamDirty = false
 		return m, nil
+	case sessionViewMsg:
+		if msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
+			return m, nil
+		}
+		m.applySessionView(msg.view)
+		m.refreshTranscript(true)
+		m.reflow(false)
+		return m, waitStream(m.ctx, m.sessionStream)
+	case sessionEventMsg:
+		if msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
+			return m, nil
+		}
+		m.applySessionEvent(msg.event)
+		m.refreshTranscript(true)
+		m.reflow(false)
+		if msg.event.Kind == contracts.EventSubscriberGap {
+			return m, m.startSessionObserver(msg.sessionID)
+		}
+		return m, waitStream(m.ctx, m.sessionStream)
+	case sessionJoinDoneMsg:
+		if msg.sessionID == m.session.ID && msg.observerID == m.sessionObserverID && msg.err != nil && !errors.Is(msg.err, context.Canceled) {
+			m.appendError(msg.err)
+			m.refreshTranscript(true)
+		}
+		return m, nil
+	case messageSentMsg:
+		if msg.err != nil {
+			// Only a send that opened the turn may close it; a refused queued
+			// prompt leaves the running turn's status alone.
+			if msg.ownsWork {
+				m.status = contracts.SessionIdle
+				m.working = false
+				m.workStatus = ""
+			}
+			m.appendError(msg.err)
+			m.refreshTranscript(true)
+			m.reflow(false)
+			if msg.ownsWork && m.session.ID != uuid.Nil {
+				return m, m.startSessionObserver(m.session.ID)
+			}
+		}
+		return m, nil
+	case turnCanceledMsg:
+		// A cancel the server refused leaves the turn as it was; clearing the
+		// label lets the status view fall back to working until the session
+		// reports its own status again.
+		if msg.err != nil {
+			m.workStatus = ""
+			m.appendError(msg.err)
+			m.refreshTranscript(true)
+		}
+		return m, nil
 	case streamDeltaMsg:
-		if msg.kind == contracts.DeltaStatus {
+		switch msg.kind {
+		case contracts.EventProviderEvent:
 			status := statusLabel(msg.text)
 			if m.cancelArmed {
 				m.cancelStatus = status
 			} else {
 				m.workStatus = status
 			}
-		} else if msg.kind == contracts.DeltaTaskChecklist {
+		case contracts.EventToolTaskCheckList:
 			if state, err := decodeTaskChecklist(msg.text); err == nil {
 				m.checklist = state
 			}
@@ -234,7 +339,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamDirty = true
 			return m, wait
 		}
-		if msg.kind != contracts.DeltaTaskChecklist {
+		if msg.kind != contracts.EventToolTaskCheckList {
 			m.stopStreamRefresh()
 			m.refreshTranscript(true)
 		}
@@ -246,17 +351,13 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleClipboardImage(msg)
 	case turnDoneMsg:
 		m.stopStreamRefresh()
-		if m.turnCancel != nil {
-			m.turnCancel()
-			m.turnCancel = nil
-		}
 		m.working = false
 		m.streaming = false
 		m.cancelArmed = false
 		m.cancelStatus = ""
 		m.workStatus = ""
 		if errors.Is(msg.err, context.Canceled) || msg.reply != nil && msg.reply.Status == "canceled" {
-			m.appendDelta(contracts.DeltaStatus, "generation canceled")
+			m.blocks = append(m.blocks, block{role: "status", text: statusLabel("generation canceled")})
 		} else if msg.err != nil {
 			m.appendError(msg.err)
 		} else if msg.reply != nil {
@@ -294,7 +395,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.checklist = taskChecklistFromRecords(msg.records)
 		m.modal = nil
 		m.refreshTranscript(true)
-		return m, nil
+		return m, m.startSessionObserver(msg.output.ID)
 	case sessionsListedMsg:
 		if msg.err != nil {
 			m.showNotice("Could not list sessions", msg.err.Error(), false)
@@ -327,7 +428,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.used = 0
 		m.modal = nil
 		m.refreshTranscript(true)
-		return m, nil
+		return m, m.startSessionObserver(msg.output.ID)
 	case modelSetMsg:
 		if msg.err != nil {
 			m.appendError(msg.err)
@@ -415,7 +516,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.PasteMsg:
-		if m.modal == nil && !m.working {
+		if m.modal == nil {
 			var cmd tea.Cmd
 			m.composer, cmd = m.composer.Update(msg)
 			m.updateCommandMenu()
@@ -424,15 +525,6 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
-		if m.modal != nil && m.modal.kind == modalApproval {
-			switch msg.Mouse().Button {
-			case tea.MouseWheelUp:
-				m.scrollApproval(-3)
-			case tea.MouseWheelDown:
-				m.scrollApproval(3)
-			}
-			return m, nil
-		}
 		if m.modal == nil {
 			mouse := msg.Mouse()
 			if len(m.areas) > 1 && (mouse.Y < m.areas[1].y || mouse.Y >= m.areas[1].y+m.areas[1].height) {
@@ -461,6 +553,11 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
+	// A pending decision owns the keyboard: the turn is blocked until it is
+	// answered, so the composer is not accepting prompts anyway.
+	if model, cmd, handled := m.handleApprovalKey(key); handled {
+		return model, cmd
+	}
 	if m.working && key == "esc" {
 		if !m.cancelArmed {
 			m.cancelArmed = true
@@ -469,14 +566,13 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.workStatus = "press esc again to cancel"
 			m.reflow(false)
 			return m, cancelArmTimeoutCmd(m.cancelArmID)
-		} else if m.turnCancel != nil {
+		} else {
 			m.cancelArmed = false
 			m.cancelStatus = ""
 			m.workStatus = "canceling"
-			m.turnCancel()
+			m.reflow(false)
+			return m, cancelTurnCmd(m.ctx, m.client, m.session.ID)
 		}
-		m.reflow(false)
-		return m, nil
 	}
 	if m.modal != nil {
 		return m, m.handleModalKey(msg)
@@ -494,24 +590,20 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.working {
+		// A running turn does not stop the composer: a prompt typed now is
+		// queued by the session and served next. The session workspace and the
+		// model picker stay closed, because both reattach the client to a
+		// different session rather than feed this turn.
 		switch key {
-		case "pgup":
-			m.viewport.PageUp()
-		case "pgdown":
-			m.viewport.PageDown()
-		case "ctrl+up":
-			m.viewport.ScrollUp(3)
-		case "ctrl+down":
-			m.viewport.ScrollDown(3)
+		case "ctrl+o", "ctrl+m":
+			return m, nil
 		}
-		m.reflow(false)
-		return m, nil
 	}
 	if key == "ctrl+o" {
 		m.modal = loadingModal("Loading sessions")
 		return m, listSessionsCmd(m.ctx, m.client)
 	}
-	if key == "ctrl+n" {
+	if key == "ctrl+m" {
 		m.modal = loadingModal("Loading models")
 		return m, listProvidersCmd(m.ctx, m.client, false)
 	}
@@ -609,22 +701,6 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.modal.move(1)
 	case "shift+tab":
 		m.modal.move(-1)
-	case "pgup":
-		if m.modal.kind == modalApproval {
-			m.scrollApproval(-8)
-		}
-	case "pgdown":
-		if m.modal.kind == modalApproval {
-			m.scrollApproval(8)
-		}
-	case "ctrl+up":
-		if m.modal.kind == modalApproval {
-			m.scrollApproval(-1)
-		}
-	case "ctrl+down":
-		if m.modal.kind == modalApproval {
-			m.scrollApproval(1)
-		}
 	case "esc":
 		if !m.modal.required {
 			m.modal = nil
@@ -642,14 +718,6 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 	return nil
-}
-
-func (m *chatModel) scrollApproval(delta int) {
-	if m.modal == nil || m.modal.kind != modalApproval || m.width <= 0 || m.height <= 0 {
-		return
-	}
-	maxOffset := approvalMaxBodyOffset(m.modal, m.width, m.height, m.styles)
-	m.modal.bodyOffset = clamp(m.modal.bodyOffset+delta, 0, maxOffset)
 }
 
 func (m *chatModel) activateModal(index int) tea.Cmd {
@@ -673,12 +741,6 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 		return createSessionCmd(m.ctx, m.client, option.provider, option.model)
 	case modalCommands:
 		m.modal = nil
-	case modalApproval:
-		approval := modal.approval
-		m.modal = nil
-		m.blocks = append(m.blocks, block{role: "system", text: "Approval " + option.decision})
-		m.refreshTranscript(true)
-		return resolveApprovalCmd(m.ctx, m.client, approval, option.decision)
 	case modalTimeline:
 		if option.event != nil {
 			m.modal = loadingModal("Selecting branch")
@@ -692,7 +754,7 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 
 func (m *chatModel) submit() tea.Cmd {
 	prompt := strings.TrimSpace(m.composer.Value())
-	if prompt == "" || m.working {
+	if prompt == "" {
 		return nil
 	}
 	images := append([]contracts.ImageInput(nil), m.pending...)
@@ -719,36 +781,174 @@ func (m *chatModel) submit() tea.Cmd {
 	m.reflow(false)
 
 	input := contracts.UserInput{Text: prompt, Images: images}
-	m.blocks = append(m.blocks, block{role: "user", text: prompt, imageCount: len(images)})
-	m.working = true
-	m.workBegan = time.Now()
-	m.workStatus = "working"
+	// A prompt sent while a turn is running is queued by the session and served
+	// next. The turn already in flight owns the status, so it is left as the
+	// events reported it.
+	ownsWork := !m.working
+	if ownsWork {
+		// The status the session will confirm; the events overwrite it.
+		m.status = contracts.SessionBusy
+		m.working = true
+		m.workBegan = time.Now()
+	}
 	m.cancelArmed = false
 	m.refreshTranscript(true)
-	m.stream = make(chan tea.Msg, 256)
-	stream := m.stream
 	thinking := m.thinking
-	turnCtx, cancel := context.WithCancel(m.ctx)
-	m.turnCancel = cancel
-	emit := func(message tea.Msg) bool {
-		select {
-		case stream <- message:
-			return true
-		case <-m.ctx.Done():
-			return false
-		}
-	}
-	go func() {
-		reply, err := m.client.Chat(turnCtx, input, thinking, func(kind contracts.DeltaKind, text string) {
-			emit(streamDeltaMsg{kind: kind, text: text})
-		}, func(update ApprovalUpdate) {
-			emit(streamApprovalMsg{update: update})
-		})
-		emit(turnDoneMsg{reply: reply, err: err})
-	}()
 	// Attachments are consumed only once dispatch has successfully begun.
 	m.pending = nil
-	return tea.Batch(waitStream(m.ctx, stream), animationTickCmd())
+	return tea.Batch(func() tea.Msg {
+		return messageSentMsg{ownsWork: ownsWork, err: m.client.SendMessage(m.ctx, input, thinking)}
+	}, animationTickCmd())
+}
+
+func cancelTurnCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
+	return func() tea.Msg {
+		return turnCanceledMsg{err: client.CancelTurn(ctx, id)}
+	}
+}
+
+func (m *chatModel) startSessionObserver(sessionID uuid.UUID) tea.Cmd {
+	if m.sessionCancel != nil {
+		m.sessionCancel()
+	}
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.sessionCancel = cancel
+	m.sessionObserverID++
+	observerID := m.sessionObserverID
+	m.sessionStream = make(chan tea.Msg, 256)
+	stream := m.sessionStream
+	emit := func(message tea.Msg) {
+		select {
+		case stream <- message:
+		case <-ctx.Done():
+		}
+	}
+	join := func() tea.Msg {
+		defer cancel()
+		err := m.client.JoinSession(ctx, sessionID, func(view glue.SessionView) {
+			emit(sessionViewMsg{sessionID: sessionID, observerID: observerID, view: view})
+		}, func(event contracts.EventStream) {
+			emit(sessionEventMsg{sessionID: sessionID, observerID: observerID, event: event})
+		})
+		return sessionJoinDoneMsg{sessionID: sessionID, observerID: observerID, err: err}
+	}
+	return tea.Batch(waitStream(ctx, stream), join)
+}
+
+func (m *chatModel) applySessionView(view glue.SessionView) {
+	m.session = view.Meta
+	m.blocks = blocksFromMessages(view.History)
+	m.checklist = view.Checklist
+	// The in-flight log is replayed through the same handler the live stream
+	// uses, so a client that joins mid-generation renders the generation the
+	// same way it would have rendered it live.
+	for _, event := range view.InFlight {
+		m.applySessionEvent(event)
+	}
+	m.applySessionStatus(view.Status)
+	if view.PendingApproval != nil {
+		m.showApproval(approvalFromRequest(view.PendingApproval))
+	} else {
+		m.clearApproval()
+	}
+}
+
+func (m *chatModel) applySessionStatus(status contracts.SessionStatus) {
+	m.status = status
+	switch status {
+	case contracts.SessionBusy, contracts.SessionWaitingApproval, contracts.SessionCompacting:
+		m.working = true
+	case contracts.SessionIdle:
+		m.stopStreamRefresh()
+		m.working = false
+		m.streaming = false
+		m.workStatus = ""
+		m.cancelArmed = false
+	case contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone:
+		m.stopStreamRefresh()
+		m.working = false
+		m.streaming = false
+		m.workStatus = ""
+		m.clearApproval()
+	}
+	if m.working && m.workBegan.IsZero() {
+		m.workBegan = time.Now()
+	}
+}
+
+func (m *chatModel) applySessionEvent(event contracts.EventStream) {
+	content := ""
+	if event.Content != nil {
+		content = *event.Content
+	}
+	switch event.Kind {
+	case contracts.EventSessionTransitionState:
+		m.applySessionStatus(contracts.SessionStatus(content))
+	case contracts.EventSessionFatal:
+		m.applySessionStatus(contracts.SessionTombstone)
+		m.appendError(errors.New(content))
+	case contracts.EventSubscriberGap:
+		m.appendError(errors.New(content))
+	case contracts.EventMessageFromAgentInbox:
+		images := 0
+		if event.Attachments != nil {
+			images = event.Attachments.ImageCount
+		}
+		m.blocks = append(m.blocks, block{role: "user", text: content, imageCount: images})
+	case contracts.EventToolCall:
+		if event.ToolCall != nil {
+			m.appendToolEvent("call", contracts.ToolCallDisplay(*event.ToolCall))
+		} else {
+			m.appendToolEvent("call", content)
+		}
+	case contracts.EventToolResult:
+		if event.ToolResult == nil {
+			m.appendToolEvent("result", content)
+			break
+		}
+		result := string(event.ToolResult.CallName) + " [" + string(event.ToolResult.Status) + "]"
+		if event.ToolResult.Error != "" {
+			result += ": " + event.ToolResult.Error
+		} else if event.ToolResult.Output != "" {
+			result += "\n" + event.ToolResult.Output
+		}
+		m.appendToolEvent("result", result)
+	case contracts.EventToolTaskCheckList:
+		if event.ToolResult != nil {
+			if state, err := decodeTaskChecklist(event.ToolResult.Output); err == nil {
+				m.checklist = state
+			}
+		} else if state, err := decodeTaskChecklist(content); err == nil {
+			m.checklist = state
+		}
+	case contracts.EventSkillLoad:
+		if event.ToolResult != nil {
+			content = event.ToolResult.Output
+		}
+		m.appendDelta(event.Kind, content)
+	case contracts.EventApprovalRequested:
+		if event.HITLCall != nil {
+			m.showApproval(approvalFromRequest(event.HITLCall))
+		}
+	case contracts.EventApprovalResolved:
+		m.handleApprovalUpdate(ApprovalUpdate{Type: string(event.Kind), Approval: approvalFromRequest(event.HITLCall)})
+	case contracts.NotifyAgentUsage:
+		var usage contracts.TokenUsage
+		if json.Unmarshal([]byte(content), &usage) == nil {
+			m.used = usage.TotalTokens
+		}
+	default:
+		m.appendDelta(event.Kind, content)
+	}
+}
+
+func blocksFromMessages(history []contracts.ChatMessage) []block {
+	records := make([]store.Record, 0, len(history))
+	for i := range history {
+		message := history[i]
+		records = append(records, store.Record{Kind: store.KindMessage, Message: &message})
+	}
+	return blocksFromRecords(records)
 }
 
 func waitStream(ctx context.Context, stream <-chan tea.Msg) tea.Cmd {
@@ -782,7 +982,7 @@ func (m *chatModel) modelSupportsImage() bool {
 // preflight checks synchronously so failures are reported without spawning a
 // process.
 func (m *chatModel) pasteImage() tea.Cmd {
-	if m.modal != nil || m.working {
+	if m.modal != nil {
 		return nil
 	}
 	if m.session.ID == uuid.Nil {
@@ -883,15 +1083,6 @@ func (m *chatModel) renderImageBadges(count int) string {
 	return strings.Join(badges, " ")
 }
 
-// attachmentsView shows the staged attachments as [Image N] chips above the
-// composer. The composer text itself stays clean.
-func (m *chatModel) attachmentsView() string {
-	if len(m.pending) == 0 {
-		return ""
-	}
-	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, m.renderImageBadges(len(m.pending)))
-}
-
 // clearAttachments drops every staged image. Ctrl+U is the explicit action
 // because the composer carries no marker text to delete.
 func (m *chatModel) clearAttachments() {
@@ -960,12 +1151,15 @@ func (m *chatModel) View() tea.View {
 	}
 	header := m.headerView()
 	status := m.statusView()
+	statusRow := m.statusRowView()
+	checklist := m.checklistView()
+	hitl := m.hitlView()
 	commands := m.commandMenuView()
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	parts := []string{header, m.viewport.View(), status, commands, attachments, composer}
+	parts := []string{header, m.viewport.View(), checklist, hitl, statusRow, commands, attachments, composer, status}
 	if len(m.areas) == len(parts) {
-		parts[3] = m.commandMenuViewForHeight(m.areas[3].height)
+		parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
 		for i := range parts {
 			parts[i] = fitArea(m.areas[i], parts[i])
 		}
@@ -977,7 +1171,7 @@ func (m *chatModel) View() tea.View {
 		}
 	}
 	base := lipgloss.JoinVertical(lipgloss.Left, visibleParts...)
-	if m.modal != nil && m.modal.kind != modalApproval && m.modal.kind != modalTimeline {
+	if m.modal != nil && m.modal.kind != modalTimeline {
 		base = renderSelectionScreen(m.modal, m.width, m.height, m.styles)
 	} else if m.modal != nil {
 		dialog := renderModal(m.modal, m.width, m.height, m.styles)
@@ -1001,13 +1195,17 @@ func (m *chatModel) reflow(follow bool) {
 	}
 	previousViewportWidth := m.viewport.Width()
 	wasAtBottom := m.viewport.AtBottom()
+	m.refreshInputMark()
 	m.composer.SetWidth(contentWidth(m.styles.composer, m.width))
 	header := m.headerView()
 	status := m.statusView()
+	statusRow := m.statusRowView()
+	checklist := m.checklistView()
+	hitl := m.hitlView()
 	commands := m.commandMenuView()
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(status), intrinsic(commands), intrinsic(attachments), intrinsic(composer))
+	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(checklist), intrinsic(hitl), intrinsic(statusRow), intrinsic(commands), intrinsic(attachments), intrinsic(composer), intrinsic(status))
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
@@ -1025,8 +1223,8 @@ func (m *chatModel) headerView() string {
 
 func (m *chatModel) statusView() string {
 	separator := m.styles.status.Render("  ·  ")
-	rest := m.styles.status.Render("ready")
 	name := ""
+	var rest string
 	if m.session.ID == uuid.Nil {
 		rest = m.styles.status.Render("choose a session to begin")
 	} else {
@@ -1039,19 +1237,17 @@ func (m *chatModel) statusView() string {
 		if thinking == "" {
 			thinking = "off"
 		}
-		rest = strings.Join([]string{
+		fields := []string{
 			m.styles.status.Render(fmt.Sprintf("%s (%s)", m.session.Model, m.session.Provider)),
-			m.styles.active.Render("thinking " + string(thinking)),
-			m.styles.status.Render("ctx ") + contextProgressBar(m.styles, pct, 10) + m.styles.status.Render(fmt.Sprintf(" %d%%", pct)),
-			m.styles.status.Render(m.session.ID.String()),
-		}, separator)
-	}
-	if m.working {
-		workStatus := m.workStatus
-		if workStatus == "" {
-			workStatus = "working"
 		}
-		rest = m.styles.statusBusy.Render(fmt.Sprintf("%s  ·  %s %s %s", m.session.Model, spinnerFrame(m.workBegan), workStatus, time.Since(m.workBegan).Round(time.Second)))
+		if m.session.Cwd != "" {
+			fields = append(fields, m.styles.status.Render(m.session.Cwd))
+		}
+		fields = append(fields,
+			m.styles.active.Render("thinking "+string(thinking)),
+			m.styles.status.Render("ctx ")+contextProgressBar(m.styles, pct, 6)+m.styles.status.Render(fmt.Sprintf(" %d%% %s/%s", pct, tokenCount(m.used), tokenCount(m.contextWindow))),
+		)
+		rest = strings.Join(fields, separator)
 	}
 	if !m.viewport.AtBottom() {
 		rest += separator + m.styles.status.Render("viewing earlier output")
@@ -1059,21 +1255,113 @@ func (m *chatModel) statusView() string {
 	if name != "" {
 		rest = m.styles.sessionName.Render(name) + separator + rest
 	}
-	if checklist := m.taskChecklistView(max(m.width-2, 1)); checklist != "" {
-		rest = checklist + "\n" + rest
-	}
-	return fullWidth(lipgloss.NewStyle().PaddingTop(1).PaddingLeft(1).PaddingRight(1), m.width, rest)
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, rest)
 }
 
-func contextProgressBar(styles harnessStyles, percent, width int) string {
-	filled := percent * width / 100
-	if percent > 0 && filled == 0 {
-		filled = 1
+// attachmentsView shows the staged attachments as [Image N] chips above the
+// composer. The composer text itself stays clean.
+func (m *chatModel) attachmentsView() string {
+	if len(m.pending) == 0 {
+		return ""
 	}
-	filled = min(max(filled, 0), width)
-	empty := width - filled
-	return styles.active.Render("["+strings.Repeat("█", filled)) +
-		lipgloss.NewStyle().Foreground(everforest.SurfaceAlt).Render(strings.Repeat("░", empty)+"]")
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, m.renderImageBadges(len(m.pending)))
+}
+
+// checklistView is the task checklist, rendered above the status row. It is
+// turn state rather than chrome, so it sits with the transcript instead of
+// stacking on top of the input.
+func (m *chatModel) checklistView() string {
+	checklist := m.taskChecklistView(max(m.width-2, 1))
+	if checklist == "" {
+		return ""
+	}
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, checklist)
+}
+
+// statusRowView is the session status, right-aligned on its own row above the
+// composer. The spinner and the elapsed time belong to the turn in flight, so
+// they sit beside the status only while one is running.
+func (m *chatModel) statusRowView() string {
+	if m.session.ID == uuid.Nil {
+		return ""
+	}
+	separator := m.styles.status.Render("  ·  ")
+	fields := []string{m.sessionStatusView()}
+	if m.working {
+		fields = append(fields, m.styles.statusBusy.Render(fmt.Sprintf("%s %s", spinnerFrame(m.workBegan), time.Since(m.workBegan).Round(time.Second))))
+	}
+	// Transient activity: a provider retry notice, or the cancel prompt.
+	if detail := m.workStatus; detail != "" {
+		fields = append(fields, m.styles.statusBusy.Render(detail))
+	}
+	content := strings.Join(fields, separator)
+	padding := max(m.width-2-lipgloss.Width(content), 0)
+	// The blank row above the status is what separates it from the transcript;
+	// the bottom line sits flush against the composer.
+	return m.styles.statusRow.PaddingTop(1).Render(" " + strings.Repeat(" ", padding) + content + " ")
+}
+
+// sessionStatusView renders the status the session reported for itself. Every
+// status has its own label and colour, so a session waiting on an approval or
+// one that has concluded never reads the same as one that is simply idle.
+func (m *chatModel) sessionStatusView() string {
+	switch m.status {
+	case contracts.SessionBusy:
+		return m.styles.statusBusy.Render("busy")
+	case contracts.SessionWaitingApproval:
+		return m.styles.statusWaiting.Render("waiting for approval")
+	case contracts.SessionCompacting:
+		return m.styles.statusBusy.Render("compacting")
+	case contracts.SessionCompleted:
+		return m.styles.active.Render("completed")
+	case contracts.SessionMaxIterationExhausted:
+		return m.styles.error.Render("max iterations reached")
+	case contracts.SessionTombstone:
+		return m.styles.error.Render("closed")
+	default:
+		return m.styles.status.Render("idle")
+	}
+}
+
+// tokenCount renders a token total compactly: 950, 41.2k, 128k, 1.2M. The
+// status line has one row to say how much context is in use, and a raw 128000
+// does not fit beside the bar.
+func tokenCount(tokens uint64) string {
+	for _, unit := range []struct {
+		divisor uint64
+		suffix  string
+	}{{1_000_000, "M"}, {1_000, "k"}} {
+		if tokens < unit.divisor {
+			continue
+		}
+		whole := tokens / unit.divisor
+		remainder := (tokens % unit.divisor) * 10 / unit.divisor
+		if whole < 100 && remainder > 0 {
+			return fmt.Sprintf("%d.%d%s", whole, remainder, unit.suffix)
+		}
+		return fmt.Sprintf("%d%s", whole, unit.suffix)
+	}
+	return fmt.Sprintf("%d", tokens)
+}
+
+// contextBarLevels splits a cell into eighths, so a short bar still moves in
+// small steps: six cells carry forty-eight positions instead of six.
+var contextBarLevels = [...]string{"", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"}
+
+// contextProgressBar draws the context bar as a run of filled cells, a partial
+// boundary cell, and dim cells for what is left.
+func contextProgressBar(styles harnessStyles, percent, width int) string {
+	eighths := min(max(percent, 0), 100) * width * 8 / 100
+	full, partial := eighths/8, eighths%8
+	if percent > 0 && full == 0 && partial == 0 {
+		partial = 1
+	}
+	if full >= width {
+		full, partial = width, 0
+	}
+	filled := strings.Repeat("█", full) + contextBarLevels[partial]
+	return styles.active.Render(filled) +
+		lipgloss.NewStyle().Foreground(everforest.SurfaceAlt).Render(strings.Repeat("░", max(width-lipgloss.Width(filled), 0)))
 }
 
 func (m *chatModel) taskChecklistView(width int) string {
@@ -1165,6 +1453,9 @@ func (m *chatModel) renderTranscript() string {
 		if strings.TrimSpace(content) != "" {
 			rendered = append(rendered, strings.Trim(content, "\n"))
 		}
+	}
+	if m.approval != nil && m.approvalShown {
+		rendered = append(rendered, m.approvalDetailBlock(width))
 	}
 	if len(rendered) == 0 {
 		return m.styles.muted.Render("\nStart with a question, a task, or / for commands.")
@@ -1781,10 +2072,14 @@ func streamRefreshTickCmd(id uint64) tea.Cmd {
 func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required bool) {
 	options := []modalOption{{label: "Start a new session", detail: "choose a provider and model", status: "NEW", shortcut: 'n'}}
 	for i, session := range sessions {
-		status := "INACTIVE"
-		if session.Active || session.ID == m.session.ID {
-			status = "ACTIVE"
+		status := string(session.Status)
+		if status == "" {
+			status = "inactive"
 		}
+		if session.Active || session.ID == m.session.ID {
+			status = "active"
+		}
+		status = strings.ToUpper(status)
 		name := session.Name
 		if name == "" {
 			name = "Untitled session"
@@ -1817,99 +2112,6 @@ func (m *chatModel) showModels(models []glue.ListModelOutput, switching bool) {
 		return
 	}
 	m.modal = &modalModel{kind: modalModels, title: "Choose a model", body: "The model is applied to this session.", options: options, switching: switching}
-}
-
-func (m *chatModel) showApproval(approval *Approval) {
-	title, body := "Approval required", approval.Message
-	script := ""
-	var diffRows []diffRow
-	if approval.ToolCall != nil {
-		title, body, script = formatApprovalToolCall(*approval.ToolCall)
-		if approval.Message != "" {
-			body = approval.Message + "\n\n" + body
-		}
-		diffRows = approvalDiffRows(*approval.ToolCall)
-	}
-	m.modal = &modalModel{
-		kind: modalApproval, title: title, body: body, script: script, diffRows: diffRows, required: true, approval: approval,
-		options: []modalOption{
-			{label: "Allow", shortcut: 'a', decision: "approve"},
-			{label: "Deny", shortcut: 'd', decision: "deny"},
-		},
-	}
-}
-
-// approvalDiffRows returns structured diff rows for edit/write tool calls so the
-// review pane can render the same GitHub-style diff as the transcript.
-func approvalDiffRows(call contracts.ToolCall) []diffRow {
-	switch contracts.ToolType(call.Function.Name) {
-	case contracts.EditTool:
-		if path, oldText, newText, _, ok := decodeEditArgs(call.Function.Arguments); ok {
-			return editDiffRows(path, oldText, newText)
-		}
-	case contracts.WriteTool:
-		if path, content, ok := decodeWriteArgs(call.Function.Arguments); ok {
-			return writeDiffRows(path, content)
-		}
-	}
-	return nil
-}
-
-func formatApprovalToolCall(call contracts.ToolCall) (string, string, string) {
-	switch contracts.ToolType(call.Function.Name) {
-	case contracts.ReadTool:
-		preview, ok := readToolCallPreview(call.Function.Arguments)
-		if !ok {
-			return "Read file", prettyToolArguments(call.Function.Arguments), ""
-		}
-		return "Read file", "SOURCE  " + preview, ""
-
-	case contracts.BashTool:
-		var args struct {
-			Command string `json:"command"`
-			Workdir string `json:"workdir"`
-			Timeout *int   `json:"timeout"`
-		}
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-			return "Bash tool call", prettyToolArguments(call.Function.Arguments), ""
-		}
-		workdir := args.Workdir
-		if workdir == "" {
-			workdir = "workspace root"
-		}
-		metadata := []string{"The following bash script will be executed.", "", "WORKING DIRECTORY  " + workdir}
-		if args.Timeout != nil {
-			metadata = append(metadata, fmt.Sprintf("TIMEOUT            %d seconds", *args.Timeout))
-		}
-		metadata = append(metadata, "", "SCRIPT")
-		return "Bash tool call", strings.Join(metadata, "\n"), args.Command
-
-	case contracts.WriteTool:
-		path, content, ok := decodeWriteArgs(call.Function.Arguments)
-		if !ok {
-			return "Write file", prettyToolArguments(call.Function.Arguments), ""
-		}
-		lineCount := 0
-		if content != "" {
-			lineCount = strings.Count(content, "\n") + 1
-		}
-		body := fmt.Sprintf("TARGET  %s\nEFFECT  Replace complete file contents\nSIZE    %d lines, %d bytes",
-			path, lineCount, len([]byte(content)))
-		return "Write file", body, ""
-
-	case contracts.EditTool:
-		path, _, _, replaceAll, ok := decodeEditArgs(call.Function.Arguments)
-		if !ok {
-			return "Edit file", prettyToolArguments(call.Function.Arguments), ""
-		}
-		mode := "Replace first exact match"
-		if replaceAll {
-			mode = "Replace every exact match"
-		}
-		return "Edit file", fmt.Sprintf("TARGET  %s\nMODE    %s", path, mode), ""
-	}
-
-	return strings.ReplaceAll(call.Function.Name, "_", " ") + " tool call", prettyToolArguments(call.Function.Arguments), ""
 }
 
 func prettyToolArguments(arguments string) string {
@@ -2047,19 +2249,6 @@ func readToolCallPreview(arguments string) (string, bool) {
 	}
 }
 
-func (m *chatModel) handleApprovalUpdate(update ApprovalUpdate) {
-	if update.Approval == nil {
-		return
-	}
-	if update.Type == "approval_requested" {
-		m.showApproval(update.Approval)
-		return
-	}
-	if m.modal != nil && m.modal.kind == modalApproval {
-		m.modal = nil
-	}
-}
-
 func (m *chatModel) showTimeline(view *TimelineView) {
 	rows := timelineTreeRows(view.Events)
 	options := make([]modalOption, 0, len(rows))
@@ -2106,30 +2295,33 @@ func loadingModal(label string) *modalModel {
 	return &modalModel{kind: modalNotice, title: label, body: "Please wait...", required: true}
 }
 
-func (m *chatModel) appendDelta(kind contracts.DeltaKind, text string) {
+func (m *chatModel) appendDelta(kind contracts.EventStreamKind, text string) {
 	role := "assistant"
 	switch kind {
 	case contracts.DeltaReasoning:
 		role = "thinking"
-	case contracts.DeltaStatus:
+	case contracts.EventProviderEvent:
 		m.streaming = false
 		role, text = "status", statusLabel(text)
-	case contracts.DeltaCompactionSummary:
+	case contracts.CompactionSummary:
 		m.streaming = false
 		role = "compaction"
-	case contracts.DeltaToolCall:
+	case contracts.EventManualCompactionTriggered, contracts.EventAutoCompactionTriggered:
+		m.streaming = false
+		role, text = "status", statusLabel(text)
+	case contracts.EventToolCall:
 		m.streaming = false
 		m.appendToolEvent("call", text)
 		return
-	case contracts.DeltaToolResult:
+	case contracts.EventToolResult:
 		m.streaming = false
 		m.appendToolEvent("result", text)
 		return
-	case contracts.DeltaSkillLoad:
+	case contracts.EventSkillLoad:
 		m.streaming = false
 		m.blocks = append(m.blocks, block{role: "skill", text: text})
 		return
-	case contracts.DeltaTaskChecklist:
+	case contracts.EventToolTaskCheckList:
 		// Checklist state is rendered in the header, never as transcript text.
 		return
 	}
@@ -2276,33 +2468,18 @@ func selectBranchCmd(ctx context.Context, client Client, sessionID uuid.UUID, ev
 	}
 }
 
-func resolveApprovalCmd(ctx context.Context, client Client, approval *Approval, decision string) tea.Cmd {
-	return func() tea.Msg {
-		if approval == nil {
-			return approvalResolvedMsg{err: errors.New("approval is unavailable")}
-		}
-		reason := ""
-		if decision == "deny" {
-			reason = "denied by user"
-		}
-		return approvalResolvedMsg{err: client.ResolveApproval(ctx, *approval, decision, reason)}
-	}
-}
-
 func blocksFromRecords(records []store.Record) []block {
 	var blocks []block
 	skillCallIDs := make(map[string]struct{})
 	toolCallNames := make(map[string]string)
 	for _, record := range records {
-		if record.ToolCall != nil {
-			toolCallNames[record.ToolCall.ID] = record.ToolCall.Name
-		}
 		if record.Message == nil || record.Message.Role != "assistant" {
 			continue
 		}
 		for _, call := range record.Message.ToolCalls {
-			toolCallNames[call.ID] = call.Function.Name
-			if isSkillTool(call.Function.Name) {
+			typename := string(call.Function.Name)
+			toolCallNames[call.ID] = typename
+			if isSkillTool(typename) {
 				skillCallIDs[call.ID] = struct{}{}
 			}
 		}
@@ -2312,17 +2489,6 @@ func blocksFromRecords(records []store.Record) []block {
 		case store.KindCompaction:
 			if record.Compaction != nil {
 				blocks = append(blocks, block{role: "compaction", text: record.Compaction.Summary})
-			}
-		case store.KindToolCall:
-			if record.ToolCall != nil && !isChecklistTool(record.ToolCall.Name) {
-				blocks = append(blocks, block{role: "tool", text: toolCallRecordDisplay(record.ToolCall), toolKind: "call", toolName: record.ToolCall.Name, toolArgs: record.ToolCall.Arguments})
-			}
-		case store.KindToolResult:
-			if record.ToolResult != nil {
-				toolName := toolCallNames[record.ToolResult.CallID]
-				if _, skill := skillCallIDs[record.ToolResult.CallID]; !skill && !isChecklistTool(toolName) {
-					blocks = append(blocks, block{role: "tool", text: transcriptToolResultDisplay(toolName, record.ToolResult.Status, record.ToolResult.Output, record.ToolResult.Error), toolKind: "result", toolStatus: record.ToolResult.Status, toolName: toolName})
-				}
 			}
 		case store.KindMessage:
 			if record.Message == nil {
@@ -2340,14 +2506,15 @@ func blocksFromRecords(records []store.Record) []block {
 					blocks = append(blocks, block{role: "assistant", text: message.Text()})
 				}
 				for _, call := range message.ToolCalls {
-					if isSkillTool(call.Function.Name) {
+					toolName := string(call.Function.Name)
+					if isSkillTool(toolName) {
 						blocks = append(blocks, block{role: "skill", text: skillNameFromCall(call)})
 						continue
 					}
-					if isChecklistTool(call.Function.Name) {
+					if isChecklistTool(toolName) {
 						continue
 					}
-					blocks = append(blocks, block{role: "tool", text: toolCallPreview(call.Function.Name, call.Function.Arguments), toolKind: "call", toolName: call.Function.Name, toolArgs: call.Function.Arguments})
+					blocks = append(blocks, block{role: "tool", text: toolCallPreview(toolName, call.Function.Arguments), toolKind: "call", toolName: toolName, toolArgs: call.Function.Arguments})
 				}
 			case "tool":
 				toolName := toolCallNames[message.ToolCallID]
@@ -2388,23 +2555,15 @@ func taskChecklistFromRecords(records []store.Record) contracts.TaskChecklistSta
 	state := contracts.TaskChecklistState{}
 	toolNames := make(map[string]string)
 	for _, record := range records {
-		if record.ToolCall != nil {
-			toolNames[record.ToolCall.ID] = record.ToolCall.Name
-		}
 		if record.Message != nil && record.Message.Role == "assistant" {
 			for _, call := range record.Message.ToolCalls {
-				toolNames[call.ID] = call.Function.Name
+				toolNames[call.ID] = string(call.Function.Name)
 			}
 		}
 	}
 	for _, record := range records {
 		if record.Compaction != nil && record.Compaction.TaskChecklist != nil {
 			state = *record.Compaction.TaskChecklist
-		}
-		if record.ToolResult != nil && isChecklistTool(toolNames[record.ToolResult.CallID]) {
-			if next, err := decodeTaskChecklist(record.ToolResult.Output); err == nil {
-				state = next
-			}
 		}
 		if record.Message != nil && record.Message.Role == "tool" && isChecklistTool(toolNames[record.Message.ToolCallID]) {
 			if next, err := decodeTaskChecklist(record.Message.Text()); err == nil {
@@ -2425,26 +2584,19 @@ func truncateLine(value string, width int) string {
 
 func toolCallDisplay(call contracts.ToolCall) string {
 	if call.Function.Arguments == "" {
-		return call.Function.Name
+		return string(call.Function.Name)
 	}
-	return call.Function.Name + " " + call.Function.Arguments
+	return string(call.Function.Name) + " " + call.Function.Arguments
 }
 
-func toolCallRecordDisplay(call *store.ToolCallRecord) string {
-	if call.Arguments == "" {
-		return call.Name
+func toolResultDisplay(status, output, resultErr string) string {
+	if resultErr != "" {
+		return status + ": " + resultErr
 	}
-	return toolCallPreview(call.Name, call.Arguments)
-}
-
-func toolResultDisplay(result *store.ToolResultRecord) string {
-	if result.Error != "" {
-		return result.Status + ": " + result.Error
+	if output != "" {
+		return status + "\n" + output
 	}
-	if result.Output != "" {
-		return result.Status + "\n" + result.Output
-	}
-	return result.Status
+	return status
 }
 
 func transcriptToolResultDisplay(name, status, output, resultErr string) string {
@@ -2470,7 +2622,7 @@ func transcriptToolResultDisplay(name, status, output, resultErr string) string 
 		}
 	}
 	if name != string(contracts.ReadTool) || status != string(contracts.ToolExecutionSuccess) || resultErr != "" {
-		return toolResultDisplay(&store.ToolResultRecord{Status: status, Output: output, Error: resultErr})
+		return toolResultDisplay(status, output, resultErr)
 	}
 	lines := 0
 	if output != "" {
@@ -2581,28 +2733,6 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 	if event.Record == nil {
 		return previewDisplays(event.Preview)
 	}
-	if event.Record.ToolCall != nil {
-		call := event.Record.ToolCall
-		if isChecklistTool(call.Name) {
-			return []timelineDisplay{{role: "system", text: "task checklist updated"}}
-		}
-		if isSkillTool(call.Name) {
-			var args struct {
-				Name string `json:"name"`
-			}
-			if json.Unmarshal([]byte(call.Arguments), &args) == nil && args.Name != "" {
-				return []timelineDisplay{{role: "skill", text: args.Name}}
-			}
-			return []timelineDisplay{{role: "skill", text: call.Name}}
-		}
-		return []timelineDisplay{{role: "tool_call", text: singleLine(toolCallRecordDisplay(call))}}
-	}
-	if event.Record.ToolResult != nil {
-		if _, err := decodeTaskChecklist(event.Record.ToolResult.Output); err == nil {
-			return []timelineDisplay{{role: "system", text: "task checklist updated"}}
-		}
-		return []timelineDisplay{{role: "tool_result", text: singleLine(toolResultDisplay(event.Record.ToolResult))}}
-	}
 	if event.Record.Message != nil {
 		message := event.Record.Message
 		if message.Role == "user" {
@@ -2622,11 +2752,12 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 			displays = append(displays, timelineDisplay{role: "assistant", text: singleLine(message.Text())})
 		}
 		for _, call := range message.ToolCalls {
-			if isSkillTool(call.Function.Name) {
+			toolName := string(call.Function.Name)
+			if isSkillTool(toolName) {
 				displays = append(displays, timelineDisplay{role: "skill", text: skillNameFromCall(call)})
 				continue
 			}
-			if isChecklistTool(call.Function.Name) {
+			if isChecklistTool(toolName) {
 				continue
 			}
 			displays = append(displays, timelineDisplay{role: "tool_call", text: singleLine(toolCallDisplay(call))})
@@ -2638,9 +2769,6 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 	}
 	if event.Record.Compaction != nil {
 		return []timelineDisplay{{role: "assistant", text: "context compacted: " + singleLine(event.Record.Compaction.Summary)}}
-	}
-	if event.Record.Approval != nil && event.Record.Approval.ToolCall != nil {
-		return []timelineDisplay{{role: "tool_call", text: singleLine(toolCallDisplay(*event.Record.Approval.ToolCall))}}
 	}
 	text := singleLine(event.Record.Text)
 	if text == "" {

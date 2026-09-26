@@ -1,13 +1,14 @@
 package actuators
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
 // FileManager is the file capability for one session. Snapshots are deliberately
@@ -20,22 +21,22 @@ type FileManager struct {
 
 func NewFileManager(root string) (*FileManager, error) {
 	if root == "" {
-		return nil, filesystemErr("invalid_workspace", "the workspace path must not be empty", ResponsibilitySession, nil)
+		return nil, filesystemErr("invalid_workspace", "the workspace path must not be empty", contracts.ResponsibilitySession, nil)
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {
-		return nil, filesystemErr("invalid_workspace", "the workspace path is invalid", ResponsibilitySession, err)
+		return nil, filesystemErr("invalid_workspace", "the workspace path is invalid", contracts.ResponsibilitySession, err)
 	}
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return nil, filesystemErr("workspace_unavailable", "the workspace could not be resolved", ResponsibilityEnvironment, err)
+		return nil, filesystemErr("workspace_unavailable", "the workspace could not be resolved", contracts.ResponsibilityEnvironment, err)
 	}
 	info, err := os.Stat(root)
 	if err != nil {
-		return nil, filesystemErr("workspace_unavailable", "the workspace could not be inspected", ResponsibilityEnvironment, err)
+		return nil, filesystemErr("workspace_unavailable", "the workspace could not be inspected", contracts.ResponsibilityEnvironment, err)
 	}
 	if !info.IsDir() {
-		return nil, filesystemErr("workspace_not_directory", "the workspace is not a directory", ResponsibilitySession, nil)
+		return nil, filesystemErr("workspace_not_directory", "the workspace is not a directory", contracts.ResponsibilitySession, nil)
 	}
 	return &FileManager{root: root, seen: make(map[string]string)}, nil
 }
@@ -44,31 +45,31 @@ func (m *FileManager) Root() string { return m.root }
 
 func (m *FileManager) resolve(name string, mustExist bool) (string, error) {
 	if name == "" || filepath.IsAbs(name) || strings.ContainsRune(name, 0) {
-		return "", filesystemErr("invalid_path", "the path must be relative to the workspace", ResponsibilityAgent, nil)
+		return "", filesystemErr("invalid_path", "the path must be relative to the workspace", contracts.ResponsibilityAgent, nil)
 	}
-	if err := validateText(name, ResponsibilityAgent); err != nil {
+	if err := validateText(name, contracts.ResponsibilityAgent); err != nil {
 		return "", err
 	}
 	candidate := filepath.Join(m.root, filepath.Clean(name))
 	if !withinDirectory(m.root, candidate) {
-		return "", filesystemErr("path_outside_workspace", "the path must remain inside the workspace", ResponsibilityAgent, nil)
+		return "", filesystemErr("path_outside_workspace", "the path must remain inside the workspace", contracts.ResponsibilityAgent, nil)
 	}
 	resolved, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
 		if !mustExist && os.IsNotExist(err) {
 			parent, parentErr := filepath.EvalSymlinks(filepath.Dir(candidate))
 			if parentErr != nil {
-				return "", filesystemErr("file_unavailable", "the parent directory could not be resolved", ResponsibilityEnvironment, parentErr)
+				return "", filesystemErr("file_unavailable", "the parent directory could not be resolved", contracts.ResponsibilityEnvironment, parentErr)
 			}
 			if !withinDirectory(m.root, parent) {
-				return "", filesystemErr("path_outside_workspace", "the path parent must remain inside the workspace", ResponsibilityAgent, nil)
+				return "", filesystemErr("path_outside_workspace", "the path parent must remain inside the workspace", contracts.ResponsibilityAgent, nil)
 			}
 			return filepath.Join(parent, filepath.Base(candidate)), nil
 		}
-		return "", filesystemErr("file_unavailable", "the path could not be resolved", ResponsibilityEnvironment, err)
+		return "", filesystemErr("file_unavailable", "the path could not be resolved", contracts.ResponsibilityEnvironment, err)
 	}
 	if !withinDirectory(m.root, resolved) {
-		return "", filesystemErr("path_outside_workspace", "the path symlink must remain inside the workspace", ResponsibilityAgent, nil)
+		return "", filesystemErr("path_outside_workspace", "the path symlink must remain inside the workspace", contracts.ResponsibilityAgent, nil)
 	}
 	return resolved, nil
 }
@@ -82,19 +83,9 @@ func (m *FileManager) verify(path string, data []byte) error {
 		return filesystemErr(
 			"file_changed_since_read",
 			"the file must be read before it can be changed, and it must not change afterwards",
-			ResponsibilityAgent,
+			contracts.ResponsibilityAgent,
 			nil,
 		)
 	}
 	return nil
-}
-
-type fileManagerKey struct{}
-
-func WithFileManager(ctx context.Context, manager *FileManager) context.Context {
-	return context.WithValue(ctx, fileManagerKey{}, manager)
-}
-func FileManagerFromContext(ctx context.Context) *FileManager {
-	manager, _ := ctx.Value(fileManagerKey{}).(*FileManager)
-	return manager
 }

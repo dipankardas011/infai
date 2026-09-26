@@ -22,15 +22,26 @@ type SessionMeta struct {
 	Cwd       string    `json:"cwd,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// Conclusion records how the session ended, written once when it does and
+	// never rewritten. Nil while the session has not ended.
+	Conclusion *SessionConclusion `json:"conclusion,omitempty"`
+}
+
+type SessionConclusion struct {
+	// Status is the settled status the session ended on.
+	Status contracts.SessionStatus `json:"status"`
+	Reason string                  `json:"reason,omitempty"`
 }
 
 type sessionFile struct {
-	ID           uuid.UUID    `json:"id"`
-	Name         string       `json:"name,omitempty"`
-	Cwd          string       `json:"cwd,omitempty"`
-	CurrentModel currentModel `json:"current_model"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
+	ID           uuid.UUID          `json:"id"`
+	Name         string             `json:"name,omitempty"`
+	Cwd          string             `json:"cwd,omitempty"`
+	CurrentModel currentModel       `json:"current_model"`
+	CreatedAt    time.Time          `json:"created_at"`
+	UpdatedAt    time.Time          `json:"updated_at"`
+	Conclusion   *SessionConclusion `json:"conclusion,omitempty"`
 }
 
 // this helps when we resume we can use this to get the client connection up.
@@ -40,7 +51,7 @@ type currentModel struct {
 }
 
 func newSessionFile(meta SessionMeta) sessionFile {
-	return sessionFile{
+	file := sessionFile{
 		ID:   meta.ID,
 		Name: meta.Name,
 		Cwd:  meta.Cwd,
@@ -51,10 +62,15 @@ func newSessionFile(meta SessionMeta) sessionFile {
 		CreatedAt: meta.CreatedAt,
 		UpdatedAt: meta.UpdatedAt,
 	}
+	if meta.Conclusion != nil {
+		conclusion := *meta.Conclusion
+		file.Conclusion = &conclusion
+	}
+	return file
 }
 
 func (f sessionFile) meta() SessionMeta {
-	return SessionMeta{
+	meta := SessionMeta{
 		ID:        f.ID,
 		Name:      f.Name,
 		Provider:  f.CurrentModel.Provider,
@@ -63,6 +79,11 @@ func (f sessionFile) meta() SessionMeta {
 		CreatedAt: f.CreatedAt,
 		UpdatedAt: f.UpdatedAt,
 	}
+	if f.Conclusion != nil {
+		conclusion := *f.Conclusion
+		meta.Conclusion = &conclusion
+	}
+	return meta
 }
 
 // RecordKind identifies the durable event type written to a session timeline.
@@ -71,30 +92,8 @@ type RecordKind string
 const (
 	KindMessage    RecordKind = "message"
 	KindDelta      RecordKind = "delta"
-	KindToolCall   RecordKind = "tool_call"
-	KindToolResult RecordKind = "tool_result"
 	KindCompaction RecordKind = "compaction"
-
-	KindApprovalRequested RecordKind = "approval_requested"
-	KindApprovalResolved  RecordKind = "approval_resolved"
-	KindApprovalCanceled  RecordKind = "approval_canceled"
 )
-
-// ToolCallRecord is what the model requested; ToolResultRecord is what it got
-// back.
-type ToolCallRecord struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
-
-type ToolResultRecord struct {
-	CallID string `json:"call_id"`
-	Status string `json:"status"`
-	Output string `json:"output"`
-	Error  string `json:"error"`
-}
 
 // CompactionRecord marks a point where the active model context was replaced
 // by a continuation summary. Earlier timeline events remain untouched.
@@ -103,28 +102,16 @@ type CompactionRecord struct {
 	TaskChecklist *contracts.TaskChecklistState `json:"task_checklist,omitempty"`
 }
 
-type ApprovalEvent struct {
-	ID          uuid.UUID           `json:"id"`
-	SessionID   uuid.UUID           `json:"session_id"`
-	AgentID     uuid.UUID           `json:"agent_id"`
-	Fingerprint string              `json:"fingerprint"`
-	ToolCall    *contracts.ToolCall `json:"tool_call,omitempty"`
-	Decision    string              `json:"decision,omitempty"`
-	Reason      string              `json:"reason,omitempty"`
-}
-
 // Record is one durable event in a session timeline. Deltas are live-only and
-// fan out to sinks; everything else is durable.
+// fan out to sinks; everything else is durable. Tool calls and their results
+// are not separate records: they live inside the assistant message's ToolCalls
+// and the following "tool" role message.
 type Record struct {
 	Kind       RecordKind             `json:"kind"`
 	Timestamp  time.Time              `json:"ts"`
 	Message    *contracts.ChatMessage `json:"message,omitempty"`
-	DeltaKind  contracts.DeltaKind    `json:"delta_kind,omitempty"`
 	Text       string                 `json:"text,omitempty"`
-	ToolCall   *ToolCallRecord        `json:"tool_call,omitempty"`
-	ToolResult *ToolResultRecord      `json:"tool_result,omitempty"`
 	Compaction *CompactionRecord      `json:"compaction,omitempty"`
-	Approval   *ApprovalEvent         `json:"approval,omitempty"`
 }
 
 // SessionStore reads and writes session timelines under harness/sessions,

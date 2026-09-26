@@ -78,9 +78,8 @@ func TestTaskChecklistRejectsFieldsForWrongAction(t *testing.T) {
 
 func executeTaskChecklist(t *testing.T, checklist *TaskChecklist, arguments string) contracts.TaskChecklistState {
 	t.Helper()
-	ctx := WithTaskChecklist(context.Background(), checklist)
-	output, err := ExecuteMemoryToolCall(ctx, contracts.ToolCall{Function: contracts.Function{
-		Name: string(contracts.TaskChecklistTool), Arguments: arguments,
+	output, err := checklist.TaskChecklistExecution(context.Background(), contracts.ToolCall{Function: contracts.Function{
+		Name: contracts.TaskChecklistTool, Arguments: arguments,
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -110,8 +109,7 @@ func executeTaskChecklistArgsError(checklist *TaskChecklist, args map[string]any
 	if err != nil {
 		return "", err
 	}
-	ctx := WithTaskChecklist(context.Background(), checklist)
-	return ExecuteMemoryToolCall(ctx, contracts.ToolCall{Function: contracts.Function{
-		Name: string(contracts.TaskChecklistTool), Arguments: string(data),
+	return checklist.TaskChecklistExecution(context.Background(), contracts.ToolCall{Function: contracts.Function{
+		Name: contracts.TaskChecklistTool, Arguments: string(data),
 	}})
 }

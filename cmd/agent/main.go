@@ -156,7 +156,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	wlog := newLogger(cfg.Logging.Level)
 	wlog.DebugContext(ctx, "Loaded config", "config", cfg)
 
-	eng, err := engine.NewInfaiAgentEngine(wlog, cfg)
+	eng, err := engine.NewInfaiAgentEngine(ctx, wlog, cfg)
 	if err != nil {
 		return err
 	}
@@ -180,11 +180,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		wlog.ErrorContext(shutdownCtx, "server shutdown error", "error", err)
-	}
 	if err := eng.Shutdown(shutdownCtx); err != nil {
 		wlog.ErrorContext(shutdownCtx, "engine shutdown error", "error", err)
+	}
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		wlog.ErrorContext(shutdownCtx, "server shutdown error", "error", err)
 	}
 	wlog.InfoContext(ctx, "shutdown complete")
 	return nil

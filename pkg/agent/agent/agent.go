@@ -5,68 +5,49 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"sync"
+	"time"
 
-	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
-	"github.com/google/uuid"
+	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 )
-
-type AgentStatus string
-
-const (
-	Idle            AgentStatus = "idle"
-	Working         AgentStatus = "working"
-	PendingApproval AgentStatus = "pending_approval"
-	Error           AgentStatus = "error"
-)
-
-var ErrNoModel = errors.New("agent: no model adapter set")
 
 type Agent struct {
-	Id uuid.UUID
+	Kind contracts.AgentKind
 
-	systemPrompt string
+	mailbox        chan contracts.ChatMessage
+	commitTimeline func(context.Context, []contracts.ChatMessage) error
+	eventStream    chan<- contracts.EventStream
+	workingHistory workingSessionMemory
+	systemPrompt   string
 
-	model         contracts.InfaiModelAdaptor
-	deltaHook     func(contracts.DeltaKind, string)
-	Status        AgentStatus
-	MaxTurns      int
-	tools         []contracts.Tool
-	comms         *comms.IACChannel
-	shouldCompact func(*contracts.TokenUsage) bool
+	modelMu sync.RWMutex
+	model   contracts.InfaiModelAdaptor
+
+	MaxQ  uint64
+	tools []contracts.Tool
+
+	shouldAutoCompact  func(*contracts.TokenUsage) bool
+	autoCompact        func(context.Context) ([]contracts.ChatMessage, error)
+	userCancellation   <-chan struct{}
+	toolCallDispatcher func([]contracts.ToolCall) ([]contracts.ChatMessage, bool)
+	evalFunc           func() bool
 }
 
 type agentOption struct {
-	maxTurns      int
-	turnHook      func(contracts.ChatMessage)
-	deltaHook     func(contracts.DeltaKind, string)
+	maxQ          uint64
 	tools         []contracts.Tool
-	comms         *comms.IACChannel
 	shouldCompact func(*contracts.TokenUsage) bool
+	autoCompact   func(context.Context) ([]contracts.ChatMessage, error)
+	evalFunc      func() bool
 }
 
 type AgentOptions func(*agentOption) error
 
-func WithMaxTurns(maxTurns int) AgentOptions {
+func WithMaxTurns(maxTurns uint64) AgentOptions {
 	return func(o *agentOption) error {
-		if maxTurns < 0 {
-			return fmt.Errorf("maxTurns must be greater than 0")
-		}
-		o.maxTurns = maxTurns
-		return nil
-	}
-}
-
-func WithIAC(comms *comms.IACChannel) AgentOptions {
-	return func(o *agentOption) error {
-		o.comms = comms
-		return nil
-	}
-}
-
-func WithDeltaHook(hook func(contracts.DeltaKind, string)) AgentOptions {
-	return func(o *agentOption) error {
-		o.deltaHook = hook
+		o.maxQ = maxTurns
 		return nil
 	}
 }
@@ -78,128 +59,292 @@ func WithTools(tools ...contracts.Tool) AgentOptions {
 	}
 }
 
-func WithCompactionCheck(check func(*contracts.TokenUsage) bool) AgentOptions {
+func WithAutoCompaction(shouldCompact func(*contracts.TokenUsage) bool, autoCompact func(context.Context) ([]contracts.ChatMessage, error)) AgentOptions {
 	return func(o *agentOption) error {
-		o.shouldCompact = check
+		o.shouldCompact = shouldCompact
+		o.autoCompact = autoCompact
 		return nil
 	}
 }
 
-// NewAgent creates an agent with an independent short-term context (the
-// message history built up by Invoke).
-func NewAgent(id uuid.UUID, systemPrompt string, opts ...AgentOptions) (*Agent, error) {
-	o := &agentOption{maxTurns: 65536}
+func WithEval(checkFunc func() bool) AgentOptions {
+	return func(ao *agentOption) error {
+		ao.evalFunc = checkFunc
+		return nil
+	}
+}
+
+func NewAgent(
+	model contracts.InfaiModelAdaptor,
+	kind contracts.AgentKind,
+	commitTimeline func(context.Context, []contracts.ChatMessage) error,
+	eventStream chan<- contracts.EventStream,
+	userCancellation <-chan struct{},
+	toolCallDispatcher func([]contracts.ToolCall) ([]contracts.ChatMessage, bool),
+	systemPrompt string,
+	opts ...AgentOptions,
+) (*Agent, error) {
+	o := &agentOption{maxQ: math.MaxUint16}
 	for _, opt := range opts {
 		if err := opt(o); err != nil {
 			return nil, err
 		}
 	}
+
 	return &Agent{
-		Id:            id,
-		model:         nil,
-		deltaHook:     o.deltaHook,
-		Status:        Idle,
-		MaxTurns:      o.maxTurns,
-		tools:         o.tools,
-		comms:         o.comms,
-		shouldCompact: o.shouldCompact,
-		systemPrompt:  systemPrompt,
+		Kind:               kind,
+		mailbox:            make(chan contracts.ChatMessage, 10),
+		commitTimeline:     commitTimeline,
+		eventStream:        eventStream,
+		model:              model,
+		MaxQ:               o.maxQ,
+		tools:              o.tools,
+		shouldAutoCompact:  o.shouldCompact,
+		autoCompact:        o.autoCompact,
+		userCancellation:   userCancellation,
+		toolCallDispatcher: toolCallDispatcher,
+		systemPrompt:       systemPrompt,
+		evalFunc:           o.evalFunc,
 	}, nil
 }
 
 func (a *Agent) SetModel(model contracts.InfaiModelAdaptor) {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
 	a.model = model
 }
 
-// SetDeltaHook wires a per-call streaming hook (set by the session before
-// each Invoke). Safe to call with nil.
-func (a *Agent) SetDeltaHook(hook func(contracts.DeltaKind, string)) {
-	a.deltaHook = hook
+func (a *Agent) Enqueue(ctx context.Context, message contracts.ChatMessage) error {
+	select {
+	case a.mailbox <- message:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
-// Invoke runs the turn loop over the given conversation history, appending
-// each reply. It checks ctx each turn so a canceled session context unwinds
-// cleanly (children get derived contexts, so cancellation propagates to the
-// whole agent tree without explicit close messages).
-func (a *Agent) Invoke(ctx context.Context, history []contracts.ChatMessage) (TurnResult, error) {
-	if a.model == nil {
-		return TurnResult{}, ErrNoModel
+func (a *Agent) MailboxEmpty() bool {
+	return len(a.mailbox) == 0
+}
+
+type workingSessionMemory struct {
+	mu sync.RWMutex
+	h  []contracts.ChatMessage
+}
+
+func (wsm *workingSessionMemory) Set(newSessionHistory []contracts.ChatMessage) {
+	wsm.mu.Lock()
+	defer wsm.mu.Unlock()
+
+	wsm.h = append([]contracts.ChatMessage(nil), newSessionHistory...)
+}
+func (wsm *workingSessionMemory) Get() []contracts.ChatMessage {
+	wsm.mu.RLock()
+	defer wsm.mu.RUnlock()
+
+	return append([]contracts.ChatMessage(nil), wsm.h...)
+}
+
+// Append adds messages to the working history under the store's own lock. The
+// loop must use this instead of Get-then-Set, otherwise it writes back a slice
+// it read earlier and silently discards a replacement installed meanwhile.
+func (wsm *workingSessionMemory) Append(messages ...contracts.ChatMessage) {
+	wsm.mu.Lock()
+	defer wsm.mu.Unlock()
+
+	wsm.h = append(wsm.h, messages...)
+}
+
+func (a *Agent) ReplaceHistory(ctx context.Context, history []contracts.ChatMessage) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		a.workingHistory.Set(history)
 	}
+	return nil
+}
 
-	a.Status = Working
-	defer func() { a.Status = Idle }()
+func (a *Agent) modelClient() contracts.InfaiModelAdaptor {
+	a.modelMu.RLock()
+	defer a.modelMu.RUnlock()
+	return a.model
+}
 
-	messages := append([]contracts.ChatMessage(nil), history...)
+func (a *Agent) publishEvent(ctx context.Context, event contracts.EventStream) bool {
+	select {
+	case a.eventStream <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
 
-	var usage *contracts.TokenUsage
+func (a *Agent) updateState(ctx context.Context, status contracts.SessionStatus) bool {
+	value := string(status)
+	return a.publishEvent(ctx, contracts.EventStream{
+		Kind:      contracts.EventSessionTransitionState,
+		Timestamp: time.Now().UTC(),
+		Content:   &value,
+	})
+}
 
-	for turn := 0; turn < a.MaxTurns; turn++ {
-		if err := ctx.Err(); err != nil {
-			return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, nil
+func (a *Agent) drainInbox() []contracts.ChatMessage {
+	var batch []contracts.ChatMessage
+	for {
+		select {
+		case message := <-a.mailbox:
+			batch = append(batch, message)
+		default:
+			return batch
+		}
+	}
+}
+
+func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMessage) {
+	a.workingHistory.Set(activeTimeline)
+
+	lastHadToolCalls := false
+	for iter := uint64(1); iter <= a.MaxQ; iter++ {
+		unreadMessages := a.drainInbox()
+
+		if !lastHadToolCalls && len(unreadMessages) == 0 {
+			if !a.updateState(ctx, contracts.SessionIdle) {
+				return
+			}
+
+			switch a.Kind {
+			case contracts.SingleLoopAgent:
+				_ = a.updateState(ctx, contracts.SessionCompleted)
+				return
+			case contracts.InteractiveAgent:
+				select {
+				case <-ctx.Done():
+					return
+				case message := <-a.mailbox:
+					unreadMessages = append(unreadMessages, message)
+				}
+			}
 		}
 
-		// Streaming is always on: deltas flow to the delta hook (the adapter
-		// still returns the full message).
-		goOpts := contracts.GenerateOptions{Stream: true}
-		if a.deltaHook != nil {
-			goOpts.OnDelta = a.deltaHook
+		if !a.updateState(ctx, contracts.SessionBusy) {
+			return
 		}
 
-		requestMessages := make([]contracts.ChatMessage, 0, len(messages)+1)
+		if len(unreadMessages) > 0 {
+			// The echo must be published before the commit that makes these
+			// messages durable: a client joining between the two is given the
+			// committed history plus the session's in-flight log, so an echo
+			// sent after its own commit would reach that client twice.
+			for _, message := range unreadMessages {
+				text := message.Text()
+				echo := contracts.EventStream{Kind: contracts.EventMessageFromAgentInbox, Timestamp: time.Now().UTC(), Content: &text}
+				if images := len(message.Images); images > 0 {
+					echo.Attachments = &contracts.EventAttachments{ImageCount: images}
+				}
+				if !a.publishEvent(ctx, echo) {
+					return
+				}
+			}
+
+			if err := a.commitTimeline(ctx, unreadMessages); err != nil {
+				return
+			}
+			a.workingHistory.Append(unreadMessages...)
+
+			select {
+			case <-a.userCancellation:
+				lastHadToolCalls = false
+				continue
+			default:
+			}
+		}
+
+		// Read the working history only after the loop has been woken, so a
+		// replacement installed while it was parked is the one that is used.
+		workingSessionMem := a.workingHistory.Get()
+
+		requestMessages := make([]contracts.ChatMessage, 0, len(workingSessionMem)+1)
 		requestMessages = append(requestMessages, contracts.NewSystemMessage(a.systemPrompt))
-		requestMessages = append(requestMessages, messages...)
+		requestMessages = append(requestMessages, workingSessionMem...)
 
-		reply, u, err := a.model.Generate(ctx, requestMessages, a.tools, &goOpts)
-		usage = u
+		reply, usage, err := a.modelClient().Generate(ctx, requestMessages, a.tools, &contracts.GenerateOptions{
+			Stream: true,
+			OnDelta: func(kind contracts.EventStreamKind, text string) (isCanceled bool) {
+				select {
+				case <-a.userCancellation:
+					return true
+				case a.eventStream <- contracts.EventStream{Kind: kind, Timestamp: time.Now().UTC(), Content: &text}:
+					return false
+				case <-ctx.Done():
+					return false
+				}
+			},
+		})
 		if err != nil {
+			if errors.Is(err, harnessErr.ErrTurnCanceled) {
+				lastHadToolCalls = false
+				continue
+			}
 			if ctx.Err() != nil {
-				// Canceled mid-call: report as canceled, not a model error.
-				return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, nil
+				return
 			}
-			a.Status = Error
-			return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, fmt.Errorf("agent: turn %d: %w", turn, err)
+			message := err.Error()
+			if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventProviderEvent, Timestamp: time.Now().UTC(), Content: &message}) {
+				return
+			}
+			lastHadToolCalls = false
+			continue
 		}
 
-		if len(reply.ToolCalls) > 0 {
-			if a.comms == nil {
-				return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, errors.New("agent: inter-agent communication is not configured")
+		if encoded, err := json.Marshal(usage); err == nil {
+			content := string(encoded)
+			if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.NotifyAgentUsage, Timestamp: time.Now().UTC(), Content: &content}) {
+				return
 			}
-			payload, err := json.Marshal(reply.ToolCalls)
-			if err != nil {
-				return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, err
+		}
+
+		messages := []contracts.ChatMessage{reply}
+		lastHadToolCalls = len(reply.ToolCalls) > 0
+		if lastHadToolCalls {
+			for i := range reply.ToolCalls {
+				call := reply.ToolCalls[i]
+				if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventToolCall, Timestamp: time.Now().UTC(), ToolCall: &call}) { // for showing up that tool call is getting called.
+					return
+				}
 			}
-			if err := a.comms.Send(ctx, comms.AgentComm{
-				ID:      uuid.New(),
-				From:    a.Id,
-				Kind:    comms.AgentCommTool,
-				Payload: payload,
-			}); err != nil {
-				return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, err
+			toolMessages, dispatcherCanceled := a.toolCallDispatcher(reply.ToolCalls)
+			if dispatcherCanceled {
+				lastHadToolCalls = false
+				continue
+			}
+			messages = append(messages, toolMessages...)
+		} else if a.evalFunc != nil {
+			result := a.evalFunc()
+			messages = append(messages, contracts.NewUserMessage(fmt.Sprintf("evalFunc status: %t", result)))
+		}
+
+		if err := a.commitTimeline(ctx, messages); err != nil {
+			return
+		}
+		a.workingHistory.Append(messages...)
+
+		if a.shouldAutoCompact != nil && a.shouldAutoCompact(usage) {
+			content := fmt.Sprintf("Used: %d against Total: %d", usage.TotalTokens, a.modelClient().GetModelSpecs().Model().MaxContextLength)
+			if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventAutoCompactionTriggered, Timestamp: time.Now().UTC(), Content: &content}) {
+				return
 			}
 
-			response, err := a.comms.Receive(ctx)
+			replacement, err := a.autoCompact(ctx)
 			if err != nil {
-				return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, err
+				return
 			}
-			var toolMessages []contracts.ChatMessage
-			if err := json.Unmarshal(response.Payload, &toolMessages); err != nil {
-				return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, err
-			}
-			messages = append(messages, append([]contracts.ChatMessage{reply}, toolMessages...)...)
 
-			if a.shouldCompact != nil && a.shouldCompact(usage) {
-				return TurnResult{Status: TurnNeedsCompaction, Messages: messages, Usage: usage}, nil
-			}
-		} else {
-			messages = append(messages, reply)
-			// TODO: some evaluation Certira need to be there as a WithEval() like thing.
-			break
+			// Continue the next iteration from the compacted history.
+			a.workingHistory.Set(replacement)
+			iter = 0
 		}
 	}
 
-	// Canceled on the final iteration's boundary — report it, not "done".
-	if err := ctx.Err(); err != nil {
-		return TurnResult{Status: TurnCanceled, Messages: messages, Usage: usage}, nil
-	}
-	return TurnResult{Status: TurnDone, Messages: messages, Usage: usage}, nil
+	a.updateState(ctx, contracts.SessionMaxIterationExhausted)
 }

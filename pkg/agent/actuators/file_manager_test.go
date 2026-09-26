@@ -21,13 +21,13 @@ func TestFileManagerSnapshotAndEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = m.Read("note.txt", nil, nil, false); err != nil {
+	if _, err = m.read("note.txt", nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = m.Edit("note.txt", "two", "three", false); err == nil {
+	if _, err = m.edit("note.txt", "two", "three", false); err == nil {
 		t.Fatal("expected duplicate edit to require replace_all")
 	}
-	if _, err = m.Edit("note.txt", "two", "three", true); err != nil {
+	if _, err = m.edit("note.txt", "two", "three", true); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(path)
@@ -37,7 +37,7 @@ func TestFileManagerSnapshotAndEdit(t *testing.T) {
 	if err = os.WriteFile(path, []byte("changed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err = m.Write("note.txt", "overwrite\n"); err == nil || !strings.Contains(err.Error(), "must be read") {
+	if err = m.write("note.txt", "overwrite\n"); err == nil || !strings.Contains(err.Error(), "must be read") {
 		t.Fatalf("write error = %v, want snapshot conflict", err)
 	}
 }
@@ -49,10 +49,10 @@ func TestFileManagerMetadataDoesNotAuthorizeMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := mustManager(t, root)
-	if _, err := m.Read("note.txt", nil, nil, true); err != nil {
+	if _, err := m.read("note.txt", nil, nil, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Write("note.txt", "changed\n"); err == nil || !strings.Contains(err.Error(), "must be read") {
+	if err := m.write("note.txt", "changed\n"); err == nil || !strings.Contains(err.Error(), "must be read") {
 		t.Fatalf("write error = %v, want read-before-write error", err)
 	}
 }
@@ -67,10 +67,10 @@ func TestFileManagerRejectsOutsideAndAllowsNewFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = m.Read("../secret", nil, nil, false); err == nil {
+	if _, err = m.read("../secret", nil, nil, false); err == nil {
 		t.Fatal("expected traversal rejection")
 	}
-	if err = m.Write("new.txt", "created"); err != nil {
+	if err = m.write("new.txt", "created"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(root, "new.txt")); string(got) != "created" {
@@ -93,7 +93,7 @@ func TestFileManagerGlobSupportsRecursivePatterns(t *testing.T) {
 		}
 	}
 	m := mustManager(t, root)
-	matches, err := m.Glob("**/*.go")
+	matches, err := m.glob("**/*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestFileManagerRejectsSymlinkedParentOutsideWorkspace(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	m := mustManager(t, root)
-	if err := m.Write("external/new.txt", "secret"); err == nil {
+	if err := m.write("external/new.txt", "secret"); err == nil {
 		t.Fatal("expected symlinked parent rejection")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "new.txt")); !os.IsNotExist(err) {
@@ -123,26 +123,36 @@ func TestFileManagerRejectsEmptyEditString(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := mustManager(t, root)
-	if _, err := m.Read("note.txt", nil, nil, false); err != nil {
+	if _, err := m.read("note.txt", nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Edit("note.txt", "", "replacement", false); err == nil {
+	if _, err := m.edit("note.txt", "", "replacement", false); err == nil {
 		t.Fatal("expected empty old_string rejection")
 	}
 }
 
-func TestFileToolDispatcherBasics(t *testing.T) {
+func TestFileToolExecutionsReturnJSON(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("needle\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ctx := WithFileManager(context.Background(), mustManager(t, root))
+	m := mustManager(t, root)
+	ctx := context.Background()
 	for _, call := range []contracts.ToolCall{
-		{Function: contracts.Function{Name: string(contracts.ListTool), Arguments: `{}`}},
-		{Function: contracts.Function{Name: string(contracts.GlobTool), Arguments: `{"pattern":"*.txt"}`}},
-		{Function: contracts.Function{Name: string(contracts.SearchTool), Arguments: `{"pattern":"needle"}`}},
+		{Function: contracts.Function{Name: contracts.ListTool, Arguments: `{}`}},
+		{Function: contracts.Function{Name: contracts.GlobTool, Arguments: `{"pattern":"*.txt"}`}},
+		{Function: contracts.Function{Name: contracts.SearchTool, Arguments: `{"pattern":"needle"}`}},
 	} {
-		out, err := ExecuteToolCall(ctx, call)
+		var out string
+		var err error
+		switch call.Function.Name {
+		case contracts.ListTool:
+			out, err = m.ListExecution(ctx, call)
+		case contracts.GlobTool:
+			out, err = m.GlobExecution(ctx, call)
+		case contracts.SearchTool:
+			out, err = m.SearchExecution(ctx, call)
+		}
 		if err != nil {
 			t.Fatalf("%s: %v", call.Function.Name, err)
 		}

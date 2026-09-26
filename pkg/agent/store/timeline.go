@@ -281,28 +281,13 @@ func buildEventPreview(record Record) *EventPreview {
 		if preview.Text == "" && len(message.ToolCalls) > 0 {
 			names := make([]string, 0, len(message.ToolCalls))
 			for _, call := range message.ToolCalls {
-				names = append(names, call.Function.Name)
+				names = append(names, string(call.Function.Name))
 			}
 			preview.Text = previewText(strings.Join(names, ", "))
 		}
-	case record.ToolCall != nil:
-		preview.Role = "tool_call"
-		preview.Text = previewText(record.ToolCall.Name + " " + record.ToolCall.Arguments)
-	case record.ToolResult != nil:
-		preview.Role = "tool_result"
-		text := record.ToolResult.Status
-		if record.ToolResult.Error != "" {
-			text += ": " + record.ToolResult.Error
-		} else if record.ToolResult.Output != "" {
-			text += ": " + record.ToolResult.Output
-		}
-		preview.Text = previewText(text)
 	case record.Compaction != nil:
 		preview.Role = "assistant"
 		preview.Text = previewText("context compacted: " + record.Compaction.Summary)
-	case record.Approval != nil && record.Approval.ToolCall != nil:
-		preview.Role = "tool_call"
-		preview.Text = previewText(record.Approval.ToolCall.Function.Name)
 	default:
 		preview.Role = "assistant"
 		preview.Text = previewText(record.Text)
@@ -314,7 +299,7 @@ func previewText(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
 	runes := []rune(value)
 	if len(runes) > previewTextLimit {
-		return string(runes[:previewTextLimit]) + "..."
+		return string(runes[:previewTextLimit]) + "…"
 	}
 	return value
 }

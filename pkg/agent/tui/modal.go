@@ -1,15 +1,11 @@
 package tui
 
 import (
-	"bytes"
 	"fmt"
 	"image/color"
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/alecthomas/chroma/v2"
-	"github.com/alecthomas/chroma/v2/formatters"
-	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/uuid"
 )
@@ -20,7 +16,6 @@ const (
 	modalSessions modalKind = iota
 	modalModels
 	modalCommands
-	modalApproval
 	modalTimeline
 	modalNotice
 )
@@ -34,26 +29,20 @@ type modalOption struct {
 	tree     string
 	fork     string
 	shortcut rune
-	command  string
 	provider string
 	model    string
 	session  uuid.UUID
 	event    *TimelineEvent
-	decision string
 }
 
 type modalModel struct {
-	kind       modalKind
-	title      string
-	body       string
-	script     string
-	diffRows   []diffRow
-	bodyOffset int
-	options    []modalOption
-	selected   int
-	switching  bool
-	required   bool
-	approval   *Approval
+	kind      modalKind
+	title     string
+	body      string
+	options   []modalOption
+	selected  int
+	switching bool
+	required  bool
 }
 
 func (m *modalModel) move(delta int) {
@@ -75,9 +64,6 @@ func (m *modalModel) optionForShortcut(key rune) (int, bool) {
 func renderModal(m *modalModel, width, height int, styles harnessStyles) string {
 	if m == nil || width <= 0 || height <= 0 {
 		return ""
-	}
-	if m.kind == modalApproval {
-		return renderApprovalModal(m, width, height, styles)
 	}
 	modalStyle := styles.modal
 	if modalStyle.GetHorizontalFrameSize() >= width || modalStyle.GetVerticalFrameSize() >= height {
@@ -148,178 +134,6 @@ func renderModal(m *modalModel, width, height int, styles harnessStyles) string 
 	return modalStyle.Width(boxWidth).MaxHeight(height).Render(strings.Join(rows, "\n"))
 }
 
-func renderApprovalModal(m *modalModel, width, height int, styles harnessStyles) string {
-	modalStyle, boxWidth, boxHeight, innerWidth, bodyHeight := approvalModalGeometry(m, width, height, styles)
-	title := styles.modalTitle.Render(strings.ToUpper(m.title))
-	footerText := ansi.Truncate("←/→ action  ·  PgUp/PgDn review  ·  mouse wheel scroll", innerWidth, "…")
-	footer := styles.muted.Render(footerText)
-	lines := approvalBodyLines(m, innerWidth, styles)
-	maxOffset := max(len(lines)-bodyHeight, 0)
-	offset := clamp(m.bodyOffset, 0, maxOffset)
-	end := min(offset+bodyHeight, len(lines))
-	visibleBody := strings.Join(lines[offset:end], "\n")
-
-	rows := []string{title, visibleBody}
-	if maxOffset > 0 {
-		rows = append(rows, styles.muted.Render(fmt.Sprintf("review lines %d-%d of %d", offset+1, end, len(lines))))
-	} else {
-		rows = append(rows, "")
-	}
-	buttons := make([]string, 0, len(m.options))
-	for i, option := range m.options {
-		accent := everforest.Green
-		if option.decision == "deny" {
-			accent = everforest.Red
-		}
-		style := styles.modalOption.Background(everforest.SurfaceAlt).Foreground(accent).Padding(0, 1)
-		if i == m.selected {
-			style = lipgloss.NewStyle().Background(accent).Foreground(everforest.Background).Bold(true).Padding(0, 1)
-		}
-		buttons = append(buttons, style.Render(approvalButtonLabel(option)))
-	}
-	rows = append(rows, strings.Join(buttons, ""))
-	rows = append(rows, footer)
-	return modalStyle.Width(boxWidth).MaxHeight(boxHeight).Render(strings.Join(rows, "\n"))
-}
-
-func approvalModalGeometry(m *modalModel, width, height int, styles harnessStyles) (lipgloss.Style, int, int, int, int) {
-	modalStyle := styles.modal
-	if modalStyle.GetHorizontalFrameSize() >= width || modalStyle.GetVerticalFrameSize() >= height {
-		modalStyle = modalStyle.Padding(0)
-	}
-	boxWidth := min(max(width-4, 1), 120)
-	boxHeight := min(height, 32)
-	innerWidth := contentWidth(modalStyle, boxWidth)
-	titleHeight := lipgloss.Height(styles.modalTitle.Render(strings.ToUpper(m.title)))
-	fixedHeight := titleHeight + 3 // scroll position, action row, and footer
-	bodyHeight := max(boxHeight-modalStyle.GetVerticalFrameSize()-fixedHeight, 1)
-	return modalStyle, boxWidth, boxHeight, innerWidth, bodyHeight
-}
-
-func approvalMaxBodyOffset(m *modalModel, width, height int, styles harnessStyles) int {
-	_, _, _, innerWidth, bodyHeight := approvalModalGeometry(m, width, height, styles)
-	return max(len(approvalBodyLines(m, innerWidth, styles))-bodyHeight, 0)
-}
-
-// approvalBodyLines renders the metadata body followed by the structured diff
-// rows (when present) into the scrollable review pane.
-func approvalBodyLines(m *modalModel, width int, styles harnessStyles) []string {
-	var lines []string
-	if m.body != "" {
-		lines = append(lines, strings.Split(renderApprovalBody(m.body, width, styles), "\n")...)
-	}
-	if m.script != "" {
-		lines = append(lines, strings.Split(renderApprovalScript(m.script, width, styles), "\n")...)
-	}
-	if len(m.diffRows) > 0 {
-		if len(lines) > 0 {
-			lines = append(lines, "")
-		}
-		oldWidth, newWidth := diffGutterWidths(m.diffRows)
-		codeWidth := max(width-(oldWidth+newWidth+4), 1)
-		for _, row := range m.diffRows {
-			lines = append(lines, renderDiffRow(row, oldWidth, newWidth, codeWidth, styles)...)
-		}
-	}
-	return lines
-}
-
-func renderApprovalBody(body string, width int, styles harnessStyles) string {
-	var rendered []string
-	section := ""
-	for _, line := range strings.Split(body, "\n") {
-		style := styles.modalBody.Background(everforest.Surface)
-		switch line {
-		case "SCRIPT", "NEW CONTENT":
-			section = line
-			style = styles.active.Background(everforest.Surface).Bold(true)
-		case "BEFORE":
-			section = line
-			style = lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Red).Bold(true)
-		case "AFTER":
-			section = line
-			style = styles.active.Background(everforest.Surface).Bold(true)
-		default:
-			switch section {
-			case "SCRIPT", "NEW CONTENT":
-				style = lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text)
-			case "BEFORE":
-				style = lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Red)
-			case "AFTER":
-				style = lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Green)
-			}
-		}
-		if section == "NEW CONTENT" {
-			if number, content, ok := splitNumberedContent(line); ok {
-				numberWidth := lipgloss.Width(number)
-				numberStyle := lipgloss.NewStyle().Background(everforest.Surface).Foreground(lipgloss.Color("8")).Width(numberWidth)
-				contentStyle := lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Width(max(width-numberWidth-2, 1))
-				gap := lipgloss.NewStyle().Background(everforest.Surface).Render("  ")
-				line = lipgloss.JoinHorizontal(lipgloss.Top, numberStyle.Render(number), gap, contentStyle.Render(content))
-				rendered = append(rendered, strings.Split(line, "\n")...)
-				continue
-			}
-		}
-		rendered = append(rendered, strings.Split(style.Width(width).Render(line), "\n")...)
-	}
-	return strings.Join(rendered, "\n")
-}
-
-func renderApprovalScript(script string, width int, styles harnessStyles) string {
-	lexer := lexers.Get("bash")
-	if lexer != nil {
-		iterator, err := chroma.Coalesce(lexer).Tokenise(nil, script)
-		if err == nil {
-			var highlighted bytes.Buffer
-			if err := formatters.TTY16m.Format(&highlighted, approvalBashStyle, iterator); err == nil {
-				lineStyle := lipgloss.NewStyle().Background(everforest.Surface).Width(width)
-				lines := strings.Split(strings.TrimSuffix(highlighted.String(), "\n"), "\n")
-				for i := range lines {
-					lines[i] = lineStyle.Render(lines[i])
-				}
-				return strings.Join(lines, "\n")
-			}
-		}
-	}
-	return styles.modalBody.Background(everforest.Surface).Foreground(everforest.Text).Width(width).Render(script)
-}
-
-var approvalBashStyle = chroma.MustNewStyle("infai-approval-bash", chroma.StyleEntries{
-	chroma.Background:      "bg:#2e383c",
-	chroma.Text:            "#d3c6aa bg:#2e383c",
-	chroma.Comment:         "#859289 bg:#2e383c",
-	chroma.CommentPreproc:  "#e69875 bg:#2e383c",
-	chroma.Keyword:         "#d699b6 bg:#2e383c",
-	chroma.KeywordReserved: "#d699b6 bg:#2e383c",
-	chroma.Operator:        "#e67e80 bg:#2e383c",
-	chroma.Punctuation:     "#859289 bg:#2e383c",
-	chroma.NameBuiltin:     "#83c092 bg:#2e383c",
-	chroma.NameFunction:    "#a7c080 bg:#2e383c",
-	chroma.LiteralNumber:   "#d699b6 bg:#2e383c",
-	chroma.LiteralString:   "#a7c080 bg:#2e383c",
-})
-
-func approvalButtonLabel(option modalOption) string {
-	if option.shortcut == 0 || option.label == "" {
-		return option.label
-	}
-	return fmt.Sprintf("[%c]%s", option.shortcut-'a'+'A', option.label[1:])
-}
-
-func splitNumberedContent(line string) (string, string, bool) {
-	separator := strings.Index(line, "  ")
-	if separator <= 0 {
-		return "", "", false
-	}
-	number := line[:separator]
-	for _, r := range strings.TrimSpace(number) {
-		if r < '0' || r > '9' {
-			return "", "", false
-		}
-	}
-	return number, line[separator+2:], true
-}
-
 func renderTimelineOption(option modalOption, selected bool, width int, styles harnessStyles) string {
 	rowStyle := styles.modalOption.PaddingLeft(0)
 	cursor := "  "
@@ -376,19 +190,27 @@ func timelineRoleLabel(role string) string {
 	return role + ": "
 }
 
+// timelineRoleStyle resolves a timeline role to the theme's semantic colour.
+// The roles are the ones timelineEventDisplays emits, and they match the
+// timelineRoleColor palette in colors.go so the modal timeline and the
+// branch-selection screen read the same.
 func timelineRoleStyle(base lipgloss.Style, role string) lipgloss.Style {
-	color := "10" // assistant: HiGreen
 	switch role {
 	case "user":
-		color = "4" // FgBlue
-	case "thinking":
-		color = "8" // HiBlack
-	case "tool_call", "tool_result":
-		color = "13" // HiPurple
+		return base.Foreground(everforest.Blue)
+	case "assistant":
+		return base.Foreground(everforest.Green)
+	case "thinking", "tool_result":
+		return base.Foreground(everforest.Muted)
+	case "system":
+		return base.Foreground(everforest.Purple)
+	case "tool_call":
+		return base.Foreground(everforest.Text)
 	case "skill":
-		color = "6" // cyan
+		return base.Foreground(everforest.Aqua)
+	default:
+		return base.Foreground(everforest.Text)
 	}
-	return base.Foreground(lipgloss.Color(color))
 }
 
 func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyles) string {

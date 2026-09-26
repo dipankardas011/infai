@@ -2,9 +2,9 @@ package actuators
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
@@ -36,31 +36,25 @@ func WriteTool() contracts.Tool {
 	)
 }
 
-func writeExecution(ctx context.Context) (string, error) {
-	var args writeArguments
-	if _, err := decodeArgs(ctx, &args); err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.WriteTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
-		}
-		return "", execErr(contracts.WriteTool, "invalid_arguments", "write arguments could not be decoded", ResponsibilityAgent, err)
-	}
-	if err := writeToolValidate(args); err != nil {
+func (m *FileManager) WriteExecution(ctx context.Context, tc contracts.ToolCall) (string, error) {
+	args, err := contracts.DecodeToolArguments[writeArguments](contracts.WriteTool, tc)
+	if err != nil {
 		return "", err
 	}
-	m := FileManagerFromContext(ctx)
-	if m == nil {
-		return "", execErr(contracts.WriteTool, "missing_file_manager", "a file manager is required to write files", ResponsibilitySession, nil)
+
+	if err := writeToolValidate(args); err != nil {
+		return "", wrapToolError(contracts.WriteTool, err, "invalid_arguments", "write arguments are invalid")
 	}
-	if err := m.Write(args.Path, *args.Content); err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.WriteTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+
+	return contracts.RunBounded(ctx, contracts.WriteTool, time.Second, func() (string, error) {
+		if err := m.write(args.Path, *args.Content); err != nil {
+			return "", wrapToolError(contracts.WriteTool, err, "write_failed", "the file could not be written")
 		}
-		return "", execErr(contracts.WriteTool, "write_failed", "the file could not be written", ResponsibilityTool, err)
-	}
-	return assemble(WriteResult{Status: "written"})
+		return assemble(WriteResult{Status: "written"})
+	})
 }
 
-func (m *FileManager) Write(path, content string) error {
+func (m *FileManager) write(path, content string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -71,21 +65,21 @@ func (m *FileManager) Write(path, content string) error {
 	mode := os.FileMode(0o600)
 	info, statErr := os.Stat(resolved)
 	if statErr != nil && !os.IsNotExist(statErr) {
-		return filesystemErr("write_failed", "the existing file could not be inspected", ResponsibilityEnvironment, statErr)
+		return filesystemErr("write_failed", "the existing file could not be inspected", contracts.ResponsibilityEnvironment, statErr)
 	}
 	if statErr == nil {
 		if !info.Mode().IsRegular() {
-			return filesystemErr("not_a_file", "the requested path is not a regular file", ResponsibilityAgent, nil)
+			return filesystemErr("not_a_file", "the requested path is not a regular file", contracts.ResponsibilityAgent, nil)
 		}
 		old, readErr := os.ReadFile(resolved)
 		if readErr != nil {
-			return filesystemErr("write_failed", "the existing file could not be read", ResponsibilityEnvironment, readErr)
+			return filesystemErr("write_failed", "the existing file could not be read", contracts.ResponsibilityEnvironment, readErr)
 		}
 		if info.Size() > maxReadBytes {
-			return filesystemErr("file_too_large", "the existing file exceeds the write size limit", ResponsibilityTool, nil)
+			return filesystemErr("file_too_large", "the existing file exceeds the write size limit", contracts.ResponsibilityTool, nil)
 		}
 		if len(old) > maxReadBytes {
-			return filesystemErr("file_too_large", "the existing file exceeds the write size limit", ResponsibilityTool, nil)
+			return filesystemErr("file_too_large", "the existing file exceeds the write size limit", contracts.ResponsibilityTool, nil)
 		}
 		mode = info.Mode().Perm()
 
@@ -97,7 +91,7 @@ func (m *FileManager) Write(path, content string) error {
 	}
 
 	if err := atomicWrite(resolved, []byte(content), mode); err != nil {
-		return filesystemErr("write_failed", "the file could not be written", ResponsibilityEnvironment, err)
+		return filesystemErr("write_failed", "the file could not be written", contracts.ResponsibilityEnvironment, err)
 	}
 
 	m.snapshot(resolved, []byte(content))
@@ -106,15 +100,15 @@ func (m *FileManager) Write(path, content string) error {
 
 func writeToolValidate(args writeArguments) error {
 	if args.Path == "" || args.Content == nil {
-		return execErr(contracts.WriteTool, "invalid_arguments", "write requires path and content", ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.WriteTool, "invalid_arguments", "write requires path and content", contracts.ResponsibilityAgent, nil)
 	}
 
-	if err := validateText(*args.Content, ResponsibilityAgent); err != nil {
+	if err := validateText(*args.Content, contracts.ResponsibilityAgent); err != nil {
 		return err
 	}
 
 	if len(*args.Content) > maxReadBytes {
-		return filesystemErr("content_too_large", "the content exceeds the write size limit", ResponsibilityTool, nil)
+		return filesystemErr("content_too_large", "the content exceeds the write size limit", contracts.ResponsibilityTool, nil)
 	}
 
 	return nil

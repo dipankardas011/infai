@@ -3,12 +3,12 @@ package actuators
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"mime"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -65,49 +65,40 @@ func ReadTool() contracts.Tool {
 	}
 }
 
-func readExecution(ctx context.Context) (string, error) {
-	var args readArguments
-	if _, err := decodeArgs(ctx, &args); err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.ReadTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
-		}
-		return "", execErr(contracts.ReadTool, "invalid_arguments", "read arguments could not be decoded", ResponsibilityAgent, err)
-	}
-	if err := readToolValidate(args); err != nil {
+func (m *FileManager) ReadExecution(ctx context.Context, tc contracts.ToolCall) (string, error) {
+	args, err := contracts.DecodeToolArguments[readArguments](contracts.ReadTool, tc)
+	if err != nil {
 		return "", err
 	}
 
-	m := FileManagerFromContext(ctx)
-	if m == nil {
-		return "", execErr(contracts.ReadTool, "missing_file_manager", "a file manager is required to read files", ResponsibilitySession, nil)
+	if err := readToolValidate(args); err != nil {
+		return "", wrapToolError(contracts.ReadTool, err, "invalid_arguments", "read arguments are invalid")
 	}
 
-	out, err := m.Read(args.Path, args.Offset, args.Limit, args.Metadata)
-	if err != nil {
-		if fileErr, ok := errors.AsType[*filesystemError](err); ok {
-			return "", execErr(contracts.ReadTool, fileErr.code, fileErr.reason, fileErr.responsibility, err)
+	return contracts.RunBounded(ctx, contracts.ReadTool, time.Second, func() (string, error) {
+		output, err := m.read(args.Path, args.Offset, args.Limit, args.Metadata)
+		if err != nil {
+			return "", wrapToolError(contracts.ReadTool, err, "read_failed", "the file could not be read")
 		}
-		return "", execErr(contracts.ReadTool, "read_failed", "the file could not be read", ResponsibilityTool, err)
-	}
-
-	return out, nil
+		return output, nil
+	})
 }
 
 func readToolValidate(args readArguments) error {
 	if args.Path == "" {
-		return execErr(contracts.ReadTool, "invalid_arguments", "read requires a non-empty relative path", ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.ReadTool, "invalid_arguments", "read requires a non-empty relative path", contracts.ResponsibilityAgent, nil)
 	}
 	if (args.Offset != nil && *args.Offset < 1) || (args.Limit != nil && *args.Limit < 1) {
-		return execErr(contracts.ReadTool, "invalid_arguments", "offset and limit must be positive line numbers", ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.ReadTool, "invalid_arguments", "offset and limit must be positive line numbers", contracts.ResponsibilityAgent, nil)
 	}
 	if args.Metadata && (args.Offset != nil || args.Limit != nil) {
-		return execErr(contracts.ReadTool, "invalid_arguments", "metadata cannot be combined with offset or limit", ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.ReadTool, "invalid_arguments", "metadata cannot be combined with offset or limit", contracts.ResponsibilityAgent, nil)
 	}
 
 	return nil
 }
 
-func (m *FileManager) Read(path string, offset, limit *int, metadata bool) (string, error) {
+func (m *FileManager) read(path string, offset, limit *int, metadata bool) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -119,25 +110,25 @@ func (m *FileManager) Read(path string, offset, limit *int, metadata bool) (stri
 	info, err := os.Stat(resolved)
 	switch {
 	case err != nil:
-		return "", filesystemErr("file_unavailable", "the file could not be inspected", ResponsibilityEnvironment, err)
+		return "", filesystemErr("file_unavailable", "the file could not be inspected", contracts.ResponsibilityEnvironment, err)
 	case !info.Mode().IsRegular():
-		return "", filesystemErr("not_a_file", "the requested path is not a regular file", ResponsibilityAgent, nil)
+		return "", filesystemErr("not_a_file", "the requested path is not a regular file", contracts.ResponsibilityAgent, nil)
 	case info.Size() > maxReadBytes:
-		return "", filesystemErr("file_too_large", "the file exceeds the read size limit", ResponsibilityTool, nil)
+		return "", filesystemErr("file_too_large", "the file exceeds the read size limit", contracts.ResponsibilityTool, nil)
 	}
 
 	data, err := os.ReadFile(resolved)
 	switch {
 	case err != nil:
-		return "", filesystemErr("read_failed", "the file could not be read", ResponsibilityEnvironment, err)
+		return "", filesystemErr("read_failed", "the file could not be read", contracts.ResponsibilityEnvironment, err)
 	case len(data) > maxReadBytes:
-		return "", filesystemErr("file_too_large", "the file exceeds the read size limit", ResponsibilityTool, nil)
+		return "", filesystemErr("file_too_large", "the file exceeds the read size limit", contracts.ResponsibilityTool, nil)
 
 	case !utf8.Valid(data):
-		return "", filesystemErr("invalid_utf8", "the file is not valid UTF-8 text", ResponsibilityTool, nil)
+		return "", filesystemErr("invalid_utf8", "the file is not valid UTF-8 text", contracts.ResponsibilityTool, nil)
 
 	default:
-		if err := validateText(string(data), ResponsibilityTool); err != nil {
+		if err := validateText(string(data), contracts.ResponsibilityTool); err != nil {
 			return "", err
 		}
 	}
@@ -162,7 +153,7 @@ func (m *FileManager) Read(path string, offset, limit *int, metadata bool) (stri
 
 	output := strings.Join(lines[start:end], "")
 	if len(output) > maxToolContentBytes {
-		return "", filesystemErr("read_output_too_large", "the requested text is too large; provide offset and limit to read a smaller range", ResponsibilityTool, nil)
+		return "", filesystemErr("read_output_too_large", "the requested text is too large; provide offset and limit to read a smaller range", contracts.ResponsibilityTool, nil)
 	}
 	return output, nil
 }

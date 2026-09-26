@@ -28,6 +28,10 @@ var everforest = struct {
 	// Diff row backgrounds (Everforest bg_red / bg_green).
 	DiffInsertBg color.Color
 	DiffDeleteBg color.Color
+
+	// AttentionBg is the band a pending human decision sits on: Everforest's
+	// bg_yellow, the palette's own surface for a highlighted region.
+	AttentionBg color.Color
 }{
 	Background: lipgloss.Color("#272e33"),
 	Surface:    lipgloss.Color("#2e383c"),
@@ -44,52 +48,78 @@ var everforest = struct {
 
 	DiffInsertBg: lipgloss.Color("#425047"),
 	DiffDeleteBg: lipgloss.Color("#514045"),
+
+	AttentionBg: lipgloss.Color("#4d4c43"), // Everforest bg_yellow
 }
 
 type harnessStyles struct {
-	app         lipgloss.Style
-	header      lipgloss.Style
-	brand       lipgloss.Style
-	headerMeta  lipgloss.Style
-	composer    lipgloss.Style
-	status      lipgloss.Style
-	statusBusy  lipgloss.Style
-	sessionName lipgloss.Style
-	muted       lipgloss.Style
-	userMarker  lipgloss.Style
-	assistant   lipgloss.Style
-	imageBadge  lipgloss.Style
-	thinking    lipgloss.Style
-	system      lipgloss.Style
-	error       lipgloss.Style
-	tool        lipgloss.Style
-	skill       lipgloss.Style
-	modal       lipgloss.Style
-	modalTitle  lipgloss.Style
-	modalBody   lipgloss.Style
-	modalOption lipgloss.Style
-	modalActive lipgloss.Style
-	screenTitle lipgloss.Style
-	screenBody  lipgloss.Style
-	screenRow   lipgloss.Style
-	screenSel   lipgloss.Style
-	active      lipgloss.Style
-	inactive    lipgloss.Style
-	menu        lipgloss.Style
-	menuRow     lipgloss.Style
-	menuActive  lipgloss.Style
+	app           lipgloss.Style
+	header        lipgloss.Style
+	brand         lipgloss.Style
+	headerMeta    lipgloss.Style
+	composer      lipgloss.Style
+	status        lipgloss.Style
+	statusBusy    lipgloss.Style
+	statusWaiting lipgloss.Style
+	statusRow     lipgloss.Style
+	hitl          lipgloss.Style
+	hitlFlag      lipgloss.Style
+	hitlTitle     lipgloss.Style
+	hitlName      lipgloss.Style
+	hitlBody      lipgloss.Style
+	hitlMuted     lipgloss.Style
+	hitlAllow     lipgloss.Style
+	hitlDeny      lipgloss.Style
+	sessionName   lipgloss.Style
+	muted         lipgloss.Style
+	userMarker    lipgloss.Style
+	assistant     lipgloss.Style
+	imageBadge    lipgloss.Style
+	thinking      lipgloss.Style
+	system        lipgloss.Style
+	error         lipgloss.Style
+	tool          lipgloss.Style
+	skill         lipgloss.Style
+	modal         lipgloss.Style
+	modalTitle    lipgloss.Style
+	modalBody     lipgloss.Style
+	modalOption   lipgloss.Style
+	modalActive   lipgloss.Style
+	screenTitle   lipgloss.Style
+	screenBody    lipgloss.Style
+	screenRow     lipgloss.Style
+	screenSel     lipgloss.Style
+	active        lipgloss.Style
+	inactive      lipgloss.Style
+	menu          lipgloss.Style
+	menuRow       lipgloss.Style
+	menuActive    lipgloss.Style
 }
 
 func newHarnessStyles() harnessStyles {
 	return harnessStyles{
-		app:         lipgloss.NewStyle().Background(everforest.Background).Foreground(everforest.Text),
-		header:      lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Padding(0, 1),
-		brand:       lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
-		headerMeta:  lipgloss.NewStyle().Foreground(everforest.Muted),
-		composer:    lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
-		status:      lipgloss.NewStyle().Foreground(everforest.Muted),
-		statusBusy:  lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
-		sessionName: lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true),
+		app:           lipgloss.NewStyle().Background(everforest.Background).Foreground(everforest.Text),
+		header:        lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Padding(0, 1),
+		brand:         lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
+		headerMeta:    lipgloss.NewStyle().Foreground(everforest.Muted),
+		composer:      lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
+		status:        lipgloss.NewStyle().Foreground(everforest.Muted),
+		statusBusy:    lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
+		statusWaiting: lipgloss.NewStyle().Foreground(everforest.Orange).Bold(true),
+		statusRow:     lipgloss.NewStyle().Foreground(everforest.Muted).PaddingRight(1),
+		// A pending decision gets a tinted band instead of a border, so it reads
+		// as reserved space without any frame to get wrong. Every style on the
+		// band carries the band's own background: a foreground-only style would
+		// punch the terminal's background through the row.
+		hitl:        lipgloss.NewStyle().Background(everforest.AttentionBg),
+		hitlFlag:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Yellow).Bold(true),
+		hitlTitle:   lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Orange).Bold(true),
+		hitlName:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Purple).Bold(true),
+		hitlBody:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Text),
+		hitlMuted:   lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Muted),
+		hitlAllow:   lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Green).Bold(true),
+		hitlDeny:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Red).Bold(true),
+		sessionName: lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
 		muted:       lipgloss.NewStyle().Foreground(everforest.Muted),
 		userMarker:  lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
 		assistant:   lipgloss.NewStyle().Foreground(everforest.Text),

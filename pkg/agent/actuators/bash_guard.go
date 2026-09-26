@@ -43,11 +43,11 @@ func checkDangerousCommand(command string) error {
 	lower := strings.ToLower(command)
 	for _, pattern := range dangerousPatterns {
 		if pattern.re.MatchString(lower) {
-			return execErr(
+			return contracts.NewToolExecutionError(
 				contracts.BashTool,
 				"dangerous_command",
 				"the command was rejected because it attempts "+pattern.reason,
-				ResponsibilityAgent,
+				contracts.ResponsibilityAgent,
 				nil,
 			)
 		}
