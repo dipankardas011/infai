@@ -1518,7 +1518,11 @@ func (m *chatModel) renderTranscript() string {
 	}
 	if m.approval != nil && m.approvalShown {
 		view := newApprovalView(m.approval)
-		detail := append([]string{fullWidth(m.styles.hitlTitle, width, strings.ToUpper(view.title))}, approvalDetailLines(view, width, m.styles)...)
+		name, _ := approvalSubject(m.approval)
+		detail := append([]string{
+			fullWidth(m.styles.hitlTitle, width, "Human In the Loop"),
+			bandLine(m.styles.hitl, width, m.styles.hitlMuted.Render("tool_call: ")+m.styles.hitlName.Render(name)),
+		}, approvalDetailLines(view, width, m.styles)...)
 		rendered = append(rendered, strings.Join(detail, "\n"))
 	}
 	if len(rendered) == 0 {
@@ -2204,7 +2208,6 @@ func (m *chatModel) clearApproval() {
 // approvalView is the reviewed content of a pending decision: the harness's
 // explanation, the script or diff, and the structured change rows.
 type approvalView struct {
-	title  string
 	body   string
 	script string
 	rows   []diffRow
@@ -2212,13 +2215,13 @@ type approvalView struct {
 
 func newApprovalView(approval *Approval) approvalView {
 	if approval == nil {
-		return approvalView{title: "Approval required"}
+		return approvalView{}
 	}
-	view := approvalView{title: "Approval required", body: approval.Message}
+	view := approvalView{body: approval.Message}
 	if approval.ToolCall == nil {
 		return view
 	}
-	view.title, view.body, view.script = formatApprovalToolCall(*approval.ToolCall)
+	view.body, view.script = formatApprovalToolCall(*approval.ToolCall)
 	if approval.Message != "" {
 		view.body = approval.Message + "\n\n" + view.body
 	}
@@ -2261,16 +2264,16 @@ func (m *chatModel) hitlView() string {
 	if gap := m.width - lipgloss.Width(second) - lipgloss.Width(styled) - 1; gap >= 2 {
 		second += band.Render(strings.Repeat(" ", gap)) + styled
 	}
-	return m.padBand(first) + "\n" + m.padBand(second)
+	return bandLine(band, m.width, first) + "\n" + bandLine(band, m.width, second)
 }
 
-// padBand fills a band row out to the full width with the band's own
+// bandLine fills a band row out to the given width with the band's own
 // background. The terminal drops the background at every style boundary, so the
 // spaces between two styled spans and the tail of the row are holes in the tint
 // unless they carry the band themselves.
-func (m *chatModel) padBand(row string) string {
-	if fill := m.width - lipgloss.Width(row); fill > 0 {
-		return row + m.styles.hitl.Render(strings.Repeat(" ", fill))
+func bandLine(band lipgloss.Style, width int, row string) string {
+	if fill := width - lipgloss.Width(row); fill > 0 {
+		return row + band.Render(strings.Repeat(" ", fill))
 	}
 	return row
 }
@@ -2297,7 +2300,9 @@ func approvalDetailLines(view approvalView, width int, styles harnessStyles) []s
 	}
 	if len(view.rows) > 0 {
 		if len(lines) > 0 {
-			lines = append(lines, "")
+			// The separator is part of the band too: a bare empty line would
+			// leave the terminal's own background showing through the block.
+			lines = append(lines, bandLine(styles.hitl, width, ""))
 		}
 		oldWidth, newWidth := diffGutterWidths(view.rows)
 		codeWidth := max(width-(oldWidth+newWidth+4), 1)
@@ -2324,14 +2329,14 @@ func approvalDiffRows(call contracts.ToolCall) []diffRow {
 	return nil
 }
 
-func formatApprovalToolCall(call contracts.ToolCall) (string, string, string) {
+func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 	switch contracts.ToolType(call.Function.Name) {
 	case contracts.ReadTool:
 		preview, ok := readToolCallPreview(call.Function.Arguments)
 		if !ok {
-			return "Read file", prettyToolArguments(call.Function.Arguments), ""
+			return prettyToolArguments(call.Function.Arguments), ""
 		}
-		return "Read file", "SOURCE  " + preview, ""
+		return "SOURCE  " + preview, ""
 
 	case contracts.BashTool:
 		var args struct {
@@ -2340,7 +2345,7 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string, string) {
 			Timeout *int   `json:"timeout"`
 		}
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-			return "Bash tool call", prettyToolArguments(call.Function.Arguments), ""
+			return prettyToolArguments(call.Function.Arguments), ""
 		}
 		workdir := args.Workdir
 		if workdir == "" {
@@ -2351,12 +2356,12 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string, string) {
 			metadata = append(metadata, fmt.Sprintf("TIMEOUT            %d seconds", *args.Timeout))
 		}
 		metadata = append(metadata, "", "SCRIPT")
-		return "Bash tool call", strings.Join(metadata, "\n"), args.Command
+		return strings.Join(metadata, "\n"), args.Command
 
 	case contracts.WriteTool:
 		path, content, ok := decodeWriteArgs(call.Function.Arguments)
 		if !ok {
-			return "Write file", prettyToolArguments(call.Function.Arguments), ""
+			return prettyToolArguments(call.Function.Arguments), ""
 		}
 		lineCount := 0
 		if content != "" {
@@ -2364,21 +2369,21 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string, string) {
 		}
 		body := fmt.Sprintf("TARGET  %s\nEFFECT  Replace complete file contents\nSIZE    %d lines, %d bytes",
 			path, lineCount, len([]byte(content)))
-		return "Write file", body, ""
+		return body, ""
 
 	case contracts.EditTool:
 		path, _, _, replaceAll, ok := decodeEditArgs(call.Function.Arguments)
 		if !ok {
-			return "Edit file", prettyToolArguments(call.Function.Arguments), ""
+			return prettyToolArguments(call.Function.Arguments), ""
 		}
 		mode := "Replace first exact match"
 		if replaceAll {
 			mode = "Replace every exact match"
 		}
-		return "Edit file", fmt.Sprintf("TARGET  %s\nMODE    %s", path, mode), ""
+		return fmt.Sprintf("TARGET  %s\nMODE    %s", path, mode), ""
 	}
 
-	return strings.ReplaceAll(string(call.Function.Name), "_", " ") + " tool call", prettyToolArguments(call.Function.Arguments), ""
+	return prettyToolArguments(call.Function.Arguments), ""
 }
 
 func prettyToolArguments(arguments string) string {

@@ -639,7 +639,7 @@ func TestApprovalOverlayKeepsTranscriptVisible(t *testing.T) {
 	// The message is part of the detail, so it arrives with the expansion.
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	expanded := ansi.Strip(m.View().Content)
-	for _, want := range []string{"transcript remains visible", "APPROVAL REQUIRED", "Run this command?", "[A]llow", "[D]eny"} {
+	for _, want := range []string{"transcript remains visible", "Human In the Loop", "tool_call: TOOL", "Run this command?", "[A]llow", "[D]eny"} {
 		if !strings.Contains(expanded, want) {
 			t.Fatalf("expanded approval view does not contain %q:\n%s", want, expanded)
 		}
@@ -731,7 +731,7 @@ func TestApprovalModalRendersEditDiff(t *testing.T) {
 
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"EDIT FILE", "TARGET  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new", "[A]llow", "[D]eny"} {
+	for _, want := range []string{"Human In the Loop", "tool_call: edit", "TARGET  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new", "[A]llow", "[D]eny"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("edit approval modal lacks %q:\n%s", want, content)
 		}
@@ -779,7 +779,7 @@ func TestApprovalModalRendersWriteAdditions(t *testing.T) {
 
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"WRITE FILE", "TARGET  notes.txt", "1 + first line", "2 + second line"} {
+	for _, want := range []string{"Human In the Loop", "tool_call: write", "TARGET  notes.txt", "1 + first line", "2 + second line"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("write approval modal lacks %q:\n%s", want, content)
 		}
@@ -796,28 +796,28 @@ func TestApprovalToolCallFormatting(t *testing.T) {
 		{
 			name: "read", tool: contracts.ReadTool,
 			arguments: `{"path":"pkg/agent/tui/chat.go","offset":10,"limit":25}`,
-			want:      []string{"Read file", "SOURCE  pkg/agent/tui/chat.go", "lines 10-34"},
+			want:      []string{"SOURCE  pkg/agent/tui/chat.go", "lines 10-34"},
 		},
 		{
 			name: "bash", tool: contracts.BashTool,
 			arguments: `{"command":"printf 'hello\\nworld'\nprintf done","workdir":"scripts","timeout":30}`,
-			want:      []string{"Bash tool call", "WORKING DIRECTORY  scripts", "TIMEOUT            30 seconds", "printf 'hello\\nworld'\nprintf done"},
+			want:      []string{"WORKING DIRECTORY  scripts", "TIMEOUT            30 seconds", "printf 'hello\\nworld'\nprintf done"},
 		},
 		{
 			name: "write", tool: contracts.WriteTool,
 			arguments: `{"path":"notes.txt","content":"first line\nsecond line"}`,
-			want:      []string{"Write file", "TARGET  notes.txt", "2 lines", "EFFECT  Replace complete file contents"},
+			want:      []string{"TARGET  notes.txt", "2 lines", "EFFECT  Replace complete file contents"},
 		},
 		{
 			name: "edit", tool: contracts.EditTool,
 			arguments: `{"path":"main.go","old_string":"old\ntext","new_string":"new\ntext","replace_all":true}`,
-			want:      []string{"Edit file", "TARGET  main.go", "Replace every exact match"},
+			want:      []string{"TARGET  main.go", "Replace every exact match"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			title, body, script := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: tt.tool, Arguments: tt.arguments}})
-			formatted := title + "\n" + body + "\n" + script
+			body, script := formatApprovalToolCall(contracts.ToolCall{Function: contracts.Function{Name: tt.tool, Arguments: tt.arguments}})
+			formatted := body + "\n" + script
 			for _, want := range tt.want {
 				if !strings.Contains(formatted, want) {
 					t.Fatalf("formatted approval lacks %q: %q", want, formatted)
@@ -838,7 +838,7 @@ func TestApprovalModalRendersBashAsCode(t *testing.T) {
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"BASH TOOL CALL", "SCRIPT", "if test -f go.mod; then", "go test ./...", "fi"} {
+	for _, want := range []string{"Human In the Loop", "tool_call: bash", "SCRIPT", "if test -f go.mod; then", "go test ./...", "fi"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("bash approval modal lacks %q:\n%s", want, content)
 		}
@@ -848,8 +848,11 @@ func TestApprovalModalRendersBashAsCode(t *testing.T) {
 	}
 
 	highlighted := renderApprovalScript("nvidia-smi", 40, newHarnessStyles())
-	if !strings.Contains(highlighted, "\x1b[48;2;77;76;67m") {
-		t.Fatalf("bash approval script does not use the attention band background: %q", highlighted)
+	if !strings.Contains(highlighted, "\x1b[48;2;46;56;60m") {
+		t.Fatalf("bash approval script does not use the surface inset: %q", highlighted)
+	}
+	if strings.Contains(highlighted, "\x1b[48;2;77;76;67m") {
+		t.Fatalf("bash approval script is painted on the attention band: %q", highlighted)
 	}
 	if strings.Contains(highlighted, "\x1b[48;2;39;46;51m") {
 		t.Fatalf("bash approval script uses app background: %q", highlighted)

@@ -179,6 +179,10 @@ func renderApprovalBody(body string, width int, styles harnessStyles) string {
 	return strings.Join(rendered, "\n")
 }
 
+// renderApprovalScript highlights a bash script, or any script the approval
+// carries, on the darker surface rather than the attention band: the code is the
+// same kind of inset as a diff, and the band is for the decision, not the
+// payload.
 func renderApprovalScript(script string, width int, styles harnessStyles) string {
 	lexer := lexers.Get("bash")
 	if lexer != nil {
@@ -186,7 +190,7 @@ func renderApprovalScript(script string, width int, styles harnessStyles) string
 		if err == nil {
 			var highlighted bytes.Buffer
 			if err := formatters.TTY16m.Format(&highlighted, approvalBashStyle, iterator); err == nil {
-				lineStyle := lipgloss.NewStyle().Background(everforest.AttentionBg).Width(width)
+				lineStyle := lipgloss.NewStyle().Background(everforest.Surface).Width(width)
 				lines := strings.Split(strings.TrimSuffix(highlighted.String(), "\n"), "\n")
 				for i := range lines {
 					lines[i] = lineStyle.Render(lines[i])
@@ -195,26 +199,25 @@ func renderApprovalScript(script string, width int, styles harnessStyles) string
 			}
 		}
 	}
-	return styles.modalBody.Background(everforest.AttentionBg).Foreground(everforest.Text).Width(width).Render(script)
+	return styles.modalBody.Background(everforest.Surface).Foreground(everforest.Text).Width(width).Render(script)
 }
 
-// approvalBashStyle carries the band's background on every entry: chroma resets
-// the terminal at each token boundary, so a token that named the old surface
-// would cut a hole in the tint. The background here mirrors
-// everforest.AttentionBg.
+// approvalBashStyle is the chroma style for a script on the surface inset. Every
+// entry names the surface: chroma resets the terminal at each token boundary, so
+// a token that named no background would cut a hole in the inset.
 var approvalBashStyle = chroma.MustNewStyle("infai-approval-bash", chroma.StyleEntries{
-	chroma.Background:      "bg:#4d4c43",
-	chroma.Text:            "#d3c6aa bg:#4d4c43",
-	chroma.Comment:         "#859289 bg:#4d4c43",
-	chroma.CommentPreproc:  "#e69875 bg:#4d4c43",
-	chroma.Keyword:         "#d699b6 bg:#4d4c43",
-	chroma.KeywordReserved: "#d699b6 bg:#4d4c43",
+	chroma.Background:      "bg:#2e383c",
+	chroma.Text:            "#d3c6aa bg:#2e383c",
+	chroma.Comment:         "#859289 bg:#2e383c",
+	chroma.CommentPreproc:  "#e69875 bg:#2e383c",
+	chroma.Keyword:         "#d699b6 bg:#2e383c",
+	chroma.KeywordReserved: "#d699b6 bg:#2e383c",
 	chroma.Operator:        "#e67e80 bg:#4d4c43",
-	chroma.Punctuation:     "#859289 bg:#4d4c43",
-	chroma.NameBuiltin:     "#83c092 bg:#4d4c43",
-	chroma.NameFunction:    "#a7c080 bg:#4d4c43",
-	chroma.LiteralNumber:   "#d699b6 bg:#4d4c43",
-	chroma.LiteralString:   "#a7c080 bg:#4d4c43",
+	chroma.Punctuation:     "#859289 bg:#2e383c",
+	chroma.NameBuiltin:     "#83c092 bg:#2e383c",
+	chroma.NameFunction:    "#a7c080 bg:#2e383c",
+	chroma.LiteralNumber:   "#d699b6 bg:#2e383c",
+	chroma.LiteralString:   "#a7c080 bg:#2e383c",
 })
 
 func splitNumberedContent(line string) (string, string, bool) {
