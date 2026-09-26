@@ -34,7 +34,6 @@ type modalOption struct {
 	tree     string
 	fork     string
 	shortcut rune
-	command  string
 	provider string
 	model    string
 	session  uuid.UUID
@@ -252,7 +251,7 @@ func renderApprovalBody(body string, width int, styles harnessStyles) string {
 		if section == "NEW CONTENT" {
 			if number, content, ok := splitNumberedContent(line); ok {
 				numberWidth := lipgloss.Width(number)
-				numberStyle := lipgloss.NewStyle().Background(everforest.Surface).Foreground(lipgloss.Color("8")).Width(numberWidth)
+				numberStyle := lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Muted).Width(numberWidth)
 				contentStyle := lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Width(max(width-numberWidth-2, 1))
 				gap := lipgloss.NewStyle().Background(everforest.Surface).Render("  ")
 				line = lipgloss.JoinHorizontal(lipgloss.Top, numberStyle.Render(number), gap, contentStyle.Render(content))
@@ -376,19 +375,27 @@ func timelineRoleLabel(role string) string {
 	return role + ": "
 }
 
+// timelineRoleStyle resolves a timeline role to the theme's semantic colour.
+// The roles are the ones timelineEventDisplays emits, and they match the
+// timelineRoleColor palette in colors.go so the modal timeline and the
+// branch-selection screen read the same.
 func timelineRoleStyle(base lipgloss.Style, role string) lipgloss.Style {
-	color := "10" // assistant: HiGreen
 	switch role {
 	case "user":
-		color = "4" // FgBlue
-	case "thinking":
-		color = "8" // HiBlack
-	case "tool_call", "tool_result":
-		color = "13" // HiPurple
+		return base.Foreground(everforest.Blue)
+	case "assistant":
+		return base.Foreground(everforest.Green)
+	case "thinking", "tool_result":
+		return base.Foreground(everforest.Muted)
+	case "system":
+		return base.Foreground(everforest.Purple)
+	case "tool_call":
+		return base.Foreground(everforest.Text)
 	case "skill":
-		color = "6" // cyan
+		return base.Foreground(everforest.Aqua)
+	default:
+		return base.Foreground(everforest.Text)
 	}
-	return base.Foreground(lipgloss.Color(color))
 }
 
 func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyles) string {

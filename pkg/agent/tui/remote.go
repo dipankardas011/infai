@@ -178,12 +178,17 @@ func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thin
 					reply.Usage = &usage
 					reply.ContextTokens = usage.TotalTokens
 				}
-			default:
-				if event.Kind == contracts.DeltaContent {
-					reply.Reply += content
-				} else if event.Kind == contracts.DeltaReasoning {
-					reply.ReasoningContent += content
+			case contracts.DeltaContent:
+				reply.Reply += content
+				if onDelta != nil && content != "" {
+					onDelta(event.Kind, content)
 				}
+			case contracts.DeltaReasoning:
+				reply.ReasoningContent += content
+				if onDelta != nil && content != "" {
+					onDelta(event.Kind, content)
+				}
+			default:
 				if onDelta != nil && content != "" {
 					onDelta(event.Kind, content)
 				}
@@ -212,6 +217,23 @@ func approvalFromRequest(request *contracts.ApprovalRequest) *Approval {
 	}
 }
 
+func (c *RemoteClient) CancelTurn(ctx context.Context, id uuid.UUID) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/sessions/"+id.String()+"/cancel", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 func (c *RemoteClient) ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error {
 	payload, err := json.Marshal(map[string]string{
 		"fingerprint": approval.Fingerprint,
@@ -237,108 +259,6 @@ func (c *RemoteClient) ResolveApproval(ctx context.Context, approval Approval, d
 		return fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
-}
-
-// readStream consumes the SSE chat stream, delivering deltas to onDelta and
-// returning the final reply.
-func (c *RemoteClient) readStream(body io.Reader, onDelta func(kind contracts.EventStreamKind, text string), onApproval func(ApprovalUpdate)) (*ChatReply, error) {
-	dec := models.NewDecoder(body)
-
-	var reply ChatReply
-	done := false
-	for {
-		ev, err := dec.Decode()
-		if err == io.EOF {
-			if !done {
-				return nil, io.ErrUnexpectedEOF
-			}
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		var sseEv struct {
-			Kind             string                `json:"kind"`
-			Delta            string                `json:"delta"`
-			Done             bool                  `json:"done"`
-			Reply            string                `json:"reply"`
-			ReasoningContent string                `json:"reasoning_content"`
-			Status           string                `json:"status"`
-			Error            string                `json:"error"`
-			SessionID        uuid.UUID             `json:"session_id"`
-			Model            string                `json:"model"`
-			Name             string                `json:"name,omitempty"`
-			ContextWindow    uint64                `json:"ctx_window"`
-			Usage            *contracts.TokenUsage `json:"usage"`
-			ContextTokens    uint64                `json:"context_tokens"`
-			Pending          *Approval             `json:"pending"`
-			Type             string                `json:"type"`
-			ID               uuid.UUID             `json:"id"`
-			Fingerprint      string                `json:"fingerprint"`
-			ToolCall         *contracts.ToolCall   `json:"tool_call"`
-			Decision         string                `json:"decision"`
-			Reason           string                `json:"reason"`
-		}
-		if err := json.Unmarshal([]byte(ev.Data), &sseEv); err != nil {
-			return nil, err
-		}
-		if sseEv.Type != "" && onApproval != nil {
-			onApproval(ApprovalUpdate{
-				Type: sseEv.Type,
-				Approval: &Approval{
-					ID: sseEv.ID, SessionID: sseEv.SessionID,
-					Fingerprint: sseEv.Fingerprint, ToolCall: sseEv.ToolCall,
-				},
-				Decision: sseEv.Decision, Reason: sseEv.Reason,
-			})
-		}
-		if sseEv.Error != "" {
-			return nil, fmt.Errorf("server: %s", sseEv.Error)
-		}
-		if sseEv.Delta != "" {
-			kind := contracts.DeltaContent
-			switch sseEv.Kind {
-			case "reasoning":
-				kind = contracts.DeltaReasoning
-			case "provider_event":
-				kind = contracts.EventProviderEvent
-			case "compaction_summary":
-				kind = contracts.CompactionSummary
-			case "tool_call":
-				kind = contracts.EventToolCall
-			case "tool_result":
-				kind = contracts.EventToolResult
-			case "skill_load":
-				kind = contracts.EventSkillLoad
-			case "task_checklist":
-				kind = contracts.EventToolTaskCheckList
-			}
-			if kind == contracts.DeltaContent {
-				reply.Reply += sseEv.Delta
-			} else if kind == contracts.DeltaReasoning {
-				reply.ReasoningContent += sseEv.Delta
-			}
-			if onDelta != nil {
-				onDelta(kind, sseEv.Delta)
-			}
-		}
-		if sseEv.Done {
-			done = true
-			reply.Reply = sseEv.Reply
-			reply.ReasoningContent = sseEv.ReasoningContent
-			reply.Status = sseEv.Status
-			reply.SessionID = sseEv.SessionID
-			reply.Model = sseEv.Model
-			reply.ContextWindow = sseEv.ContextWindow
-			reply.Name = sseEv.Name
-			reply.Usage = sseEv.Usage
-			reply.ContextTokens = sseEv.ContextTokens
-			reply.Pending = sseEv.Pending
-		}
-	}
-
-	return &reply, nil
 }
 
 // ---- providers ----

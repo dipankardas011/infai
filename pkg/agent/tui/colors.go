@@ -2,34 +2,47 @@ package tui
 
 import "github.com/fatih/color"
 
-// Color scheme for the plain-stdio REPL. fatih/color disables the ANSI codes
-// automatically when the output is not a terminal, so piping stays plain.
+// The plain-stdio REPL's palette. This file is the only place in the REPL that
+// names a colour: every other file uses these, and theme.go holds the palette
+// the bubbletea UI draws with.
+//
+// The two palettes cannot be the same values — fatih/color takes ANSI
+// attributes and the theme uses truecolor — so each entry below names the
+// theme colour it stands in for. fatih/color drops the ANSI codes when the
+// output is not a terminal, so piping stays plain.
 var (
 	cPrompt         = color.New(color.FgBlue)             // the "> " input marker
-	cUser           = color.New(color.FgBlue, color.Bold) // user messages (● dot, blue)
-	cThinking       = color.New(color.FgHiBlack)          // model reasoning (dark grey)
-	cAssistant      = color.New(color.FgGreen)            // model answers (● dot, green)
-	cChatText       = color.New(color.FgHiWhite)          // chat message bodies
+	cUser           = color.New(color.FgBlue, color.Bold) // user messages (● dot), theme: Blue
+	cThinking       = color.New(color.FgHiBlack)          // model reasoning (dark grey), theme: Muted
+	cAssistant      = color.New(color.FgGreen)            // model answers (● dot, green), theme: Green
 	cHeader         = color.New(color.FgHiBlack)          // footer + separators
-	cPopupBorder    = color.New(color.FgHiWhite)          // popup frame
-	cSystem         = color.New(color.FgMagenta)          // system/notices
-	cError          = color.New(color.FgRed)              // errors
-	cToolCallText   = color.New(color.FgHiWhite)          // tool-call text and arguments
-	cToolResultText = color.New(color.FgHiBlack)          // tool-result text and output
-	cSkill          = color.New(color.FgHiCyan)           // skill loads
+	cSystem         = color.New(color.FgMagenta)          // system/notices, theme: Purple
+	cToolCallText   = color.New(color.FgHiWhite)          // tool-call text and arguments, theme: Text
+	cToolResultText = color.New(color.FgHiBlack)          // tool-result text and output, theme: Muted
+	cSkill          = color.New(color.FgHiCyan)           // skill loads, theme: Aqua
 )
 
+// timelineRoleColor is the timeline's role palette, used by both the
+// branch-selection screen here and the timeline modal. The roles are the ones
+// timelineEventDisplays emits; a role with no colour of its own returns nil so
+// the caller renders it plainly instead of borrowing another role's colour.
 func timelineRoleColor(role string) *color.Color {
 	switch role {
 	case "user":
-		return color.New(color.FgBlue)
+		return cUser
+	case "assistant":
+		return cAssistant
 	case "thinking":
-		return color.New(color.FgHiBlack)
-	case "tool_call", "tool_result":
-		return color.New(color.FgHiMagenta)
+		return cThinking
+	case "system":
+		return cSystem
+	case "tool_call":
+		return cToolCallText
+	case "tool_result":
+		return cToolResultText
 	case "skill":
-		return color.New(color.FgCyan)
+		return cSkill
 	default:
-		return color.New(color.FgHiGreen)
+		return nil
 	}
 }

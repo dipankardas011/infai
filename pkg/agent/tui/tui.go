@@ -65,6 +65,7 @@ type Client interface {
 	SendMessage(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel) error
 	JoinSession(ctx context.Context, id uuid.UUID, onView func(glue.SessionView), onEvent func(contracts.EventStream)) error
 	ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error
+	CancelTurn(ctx context.Context, id uuid.UUID) error
 	SetSession(id uuid.UUID)
 	CreateSession(ctx context.Context, opts SessionCreateOptions) (*glue.SessionOutput, error)
 	LoadSession(ctx context.Context, id uuid.UUID) (*glue.SessionOutput, error)
@@ -552,7 +553,11 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 				fork = ""
 			}
 			fmt.Fprintf(out, "  %d  %s%s%s", len(options), current, tree, fork)
-			timelineRoleColor(display.role).Fprintf(out, "%s:", display.role)
+			if roleColor := timelineRoleColor(display.role); roleColor != nil {
+				roleColor.Fprintf(out, "%s:", display.role)
+			} else {
+				fmt.Fprintf(out, "%s:", display.role)
+			}
 			fmt.Fprintf(out, " %s\n", display.text)
 			options = append(options, row.event)
 		}

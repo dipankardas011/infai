@@ -89,7 +89,7 @@ func newHarnessStyles() harnessStyles {
 		composer:    lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
 		status:      lipgloss.NewStyle().Foreground(everforest.Muted),
 		statusBusy:  lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
-		sessionName: lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true),
+		sessionName: lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
 		muted:       lipgloss.NewStyle().Foreground(everforest.Muted),
 		userMarker:  lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
 		assistant:   lipgloss.NewStyle().Foreground(everforest.Text),

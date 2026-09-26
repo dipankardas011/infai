@@ -119,11 +119,6 @@ func contentWidth(style lipgloss.Style, available int) int {
 	return max(available-style.GetHorizontalFrameSize(), 1)
 }
 
-func spread(width int, style lipgloss.Style, left, right string) string {
-	gap := max(contentWidth(style, width)-lipgloss.Width(left)-lipgloss.Width(right), 1)
-	return left + strings.Repeat(" ", gap) + right
-}
-
 // visibleRange keeps a selected item visible within a bounded list.
 func visibleRange(length, selected, capacity int) (int, int) {
 	if length <= 0 || capacity <= 0 {

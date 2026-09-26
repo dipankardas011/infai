@@ -2,8 +2,8 @@ package tui
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"image/color"
 	"strings"
 	"testing"
 	"time"
@@ -490,35 +490,55 @@ func TestSessionWorkspaceShowsBrandAndSections(t *testing.T) {
 	}
 }
 
-func TestWorkingTurnDoesNotQueueInputOrOpenSessions(t *testing.T) {
+func TestWorkingTurnQueuesInputWithoutReplacingStatus(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.working = true
-	turnCtx, cancel := context.WithCancel(context.Background())
-	m.turnCancel = cancel
+	m.workStatus = "waiting for approval"
+	m.session = store.SessionMeta{ID: uuid.New(), Model: "test-model"}
 	_ = m.composer.Focus()
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
 	_, _ = m.Update(tea.PasteMsg{Content: "queued"})
+	if m.composer.Value() != "xqueued" {
+		t.Fatalf("composer while working = %q, want the typed text", m.composer.Value())
+	}
+
+	// A queued prompt must leave the running turn's status to the events.
+	if cmd := m.submit(); cmd == nil {
+		t.Fatal("prompt sent while working was dropped")
+	}
+	if m.workStatus != "waiting for approval" {
+		t.Fatalf("queued prompt replaced the running status with %q", m.workStatus)
+	}
+	if !m.working {
+		t.Fatal("queued prompt ended the running turn")
+	}
+	if m.composer.Value() != "" {
+		t.Fatalf("queued prompt left the composer holding %q", m.composer.Value())
+	}
+}
+
+func TestWorkingTurnKeepsWorkspaceClosedAndCancelArmed(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.working = true
+	m.workStatus = "working"
+
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
+	if m.modal != nil {
+		t.Fatal("working turn opened the session workspace")
+	}
+
 	escape := tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
 	_, cmd := m.Update(escape)
-	if turnCtx.Err() != nil {
-		t.Fatal("first escape canceled the working turn")
-	}
 	if cmd == nil || !m.cancelArmed {
 		t.Fatal("first escape did not arm cancellation timeout")
 	}
-	_, _ = m.Update(escape)
-	if !errors.Is(turnCtx.Err(), context.Canceled) {
-		t.Fatal("second escape did not cancel the working turn")
-	}
-
-	if m.composer.Value() != "" {
-		t.Fatalf("working turn queued composer input %q", m.composer.Value())
-	}
-	if m.modal != nil {
-		t.Fatal("working turn opened the session workspace")
+	_, cmd = m.Update(escape)
+	if cmd == nil || m.workStatus != "canceling" {
+		t.Fatal("second escape did not request turn cancellation")
 	}
 }
 
@@ -527,9 +547,6 @@ func TestWorkingTurnCancelArmExpires(t *testing.T) {
 	m.modal = nil
 	m.working = true
 	m.workStatus = "working"
-	turnCtx, cancel := context.WithCancel(context.Background())
-	m.turnCancel = cancel
-	t.Cleanup(cancel)
 
 	escape := tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
 	_, _ = m.Update(escape)
@@ -542,9 +559,9 @@ func TestWorkingTurnCancelArmExpires(t *testing.T) {
 		t.Fatalf("work status after timeout = %q, want working", m.workStatus)
 	}
 
-	_, _ = m.Update(escape)
-	if turnCtx.Err() != nil {
-		t.Fatal("escape after timeout acted as the second escape")
+	_, cmd := m.Update(escape)
+	if cmd == nil || !m.cancelArmed {
+		t.Fatal("escape after timeout did not start a new cancellation sequence")
 	}
 	_, _ = m.Update(cancelArmTimeoutMsg{id: armID})
 	if !m.cancelArmed {
@@ -935,14 +952,19 @@ func TestTimelineOriginalHasNoTextLabel(t *testing.T) {
 }
 
 func TestTimelineRoleColors(t *testing.T) {
-	tests := map[string]string{
-		"user": "4", "thinking": "8", "assistant": "10",
-		"tool_call": "13", "tool_result": "13", "skill": "6",
+	tests := map[string]color.Color{
+		"user":        everforest.Blue,
+		"assistant":   everforest.Green,
+		"thinking":    everforest.Muted,
+		"system":      everforest.Purple,
+		"tool_call":   everforest.Text,
+		"tool_result": everforest.Muted,
+		"skill":       everforest.Aqua,
 	}
 	for role, want := range tests {
 		got := timelineRoleStyle(lipgloss.NewStyle(), role).GetForeground()
-		if got != lipgloss.Color(want) {
-			t.Errorf("role %s color=%v want=%v", role, got, lipgloss.Color(want))
+		if got != want {
+			t.Errorf("role %s color=%v want=%v", role, got, want)
 		}
 	}
 }
@@ -1164,6 +1186,7 @@ func (stubChatClient) JoinSession(context.Context, uuid.UUID, func(glue.SessionV
 	return nil
 }
 func (stubChatClient) ResolveApproval(context.Context, Approval, string, string) error { return nil }
+func (stubChatClient) CancelTurn(context.Context, uuid.UUID) error                     { return nil }
 func (stubChatClient) SetSession(uuid.UUID)                                            {}
 func (stubChatClient) CreateSession(context.Context, SessionCreateOptions) (*glue.SessionOutput, error) {
 	return &glue.SessionOutput{}, nil

@@ -38,7 +38,6 @@ type block struct {
 	toolStatus    string
 	toolName      string
 	toolArgs      string
-	skillName     string
 	rendered      string
 	renderedWidth int
 	renderedValid bool
@@ -75,7 +74,6 @@ type chatModel struct {
 	cancelArmed       bool
 	cancelArmID       uint64
 	cancelStatus      string
-	turnCancel        context.CancelFunc
 	stream            chan tea.Msg
 	sessionCancel     context.CancelFunc
 	sessionStream     chan tea.Msg
@@ -106,7 +104,11 @@ type sessionJoinDoneMsg struct {
 	err        error
 }
 
-type messageSentMsg struct{ err error }
+type messageSentMsg struct {
+	ownsWork bool
+	err      error
+}
+type turnCanceledMsg struct{ err error }
 
 type streamDeltaMsg struct {
 	kind contracts.EventStreamKind
@@ -258,27 +260,41 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case messageSentMsg:
-		m.turnCancel = nil
 		if msg.err != nil {
-			m.working = false
-			m.workStatus = ""
+			// Only a send that opened the turn may close it; a refused queued
+			// prompt leaves the running turn's status alone.
+			if msg.ownsWork {
+				m.working = false
+				m.workStatus = ""
+			}
 			m.appendError(msg.err)
 			m.refreshTranscript(true)
 			m.reflow(false)
-			if m.session.ID != uuid.Nil {
+			if msg.ownsWork && m.session.ID != uuid.Nil {
 				return m, m.startSessionObserver(m.session.ID)
 			}
 		}
 		return m, nil
+	case turnCanceledMsg:
+		// A cancel the server refused leaves the turn as it was; clearing the
+		// label lets the status view fall back to working until the session
+		// reports its own status again.
+		if msg.err != nil {
+			m.workStatus = ""
+			m.appendError(msg.err)
+			m.refreshTranscript(true)
+		}
+		return m, nil
 	case streamDeltaMsg:
-		if msg.kind == contracts.EventProviderEvent {
+		switch msg.kind {
+		case contracts.EventProviderEvent:
 			status := statusLabel(msg.text)
 			if m.cancelArmed {
 				m.cancelStatus = status
 			} else {
 				m.workStatus = status
 			}
-		} else if msg.kind == contracts.EventToolTaskCheckList {
+		case contracts.EventToolTaskCheckList:
 			if state, err := decodeTaskChecklist(msg.text); err == nil {
 				m.checklist = state
 			}
@@ -307,10 +323,6 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleClipboardImage(msg)
 	case turnDoneMsg:
 		m.stopStreamRefresh()
-		if m.turnCancel != nil {
-			m.turnCancel()
-			m.turnCancel = nil
-		}
 		m.working = false
 		m.streaming = false
 		m.cancelArmed = false
@@ -476,7 +488,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.PasteMsg:
-		if m.modal == nil && !m.working {
+		if m.modal == nil {
 			var cmd tea.Cmd
 			m.composer, cmd = m.composer.Update(msg)
 			m.updateCommandMenu()
@@ -530,14 +542,13 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.workStatus = "press esc again to cancel"
 			m.reflow(false)
 			return m, cancelArmTimeoutCmd(m.cancelArmID)
-		} else if m.turnCancel != nil {
+		} else {
 			m.cancelArmed = false
 			m.cancelStatus = ""
 			m.workStatus = "canceling"
-			m.turnCancel()
+			m.reflow(false)
+			return m, cancelTurnCmd(m.ctx, m.client, m.session.ID)
 		}
-		m.reflow(false)
-		return m, nil
 	}
 	if m.modal != nil {
 		return m, m.handleModalKey(msg)
@@ -555,24 +566,20 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.working {
+		// A running turn does not stop the composer: a prompt typed now is
+		// queued by the session and served next. The session workspace and the
+		// model picker stay closed, because both reattach the client to a
+		// different session rather than feed this turn.
 		switch key {
-		case "pgup":
-			m.viewport.PageUp()
-		case "pgdown":
-			m.viewport.PageDown()
-		case "ctrl+up":
-			m.viewport.ScrollUp(3)
-		case "ctrl+down":
-			m.viewport.ScrollDown(3)
+		case "ctrl+o", "ctrl+m":
+			return m, nil
 		}
-		m.reflow(false)
-		return m, nil
 	}
 	if key == "ctrl+o" {
 		m.modal = loadingModal("Loading sessions")
 		return m, listSessionsCmd(m.ctx, m.client)
 	}
-	if key == "ctrl+n" {
+	if key == "ctrl+m" {
 		m.modal = loadingModal("Loading models")
 		return m, listProvidersCmd(m.ctx, m.client, false)
 	}
@@ -753,7 +760,7 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 
 func (m *chatModel) submit() tea.Cmd {
 	prompt := strings.TrimSpace(m.composer.Value())
-	if prompt == "" || m.working {
+	if prompt == "" {
 		return nil
 	}
 	images := append([]contracts.ImageInput(nil), m.pending...)
@@ -780,19 +787,29 @@ func (m *chatModel) submit() tea.Cmd {
 	m.reflow(false)
 
 	input := contracts.UserInput{Text: prompt, Images: images}
-	m.working = true
-	m.workBegan = time.Now()
-	m.workStatus = "working"
+	// A prompt sent while a turn is running is queued by the session and served
+	// next. The turn already in flight owns the status, so it is left as the
+	// events reported it.
+	ownsWork := !m.working
+	if ownsWork {
+		m.working = true
+		m.workBegan = time.Now()
+		m.workStatus = "working"
+	}
 	m.cancelArmed = false
 	m.refreshTranscript(true)
 	thinking := m.thinking
-	turnCtx, cancel := context.WithCancel(m.ctx)
-	m.turnCancel = cancel
 	// Attachments are consumed only once dispatch has successfully begun.
 	m.pending = nil
 	return tea.Batch(func() tea.Msg {
-		return messageSentMsg{err: m.client.SendMessage(turnCtx, input, thinking)}
+		return messageSentMsg{ownsWork: ownsWork, err: m.client.SendMessage(m.ctx, input, thinking)}
 	}, animationTickCmd())
+}
+
+func cancelTurnCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
+	return func() tea.Msg {
+		return turnCanceledMsg{err: client.CancelTurn(ctx, id)}
+	}
 }
 
 func (m *chatModel) startSessionObserver(sessionID uuid.UUID) tea.Cmd {
@@ -826,7 +843,7 @@ func (m *chatModel) startSessionObserver(sessionID uuid.UUID) tea.Cmd {
 func (m *chatModel) applySessionView(view glue.SessionView) {
 	m.session = view.Meta
 	m.blocks = blocksFromMessages(view.History)
-	m.checklist = taskChecklistFromMessages(view.History)
+	m.checklist = view.Checklist
 	// The in-flight log is replayed through the same handler the live stream
 	// uses, so a client that joins mid-generation renders the generation the
 	// same way it would have rendered it live.
@@ -940,15 +957,6 @@ func blocksFromMessages(history []contracts.ChatMessage) []block {
 	return blocksFromRecords(records)
 }
 
-func taskChecklistFromMessages(history []contracts.ChatMessage) contracts.TaskChecklistState {
-	records := make([]store.Record, 0, len(history))
-	for i := range history {
-		message := history[i]
-		records = append(records, store.Record{Kind: store.KindMessage, Message: &message})
-	}
-	return taskChecklistFromRecords(records)
-}
-
 func waitStream(ctx context.Context, stream <-chan tea.Msg) tea.Cmd {
 	if stream == nil {
 		return nil
@@ -980,7 +988,7 @@ func (m *chatModel) modelSupportsImage() bool {
 // preflight checks synchronously so failures are reported without spawning a
 // process.
 func (m *chatModel) pasteImage() tea.Cmd {
-	if m.modal != nil || m.working {
+	if m.modal != nil {
 		return nil
 	}
 	if m.session.ID == uuid.Nil {
@@ -1223,8 +1231,8 @@ func (m *chatModel) headerView() string {
 
 func (m *chatModel) statusView() string {
 	separator := m.styles.status.Render("  ·  ")
-	rest := m.styles.status.Render("ready")
 	name := ""
+	var rest string
 	if m.session.ID == uuid.Nil {
 		rest = m.styles.status.Render("choose a session to begin")
 	} else {
@@ -1979,10 +1987,14 @@ func streamRefreshTickCmd(id uint64) tea.Cmd {
 func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required bool) {
 	options := []modalOption{{label: "Start a new session", detail: "choose a provider and model", status: "NEW", shortcut: 'n'}}
 	for i, session := range sessions {
-		status := "INACTIVE"
-		if session.Active || session.ID == m.session.ID {
-			status = "ACTIVE"
+		status := string(session.Status)
+		if status == "" {
+			status = "inactive"
 		}
+		if session.Active || session.ID == m.session.ID {
+			status = "active"
+		}
+		status = strings.ToUpper(status)
 		name := session.Name
 		if name == "" {
 			name = "Untitled session"
