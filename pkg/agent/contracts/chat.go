@@ -1,18 +1,5 @@
 package contracts
 
-import "github.com/google/uuid"
-
-// ChatResult is the outcome of one Chat call on a session.
-type ChatResult struct {
-	SessionID        uuid.UUID
-	Status           TurnStatus
-	Reply            string
-	ReasoningContent string
-	Pending          *ApprovalRequest
-	Usage            *TokenUsage
-	ContextTokens    uint64
-}
-
 // ChatOptions carries per-chat knobs.
 type ChatOptions struct {
 	Thinking InfaiThinkingLevel

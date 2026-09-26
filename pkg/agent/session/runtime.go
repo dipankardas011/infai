@@ -37,10 +37,11 @@ func (s *InfaiAgentSession) JoinSessionEvents() (glue.SessionView, <-chan contra
 	sub := &subscriber{events: make(chan contracts.EventStream, SUBSCRIBER_BUFFER)}
 	s.subscribers[sub] = struct{}{}
 	view := glue.SessionView{
-		Meta:     s.meta,
-		History:  append([]contracts.ChatMessage(nil), s.activeTimeline...),
-		Status:   s.status,
-		InFlight: append([]contracts.EventStream(nil), s.inFlight...),
+		Meta:      s.meta,
+		History:   append([]contracts.ChatMessage(nil), s.activeTimeline...),
+		Status:    s.status,
+		InFlight:  append([]contracts.EventStream(nil), s.inFlight...),
+		Checklist: s.taskChecklist.Snapshot(),
 	}
 	if s.pendingApproval != nil {
 		request := s.pendingApproval.request

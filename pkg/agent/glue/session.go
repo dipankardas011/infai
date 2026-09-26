@@ -7,11 +7,12 @@ import (
 )
 
 type SessionView struct {
-	Meta            store.SessionMeta          `json:"meta"`
-	History         []contracts.ChatMessage    `json:"history"`
-	Status          contracts.SessionStatus    `json:"status"`
-	InFlight        []contracts.EventStream    `json:"in_flight"`
-	PendingApproval *contracts.ApprovalRequest `json:"pending_approval,omitempty"`
+	Meta            store.SessionMeta            `json:"meta"`
+	History         []contracts.ChatMessage      `json:"history"`
+	Status          contracts.SessionStatus      `json:"status"`
+	InFlight        []contracts.EventStream      `json:"in_flight"`
+	Checklist       contracts.TaskChecklistState `json:"checklist"`
+	PendingApproval *contracts.ApprovalRequest   `json:"pending_approval,omitempty"`
 }
 
 // SessionOutput combines durable session metadata with runtime model capacity.

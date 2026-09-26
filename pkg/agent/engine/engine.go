@@ -400,8 +400,6 @@ func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) err
 	return sess.CompactChat(ctx)
 }
 
-// CloseSession removes and closes a session and deletes its timeline from
-// disk. An in-flight Chat finishes or is canceled by its own context.
 func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 	e.mu.Lock()
 	sess, ok := e.activeSessionAgents[id]
@@ -416,6 +414,26 @@ func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 	sess.Close()
 	e.aseComms.UnregisterSessionAgent(id)
 	e.bgLogger.Info("session closed", "session_id", id)
+	return nil
+}
+
+// DeleteSession closes the session when it is resident, then removes its
+// timeline and metadata from disk. A saved session has nothing to close.
+func (e *InfaiAgentEngine) DeleteSession(id uuid.UUID) error {
+	switch err := e.CloseSession(id); {
+	case err == nil:
+	case errors.Is(err, harnessErr.ErrSessionNotFound):
+		if _, loadErr := e.sessionStore.LoadMeta(id); loadErr != nil {
+			return harnessErr.ErrSessionNotFound
+		}
+	default:
+		return err
+	}
+
+	if err := e.sessionStore.Delete(id); err != nil {
+		return err
+	}
+	e.bgLogger.Info("session deleted", "session_id", id)
 	return nil
 }
 
