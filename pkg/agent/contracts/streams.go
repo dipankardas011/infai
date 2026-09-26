@@ -55,13 +55,18 @@ const (
 )
 
 type EventStream struct {
-	Kind       EventStreamKind      `json:"delta_kind,omitempty"`
-	Timestamp  time.Time            `json:"ts"`
-	Content    *string              `json:"content"`
-	ToolCall   *ToolCall            `json:"tool_call"`
-	ToolResult *ToolExecutionResult `json:"tool_result"`
-	HITLCall   *ApprovalRequest     `json:"hitl_call"`
-	HITLResult *ApprovalConclusion  `json:"hitl_result"`
+	Kind        EventStreamKind      `json:"delta_kind,omitempty"`
+	Timestamp   time.Time            `json:"ts"`
+	Content     *string              `json:"content"`
+	ToolCall    *ToolCall            `json:"tool_call"`
+	ToolResult  *ToolExecutionResult `json:"tool_result"`
+	HITLCall    *ApprovalRequest     `json:"hitl_call"`
+	HITLResult  *ApprovalConclusion  `json:"hitl_result"`
+	Attachments *EventAttachments    `json:"attachments,omitempty"`
+}
+
+type EventAttachments struct {
+	ImageCount int `json:"image_count,omitempty"`
 }
 
 func ToolCallDisplay(call ToolCall) string {

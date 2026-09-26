@@ -903,7 +903,11 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 	case contracts.EventSubscriberGap:
 		m.appendError(errors.New(content))
 	case contracts.EventMessageFromAgentInbox:
-		m.blocks = append(m.blocks, block{role: "user", text: content})
+		images := 0
+		if event.Attachments != nil {
+			images = event.Attachments.ImageCount
+		}
+		m.blocks = append(m.blocks, block{role: "user", text: content, imageCount: images})
 	case contracts.EventToolCall:
 		if event.ToolCall != nil {
 			m.appendToolEvent("call", contracts.ToolCallDisplay(*event.ToolCall))
@@ -1092,15 +1096,6 @@ func (m *chatModel) renderImageBadges(count int) string {
 	return strings.Join(badges, " ")
 }
 
-// attachmentsView shows the staged attachments as [Image N] chips above the
-// composer. The composer text itself stays clean.
-func (m *chatModel) attachmentsView() string {
-	if len(m.pending) == 0 {
-		return ""
-	}
-	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, m.renderImageBadges(len(m.pending)))
-}
-
 // clearAttachments drops every staged image. Ctrl+U is the explicit action
 // because the composer carries no marker text to delete.
 func (m *chatModel) clearAttachments() {
@@ -1266,6 +1261,15 @@ func (m *chatModel) statusView() string {
 		rest = m.styles.sessionName.Render(name) + separator + rest
 	}
 	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, rest)
+}
+
+// attachmentsView shows the staged attachments as [Image N] chips above the
+// composer. The composer text itself stays clean.
+func (m *chatModel) attachmentsView() string {
+	if len(m.pending) == 0 {
+		return ""
+	}
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, m.renderImageBadges(len(m.pending)))
 }
 
 // checklistView is the task checklist, rendered above the status row. It is
