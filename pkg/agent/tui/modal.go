@@ -1,15 +1,11 @@
 package tui
 
 import (
-	"bytes"
 	"fmt"
 	"image/color"
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/alecthomas/chroma/v2"
-	"github.com/alecthomas/chroma/v2/formatters"
-	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/uuid"
 )
@@ -136,102 +132,6 @@ func renderModal(m *modalModel, width, height int, styles harnessStyles) string 
 	}
 
 	return modalStyle.Width(boxWidth).MaxHeight(height).Render(strings.Join(rows, "\n"))
-}
-
-func renderApprovalBody(body string, width int, styles harnessStyles) string {
-	var rendered []string
-	section := ""
-	for _, line := range strings.Split(body, "\n") {
-		style := styles.modalBody.Background(everforest.AttentionBg)
-		switch line {
-		case "SCRIPT", "NEW CONTENT":
-			section = line
-			style = styles.active.Background(everforest.AttentionBg).Bold(true)
-		case "BEFORE":
-			section = line
-			style = lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Red).Bold(true)
-		case "AFTER":
-			section = line
-			style = styles.active.Background(everforest.AttentionBg).Bold(true)
-		default:
-			switch section {
-			case "SCRIPT", "NEW CONTENT":
-				style = lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Text)
-			case "BEFORE":
-				style = lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Red)
-			case "AFTER":
-				style = lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Green)
-			}
-		}
-		if section == "NEW CONTENT" {
-			if number, content, ok := splitNumberedContent(line); ok {
-				numberWidth := lipgloss.Width(number)
-				numberStyle := lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Muted).Width(numberWidth)
-				contentStyle := lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Text).Width(max(width-numberWidth-2, 1))
-				gap := lipgloss.NewStyle().Background(everforest.AttentionBg).Render("  ")
-				line = lipgloss.JoinHorizontal(lipgloss.Top, numberStyle.Render(number), gap, contentStyle.Render(content))
-				rendered = append(rendered, strings.Split(line, "\n")...)
-				continue
-			}
-		}
-		rendered = append(rendered, strings.Split(style.Width(width).Render(line), "\n")...)
-	}
-	return strings.Join(rendered, "\n")
-}
-
-// renderApprovalScript highlights a bash script, or any script the approval
-// carries, on the darker surface rather than the attention band: the code is the
-// same kind of inset as a diff, and the band is for the decision, not the
-// payload.
-func renderApprovalScript(script string, width int, styles harnessStyles) string {
-	lexer := lexers.Get("bash")
-	if lexer != nil {
-		iterator, err := chroma.Coalesce(lexer).Tokenise(nil, script)
-		if err == nil {
-			var highlighted bytes.Buffer
-			if err := formatters.TTY16m.Format(&highlighted, approvalBashStyle, iterator); err == nil {
-				lineStyle := lipgloss.NewStyle().Background(everforest.Surface).Width(width)
-				lines := strings.Split(strings.TrimSuffix(highlighted.String(), "\n"), "\n")
-				for i := range lines {
-					lines[i] = lineStyle.Render(lines[i])
-				}
-				return strings.Join(lines, "\n")
-			}
-		}
-	}
-	return styles.modalBody.Background(everforest.Surface).Foreground(everforest.Text).Width(width).Render(script)
-}
-
-// approvalBashStyle is the chroma style for a script on the surface inset. Every
-// entry names the surface: chroma resets the terminal at each token boundary, so
-// a token that named no background would cut a hole in the inset.
-var approvalBashStyle = chroma.MustNewStyle("infai-approval-bash", chroma.StyleEntries{
-	chroma.Background:      "bg:#2e383c",
-	chroma.Text:            "#d3c6aa bg:#2e383c",
-	chroma.Comment:         "#859289 bg:#2e383c",
-	chroma.CommentPreproc:  "#e69875 bg:#2e383c",
-	chroma.Keyword:         "#d699b6 bg:#2e383c",
-	chroma.KeywordReserved: "#d699b6 bg:#2e383c",
-	chroma.Operator:        "#e67e80 bg:#4d4c43",
-	chroma.Punctuation:     "#859289 bg:#2e383c",
-	chroma.NameBuiltin:     "#83c092 bg:#2e383c",
-	chroma.NameFunction:    "#a7c080 bg:#2e383c",
-	chroma.LiteralNumber:   "#d699b6 bg:#2e383c",
-	chroma.LiteralString:   "#a7c080 bg:#2e383c",
-})
-
-func splitNumberedContent(line string) (string, string, bool) {
-	separator := strings.Index(line, "  ")
-	if separator <= 0 {
-		return "", "", false
-	}
-	number := line[:separator]
-	for _, r := range strings.TrimSpace(number) {
-		if r < '0' || r > '9' {
-			return "", "", false
-		}
-	}
-	return number, line[separator+2:], true
 }
 
 func renderTimelineOption(option modalOption, selected bool, width int, styles harnessStyles) string {

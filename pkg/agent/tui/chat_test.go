@@ -623,12 +623,12 @@ func TestLongModalAndShortLayoutStayWithinTerminal(t *testing.T) {
 	}
 }
 
-func TestApprovalOverlayKeepsTranscriptVisible(t *testing.T) {
+func TestApprovalBandKeepsTranscriptVisible(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.blocks = []block{{role: "system", text: "transcript remains visible"}}
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 20})
-	m.showApproval(&Approval{Message: "Run this command?"})
+	m.showApproval(&Approval{})
 
 	collapsed := ansi.Strip(m.View().Content)
 	for _, want := range []string{"transcript remains visible", "TOOL", "[A]llow", "[D]eny"} {
@@ -636,10 +636,11 @@ func TestApprovalOverlayKeepsTranscriptVisible(t *testing.T) {
 			t.Fatalf("approval view does not contain %q:\n%s", want, collapsed)
 		}
 	}
-	// The message is part of the detail, so it arrives with the expansion.
+	// The detail arrives with the expansion, into the transcript that keeps its
+	// content visible behind it.
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	expanded := ansi.Strip(m.View().Content)
-	for _, want := range []string{"transcript remains visible", "Human In the Loop", "tool_call: TOOL", "Run this command?", "[A]llow", "[D]eny"} {
+	for _, want := range []string{"transcript remains visible", "Human In the Loop", "tool_call: TOOL", "[A]llow", "[D]eny"} {
 		if !strings.Contains(expanded, want) {
 			t.Fatalf("expanded approval view does not contain %q:\n%s", want, expanded)
 		}
@@ -718,7 +719,7 @@ func TestApprovalKeysAnswerTheDecision(t *testing.T) {
 	}
 }
 
-func TestApprovalModalRendersEditDiff(t *testing.T) {
+func TestApprovalDetailRendersEditDiff(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
@@ -733,11 +734,11 @@ func TestApprovalModalRendersEditDiff(t *testing.T) {
 	content := ansi.Strip(m.View().Content)
 	for _, want := range []string{"Human In the Loop", "tool_call: edit", "TARGET  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new", "[A]llow", "[D]eny"} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("edit approval modal lacks %q:\n%s", want, content)
+			t.Fatalf("edit approval detail lacks %q:\n%s", want, content)
 		}
 	}
 	if strings.Contains(content, "BEFORE") || strings.Contains(content, "AFTER") {
-		t.Fatalf("edit approval modal still shows BEFORE/AFTER:\n%s", content)
+		t.Fatalf("edit approval detail still shows BEFORE/AFTER:\n%s", content)
 	}
 }
 
@@ -766,7 +767,7 @@ func TestEditDiffWrapsAndKeepsActionsPinned(t *testing.T) {
 	}
 }
 
-func TestApprovalModalRendersWriteAdditions(t *testing.T) {
+func TestApprovalDetailRendersWriteAdditions(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
@@ -781,7 +782,7 @@ func TestApprovalModalRendersWriteAdditions(t *testing.T) {
 	content := ansi.Strip(m.View().Content)
 	for _, want := range []string{"Human In the Loop", "tool_call: write", "TARGET  notes.txt", "1 + first line", "2 + second line"} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("write approval modal lacks %q:\n%s", want, content)
+			t.Fatalf("write approval detail lacks %q:\n%s", want, content)
 		}
 	}
 }
@@ -827,7 +828,7 @@ func TestApprovalToolCallFormatting(t *testing.T) {
 	}
 }
 
-func TestApprovalModalRendersBashAsCode(t *testing.T) {
+func TestApprovalDetailRendersBashAsCode(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
@@ -840,22 +841,20 @@ func TestApprovalModalRendersBashAsCode(t *testing.T) {
 	content := ansi.Strip(m.View().Content)
 	for _, want := range []string{"Human In the Loop", "tool_call: bash", "SCRIPT", "if test -f go.mod; then", "go test ./...", "fi"} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("bash approval modal lacks %q:\n%s", want, content)
+			t.Fatalf("bash approval detail lacks %q:\n%s", want, content)
 		}
 	}
 	if strings.Contains(content, "```bash") {
-		t.Fatalf("bash approval modal exposes Markdown fence:\n%s", content)
+		t.Fatalf("bash approval detail exposes Markdown fence:\n%s", content)
 	}
 
+	// The code sits on the one inset a diff uses, never on the attention band.
 	highlighted := renderApprovalScript("nvidia-smi", 40, newHarnessStyles())
-	if !strings.Contains(highlighted, "\x1b[48;2;46;56;60m") {
-		t.Fatalf("bash approval script does not use the surface inset: %q", highlighted)
+	if !strings.Contains(highlighted, "\x1b[48;2;39;46;51m") {
+		t.Fatalf("bash approval script does not use the code inset: %q", highlighted)
 	}
 	if strings.Contains(highlighted, "\x1b[48;2;77;76;67m") {
 		t.Fatalf("bash approval script is painted on the attention band: %q", highlighted)
-	}
-	if strings.Contains(highlighted, "\x1b[48;2;39;46;51m") {
-		t.Fatalf("bash approval script uses app background: %q", highlighted)
 	}
 	if got := strings.TrimSpace(ansi.Strip(highlighted)); got != "nvidia-smi" {
 		t.Fatalf("bash approval script=%q", got)

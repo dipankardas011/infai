@@ -35,12 +35,13 @@ type ChatReply struct {
 }
 
 // Approval is a human-in-the-loop checkpoint the agent reached; the turn
-// pauses until the user decides.
+// pauses until the user decides. It carries exactly what the server's
+// contracts.ApprovalRequest carries: there is no message to show, the tool call
+// is the message.
 type Approval struct {
 	ID          uuid.UUID
 	SessionID   uuid.UUID
 	Fingerprint string
-	Message     string
 	ToolCall    *contracts.ToolCall
 }
 

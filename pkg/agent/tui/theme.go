@@ -111,16 +111,14 @@ func newHarnessStyles() harnessStyles {
 		// as reserved space without any frame to get wrong. Every style on the
 		// band carries the band's own background: a foreground-only style would
 		// punch the terminal's background through the row.
-		hitl:      lipgloss.NewStyle().Background(everforest.AttentionBg),
-		hitlFlag:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Yellow).Bold(true),
-		hitlName:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Purple).Bold(true),
-		hitlBody:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Text),
-		hitlMuted: lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Muted),
-		hitlAllow: lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Green).Bold(true),
-		hitlDeny:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Red).Bold(true),
-		// The expanded detail is the same band: one block of attention, whether
-		// the decision is collapsed into the reserved rows or opened up.
+		hitl:        lipgloss.NewStyle().Background(everforest.AttentionBg),
+		hitlFlag:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Yellow).Bold(true),
 		hitlTitle:   lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Orange).Bold(true),
+		hitlName:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Purple).Bold(true),
+		hitlBody:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Text),
+		hitlMuted:   lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Muted),
+		hitlAllow:   lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Green).Bold(true),
+		hitlDeny:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Red).Bold(true),
 		sessionName: lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
 		muted:       lipgloss.NewStyle().Foreground(everforest.Muted),
 		userMarker:  lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
