@@ -88,6 +88,8 @@ type chatModel struct {
 	streamTick        bool
 	streamTickID      uint64
 	streamDirty       bool
+	toolCallNames     map[string]string
+	skillNames        map[string]string
 }
 
 type sessionViewMsg struct {
@@ -209,12 +211,14 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 	view.Style = lipgloss.NewStyle().Padding(0, 1)
 
 	m := &chatModel{
-		ctx:       ctx,
-		client:    client,
-		styles:    newHarnessStyles(),
-		viewport:  view,
-		composer:  input,
-		clipboard: defaultClipboard(),
+		ctx:           ctx,
+		client:        client,
+		styles:        newHarnessStyles(),
+		viewport:      view,
+		composer:      input,
+		clipboard:     defaultClipboard(),
+		toolCallNames: make(map[string]string),
+		skillNames:    make(map[string]string),
 	}
 	if opts.SessionID != uuid.Nil {
 		m.modal = loadingModal("Opening session")
@@ -238,7 +242,7 @@ func (m *chatModel) refreshInputMark() {
 	placeholder := "Ask, plan, build..."
 	if m.approvalReason {
 		mark = "why▸ "
-		placeholder = "(reason to deny  ·  ⏎ send  ·  esc cancel)"
+		placeholder = "(reason to deny · ⏎ send · esc cancel)"
 	}
 	m.composer.Placeholder = placeholder
 	width := lipgloss.Width(mark)
@@ -897,6 +901,12 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 		m.blocks = append(m.blocks, block{role: "user", text: content, imageCount: images})
 	case contracts.EventToolCall:
 		if event.ToolCall != nil {
+			name := string(event.ToolCall.Function.Name)
+			m.toolCallNames[event.ToolCall.ID] = name
+			if isSkillTool(name) {
+				m.skillNames[event.ToolCall.ID] = skillNameFromCall(*event.ToolCall)
+				break
+			}
 			m.appendToolEvent("call", contracts.ToolCallDisplay(*event.ToolCall))
 		} else {
 			m.appendToolEvent("call", content)
@@ -904,6 +914,9 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 	case contracts.EventToolResult:
 		if event.ToolResult == nil {
 			m.appendToolEvent("result", content)
+			break
+		}
+		if isSkillTool(string(event.ToolResult.CallName)) {
 			break
 		}
 		result := string(event.ToolResult.CallName) + " [" + string(event.ToolResult.Status) + "]"
@@ -922,10 +935,13 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 			m.checklist = state
 		}
 	case contracts.EventSkillLoad:
+		name := string(contracts.ReadSkillTool)
 		if event.ToolResult != nil {
-			content = event.ToolResult.Output
+			if loaded := m.skillNames[event.ToolResult.CallID]; loaded != "" {
+				name = loaded
+			}
 		}
-		m.appendDelta(event.Kind, content)
+		m.blocks = append(m.blocks, block{role: "skill", text: "Skill loaded: " + name})
 	case contracts.EventApprovalRequested:
 		if event.HITLCall != nil {
 			m.showApproval(approvalFromRequest(event.HITLCall))
@@ -2508,7 +2524,7 @@ func blocksFromRecords(records []store.Record) []block {
 				for _, call := range message.ToolCalls {
 					toolName := string(call.Function.Name)
 					if isSkillTool(toolName) {
-						blocks = append(blocks, block{role: "skill", text: skillNameFromCall(call)})
+						blocks = append(blocks, block{role: "skill", text: "Skill loaded: " + skillNameFromCall(call)})
 						continue
 					}
 					if isChecklistTool(toolName) {
