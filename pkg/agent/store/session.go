@@ -74,6 +74,14 @@ func newSessionFile(meta SessionMeta) sessionFile {
 }
 
 func (f sessionFile) meta() SessionMeta {
+	// Sessions written before the agent kind was recorded carry no value here.
+	// They were all interactive by construction, and an empty kind matches no
+	// branch of the agent loop, so it must never reach a resumed session.
+	agentKind := f.AgentKind
+	if agentKind == "" {
+		agentKind = contracts.InteractiveAgent
+	}
+
 	meta := SessionMeta{
 		ID:        f.ID,
 		Name:      f.Name,
@@ -82,7 +90,7 @@ func (f sessionFile) meta() SessionMeta {
 		Cwd:       f.Cwd,
 		CreatedAt: f.CreatedAt,
 		UpdatedAt: f.UpdatedAt,
-		AgentKind: f.AgentKind,
+		AgentKind: agentKind,
 	}
 	if f.Conclusion != nil {
 		conclusion := *f.Conclusion
