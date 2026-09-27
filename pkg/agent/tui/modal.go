@@ -24,8 +24,6 @@ const (
 type modalOption struct {
 	label    string
 	role     string
-	detail   string
-	status   string
 	current  bool
 	tree     string
 	fork     string
@@ -34,8 +32,8 @@ type modalOption struct {
 	model    string
 	session  uuid.UUID
 	event    *TimelineEvent
-	// detailParts is option.detail split into its identifying fields, most
-	// important first, so a narrow list can drop the ones that fit worst.
+	// detailParts is the identifying fields of a session row, most important
+	// first, so a narrow list can drop the ones that fit worst.
 	detailParts []string
 	// sessionStatus is the status the engine reported for the session, which
 	// the session list shows as a glyph and a label.
@@ -50,6 +48,9 @@ type modalModel struct {
 	selected  int
 	switching bool
 	required  bool
+	// pendingDelete is the session a first "d" armed for deletion. The second
+	// "d" deletes it; anything else drops the arm.
+	pendingDelete uuid.UUID
 }
 
 func (m *modalModel) move(delta int) {
@@ -224,7 +225,7 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 	if m == nil || width <= 0 || height <= 0 {
 		return ""
 	}
-	if m.kind == modalSessions && width >= sessionWorkspaceMinWidth && height >= 22 {
+	if m.kind == modalSessions {
 		return renderSessionWorkspace(m, width, height, styles)
 	}
 	contentWidth := max(width-4, 1)
@@ -243,31 +244,13 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 	rows := make([]string, 0, end-start)
 	for i := start; i < end; i++ {
 		option := m.options[i]
-		status := ""
 		rowStyle := styles.screenRow
 		prefix := "  "
 		if i == m.selected {
 			rowStyle = styles.screenSel
 			prefix = "› "
-			if option.status != "" {
-				status = "[" + option.status + "]  "
-			}
-		} else if option.status != "" {
-			statusStyle := styles.inactive
-			if option.status == "ACTIVE" || option.status == "NEW" || option.status == "SUCCESS" || option.status == "HEAD" {
-				statusStyle = styles.active
-			}
-			status = statusStyle.Render("["+option.status+"]") + "  "
 		}
-		line := status + option.label
-		if option.detail != "" {
-			if i == m.selected {
-				line += "  " + option.detail
-			} else {
-				line += styles.inactive.Render("  " + option.detail)
-			}
-		}
-		line = ansi.Truncate(prefix+line, contentWidth, "…")
+		line := ansi.Truncate(prefix+option.label, contentWidth, "…")
 		rows = append(rows, rowStyle.Width(contentWidth).Render(line))
 	}
 	if start > 0 || end < len(m.options) {
@@ -296,7 +279,10 @@ func renderSessionWorkspace(m *modalModel, width, height int, styles harnessStyl
 		styles.brand.Render("INFAI")+" "+styles.headerMeta.Render("HARNESS")+"\n"+
 			styles.screenTitle.Render("SESSION WORKSPACE")+"\n"+
 			styles.screenBody.Render("Start fresh, inspect active work, or resume a saved session."))
-	footerText := "n new  ·  ↑/↓ navigate sessions  ·  enter open"
+	footerText := "n new  ·  ↑/↓ navigate sessions  ·  enter open  ·  c close  ·  d delete"
+	if m.pendingDelete != uuid.Nil {
+		footerText = "press d again to delete this session  ·  any other key cancels"
+	}
 	if !m.required {
 		footerText += "  ·  esc back"
 	}
@@ -372,7 +358,9 @@ func renderSessionsPanel(m *modalModel, width, height int, styles harnessStyles)
 	start, end := visibleRange(len(options), selected, rowCap)
 	rows := make([]string, 0, (end-start)*2+1)
 	for i := start; i < end; i++ {
-		rows = append(rows, sessionEntryRows(options[i], m.selected == i+1, contentWidth, styles)...)
+		option := options[i]
+		armed := option.session != uuid.Nil && option.session == m.pendingDelete
+		rows = append(rows, sessionEntryRows(option, m.selected == i+1, armed, contentWidth, styles)...)
 	}
 	if start > 0 || end < len(options) {
 		rows = append(rows, styles.inactive.Render(fmt.Sprintf("  %d-%d of %d", start+1, end, len(options))))
@@ -389,8 +377,13 @@ func renderSessionsPanel(m *modalModel, width, height int, styles harnessStyles)
 // label is the first thing to go when the row is narrow — the glyph still says
 // what the session is doing — and the working directory is the first detail
 // field to go, because it is the longest and the least specific.
-func sessionEntryRows(option modalOption, selected bool, width int, styles harnessStyles) []string {
+func sessionEntryRows(option modalOption, selected, armed bool, width int, styles harnessStyles) []string {
 	status := describeSessionStatus(option.sessionStatus, styles)
+	if armed {
+		// The armed row says so where its status was, so the decision and the
+		// row it applies to are read together.
+		status = sessionStatusDescriptor{"!", "delete?", styles.error}
+	}
 	prefix := "  "
 	if selected {
 		prefix = "› "
@@ -427,11 +420,6 @@ func sessionEntryRows(option modalOption, selected bool, width int, styles harne
 // minSessionNameWidth is the room a session name keeps before its status label
 // gives way to the glyph alone.
 const minSessionNameWidth = 12
-
-// sessionWorkspaceMinWidth is the narrowest terminal that gets the session
-// workspace instead of the compact selection screen. Below it the list cannot
-// fit a session name beside its status, so the plain rows read better.
-const sessionWorkspaceMinWidth = 44
 
 // sessionDetailLine joins a session's identifying fields, dropping the ones that
 // fit worst so the line still fits a narrow terminal.

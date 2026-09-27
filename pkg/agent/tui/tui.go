@@ -72,6 +72,7 @@ type Client interface {
 	LoadSession(ctx context.Context, id uuid.UUID) (*glue.SessionOutput, error)
 	GetSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, []store.Record, error)
 	DeleteSession(ctx context.Context, id uuid.UUID) error
+	CloseSession(ctx context.Context, id uuid.UUID) error
 	RenameSession(ctx context.Context, id uuid.UUID, name string) (*store.SessionMeta, error)
 	ListSessions(ctx context.Context) ([]contracts.SessionSummary, error)
 	ListAllProviderModels(ctx context.Context) ([]glue.ListModelOutput, error)

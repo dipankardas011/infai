@@ -21,6 +21,11 @@ import (
 // yet.
 var ErrNoSession = errors.New("client: no active session; create or load one first")
 
+// ErrSessionNotOpen is returned by CloseSession when the server is not holding
+// the session. Only a resident session has anything to close: a saved one is
+// already closed.
+var ErrSessionNotOpen = errors.New("session is not open in the engine")
+
 // RemoteClient attaches the CLI to a running <binary> server. The REPL
 // explicitly creates or loads a session and calls SetSession; Chat then reuses
 // that session, so the conversation persists server-side.
@@ -462,6 +467,27 @@ func (c *RemoteClient) DeleteSession(ctx context.Context, id uuid.UUID) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return readAPIError(resp)
+	}
+	return nil
+}
+
+// CloseSession tears down the agent the server is holding for a session. The
+// session stays on disk and can be opened again; only its runtime state goes.
+func (c *RemoteClient) CloseSession(ctx context.Context, id uuid.UUID) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/sessions/"+id.String()+"/close", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrSessionNotOpen
+	}
 	if resp.StatusCode != http.StatusNoContent {
 		return readAPIError(resp)
 	}

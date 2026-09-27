@@ -407,6 +407,13 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.showSessions(msg.sessions, false)
 		}
 		return m, nil
+	case sessionActionedMsg:
+		if msg.err != nil {
+			m.showNotice("Could not "+msg.action+" session", msg.err.Error(), false)
+			return m, nil
+		}
+		m.applySessionAction(msg)
+		return m, nil
 	case providersListedMsg:
 		if msg.err != nil {
 			m.showNotice("Could not list models", msg.err.Error(), false)
@@ -696,8 +703,51 @@ func (m *chatModel) cycleThinking() {
 	m.reflow(false)
 }
 
+// handleSessionListKey routes the keys the session list owns: "d" deletes a
+// saved session and "c" closes one the engine is holding. A delete is armed by
+// the first "d" and confirmed by the second, and every other key drops the arm,
+// so the confirmation cannot outlive the row it was meant for.
+func (m *chatModel) handleSessionListKey(key string) (tea.Cmd, bool) {
+	if len(m.modal.options) == 0 {
+		return nil, false
+	}
+	selected := clamp(m.modal.selected, 0, len(m.modal.options)-1)
+	option := m.modal.options[selected]
+	// Every key drops an arm first; "d" puts it back. Nothing else can carry a
+	// confirmation over to a later press.
+	armed := m.modal.pendingDelete
+	m.modal.pendingDelete = uuid.Nil
+
+	switch key {
+	case "d":
+		if option.session == uuid.Nil {
+			return nil, false
+		}
+		if armed == option.session {
+			return deleteSessionCmd(m.ctx, m.client, option.session), true
+		}
+		m.modal.pendingDelete = option.session
+		return nil, true
+	case "c":
+		if option.session == uuid.Nil {
+			return nil, false
+		}
+		return closeSessionCmd(m.ctx, m.client, option.session), true
+	case "esc":
+		if armed != uuid.Nil {
+			return nil, true
+		}
+	}
+	return nil, false
+}
+
 func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	if m.modal.kind == modalSessions {
+		if cmd, handled := m.handleSessionListKey(key); handled {
+			return cmd
+		}
+	}
 	switch key {
 	case "up", "left", "k", "h":
 		m.modal.move(-1)
@@ -2074,9 +2124,62 @@ func streamRefreshTickCmd(id uint64) tea.Cmd {
 	return tea.Tick(streamRefreshInterval, func(time.Time) tea.Msg { return streamRefreshTickMsg{id: id} })
 }
 
+// applySessionAction updates the list in place for a close or a delete, so the
+// row the user was working on stays under the cursor.
+func (m *chatModel) applySessionAction(msg sessionActionedMsg) {
+	if m.modal == nil || m.modal.kind != modalSessions {
+		return
+	}
+	index := -1
+	for i, option := range m.modal.options {
+		if option.session == msg.id {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return
+	}
+
+	if msg.action == "close" {
+		// Close keeps a conclusion the session already recorded, and records an
+		// inactive one otherwise. Only the second case changes what the list
+		// shows, and it is the case a live status identifies.
+		if isLiveSessionStatus(m.modal.options[index].sessionStatus) {
+			m.modal.options[index].sessionStatus = contracts.SessionTombstone
+		}
+		return
+	}
+
+	// The deleted session may be the one this client is attached to, and the
+	// server no longer has it: detach rather than let the next send fail.
+	if msg.id == m.session.ID {
+		m.session = store.SessionMeta{}
+		m.client.SetSession(uuid.Nil)
+	}
+	m.modal.options = append(m.modal.options[:index], m.modal.options[index+1:]...)
+	numberSessionOptions(m.modal.options)
+	if m.modal.selected > index {
+		m.modal.selected--
+	}
+	m.modal.selected = clamp(m.modal.selected, 0, len(m.modal.options)-1)
+}
+
+// isLiveSessionStatus reports whether a status means the engine still holds a
+// turn for the session. A concluded status is history: nothing is open to
+// close, and closing one would not change it.
+func isLiveSessionStatus(status contracts.SessionStatus) bool {
+	switch status {
+	case contracts.SessionIdle, contracts.SessionBusy, contracts.SessionWaitingApproval, contracts.SessionCompacting:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required bool) {
-	options := []modalOption{{label: "Start a new session", detail: "choose a provider and model", status: "NEW", shortcut: 'n'}}
-	for i, session := range sessions {
+	options := []modalOption{{label: "Start a new session", shortcut: 'n'}}
+	for _, session := range sessions {
 		status := session.Status
 		if status == "" {
 			status = contracts.SessionIdle
@@ -2093,18 +2196,30 @@ func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required b
 		}
 		option := modalOption{
 			label:         name,
-			detail:        strings.Join(parts, sessionFieldSeparator),
 			detailParts:   parts,
-			status:        strings.ToUpper(describeSessionStatus(status, m.styles).label),
 			session:       session.ID,
 			sessionStatus: status,
 		}
-		if i < 9 {
-			option.shortcut = rune('1' + i)
-		}
 		options = append(options, option)
 	}
-	m.modal = &modalModel{kind: modalSessions, title: "Sessions", body: "Start fresh or resume a saved session. The attached session is marked active.", options: options, required: required}
+	numberSessionOptions(options)
+	m.modal = &modalModel{kind: modalSessions, options: options, required: required}
+}
+
+// numberSessionOptions gives the new-session row its "n" and each session its
+// number key. The list is renumbered after a row is deleted, so a number key
+// always names the row it is shown against.
+func numberSessionOptions(options []modalOption) {
+	for i := range options {
+		switch {
+		case i == 0:
+			options[i].shortcut = 'n'
+		case i <= 9:
+			options[i].shortcut = rune('0' + i)
+		default:
+			options[i].shortcut = 0
+		}
+	}
 }
 
 func (m *chatModel) showModels(models []glue.ListModelOutput, switching bool) {
@@ -2420,6 +2535,26 @@ func listSessionsCmd(ctx context.Context, client Client) tea.Cmd {
 	return func() tea.Msg {
 		sessions, err := client.ListSessions(ctx)
 		return sessionsListedMsg{sessions: sessions, err: err}
+	}
+}
+
+// sessionActionedMsg reports the outcome of a close or a delete, named so the
+// screen can say which one failed.
+type sessionActionedMsg struct {
+	action string
+	id     uuid.UUID
+	err    error
+}
+
+func closeSessionCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
+	return func() tea.Msg {
+		return sessionActionedMsg{action: "close", id: id, err: client.CloseSession(ctx, id)}
+	}
+}
+
+func deleteSessionCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
+	return func() tea.Msg {
+		return sessionActionedMsg{action: "delete", id: id, err: client.DeleteSession(ctx, id)}
 	}
 }
 

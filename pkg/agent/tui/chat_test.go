@@ -491,7 +491,10 @@ func TestMouseWheelScrollsTranscript(t *testing.T) {
 	}
 }
 
-func TestSessionScreenShowsStatusBadges(t *testing.T) {
+// The badge list the session screen used on small terminals is gone: the
+// workspace is the only session screen, so a narrow terminal gets the same
+// sections and the same status glyphs rather than a different view.
+func TestSessionScreenAlwaysUsesTheWorkspace(t *testing.T) {
 	busy := uuid.New()
 	closed := uuid.New()
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
@@ -502,11 +505,14 @@ func TestSessionScreenShowsStatusBadges(t *testing.T) {
 	}, false)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
-	content := m.View().Content
-	for _, want := range []string{"[BUSY]", "[INACTIVE]", "active-model", "saved-model"} {
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"SESSION WORKSPACE", "NEW SESSION", "SESSIONS", "◐", "busy", "active-model"} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("session screen does not contain %q", want)
+			t.Fatalf("session screen does not contain %q:\n%s", want, content)
 		}
+	}
+	if strings.Contains(content, "[INACTIVE]") || strings.Contains(content, "[BUSY]") {
+		t.Fatalf("session screen fell back to the badge list:\n%s", content)
 	}
 }
 
@@ -568,6 +574,115 @@ func TestSessionWorkspaceMarksApprovalAndDropsDetailWhenNarrow(t *testing.T) {
 		if width := lipgloss.Width(line); width > 62 {
 			t.Fatalf("narrow session list line width=%d exceeds terminal:\n%s", width, narrow)
 		}
+	}
+}
+
+func TestSessionListDeletesOnlyAfterASecondKey(t *testing.T) {
+	id := uuid.New()
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{{ID: id, Name: "scratch", Status: contracts.SessionTombstone}}, true)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.modal.selected = 1
+
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'd', Text: "d"}))
+	if cmd != nil {
+		t.Fatal("the first d dispatched a delete instead of arming one")
+	}
+	if m.modal.pendingDelete != id {
+		t.Fatalf("first d left pendingDelete=%v, want %v", m.modal.pendingDelete, id)
+	}
+	armed := ansi.Strip(m.View().Content)
+	for _, want := range []string{"delete?", "press d again to delete this session"} {
+		if !strings.Contains(armed, want) {
+			t.Fatalf("armed list lacks %q:\n%s", want, armed)
+		}
+	}
+
+	_, cmd = m.Update(tea.KeyPressMsg(tea.Key{Code: 'd', Text: "d"}))
+	if cmd == nil {
+		t.Fatal("the second d did not dispatch the delete")
+	}
+	actioned, ok := cmd().(sessionActionedMsg)
+	if !ok || actioned.action != "delete" || actioned.id != id {
+		t.Fatalf("second d dispatched %#v, want a delete of %v", actioned, id)
+	}
+	if m.modal.pendingDelete != uuid.Nil {
+		t.Fatal("a confirmed delete stayed armed")
+	}
+}
+
+func TestSessionListAnyOtherKeyCancelsAnArmedDelete(t *testing.T) {
+	id := uuid.New()
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{
+		{ID: id, Name: "scratch", Status: contracts.SessionTombstone},
+		{ID: uuid.New(), Name: "kept", Status: contracts.SessionIdle},
+	}, true)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.modal.selected = 1
+
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'd', Text: "d"}))
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'j', Text: "j"}))
+	if m.modal.pendingDelete != uuid.Nil {
+		t.Fatal("moving the cursor left a delete armed")
+	}
+
+	// The next d arms this row rather than deleting the previously armed one.
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'd', Text: "d"}))
+	if cmd != nil {
+		t.Fatal("a key after the arm was read as the confirmation")
+	}
+	if m.modal.pendingDelete == id {
+		t.Fatal("the wrong row was armed after the cursor moved")
+	}
+
+	// A close answers the arm rather than leaving it behind, so a later d on
+	// the same row still has to arm again.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Text: "c"}))
+	_, cmd = m.Update(tea.KeyPressMsg(tea.Key{Code: 'd', Text: "d"}))
+	if cmd != nil {
+		t.Fatal("an armed delete survived the close that answered it")
+	}
+}
+
+func TestSessionListCloseAndDeleteUpdateTheRow(t *testing.T) {
+	open, saved := uuid.New(), uuid.New()
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{
+		{ID: open, Name: "open one", Status: contracts.SessionIdle},
+		{ID: saved, Name: "saved one", Status: contracts.SessionTombstone},
+	}, true)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m.modal.selected = 1
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Text: "c"}))
+	if cmd == nil {
+		t.Fatal("c did not dispatch a close")
+	}
+	closed, ok := cmd().(sessionActionedMsg)
+	if !ok || closed.action != "close" || closed.id != open {
+		t.Fatalf("c dispatched %#v, want a close of %v", closed, open)
+	}
+	_, _ = m.Update(closed)
+	if m.modal.options[1].sessionStatus != contracts.SessionTombstone {
+		t.Fatalf("closed session still reads %q", m.modal.options[1].sessionStatus)
+	}
+
+	// Deleting removes the row, keeps the cursor on the row that took its place,
+	// and detaches this client when the deleted session was the attached one.
+	m.session = store.SessionMeta{ID: open, Model: "test-model"}
+	_, _ = m.Update(sessionActionedMsg{action: "delete", id: open})
+	if len(m.modal.options) != 2 {
+		t.Fatalf("options=%d after a delete, want the new-session row and one session", len(m.modal.options))
+	}
+	if m.modal.options[1].session != saved {
+		t.Fatal("the wrong row was deleted")
+	}
+	if m.modal.selected != 1 {
+		t.Fatalf("selection=%d after a delete, want the row that moved up", m.modal.selected)
+	}
+	if m.session.ID != uuid.Nil {
+		t.Fatal("deleting the attached session did not detach the client")
 	}
 }
 
@@ -1309,6 +1424,7 @@ func (stubChatClient) GetSession(context.Context, uuid.UUID) (*store.SessionMeta
 	return nil, nil, nil
 }
 func (stubChatClient) DeleteSession(context.Context, uuid.UUID) error { return nil }
+func (stubChatClient) CloseSession(context.Context, uuid.UUID) error  { return nil }
 func (stubChatClient) RenameSession(context.Context, uuid.UUID, string) (*store.SessionMeta, error) {
 	return &store.SessionMeta{}, nil
 }
