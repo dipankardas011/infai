@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/google/uuid"
 )
 
@@ -33,6 +34,12 @@ type modalOption struct {
 	model    string
 	session  uuid.UUID
 	event    *TimelineEvent
+	// detailParts is option.detail split into its identifying fields, most
+	// important first, so a narrow list can drop the ones that fit worst.
+	detailParts []string
+	// sessionStatus is the status the engine reported for the session, which
+	// the session list shows as a glyph and a label.
+	sessionStatus contracts.SessionStatus
 }
 
 type modalModel struct {
@@ -217,7 +224,7 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 	if m == nil || width <= 0 || height <= 0 {
 		return ""
 	}
-	if m.kind == modalSessions && width >= 50 && height >= 22 {
+	if m.kind == modalSessions && width >= sessionWorkspaceMinWidth && height >= 22 {
 		return renderSessionWorkspace(m, width, height, styles)
 	}
 	contentWidth := max(width-4, 1)
@@ -297,12 +304,9 @@ func renderSessionWorkspace(m *modalModel, width, height int, styles harnessStyl
 
 	contentHeight := max(height-lipgloss.Height(header)-lipgloss.Height(footer), 0)
 	innerWidth := max(width-4, 1)
-	var main string
-	if width >= 90 {
-		main = renderWideSessionWorkspace(m, innerWidth, contentHeight, styles)
-	} else {
-		main = renderStackedSessionWorkspace(m, innerWidth, contentHeight, styles)
-	}
+	newPanel := renderNewSessionPanel(m, innerWidth, styles)
+	listHeight := max(contentHeight-lipgloss.Height(newPanel)-1, 6)
+	main := newPanel + "\n" + renderSessionsPanel(m, innerWidth, listHeight, styles)
 	if pad := contentHeight - lipgloss.Height(main); pad > 0 {
 		main += strings.Repeat("\n", pad)
 	}
@@ -310,103 +314,135 @@ func renderSessionWorkspace(m *modalModel, width, height int, styles harnessStyl
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
-func renderWideSessionWorkspace(m *modalModel, width, height int, styles harnessStyles) string {
-	gap := 2
-	leftWidth := max((width-gap)*2/5, 30)
-	rightWidth := max(width-gap-leftWidth, 1)
-
-	newPanel := renderNewSessionPanel(m, leftWidth, styles)
-	leftMax := max(height-lipgloss.Height(newPanel)-6, 0)
-	active := renderActiveSessionsPanel(m, leftWidth, leftMax, styles)
-	left := newPanel + "\n" + active
-	right := renderAllSessionsPanel(m, rightWidth, height, styles)
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", gap), right)
+// sessionStatusDescriptor is a reported status in the terms the UI shows it: a
+// glyph that survives a narrow row, and the label that spells it out.
+type sessionStatusDescriptor struct {
+	glyph string
+	label string
+	style lipgloss.Style
 }
 
-func renderStackedSessionWorkspace(m *modalModel, width, height int, styles harnessStyles) string {
-	newPanel := renderNewSessionPanel(m, width, styles)
-	leftMax := max(height-lipgloss.Height(newPanel)-6, 0)
-	active := renderActiveSessionsPanel(m, width, leftMax, styles)
-	allHeight := max(height-lipgloss.Height(newPanel)-lipgloss.Height(active)-3, 6)
-	all := renderAllSessionsPanel(m, width, allHeight, styles)
-	return strings.Join([]string{newPanel, active, all}, "\n")
+// describeSessionStatus maps a session status to its presentation. The status
+// row and the session list both read it, so a status never means one thing on
+// the chat screen and another in the list.
+func describeSessionStatus(status contracts.SessionStatus, styles harnessStyles) sessionStatusDescriptor {
+	switch status {
+	case contracts.SessionBusy:
+		return sessionStatusDescriptor{"◐", "busy", styles.statusBusy}
+	case contracts.SessionWaitingApproval:
+		return sessionStatusDescriptor{"⚑", "waiting for approval", styles.statusWaiting}
+	case contracts.SessionCompacting:
+		return sessionStatusDescriptor{"⟳", "compacting", styles.statusBusy}
+	case contracts.SessionCompleted:
+		return sessionStatusDescriptor{"✓", "completed", styles.active}
+	case contracts.SessionMaxIterationExhausted:
+		return sessionStatusDescriptor{"⚠", "max iterations reached", styles.error}
+	case contracts.SessionTombstone:
+		return sessionStatusDescriptor{"·", "inactive", styles.inactive}
+	default:
+		return sessionStatusDescriptor{"○", "idle", styles.status}
+	}
 }
 
 func renderNewSessionPanel(m *modalModel, width int, styles harnessStyles) string {
-	selected := m.selected == 0
-	actionStyle := styles.screenRow
-	border := everforest.SurfaceAlt
-	prefix := "  "
-	if selected {
-		actionStyle = styles.screenSel
-		border = everforest.Green
-		prefix = "› "
-	}
 	contentWidth := max(width-4, 1)
-	action := sessionRow(actionStyle, prefix+"+ New session", contentWidth)
-	hint := styles.inactive.Render(ansi.Truncate("  choose provider and model", contentWidth, "…"))
-	return renderSessionPanel("NEW SESSION", action+"\n"+hint, width, 0, border, styles)
+	label := "Start a new session"
+	if len(m.options) > 0 && m.options[0].shortcut != 0 {
+		label = fmt.Sprintf("[%c] for a new session", m.options[0].shortcut)
+	}
+	rowStyle, border, prefix := styles.screenRow, everforest.SurfaceAlt, "  "
+	if m.selected == 0 {
+		rowStyle, border, prefix = styles.screenSel, everforest.Green, "› "
+	}
+	return renderSessionPanel("NEW SESSION", sessionRow(rowStyle, prefix+label, contentWidth), width, 0, border, styles)
 }
 
-func renderActiveSessionsPanel(m *modalModel, width, maxLines int, styles harnessStyles) string {
-	active := activeSessionOptions(m.options)
+func renderSessionsPanel(m *modalModel, width, height int, styles harnessStyles) string {
 	contentWidth := max(width-4, 1)
-	lines := make([]string, 0, max(maxLines, 1))
-	if len(active) == 0 {
-		lines = append(lines, styles.inactive.Render("No active sessions"))
-	} else {
-		for i, option := range active {
-			if i >= maxLines {
-				break
-			}
-			lines = append(lines, sessionRow(styles.active, "● "+option.label, contentWidth))
-		}
-	}
-	return renderSessionPanel("ACTIVE SESSIONS", strings.Join(lines, "\n"), width, 0, everforest.Aqua, styles)
-}
-
-func renderAllSessionsPanel(m *modalModel, width, height int, styles harnessStyles) string {
-	contentWidth := max(width-4, 1)
+	// The first option is the new-session row, which has a panel of its own.
 	options := m.options
 	if len(options) > 0 {
 		options = options[1:]
 	}
 	if len(options) == 0 {
-		return renderSessionPanel("ALL SESSIONS", styles.inactive.Render("No saved sessions yet"), width, height, everforest.SurfaceAlt, styles)
+		return renderSessionPanel("SESSIONS", styles.inactive.Render("No saved sessions yet"), width, height, everforest.SurfaceAlt, styles)
 	}
 	selected := clamp(m.selected-1, 0, len(options)-1)
-	rowCap := max((height-5)/2, 1)
+	rowCap := max((height-5)/2, 1) // each session takes a name row and a detail row
 	start, end := visibleRange(len(options), selected, rowCap)
 	rows := make([]string, 0, (end-start)*2+1)
 	for i := start; i < end; i++ {
-		option := options[i]
-		isSelected := m.selected == i+1
-		prefix := "  "
-		nameStyle := styles.screenRow
-		if option.status == "ACTIVE" {
-			nameStyle = styles.active
-		}
-		if isSelected {
-			prefix = "› "
-			nameStyle = styles.screenSel
-		}
-		nameLine := sessionRow(nameStyle, prefix+option.label, contentWidth)
-		detailStyle := styles.inactive
-		if isSelected {
-			detailStyle = styles.inactive.Background(everforest.SurfaceAlt)
-		}
-		detailLine := sessionRow(detailStyle, "    "+option.detail, contentWidth)
-		rows = append(rows, nameLine+"\n"+detailLine)
+		rows = append(rows, sessionEntryRows(options[i], m.selected == i+1, contentWidth, styles)...)
 	}
 	if start > 0 || end < len(options) {
-		rows = append(rows, styles.inactive.Render(fmt.Sprintf("%d-%d of %d", start+1, end, len(options))))
+		rows = append(rows, styles.inactive.Render(fmt.Sprintf("  %d-%d of %d", start+1, end, len(options))))
 	}
 	border := everforest.SurfaceAlt
 	if m.selected > 0 {
 		border = everforest.Green
 	}
-	return renderSessionPanel("ALL SESSIONS", strings.Join(rows, "\n"), width, height, border, styles)
+	return renderSessionPanel("SESSIONS", strings.Join(rows, "\n"), width, height, border, styles)
 }
+
+// sessionEntryRows renders one session as two rows: the name with the status
+// that says what it is doing, then the fields that identify it. The status
+// label is the first thing to go when the row is narrow — the glyph still says
+// what the session is doing — and the working directory is the first detail
+// field to go, because it is the longest and the least specific.
+func sessionEntryRows(option modalOption, selected bool, width int, styles harnessStyles) []string {
+	status := describeSessionStatus(option.sessionStatus, styles)
+	prefix := "  "
+	if selected {
+		prefix = "› "
+	}
+	head := prefix + status.glyph + " "
+
+	label := status.label
+	if width-lipgloss.Width(head)-lipgloss.Width(label)-2 < minSessionNameWidth {
+		label = ""
+	}
+	name := ansi.Truncate(option.label, max(width-lipgloss.Width(head)-lipgloss.Width(label)-2, 1), "…")
+	gap := strings.Repeat(" ", max(width-lipgloss.Width(head)-lipgloss.Width(name)-lipgloss.Width(label), 1))
+	detail := "    " + sessionDetailLine(option.detailParts, max(width-4, 1))
+
+	if selected {
+		// The row carries one style and no inner spans: a styled span ends the
+		// highlight at its own reset, punching the terminal background through
+		// the rest of the row.
+		return []string{
+			sessionRow(styles.screenSel, head+name+gap+label, width),
+			sessionRow(styles.inactive.Background(everforest.SelectionBg), detail, width),
+		}
+	}
+	tail := ""
+	if label != "" {
+		tail = status.style.Render(label)
+	}
+	return []string{
+		sessionRow(styles.screenRow, prefix+status.style.Render(status.glyph)+" "+name+gap+tail, width),
+		sessionRow(styles.inactive, detail, width),
+	}
+}
+
+// minSessionNameWidth is the room a session name keeps before its status label
+// gives way to the glyph alone.
+const minSessionNameWidth = 12
+
+// sessionWorkspaceMinWidth is the narrowest terminal that gets the session
+// workspace instead of the compact selection screen. Below it the list cannot
+// fit a session name beside its status, so the plain rows read better.
+const sessionWorkspaceMinWidth = 44
+
+// sessionDetailLine joins a session's identifying fields, dropping the ones that
+// fit worst so the line still fits a narrow terminal.
+func sessionDetailLine(parts []string, width int) string {
+	for len(parts) > 1 && lipgloss.Width(strings.Join(parts, sessionFieldSeparator)) > width {
+		parts = parts[:len(parts)-1]
+	}
+	return ansi.Truncate(strings.Join(parts, sessionFieldSeparator), width, "…")
+}
+
+const sessionFieldSeparator = "  ·  "
 
 func renderSessionPanel(title, body string, width, height int, border color.Color, styles harnessStyles) string {
 	content := styles.screenTitle.Render(title)
@@ -430,14 +466,4 @@ func renderSessionPanel(title, body string, width, height int, border color.Colo
 // border stays flush and selected rows get a full-width highlight.
 func sessionRow(style lipgloss.Style, text string, contentWidth int) string {
 	return style.Width(contentWidth).Render(ansi.Truncate(text, contentWidth, "…"))
-}
-
-func activeSessionOptions(options []modalOption) []modalOption {
-	active := make([]modalOption, 0)
-	for _, option := range options {
-		if option.status == "ACTIVE" && option.session != uuid.Nil {
-			active = append(active, option)
-		}
-	}
-	return active
 }

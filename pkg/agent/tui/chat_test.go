@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -490,19 +491,19 @@ func TestMouseWheelScrollsTranscript(t *testing.T) {
 	}
 }
 
-func TestSessionScreenShowsActiveAndInactiveStatus(t *testing.T) {
-	active := uuid.New()
-	inactive := uuid.New()
+func TestSessionScreenShowsStatusBadges(t *testing.T) {
+	busy := uuid.New()
+	closed := uuid.New()
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
-	m.session.ID = active
+	m.session.ID = busy
 	m.showSessions([]contracts.SessionSummary{
-		{ID: active, Model: "active-model", Cwd: "/active"},
-		{ID: inactive, Model: "saved-model", Cwd: "/saved"},
+		{ID: busy, Model: "active-model", Cwd: "/active", Status: contracts.SessionBusy},
+		{ID: closed, Model: "saved-model", Cwd: "/saved", Status: contracts.SessionTombstone},
 	}, false)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
 	content := m.View().Content
-	for _, want := range []string{"[ACTIVE]", "[INACTIVE]", "active-model", "saved-model"} {
+	for _, want := range []string{"[BUSY]", "[INACTIVE]", "active-model", "saved-model"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("session screen does not contain %q", want)
 		}
@@ -514,15 +515,15 @@ func TestSessionWorkspaceShowsBrandAndSections(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.session.ID = active
 	m.showSessions([]contracts.SessionSummary{
-		{ID: active, Model: "active-model", Cwd: "/active"},
-		{ID: uuid.New(), Model: "saved-model", Cwd: "/saved"},
+		{ID: active, Model: "active-model", Cwd: "/active", Status: contracts.SessionBusy},
+		{ID: uuid.New(), Model: "saved-model", Cwd: "/saved", Status: contracts.SessionTombstone},
 	}, false)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
 
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"INFAI HARNESS", "SESSION WORKSPACE", "NEW SESSION", "ACTIVE SESSIONS", "ALL SESSIONS", "active-model", "saved-model"} {
+	for _, want := range []string{"INFAI HARNESS", "SESSION WORKSPACE", "NEW SESSION", "SESSIONS", "◐", "busy", "·", "inactive", "active-model", "saved-model"} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("session workspace does not contain %q", want)
+			t.Fatalf("session workspace does not contain %q:\n%s", want, content)
 		}
 	}
 	if width := lipgloss.Width(m.View().Content); width > 120 {
@@ -530,6 +531,43 @@ func TestSessionWorkspaceShowsBrandAndSections(t *testing.T) {
 	}
 	if height := lipgloss.Height(m.View().Content); height > 30 {
 		t.Fatalf("session workspace height=%d exceeds terminal", height)
+	}
+}
+
+// A session blocked on a human decision must be recognisable from the list, and
+// the identifying fields must survive a narrow terminal: the working directory
+// goes before the model and the time, the words go before the glyph.
+func TestSessionWorkspaceMarksApprovalAndDropsDetailWhenNarrow(t *testing.T) {
+	waiting := uuid.New()
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{{
+		ID: waiting, Name: "Deploy the cluster", Model: "deepseek-v4-flash",
+		Cwd: "/home/dipankardas/ws/infai", UpdatedAt: time.Now(), Status: contracts.SessionWaitingApproval,
+	}}, false)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	wide := ansi.Strip(m.View().Content)
+	for _, want := range []string{"⚑ Deploy the cluster", "waiting for approval", "deepseek-v4-flash", "/home/dipankardas/ws/infai"} {
+		if !strings.Contains(wide, want) {
+			t.Fatalf("wide session list lacks %q:\n%s", want, wide)
+		}
+	}
+
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 62, Height: 30})
+	narrow := ansi.Strip(m.View().Content)
+	if !strings.Contains(narrow, "⚑ Deploy the cluster") {
+		t.Fatalf("narrow session list lost the name or the glyph:\n%s", narrow)
+	}
+	if !strings.Contains(narrow, "deepseek-v4-flash") {
+		t.Fatalf("narrow session list lost the model:\n%s", narrow)
+	}
+	if strings.Contains(narrow, "/home/dipankardas/ws/infai") {
+		t.Fatalf("narrow session list kept the working directory:\n%s", narrow)
+	}
+	for _, line := range strings.Split(narrow, "\n") {
+		if width := lipgloss.Width(line); width > 62 {
+			t.Fatalf("narrow session list line width=%d exceeds terminal:\n%s", width, narrow)
+		}
 	}
 }
 

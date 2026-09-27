@@ -32,6 +32,11 @@ var everforest = struct {
 	// AttentionBg is the band a pending human decision sits on: Everforest's
 	// bg_yellow, the palette's own surface for a highlighted region.
 	AttentionBg color.Color
+
+	// SelectionBg is the band a list cursor sits on. It is the green-tinted
+	// tone of the diff-insert surface, one step above SurfaceAlt, so a chosen
+	// row reads as chosen without a border to carry it.
+	SelectionBg color.Color
 }{
 	Background: lipgloss.Color("#272e33"),
 	Surface:    lipgloss.Color("#2e383c"),
@@ -50,6 +55,8 @@ var everforest = struct {
 	DiffDeleteBg: lipgloss.Color("#514045"),
 
 	AttentionBg: lipgloss.Color("#4d4c43"), // Everforest bg_yellow
+
+	SelectionBg: lipgloss.Color("#425047"), // Everforest bg_green
 }
 
 type harnessStyles struct {
@@ -137,7 +144,7 @@ func newHarnessStyles() harnessStyles {
 		screenTitle: lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
 		screenBody:  lipgloss.NewStyle().Foreground(everforest.Muted),
 		screenRow:   lipgloss.NewStyle().Foreground(everforest.Text),
-		screenSel:   lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
+		screenSel:   lipgloss.NewStyle().Background(everforest.SelectionBg).Foreground(everforest.Yellow).Bold(true),
 		active:      lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
 		inactive:    lipgloss.NewStyle().Foreground(everforest.Muted),
 		menu:        lipgloss.NewStyle().Background(everforest.Surface).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(everforest.Green),

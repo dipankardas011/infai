@@ -1321,22 +1321,8 @@ func (m *chatModel) statusRowView() string {
 // status has its own label and colour, so a session waiting on an approval or
 // one that has concluded never reads the same as one that is simply idle.
 func (m *chatModel) sessionStatusView() string {
-	switch m.status {
-	case contracts.SessionBusy:
-		return m.styles.statusBusy.Render("busy")
-	case contracts.SessionWaitingApproval:
-		return m.styles.statusWaiting.Render("waiting for approval")
-	case contracts.SessionCompacting:
-		return m.styles.statusBusy.Render("compacting")
-	case contracts.SessionCompleted:
-		return m.styles.active.Render("completed")
-	case contracts.SessionMaxIterationExhausted:
-		return m.styles.error.Render("max iterations reached")
-	case contracts.SessionTombstone:
-		return m.styles.error.Render("closed")
-	default:
-		return m.styles.status.Render("idle")
-	}
+	descriptor := describeSessionStatus(m.status, m.styles)
+	return descriptor.style.Render(descriptor.label)
 }
 
 // tokenCount renders a token total compactly: 950, 41.2k, 128k, 1.2M. The
@@ -2091,23 +2077,27 @@ func streamRefreshTickCmd(id uint64) tea.Cmd {
 func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required bool) {
 	options := []modalOption{{label: "Start a new session", detail: "choose a provider and model", status: "NEW", shortcut: 'n'}}
 	for i, session := range sessions {
-		status := string(session.Status)
+		status := session.Status
 		if status == "" {
-			status = "inactive"
+			status = contracts.SessionIdle
 		}
-		if session.Active || session.ID == m.session.ID {
-			status = "active"
-		}
-		status = strings.ToUpper(status)
 		name := session.Name
 		if name == "" {
 			name = "Untitled session"
 		}
+		// The working directory goes first when the row is narrow, then the
+		// time: the model is what tells two sessions of one project apart.
+		parts := []string{orModel(session.Model), humanTime(session.UpdatedAt)}
+		if session.Cwd != "" {
+			parts = append(parts, session.Cwd)
+		}
 		option := modalOption{
-			label:   name,
-			detail:  fmt.Sprintf("%s  ·  %s  ·  %s", orModel(session.Model), humanTime(session.UpdatedAt), session.Cwd),
-			status:  status,
-			session: session.ID,
+			label:         name,
+			detail:        strings.Join(parts, sessionFieldSeparator),
+			detailParts:   parts,
+			status:        strings.ToUpper(describeSessionStatus(status, m.styles).label),
+			session:       session.ID,
+			sessionStatus: status,
 		}
 		if i < 9 {
 			option.shortcut = rune('1' + i)
