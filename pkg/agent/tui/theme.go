@@ -137,15 +137,17 @@ func newHarnessStyles() harnessStyles {
 		// as reserved space without any frame to get wrong. Every style on the
 		// band carries the band's own background: a foreground-only style would
 		// punch the terminal's background through the row.
-		hitl:        lipgloss.NewStyle().Background(everforest.AttentionBg),
-		hitlFlag:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Yellow).Bold(true),
-		hitlTitle:   lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Orange).Bold(true),
-		hitlName:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Purple).Bold(true),
-		hitlBody:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Text),
-		hitlMuted:   lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Muted),
-		hitlAllow:   lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Green).Bold(true),
-		hitlDeny:    lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Red).Bold(true),
-		sessionName: lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
+		hitl:      lipgloss.NewStyle().Background(everforest.AttentionBg),
+		hitlFlag:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Yellow).Bold(true),
+		hitlTitle: lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Orange).Bold(true),
+		hitlName:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Purple).Bold(true),
+		hitlBody:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Text),
+		hitlMuted: lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Muted),
+		hitlAllow: lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Green).Bold(true),
+		hitlDeny:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Red).Bold(true),
+		// The session name is a title, not a state: it takes weight instead of a
+		// hue, so every colour on the session row is left to mean kind or status.
+		sessionName: lipgloss.NewStyle().Foreground(everforest.Text).Bold(true),
 		muted:       lipgloss.NewStyle().Foreground(everforest.Muted),
 		userMarker:  lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
 		assistant:   lipgloss.NewStyle().Foreground(everforest.Text),

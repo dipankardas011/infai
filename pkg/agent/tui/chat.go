@@ -1223,13 +1223,13 @@ func (m *chatModel) View() tea.View {
 	}
 	header := m.headerView()
 	status := m.statusView()
-	statusRow := m.statusRowView()
+	sessionRow := m.sessionRowView()
 	checklist := m.checklistView()
 	hitl := m.hitlView()
 	commands := m.commandMenuView()
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	parts := []string{header, m.viewport.View(), checklist, hitl, statusRow, commands, attachments, composer, status}
+	parts := []string{header, m.viewport.View(), checklist, hitl, sessionRow, commands, attachments, composer, status}
 	if len(m.areas) == len(parts) {
 		parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
 		for i := range parts {
@@ -1271,13 +1271,13 @@ func (m *chatModel) reflow(follow bool) {
 	m.composer.SetWidth(contentWidth(m.styles.composer, m.width))
 	header := m.headerView()
 	status := m.statusView()
-	statusRow := m.statusRowView()
+	sessionRow := m.sessionRowView()
 	checklist := m.checklistView()
 	hitl := m.hitlView()
 	commands := m.commandMenuView()
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(checklist), intrinsic(hitl), intrinsic(statusRow), intrinsic(commands), intrinsic(attachments), intrinsic(composer), intrinsic(status))
+	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(checklist), intrinsic(hitl), intrinsic(sessionRow), intrinsic(commands), intrinsic(attachments), intrinsic(composer), intrinsic(status))
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
@@ -1295,7 +1295,6 @@ func (m *chatModel) headerView() string {
 
 func (m *chatModel) statusView() string {
 	separator := m.styles.status.Render("  ·  ")
-	name := ""
 	var rest string
 	if m.session.ID == uuid.Nil {
 		rest = m.styles.status.Render("choose a session to begin")
@@ -1304,7 +1303,6 @@ func (m *chatModel) statusView() string {
 		if m.contextWindow > 0 {
 			pct = min(int(m.used*100/m.contextWindow), 100)
 		}
-		name = m.session.Name
 		thinking := m.thinking
 		if thinking == "" {
 			thinking = "off"
@@ -1323,9 +1321,6 @@ func (m *chatModel) statusView() string {
 	}
 	if !m.viewport.AtBottom() {
 		rest += separator + m.styles.status.Render("viewing earlier output")
-	}
-	if name != "" {
-		rest = m.styles.sessionName.Render(name) + separator + rest
 	}
 	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, rest)
 }
@@ -1350,35 +1345,92 @@ func (m *chatModel) checklistView() string {
 	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, checklist)
 }
 
-// statusRowView is the session status, right-aligned on its own row above the
-// composer. The spinner and the elapsed time belong to the turn in flight, so
-// they sit beside the status only while one is running.
-func (m *chatModel) statusRowView() string {
+// sessionRowView is the row above the composer: which session this is, what
+// kind of agent runs it, and what the session is doing. The spinner and the
+// elapsed time belong to the turn in flight, so they sit beside the status only
+// while one is running.
+// sessionRowView is the row above the composer: the marks that describe the
+// session, then the session name in the room left over. Every mark is a glyph
+// and the word it stands for, the way the session list names them, and the whole
+// run sits flush right, where the status row always was. The spinner and the
+// elapsed time belong to the turn in flight, so they appear only while one runs.
+func (m *chatModel) sessionRowView() string {
 	if m.session.ID == uuid.Nil {
 		return ""
 	}
 	separator := m.styles.status.Render("  ·  ")
-	fields := []string{m.sessionStatusView()}
-	if m.working {
-		fields = append(fields, m.styles.statusBusy.Render(fmt.Sprintf("%s %s", spinnerFrame(m.workBegan), time.Since(m.workBegan).Round(time.Second))))
+	status := describeSessionStatus(m.status, m.styles)
+
+	kindGlyph, kindStyle := agentKindMark(m.session.AgentKind, m.styles)
+	kindWord := agentKindLabel(m.session.AgentKind)
+
+	kindGroup := func(withWord bool) string {
+		if kindGlyph == "" {
+			return ""
+		}
+		if withWord && kindWord != "" {
+			return kindStyle.Render(kindGlyph + " " + kindWord)
+		}
+		return kindStyle.Render(kindGlyph)
 	}
-	// Transient activity: a provider retry notice, or the cancel prompt.
-	if detail := m.workStatus; detail != "" {
-		fields = append(fields, m.styles.statusBusy.Render(detail))
+	statusGroup := func(withWord bool) string {
+		if withWord {
+			return m.sessionStatusView()
+		}
+		return status.style.Render(status.glyph)
 	}
-	content := strings.Join(fields, separator)
-	padding := max(m.width-2-lipgloss.Width(content), 0)
-	// The blank row above the status is what separates it from the transcript;
+	groups := func(withWords bool) string {
+		fields := make([]string, 0, 4)
+		for _, group := range []string{kindGroup(withWords), statusGroup(withWords)} {
+			if group != "" {
+				fields = append(fields, group)
+			}
+		}
+		if m.working {
+			fields = append(fields, m.styles.statusBusy.Render(fmt.Sprintf("%s %s", spinnerFrame(m.workBegan), time.Since(m.workBegan).Round(time.Second))))
+		}
+		// Transient activity: a provider retry notice, or the cancel prompt.
+		if detail := m.workStatus; detail != "" {
+			fields = append(fields, m.styles.statusBusy.Render(detail))
+		}
+		return strings.Join(fields, separator)
+	}
+
+	inner := max(m.width-2, 1)
+	// The words are the first thing to go, exactly as in the session list: the
+	// glyphs still carry the kind and the status.
+	marks := groups(false)
+	if inner-lipgloss.Width(groups(true))-sessionRowGap >= minSessionNameRoom {
+		marks = groups(true)
+	}
+	name := ""
+	if room := inner - lipgloss.Width(marks) - sessionRowGap; room >= minSessionNameRoom {
+		name = m.session.Name
+		if name == "" {
+			name = "Untitled session"
+		}
+		name = m.styles.sessionName.Render(truncateLine(name, room))
+	}
+	gap := strings.Repeat(" ", max(inner-lipgloss.Width(name)-lipgloss.Width(marks), 0))
+	// The blank row above is what separates the session row from the transcript;
 	// the bottom line sits flush against the composer.
-	return m.styles.statusRow.PaddingTop(1).Render(" " + strings.Repeat(" ", padding) + content + " ")
+	return m.styles.statusRow.PaddingTop(1).Render(" " + name + gap + marks + " ")
 }
+
+// sessionRowGap is the space kept between the session name and the marks, and
+// minSessionNameRoom is the room below which the name says too little to take
+// space from them.
+const (
+	sessionRowGap      = 4
+	minSessionNameRoom = 12
+)
 
 // sessionStatusView renders the status the session reported for itself. Every
 // status has its own label and colour, so a session waiting on an approval or
 // one that has concluded never reads the same as one that is simply idle.
 func (m *chatModel) sessionStatusView() string {
 	descriptor := describeSessionStatus(m.status, m.styles)
-	return descriptor.style.Render(descriptor.label)
+	return descriptor.style.Render(descriptor.glyph + " " + descriptor.label)
 }
 
 // tokenCount renders a token total compactly: 950, 41.2k, 128k, 1.2M. The
@@ -2101,10 +2153,20 @@ func (m *chatModel) renderStyledMarkdown(markdown string, width int, style ansi.
 	return output
 }
 
+// spinnerFrames sweeps a bar up and down. Every frame is one cell wide and from
+// the block family, so the sweep keeps its shape in any font that carries the
+// rest of the UI, and it never reads as a status glyph.
+var spinnerFrames = [...]string{"▁", "▃", "▄", "▅", "▆", "▇", "█", "▇", "▆", "▅", "▄", "▃", "▁"}
+
+// spinnerFrame is the sweep position for a turn that began at start. The frames
+// advance with the animation tick, so the sweep is as smooth as the redraw.
 func spinnerFrame(start time.Time) string {
-	frames := [...]string{"◐", "◓", "◑", "◒"}
-	return frames[time.Since(start).Milliseconds()/200%int64(len(frames))]
+	return spinnerFrames[time.Since(start).Milliseconds()/spinnerFrameMillis%int64(len(spinnerFrames))]
 }
+
+// spinnerFrameMillis is how long one sweep frame holds. The animation tick is
+// what actually advances it, so a shorter hold than the tick only wastes frames.
+const spinnerFrameMillis = 200
 
 func animationTickCmd() tea.Cmd {
 	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return animationTickMsg{} })

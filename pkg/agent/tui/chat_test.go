@@ -141,15 +141,58 @@ func TestWorkingStatusIsProminentAndOmitsTurns(t *testing.T) {
 		t.Fatalf("status still shows the session id: %q", normalStatus)
 	}
 	m.applySessionStatus(contracts.SessionBusy)
-	workingStatus := ansi.Strip(m.statusRowView())
+	workingStatus := ansi.Strip(m.sessionRowView())
 	if !strings.Contains(workingStatus, "busy") {
-		t.Fatalf("working status row lacks the session status: %q", workingStatus)
+		t.Fatalf("session row lacks the session status: %q", workingStatus)
 	}
 	if !strings.Contains(workingStatus, spinnerFrame(m.workBegan)) || !strings.Contains(workingStatus, "0s") {
-		t.Fatalf("working status row lacks the spinner and timer: %q", workingStatus)
+		t.Fatalf("session row lacks the spinner and timer: %q", workingStatus)
 	}
 	if m.styles.statusBusy.GetForeground() != everforest.Yellow {
 		t.Fatalf("working status foreground=%v want yellow", m.styles.statusBusy.GetForeground())
+	}
+}
+
+// The session row carries the three things that describe the session — its name,
+// the kind of agent running it, and its status — and the bottom bar keeps the
+// facts about the model and the context.
+func TestSessionRowCarriesNameKindAndStatus(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.width = 120
+	m.session = store.SessionMeta{
+		ID: uuid.New(), Name: "Deploy the cluster", Provider: "deepseek",
+		Model: "deepseek-v4-flash", Cwd: "/ws/infai", AgentKind: contracts.SidecarLoopAgent,
+	}
+	m.status = contracts.SessionWaitingApproval
+
+	row := ansi.Strip(m.sessionRowView())
+	for _, want := range []string{"Deploy the cluster", "⧉", "waiting for approval"} {
+		if !strings.Contains(row, want) {
+			t.Fatalf("session row lacks %q: %q", want, row)
+		}
+	}
+	// The marks stay flush right, as the status row always did.
+	if !strings.HasSuffix(strings.TrimRight(row, " "), "waiting for approval") {
+		t.Fatalf("the marks are not right-aligned: %q", row)
+	}
+
+	// A row with no room for the name keeps the marks and drops the name, and the
+	// marks stay on the right edge.
+	m.width = 20
+	narrow := ansi.Strip(m.sessionRowView())
+	if strings.Contains(narrow, "Deploy") {
+		t.Fatalf("a row with no room kept the name: %q", narrow)
+	}
+	if !strings.HasSuffix(strings.TrimRight(narrow, " "), "⚑") {
+		t.Fatalf("the marks left the right edge when the name went: %q", narrow)
+	}
+
+	if strings.Contains(ansi.Strip(m.statusView()), "Deploy the cluster") {
+		t.Fatalf("the bottom bar still repeats the session name: %q", ansi.Strip(m.statusView()))
+	}
+	if m.styles.sessionName.GetForeground() == everforest.Blue {
+		t.Fatal("the session name is still the loud blue")
 	}
 }
 

@@ -308,6 +308,41 @@ func renderSessionWorkspace(m *modalModel, width, height int, styles harnessStyl
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
+// agentKindMark is the glyph and the colour an agent kind wears wherever the UI
+// names it: the session list and the session row both read it, so a kind never
+// looks like two different things on two screens.
+func agentKindMark(kind contracts.AgentKind, styles harnessStyles) (string, lipgloss.Style) {
+	switch kind {
+	case contracts.InteractiveAgent:
+		return "⬢", styles.agentInteractive
+	case contracts.SidecarLoopAgent:
+		return "⧉", styles.agentSidecar
+	case contracts.SingleLoopAgent:
+		return "↻", styles.agentLoop
+	case contracts.SwarmAgent:
+		return "⇶", styles.agentSwarm
+	default:
+		return "", lipgloss.NewStyle()
+	}
+}
+
+// agentKindLabel is the name an agent kind spells itself with in the list, once
+// the row has room for it.
+func agentKindLabel(kind contracts.AgentKind) string {
+	switch kind {
+	case contracts.InteractiveAgent:
+		return "interactive"
+	case contracts.SidecarLoopAgent:
+		return "sidecar_loop"
+	case contracts.SingleLoopAgent:
+		return "loop"
+	case contracts.SwarmAgent:
+		return "swarm"
+	default:
+		return ""
+	}
+}
+
 // sessionStatusDescriptor is a reported status in the terms the UI shows it: a
 // glyph that survives a narrow row, and the label that spells it out.
 type sessionStatusDescriptor struct {
@@ -392,17 +427,8 @@ func sessionEntryRows(option modalOption, selected, armed bool, width int, style
 		prefix = "› "
 	}
 
-	kindGlyph, kindWord, kindStyle := "", "", lipgloss.NewStyle()
-	switch option.agentKind {
-	case contracts.InteractiveAgent:
-		kindGlyph, kindWord, kindStyle = "⬢", "interactive", styles.agentInteractive
-	case contracts.SidecarLoopAgent:
-		kindGlyph, kindWord, kindStyle = "⧉", "sidecar_loop", styles.agentSidecar
-	case contracts.SingleLoopAgent:
-		kindGlyph, kindWord, kindStyle = "↻", "loop", styles.agentLoop
-	case contracts.SwarmAgent:
-		kindGlyph, kindWord, kindStyle = "⇶", "swarm", styles.agentSwarm
-	}
+	kindGlyph, kindStyle := agentKindMark(option.agentKind, styles)
+	kindWord := agentKindLabel(option.agentKind)
 
 	type rowTail struct{ plain, styled string }
 	kindGroup := strings.TrimSpace(kindGlyph + " " + kindWord)
