@@ -1504,7 +1504,10 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	case "system", "status":
 		content = m.styles.system.Width(width).Render("· " + entry.text)
 	case "compaction":
-		content = m.styles.thinking.Width(width).Render("CONTEXT COMPACTED\n" + entry.text)
+		content = m.styles.thinking.Width(width).Render("CONTEXT COMPACTED")
+		if body := strings.Trim(m.renderThinkingMarkdown(entry.text, width), "\n"); body != "" {
+			content += "\n" + body
+		}
 	case "skill":
 		content = renderChatMarker("✦", m.styles.skill, m.styles.skill, entry.text, width)
 	case "tool":
