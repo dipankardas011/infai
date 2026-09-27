@@ -72,6 +72,7 @@ type chatModel struct {
 	modal            *modalModel
 	commandMenu      bool
 	commandSelection int
+	filePicker       *filePicker
 
 	working           bool
 	workBegan         time.Time
@@ -694,11 +695,49 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key == "enter" {
+		if m.filePicker != nil {
+			if len(m.filePicker.matches) > 0 {
+				path := m.filePicker.matches[m.filePicker.selected]
+				value := m.composer.Value()
+				m.composer.SetValue(value[:m.filePicker.start] + "@" + path + value[m.filePicker.start+1+len(m.filePicker.query):])
+				m.composer.CursorEnd()
+			}
+			m.filePicker = nil
+			m.reflow(false)
+			return m, nil
+		}
 		return m, m.submit()
 	}
 
+	if m.filePicker != nil {
+		switch key {
+		case "esc":
+			m.filePicker = nil
+			m.reflow(false)
+			return m, nil
+		case "up":
+			m.filePicker.selected = (m.filePicker.selected - 1 + max(len(m.filePicker.matches), 1)) % max(len(m.filePicker.matches), 1)
+			return m, nil
+		case "down", "tab":
+			m.filePicker.selected = (m.filePicker.selected + 1) % max(len(m.filePicker.matches), 1)
+			return m, nil
+		}
+	}
+
 	var cmd tea.Cmd
+	before := m.composer.Value()
 	m.composer, cmd = m.composer.Update(msg)
+	value := m.composer.Value()
+	if m.filePicker != nil {
+		if len(value) < m.filePicker.start || !strings.HasPrefix(value[m.filePicker.start:], "@") || strings.ContainsAny(value[m.filePicker.start+1:], " \t\n") {
+			m.filePicker = nil
+		} else {
+			m.filePicker.filter(value[m.filePicker.start+1:])
+		}
+	} else if value == before+"@" && m.session.Cwd != "" {
+		m.filePicker = &filePicker{files: scanWorkspaceFiles(m.session.Cwd), start: len(before)}
+		m.filePicker.filter("")
+	}
 	m.updateCommandMenu()
 	m.reflow(false)
 	return m, cmd
@@ -832,6 +871,13 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 	return nil
 }
 
+func (m *chatModel) filePickerFiles() []string {
+	if m.session.Cwd == "" {
+		return nil
+	}
+	return scanWorkspaceFiles(m.session.Cwd)
+}
+
 func (m *chatModel) submit() tea.Cmd {
 	prompt := strings.TrimSpace(m.composer.Value())
 	if prompt == "" {
@@ -860,7 +906,7 @@ func (m *chatModel) submit() tea.Cmd {
 	m.commandMenu = false
 	m.reflow(false)
 
-	input := contracts.UserInput{Text: prompt, Images: images}
+	input := contracts.UserInput{Text: encodeFileReferences(prompt, m.filePickerFiles()), Images: images}
 	// A prompt sent while a turn is running is queued by the session and served
 	// next. The turn already in flight owns the status, so it is left as the
 	// events reported it.
@@ -1247,9 +1293,10 @@ func (m *chatModel) View() tea.View {
 	checklist := m.checklistView()
 	hitl := m.hitlView()
 	commands := m.commandMenuView()
+	files := renderFilePicker(m.filePicker, m.width, m.styles)
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	parts := []string{header, m.viewport.View(), checklist, hitl, sessionRow, commands, attachments, composer, status}
+	parts := []string{header, m.viewport.View(), checklist, hitl, sessionRow, commands, files, attachments, composer, status}
 	if len(m.areas) == len(parts) {
 		parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
 		for i := range parts {
@@ -1295,9 +1342,10 @@ func (m *chatModel) reflow(follow bool) {
 	checklist := m.checklistView()
 	hitl := m.hitlView()
 	commands := m.commandMenuView()
+	files := renderFilePicker(m.filePicker, m.width, m.styles)
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(checklist), intrinsic(hitl), intrinsic(sessionRow), intrinsic(commands), intrinsic(attachments), intrinsic(composer), intrinsic(status))
+	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(checklist), intrinsic(hitl), intrinsic(sessionRow), intrinsic(commands), intrinsic(files), intrinsic(attachments), intrinsic(composer), intrinsic(status))
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
@@ -1597,7 +1645,7 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	var content string
 	switch entry.role {
 	case "user":
-		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, entry.text, width)
+		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, renderFileReferences(entry.text), width)
 		if badges := m.renderImageBadges(entry.imageCount); badges != "" {
 			content += "\n" + strings.Repeat(" ", lipgloss.Width("●")+1) + badges
 		}

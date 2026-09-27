@@ -73,6 +73,7 @@ func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd 
 </risk_and_security>
 
 <tool_discipline>
+- A tag in the form "[file:relative/path]" is an inline reference/path to a file/folder under the workspace root. Use the read tool to inspect its current contents before reasoning from it.
 - Prefer the dedicated tool over Bash; reserve Bash for shell and system operations.
 - Independent tool calls in parallel; dependent calls strictly sequential.
 - Use task_checklist for multi-step work. Keep exactly one item in_progress while working and update it as work completes. A harness-provided <task_checklist> block is a session checkpoint, not a user request; later successful task_checklist results supersede it.
