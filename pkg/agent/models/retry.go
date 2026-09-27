@@ -18,7 +18,14 @@ import (
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 )
 
-// defaultRetryPolicy suits HTTP endpoints that fail fast: enough attempts to
+const responseHeaderTimeout = 5 * time.Minute
+
+func newProviderHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
+	return &http.Client{Transport: transport}
+}
+
 // ride out a restart or a brief rate limit, with a long enough cap that a
 // provider asking for a minute gets it.
 var defaultRetryPolicy = retryPolicy{maxAttempts: 10, base: 5 * time.Second, maxDelay: time.Minute}

@@ -307,12 +307,10 @@ func NewOpenAICodexResponsesAPI(b contracts.ProvisionedModel) (*openAICodexRespo
 	default:
 		base = base.JoinPath("codex", "responses")
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = 5 * time.Minute
 	return &openAICodexResponsesAPI{
 		b:        b,
 		endpoint: base,
-		client:   &http.Client{Transport: transport},
+		client:   newProviderHTTPClient(),
 		retry:    codexRetryPolicy,
 	}, nil
 }

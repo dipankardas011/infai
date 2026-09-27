@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
@@ -29,14 +28,10 @@ func NewOpenAICompatableAPI(b contracts.ProvisionedModel) (*genericOpenAICompata
 	if err != nil || !baseEndpoint.IsAbs() || baseEndpoint.Host == "" {
 		return nil, fmt.Errorf("openai compatible api: invalid base endpoint %q", b.BaseEndpoint())
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-
-	transport.ResponseHeaderTimeout = 5 * time.Minute
-
 	return &genericOpenAICompatableAPI{
 		b:        b,
 		endpoint: baseEndpoint.JoinPath("chat", "completions"),
-		client:   &http.Client{Transport: transport},
+		client:   newProviderHTTPClient(),
 		retry:    defaultRetryPolicy,
 	}, nil
 }

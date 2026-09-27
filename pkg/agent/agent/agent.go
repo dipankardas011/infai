@@ -268,15 +268,26 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 		requestMessages = append(requestMessages, contracts.NewSystemMessage(a.systemPrompt))
 		requestMessages = append(requestMessages, workingSessionMem...)
 
-		reply, usage, err := a.modelClient().Generate(ctx, requestMessages, a.tools, &contracts.GenerateOptions{
+		generateCtx, cancelGenerate := context.WithCancel(ctx)
+		defer cancelGenerate()
+		go func() {
+			select {
+			case <-a.userCancellation:
+				cancelGenerate()
+			case <-ctx.Done():
+			case <-generateCtx.Done():
+			}
+		}()
+
+		reply, usage, err := a.modelClient().Generate(generateCtx, requestMessages, a.tools, &contracts.GenerateOptions{
 			Stream: true,
 			OnDelta: func(kind contracts.EventStreamKind, text string) (isCanceled bool) {
 				select {
 				case <-a.userCancellation:
 					return true
-				case a.eventStream <- contracts.EventStream{Kind: kind, Timestamp: time.Now().UTC(), Content: &text}:
-					return false
 				case <-ctx.Done():
+					return true
+				case a.eventStream <- contracts.EventStream{Kind: kind, Timestamp: time.Now().UTC(), Content: &text}:
 					return false
 				}
 			},
