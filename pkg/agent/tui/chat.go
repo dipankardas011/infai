@@ -1484,7 +1484,7 @@ func (m *chatModel) taskChecklistView(width int) string {
 			completed++
 		}
 	}
-	lines := []string{m.styles.system.Bold(true).Render(fmt.Sprintf("TASKS  %d/%d complete", completed, len(m.checklist.Items)))}
+	lines := []string{m.styles.system.Bold(true).Render(fmt.Sprintf("Task Checklist %d/%d complete", completed, len(m.checklist.Items)))}
 	visible := min(len(m.checklist.Items), 4)
 	for _, item := range m.checklist.Items[:visible] {
 		marker := "○"
