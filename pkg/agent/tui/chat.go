@@ -605,7 +605,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if key == "ctrl+m" {
 		m.modal = loadingModal("Loading models")
-		return m, listProvidersCmd(m.ctx, m.client, false)
+		return m, listProvidersCmd(m.ctx, m.client, true)
 	}
 	if key == "ctrl+t" {
 		m.cycleThinking()
