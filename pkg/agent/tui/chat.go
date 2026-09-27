@@ -199,7 +199,7 @@ func runChatTUI(ctx context.Context, client Client, sessions []contracts.Session
 
 func newChatModel(ctx context.Context, client Client, sessions []contracts.SessionSummary, opts RunOptions) *chatModel {
 	input := textarea.New()
-	input.Placeholder = "Ask, plan, build..."
+	input.Placeholder = "Ask, plan, build... (external editor ctrl+x)"
 	input.ShowLineNumbers = false
 	input.DynamicHeight = true
 	input.MinHeight = 1
@@ -245,7 +245,7 @@ const inputMark = "∞ "
 // out how to finish a reason, so the reserved block above does not have to.
 func (m *chatModel) refreshInputMark() {
 	mark := inputMark
-	placeholder := "Ask, plan, build..."
+	placeholder := "Ask, plan, build... (external editor ctrl+x)"
 	if m.approvalReason {
 		mark = "why▸ "
 		placeholder = "(reason to deny · ⏎ send · esc cancel)"
@@ -607,7 +607,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleModalKey(msg)
 	}
 	switch msg.Key().Keystroke() {
-	case "ctrl+e":
+	case "ctrl+x":
 		return m, editComposerCmd(m.composer.Value())
 	case "ctrl+v":
 		return m, m.pasteImage()
