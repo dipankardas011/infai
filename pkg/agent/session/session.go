@@ -96,6 +96,7 @@ func NewSession(
 	cwd string,
 	ss *store.SessionStore,
 	aeComms *comms.ISACChannel,
+	sessionAgentKind contracts.AgentKind,
 ) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(chosenModel)
 	if err != nil {
@@ -110,6 +111,7 @@ func NewSession(
 		Cwd:       cwd,
 		CreatedAt: now,
 		UpdatedAt: now,
+		AgentKind: sessionAgentKind,
 	}
 	if err := ss.SaveMeta(meta); err != nil {
 		return nil, err
@@ -205,7 +207,7 @@ func newRuntimeSession(
 
 	s.agent, err = agent.NewAgent(
 		s.model,
-		contracts.InteractiveAgent,
+		s.meta.AgentKind,
 		s.commitMessages,
 		s.eventBus,
 		s.userCancellation,

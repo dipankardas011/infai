@@ -86,9 +86,10 @@ func NewInfaiAgentEngine(parent context.Context, bgLogger *slog.Logger, cfg *con
 // ---- Sessions ----
 
 type CreateSessionOptions struct {
-	Provider string
-	Model    string
-	Cwd      string
+	Provider  string
+	Model     string
+	Cwd       string
+	AgentKind contracts.AgentKind
 }
 
 // CreateSession registers a new idle session and persists it. It stays until
@@ -107,6 +108,10 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	}
 	if opts.Model == "" {
 		return nil, errors.New("engine: model is required")
+	}
+
+	if opts.AgentKind == "" {
+		opts.AgentKind = contracts.InteractiveAgent
 	}
 
 	providerConfig, ok := e.Provider(opts.Provider)
@@ -140,6 +145,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		opts.Cwd,
 		e.sessionStore,
 		e.aseComms.NewSessionAgentComms(sessID),
+		opts.AgentKind,
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(sessID)
@@ -497,6 +503,7 @@ func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 			UpdatedAt: meta.UpdatedAt,
 			Active:    active,
 			Status:    status,
+			AgentKind: meta.AgentKind,
 		})
 	}
 	return summaries

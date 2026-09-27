@@ -553,7 +553,7 @@ func TestSessionWorkspaceMarksApprovalAndDropsDetailWhenNarrow(t *testing.T) {
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
 
 	wide := ansi.Strip(m.View().Content)
-	for _, want := range []string{"⚑ Deploy the cluster", "waiting for approval", "deepseek-v4-flash", "/home/dipankardas/ws/infai"} {
+	for _, want := range []string{"Deploy the cluster", "⚑ waiting for approval", "deepseek-v4-flash", "/home/dipankardas/ws/infai"} {
 		if !strings.Contains(wide, want) {
 			t.Fatalf("wide session list lacks %q:\n%s", want, wide)
 		}
@@ -561,11 +561,10 @@ func TestSessionWorkspaceMarksApprovalAndDropsDetailWhenNarrow(t *testing.T) {
 
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 62, Height: 30})
 	narrow := ansi.Strip(m.View().Content)
-	if !strings.Contains(narrow, "⚑ Deploy the cluster") {
-		t.Fatalf("narrow session list lost the name or the glyph:\n%s", narrow)
-	}
-	if !strings.Contains(narrow, "deepseek-v4-flash") {
-		t.Fatalf("narrow session list lost the model:\n%s", narrow)
+	for _, want := range []string{"Deploy the cluster", "⚑ waiting for approval", "deepseek-v4-flash"} {
+		if !strings.Contains(narrow, want) {
+			t.Fatalf("narrow session list lacks %q:\n%s", want, narrow)
+		}
 	}
 	if strings.Contains(narrow, "/home/dipankardas/ws/infai") {
 		t.Fatalf("narrow session list kept the working directory:\n%s", narrow)
@@ -574,6 +573,59 @@ func TestSessionWorkspaceMarksApprovalAndDropsDetailWhenNarrow(t *testing.T) {
 		if width := lipgloss.Width(line); width > 62 {
 			t.Fatalf("narrow session list line width=%d exceeds terminal:\n%s", width, narrow)
 		}
+	}
+}
+
+func TestSessionListShowsAgentKind(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{
+		{ID: uuid.New(), Name: "main", Model: "deepseek-v4-flash", Cwd: "/ws/infai", UpdatedAt: time.Now(),
+			Status: contracts.SessionIdle, Active: true, AgentKind: contracts.InteractiveAgent},
+		{ID: uuid.New(), Name: "worker", Model: "gemma4-e2b-it", Cwd: "/ws/infai", UpdatedAt: time.Now(),
+			Status: contracts.SessionIdle, Active: true, AgentKind: contracts.SidecarLoopAgent},
+		{ID: uuid.New(), Name: "turn", Model: "gpt-5.6-sol", Cwd: "/ws/infai", UpdatedAt: time.Now(),
+			Status: contracts.SessionCompleted, AgentKind: contracts.SingleLoopAgent},
+		{ID: uuid.New(), Name: "lane", Model: "gpt-5.6-luna", Cwd: "/ws/infai", UpdatedAt: time.Now(),
+			Status: contracts.SessionWaitingApproval, Active: true, AgentKind: contracts.SwarmAgent},
+	}, false)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+
+	// Each kind names itself in its own group at the end of the name row, ahead
+	// of the status group.
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{
+		"⬢ interactive  ○ idle",
+		"⧉ sidecar_loop  ○ idle",
+		"↻ loop  ✓ completed",
+		"⇶ swarm  ⚑ waiting for approval",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("session list lacks the kind group %q:\n%s", want, content)
+		}
+	}
+
+	// The words are a luxury and the name is not: a row shows the words only
+	// while it can also show the name whole. So two rows in one list can differ,
+	// and the one with the longer name keeps its own room instead of spending it
+	// on a word.
+	m.showSessions([]contracts.SessionSummary{
+		{ID: uuid.New(), Name: "main", Model: "deepseek-v4-flash", Cwd: "/ws/infai", UpdatedAt: time.Now(),
+			Status: contracts.SessionIdle, Active: true, AgentKind: contracts.InteractiveAgent},
+		{ID: uuid.New(), Name: "I want you to help me Why this happened? point is when", Model: "gemma4-e2b-it",
+			Cwd: "/ws/infai", UpdatedAt: time.Now(), Status: contracts.SessionBusy, Active: true,
+			AgentKind: contracts.SidecarLoopAgent},
+	}, false)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 62, Height: 26})
+
+	content = ansi.Strip(m.View().Content)
+	if !strings.Contains(content, "⬢ interactive  ○ idle") {
+		t.Fatalf("a name with room to spare did not get the words:\n%s", content)
+	}
+	if strings.Contains(content, "⧉ sidecar_loop") {
+		t.Fatalf("a long name spent its room on a word:\n%s", content)
+	}
+	if !strings.Contains(content, "⧉  ◐") {
+		t.Fatalf("a long name lost the kind glyph too:\n%s", content)
 	}
 }
 

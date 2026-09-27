@@ -23,6 +23,8 @@ type SessionMeta struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
+	AgentKind contracts.AgentKind `json:"agent_kind"`
+
 	// Conclusion records how the session ended, written once when it does and
 	// never rewritten. Nil while the session has not ended.
 	Conclusion *SessionConclusion `json:"conclusion,omitempty"`
@@ -35,13 +37,14 @@ type SessionConclusion struct {
 }
 
 type sessionFile struct {
-	ID           uuid.UUID          `json:"id"`
-	Name         string             `json:"name,omitempty"`
-	Cwd          string             `json:"cwd,omitempty"`
-	CurrentModel currentModel       `json:"current_model"`
-	CreatedAt    time.Time          `json:"created_at"`
-	UpdatedAt    time.Time          `json:"updated_at"`
-	Conclusion   *SessionConclusion `json:"conclusion,omitempty"`
+	ID           uuid.UUID           `json:"id"`
+	Name         string              `json:"name,omitempty"`
+	Cwd          string              `json:"cwd,omitempty"`
+	CurrentModel currentModel        `json:"current_model"`
+	CreatedAt    time.Time           `json:"created_at"`
+	UpdatedAt    time.Time           `json:"updated_at"`
+	Conclusion   *SessionConclusion  `json:"conclusion,omitempty"`
+	AgentKind    contracts.AgentKind `json:"agent_kind"`
 }
 
 // this helps when we resume we can use this to get the client connection up.
@@ -61,6 +64,7 @@ func newSessionFile(meta SessionMeta) sessionFile {
 		},
 		CreatedAt: meta.CreatedAt,
 		UpdatedAt: meta.UpdatedAt,
+		AgentKind: meta.AgentKind,
 	}
 	if meta.Conclusion != nil {
 		conclusion := *meta.Conclusion
@@ -78,6 +82,7 @@ func (f sessionFile) meta() SessionMeta {
 		Cwd:       f.Cwd,
 		CreatedAt: f.CreatedAt,
 		UpdatedAt: f.UpdatedAt,
+		AgentKind: f.AgentKind,
 	}
 	if f.Conclusion != nil {
 		conclusion := *f.Conclusion

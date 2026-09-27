@@ -32,12 +32,14 @@ type SessionSummary struct {
 	UpdatedAt time.Time     `json:"updated_at"`
 	Active    bool          `json:"active"`
 	Status    SessionStatus `json:"status,omitempty"`
+	AgentKind AgentKind     `json:"agent_kind,omitempty"`
 }
 
 type AgentKind string
 
 const (
 	InteractiveAgent AgentKind = "interactive"
+	SidecarLoopAgent AgentKind = "sidecar_loop"
 	SingleLoopAgent  AgentKind = "loop"
 	SwarmAgent       AgentKind = "swarm"
 )

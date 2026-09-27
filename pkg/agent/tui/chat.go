@@ -2192,8 +2192,6 @@ func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required b
 		if name == "" {
 			name = "Untitled session"
 		}
-		// The working directory goes first when the row is narrow, then the
-		// time: the model is what tells two sessions of one project apart.
 		parts := []string{orModel(session.Model), humanTime(session.UpdatedAt)}
 		if session.Cwd != "" {
 			parts = append(parts, session.Cwd)
@@ -2204,6 +2202,7 @@ func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required b
 			session:       session.ID,
 			sessionStatus: status,
 			sessionActive: session.Active,
+			agentKind:     session.AgentKind,
 		}
 		options = append(options, option)
 	}

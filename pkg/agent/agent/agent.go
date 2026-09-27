@@ -214,7 +214,7 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 			}
 
 			switch a.Kind {
-			case contracts.SingleLoopAgent:
+			case contracts.SidecarLoopAgent, contracts.SingleLoopAgent:
 				_ = a.updateState(ctx, contracts.SessionCompleted)
 				return
 			case contracts.InteractiveAgent:

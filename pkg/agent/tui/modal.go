@@ -35,6 +35,9 @@ type modalOption struct {
 	// detailParts is the identifying fields of a session row, most important
 	// first, so a narrow list can drop the ones that fit worst.
 	detailParts []string
+	// agentKind is the kind of agent the session runs, which the list names
+	// beside the status.
+	agentKind contracts.AgentKind
 	// sessionStatus is the status the engine reported for the session, which
 	// the session list shows as a glyph and a label.
 	sessionStatus contracts.SessionStatus
@@ -377,11 +380,6 @@ func renderSessionsPanel(m *modalModel, width, height int, styles harnessStyles)
 	return renderSessionPanel("SESSIONS", strings.Join(rows, "\n"), width, height, border, styles)
 }
 
-// sessionEntryRows renders one session as two rows: the name with the status
-// that says what it is doing, then the fields that identify it. The status
-// label is the first thing to go when the row is narrow — the glyph still says
-// what the session is doing — and the working directory is the first detail
-// field to go, because it is the longest and the least specific.
 func sessionEntryRows(option modalOption, selected, armed bool, width int, styles harnessStyles) []string {
 	status := describeSessionStatus(option.sessionStatus, styles)
 	if armed {
@@ -393,38 +391,68 @@ func sessionEntryRows(option modalOption, selected, armed bool, width int, style
 	if selected {
 		prefix = "› "
 	}
-	head := prefix + status.glyph + " "
 
-	label := status.label
-	if width-lipgloss.Width(head)-lipgloss.Width(label)-2 < minSessionNameWidth {
-		label = ""
+	kindGlyph, kindWord, kindStyle := "", "", lipgloss.NewStyle()
+	switch option.agentKind {
+	case contracts.InteractiveAgent:
+		kindGlyph, kindWord, kindStyle = "⬢", "interactive", styles.agentInteractive
+	case contracts.SidecarLoopAgent:
+		kindGlyph, kindWord, kindStyle = "⧉", "sidecar_loop", styles.agentSidecar
+	case contracts.SingleLoopAgent:
+		kindGlyph, kindWord, kindStyle = "↻", "loop", styles.agentLoop
+	case contracts.SwarmAgent:
+		kindGlyph, kindWord, kindStyle = "⇶", "swarm", styles.agentSwarm
 	}
-	name := ansi.Truncate(option.label, max(width-lipgloss.Width(head)-lipgloss.Width(label)-2, 1), "…")
-	gap := strings.Repeat(" ", max(width-lipgloss.Width(head)-lipgloss.Width(name)-lipgloss.Width(label), 1))
+
+	type rowTail struct{ plain, styled string }
+	kindGroup := strings.TrimSpace(kindGlyph + " " + kindWord)
+	statusGroup := status.glyph + " " + status.label
+	rich := rowTail{
+		plain:  kindGroup + "  " + statusGroup,
+		styled: kindStyle.Render(kindGroup) + "  " + status.style.Render(statusGroup),
+	}
+	marks := rowTail{
+		plain:  status.glyph,
+		styled: status.style.Render(status.glyph),
+	}
+	if kindGlyph == "" {
+		// A session with no kind recorded has only the status to show.
+		rich = rowTail{plain: statusGroup, styled: status.style.Render(statusGroup)}
+	} else {
+		marks = rowTail{
+			plain:  kindGlyph + "  " + status.glyph,
+			styled: kindStyle.Render(kindGlyph) + "  " + status.style.Render(status.glyph),
+		}
+	}
+
+	nameWidth := func(tail string) int {
+		return min(width-lipgloss.Width(prefix)-lipgloss.Width(tail)-2, maxSessionNameWidth)
+	}
+
+	wanted := min(lipgloss.Width(option.label), maxSessionNameWidth)
+	tail := marks
+	if wanted <= nameWidth(rich.plain) {
+		tail = rich
+	}
+	name := ansi.Truncate(option.label, max(nameWidth(tail.plain), 1), "…")
+	gap := strings.Repeat(" ", max(width-lipgloss.Width(prefix)-lipgloss.Width(name)-lipgloss.Width(tail.plain), 1))
 	detail := "    " + sessionDetailLine(option.detailParts, max(width-4, 1))
 
 	if selected {
-		// The row carries one style and no inner spans: a styled span ends the
-		// highlight at its own reset, punching the terminal background through
-		// the rest of the row.
 		return []string{
-			sessionRow(styles.screenSel, head+name+gap+label, width),
+			sessionRow(styles.screenSel, prefix+name+gap+tail.plain, width),
 			sessionRow(styles.inactive.Background(everforest.SelectionBg), detail, width),
 		}
 	}
-	tail := ""
-	if label != "" {
-		tail = status.style.Render(label)
-	}
 	return []string{
-		sessionRow(styles.screenRow, prefix+status.style.Render(status.glyph)+" "+name+gap+tail, width),
+		sessionRow(styles.screenRow, prefix+name+gap+tail.styled, width),
 		sessionRow(styles.inactive, detail, width),
 	}
 }
 
-// minSessionNameWidth is the room a session name keeps before its status label
-// gives way to the glyph alone.
-const minSessionNameWidth = 12
+// maxSessionNameWidth caps the name so a long one cannot squeeze the marks off
+// the row: the marks are what the list is scanned for.
+const maxSessionNameWidth = 60
 
 // sessionDetailLine joins a session's identifying fields, dropping the ones that
 // fit worst so the line still fits a narrow terminal.
