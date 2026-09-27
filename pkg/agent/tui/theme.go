@@ -68,39 +68,43 @@ type harnessStyles struct {
 	status        lipgloss.Style
 	statusBusy    lipgloss.Style
 	statusWaiting lipgloss.Style
-	statusRow     lipgloss.Style
-	hitl          lipgloss.Style
-	hitlFlag      lipgloss.Style
-	hitlTitle     lipgloss.Style
-	hitlName      lipgloss.Style
-	hitlBody      lipgloss.Style
-	hitlMuted     lipgloss.Style
-	hitlAllow     lipgloss.Style
-	hitlDeny      lipgloss.Style
-	sessionName   lipgloss.Style
-	muted         lipgloss.Style
-	userMarker    lipgloss.Style
-	assistant     lipgloss.Style
-	imageBadge    lipgloss.Style
-	thinking      lipgloss.Style
-	system        lipgloss.Style
-	error         lipgloss.Style
-	tool          lipgloss.Style
-	skill         lipgloss.Style
-	modal         lipgloss.Style
-	modalTitle    lipgloss.Style
-	modalBody     lipgloss.Style
-	modalOption   lipgloss.Style
-	modalActive   lipgloss.Style
-	screenTitle   lipgloss.Style
-	screenBody    lipgloss.Style
-	screenRow     lipgloss.Style
-	screenSel     lipgloss.Style
-	active        lipgloss.Style
-	inactive      lipgloss.Style
-	menu          lipgloss.Style
-	menuRow       lipgloss.Style
-	menuActive    lipgloss.Style
+	// statusOpen is a session the engine holds and is not working on: it is
+	// ready for a prompt, which reads as "go", not as "wait".
+	statusOpen      lipgloss.Style
+	statusConcluded lipgloss.Style
+	statusRow       lipgloss.Style
+	hitl            lipgloss.Style
+	hitlFlag        lipgloss.Style
+	hitlTitle       lipgloss.Style
+	hitlName        lipgloss.Style
+	hitlBody        lipgloss.Style
+	hitlMuted       lipgloss.Style
+	hitlAllow       lipgloss.Style
+	hitlDeny        lipgloss.Style
+	sessionName     lipgloss.Style
+	muted           lipgloss.Style
+	userMarker      lipgloss.Style
+	assistant       lipgloss.Style
+	imageBadge      lipgloss.Style
+	thinking        lipgloss.Style
+	system          lipgloss.Style
+	error           lipgloss.Style
+	tool            lipgloss.Style
+	skill           lipgloss.Style
+	modal           lipgloss.Style
+	modalTitle      lipgloss.Style
+	modalBody       lipgloss.Style
+	modalOption     lipgloss.Style
+	modalActive     lipgloss.Style
+	screenTitle     lipgloss.Style
+	screenBody      lipgloss.Style
+	screenRow       lipgloss.Style
+	screenSel       lipgloss.Style
+	active          lipgloss.Style
+	inactive        lipgloss.Style
+	menu            lipgloss.Style
+	menuRow         lipgloss.Style
+	menuActive      lipgloss.Style
 }
 
 func newHarnessStyles() harnessStyles {
@@ -113,7 +117,12 @@ func newHarnessStyles() harnessStyles {
 		status:        lipgloss.NewStyle().Foreground(everforest.Muted),
 		statusBusy:    lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
 		statusWaiting: lipgloss.NewStyle().Foreground(everforest.Orange).Bold(true),
-		statusRow:     lipgloss.NewStyle().Foreground(everforest.Muted).PaddingRight(1),
+		// A session the engine holds and is not working on reads as "go", so it
+		// takes the palette's go colour; one that has ended takes the quieter
+		// aqua, which keeps "open and waiting" from reading as "finished".
+		statusOpen:      lipgloss.NewStyle().Foreground(everforest.Green),
+		statusConcluded: lipgloss.NewStyle().Foreground(everforest.Aqua),
+		statusRow:       lipgloss.NewStyle().Foreground(everforest.Muted).PaddingRight(1),
 		// A pending decision gets a tinted band instead of a border, so it reads
 		// as reserved space without any frame to get wrong. Every style on the
 		// band carries the band's own background: a foreground-only style would

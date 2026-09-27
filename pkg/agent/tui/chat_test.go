@@ -649,7 +649,7 @@ func TestSessionListCloseAndDeleteUpdateTheRow(t *testing.T) {
 	open, saved := uuid.New(), uuid.New()
 	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
 	m.showSessions([]contracts.SessionSummary{
-		{ID: open, Name: "open one", Status: contracts.SessionIdle},
+		{ID: open, Name: "open one", Status: contracts.SessionIdle, Active: true},
 		{ID: saved, Name: "saved one", Status: contracts.SessionTombstone},
 	}, true)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -683,6 +683,69 @@ func TestSessionListCloseAndDeleteUpdateTheRow(t *testing.T) {
 	}
 	if m.session.ID != uuid.Nil {
 		t.Fatal("deleting the attached session did not detach the client")
+	}
+}
+
+func TestSessionListCloseOnlyAppliesToASessionTheEngineHolds(t *testing.T) {
+	open, saved := uuid.New(), uuid.New()
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{
+		{ID: open, Name: "open one", Status: contracts.SessionIdle, Active: true},
+		// A saved session is not resident, whatever status it reports.
+		{ID: saved, Name: "saved one", Status: contracts.SessionTombstone},
+		// A concluded session stays in the engine until it is closed, so its
+		// status alone would hide that it is still open.
+		{ID: uuid.New(), Name: "finished one", Status: contracts.SessionCompleted, Active: true},
+	}, true)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m.modal.selected = 1
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Text: "c"}))
+	if cmd == nil {
+		t.Fatal("c did not dispatch a close for a session the engine holds")
+	}
+
+	m.modal.selected = 2
+	_, cmd = m.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Text: "c"}))
+	if cmd != nil {
+		t.Fatal("c dispatched a close for a session the engine is not holding")
+	}
+	if notice := ansi.Strip(m.View().Content); !strings.Contains(notice, "SESSION IS NOT OPEN") {
+		t.Fatalf("closing a saved session did not explain itself:\n%s", notice)
+	}
+}
+
+// "idle" and "inactive" are the two statuses a list is mostly made of, and the
+// whole difference between them is that one is open and the other is not. That
+// has to reach the terminal as colour, because the words alone do not carry it.
+func TestSessionStatusesReadDifferently(t *testing.T) {
+	styles := newHarnessStyles()
+	foregrounds := map[contracts.SessionStatus]color.Color{}
+	for _, status := range []contracts.SessionStatus{
+		contracts.SessionIdle, contracts.SessionBusy, contracts.SessionWaitingApproval, contracts.SessionCompacting,
+		contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone,
+	} {
+		foregrounds[status] = describeSessionStatus(status, styles).style.GetForeground()
+	}
+
+	for status, want := range map[contracts.SessionStatus]color.Color{
+		contracts.SessionIdle:                  everforest.Green,
+		contracts.SessionBusy:                  everforest.Yellow,
+		contracts.SessionWaitingApproval:       everforest.Orange,
+		contracts.SessionCompacting:            everforest.Yellow,
+		contracts.SessionCompleted:             everforest.Aqua,
+		contracts.SessionMaxIterationExhausted: everforest.Red,
+		contracts.SessionTombstone:             everforest.Muted,
+	} {
+		if got := foregrounds[status]; got != want {
+			t.Errorf("status %s foreground=%v want=%v", status, got, want)
+		}
+	}
+	if foregrounds[contracts.SessionIdle] == foregrounds[contracts.SessionTombstone] {
+		t.Fatal("an open session and a closed one are drawn in the same colour")
+	}
+	if foregrounds[contracts.SessionIdle] == foregrounds[contracts.SessionCompleted] {
+		t.Fatal("an open session and a finished one are drawn in the same colour")
 	}
 }
 

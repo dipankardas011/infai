@@ -38,6 +38,11 @@ type modalOption struct {
 	// sessionStatus is the status the engine reported for the session, which
 	// the session list shows as a glyph and a label.
 	sessionStatus contracts.SessionStatus
+	// sessionActive is whether the engine is holding the session. It is the
+	// engine's own answer, and the status cannot stand in for it: a session
+	// that concluded stays in the engine until it is closed, so it reports a
+	// concluded status while still being open to close.
+	sessionActive bool
 }
 
 type modalModel struct {
@@ -320,13 +325,13 @@ func describeSessionStatus(status contracts.SessionStatus, styles harnessStyles)
 	case contracts.SessionCompacting:
 		return sessionStatusDescriptor{"⟳", "compacting", styles.statusBusy}
 	case contracts.SessionCompleted:
-		return sessionStatusDescriptor{"✓", "completed", styles.active}
+		return sessionStatusDescriptor{"✓", "completed", styles.statusConcluded}
 	case contracts.SessionMaxIterationExhausted:
 		return sessionStatusDescriptor{"⚠", "max iterations reached", styles.error}
 	case contracts.SessionTombstone:
-		return sessionStatusDescriptor{"·", "inactive", styles.inactive}
+		return sessionStatusDescriptor{"·", "inactive", styles.status}
 	default:
-		return sessionStatusDescriptor{"○", "idle", styles.status}
+		return sessionStatusDescriptor{"○", "idle", styles.statusOpen}
 	}
 }
 

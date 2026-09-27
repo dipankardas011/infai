@@ -732,6 +732,12 @@ func (m *chatModel) handleSessionListKey(key string) (tea.Cmd, bool) {
 		if option.session == uuid.Nil {
 			return nil, false
 		}
+		if !option.sessionActive {
+			// The engine has nothing to tear down: the session is saved history,
+			// already closed. Say so here rather than spend a round trip on it.
+			m.showNotice("Session is not open", "Only a session the engine is holding can be closed.", false)
+			return nil, true
+		}
 		return closeSessionCmd(m.ctx, m.client, option.session), true
 	case "esc":
 		if armed != uuid.Nil {
@@ -2142,10 +2148,7 @@ func (m *chatModel) applySessionAction(msg sessionActionedMsg) {
 	}
 
 	if msg.action == "close" {
-		// Close keeps a conclusion the session already recorded, and records an
-		// inactive one otherwise. Only the second case changes what the list
-		// shows, and it is the case a live status identifies.
-		if isLiveSessionStatus(m.modal.options[index].sessionStatus) {
+		if !sessionConcluded(m.modal.options[index].sessionStatus) {
 			m.modal.options[index].sessionStatus = contracts.SessionTombstone
 		}
 		return
@@ -2165,12 +2168,13 @@ func (m *chatModel) applySessionAction(msg sessionActionedMsg) {
 	m.modal.selected = clamp(m.modal.selected, 0, len(m.modal.options)-1)
 }
 
-// isLiveSessionStatus reports whether a status means the engine still holds a
-// turn for the session. A concluded status is history: nothing is open to
-// close, and closing one would not change it.
-func isLiveSessionStatus(status contracts.SessionStatus) bool {
+// sessionConcluded reports whether the session has ended, which is the group
+// the contract calls "concluded states". Closing a session that ended keeps the
+// conclusion it recorded, so the list does not change; one that has not ended
+// records an inactive conclusion, which is the change worth showing.
+func sessionConcluded(status contracts.SessionStatus) bool {
 	switch status {
-	case contracts.SessionIdle, contracts.SessionBusy, contracts.SessionWaitingApproval, contracts.SessionCompacting:
+	case contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone:
 		return true
 	default:
 		return false
@@ -2199,6 +2203,7 @@ func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required b
 			detailParts:   parts,
 			session:       session.ID,
 			sessionStatus: status,
+			sessionActive: session.Active,
 		}
 		options = append(options, option)
 	}
