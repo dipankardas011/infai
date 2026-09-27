@@ -32,8 +32,7 @@ func (m *chatModel) handleApprovalKey(key string) (tea.Model, tea.Cmd, bool) {
 		switch key {
 		case "esc":
 			m.approvalReason = false
-			m.composer.Reset()
-			m.reflow(false)
+			m.refreshInputMark()
 			return m, nil, true
 		case "enter":
 			return m, m.resolveApproval(string(contracts.ApprovalDenyWithReason), strings.TrimSpace(m.composer.Value())), true
@@ -47,7 +46,6 @@ func (m *chatModel) handleApprovalKey(key string) (tea.Model, tea.Cmd, bool) {
 		return m, m.resolveApproval(string(contracts.ApprovalDeny), ""), true
 	case "r":
 		m.approvalReason = true
-		m.composer.Reset()
 		m.refreshInputMark()
 		m.reflow(false)
 		return m, nil, true
@@ -71,7 +69,7 @@ func (m *chatModel) resolveApproval(decision, reason string) tea.Cmd {
 	m.approval = nil
 	m.approvalShown = false
 	m.approvalReason = false
-	m.composer.Reset()
+	m.refreshInputMark()
 	note := "Approval " + decision
 	if reason != "" {
 		note += ": " + reason
@@ -101,7 +99,7 @@ func (m *chatModel) clearApproval() {
 	m.approval = nil
 	m.approvalShown = false
 	m.approvalReason = false
-	m.composer.Reset()
+	m.refreshInputMark()
 	m.reflow(false)
 }
 

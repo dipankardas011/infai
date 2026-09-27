@@ -126,6 +126,11 @@ type clipboardImageMsg struct {
 	err   error
 }
 
+type editorDoneMsg struct {
+	text string
+	err  error
+}
+
 type streamApprovalMsg struct{ update ApprovalUpdate }
 type turnDoneMsg struct {
 	reply *ChatReply
@@ -353,6 +358,18 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitStream(m.ctx, m.stream)
 	case clipboardImageMsg:
 		return m.handleClipboardImage(msg)
+	case editorDoneMsg:
+		if msg.err != nil {
+			m.appendError(fmt.Errorf("open editor: %w", msg.err))
+			m.refreshTranscript(true)
+			m.reflow(false)
+			return m, nil
+		}
+		m.composer.SetValue(msg.text)
+		m.composer.CursorEnd()
+		m.updateCommandMenu()
+		m.reflow(false)
+		return m, nil
 	case turnDoneMsg:
 		m.stopStreamRefresh()
 		m.working = false
@@ -589,6 +606,8 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleModalKey(msg)
 	}
 	switch msg.Key().Keystroke() {
+	case "ctrl+e":
+		return m, editComposerCmd(m.composer.Value())
 	case "ctrl+v":
 		return m, m.pasteImage()
 	case "ctrl+u":
