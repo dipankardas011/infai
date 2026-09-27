@@ -1077,17 +1077,27 @@ func TestApprovalKeysPreserveComposerDraft(t *testing.T) {
 	m.composer.SetValue("queued prompt")
 	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{Name: contracts.BashTool, Arguments: `{"command":"ls"}`}}})
 
-	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'r', Text: "r"}))
-	if got := m.composer.Value(); got != "queued prompt" {
-		t.Fatalf("reason action cleared draft: got %q", got)
-	}
-	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
-	if got := m.composer.Value(); got != "queued prompt" {
-		t.Fatalf("canceling reason mode cleared draft: got %q", got)
-	}
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
 	if got := m.composer.Value(); got != "queued prompt" {
 		t.Fatalf("approving cleared draft: got %q", got)
+	}
+}
+
+func TestApprovalReasonRestoresComposerDraft(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	m.composer.SetValue("queued prompt")
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{Name: contracts.BashTool, Arguments: `{"command":"ls"}`}}})
+
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'r', Text: "r"}))
+	if got := m.composer.Value(); got != "" {
+		t.Fatalf("reason mode kept draft: got %q", got)
+	}
+	m.composer.SetValue("not safe")
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if got := m.composer.Value(); got != "queued prompt" {
+		t.Fatalf("reason submission did not restore draft: got %q", got)
 	}
 }
 

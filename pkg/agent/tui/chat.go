@@ -68,6 +68,7 @@ type chatModel struct {
 	approval         *Approval
 	approvalShown    bool
 	approvalReason   bool
+	approvalDraft    string
 	modal            *modalModel
 	commandMenu      bool
 	commandSelection int
