@@ -192,7 +192,37 @@ func approvalSubject(approval *Approval) (name, preview string) {
 		return "TOOL", "tool call"
 	}
 	call := *approval.ToolCall
-	return string(call.Function.Name), singleLine(toolCallPreview(string(call.Function.Name), call.Function.Arguments))
+	return string(call.Function.Name), approvalCompactPreview(call)
+}
+
+func approvalCompactPreview(call contracts.ToolCall) string {
+	switch contracts.ToolType(call.Function.Name) {
+	case contracts.ReadTool:
+		if preview, ok := readToolCallPreview(call.Function.Arguments); ok {
+			return preview
+		}
+	case contracts.WriteTool:
+		if path, content, ok := decodeWriteArgs(call.Function.Arguments); ok {
+			return fmt.Sprintf("%s  (%d lines, %d bytes)", path, textLineCount(content), len([]byte(content)))
+		}
+	case contracts.EditTool:
+		if path, oldText, newText, replaceAll, ok := decodeEditArgs(call.Function.Arguments); ok {
+			mode := "first match"
+			if replaceAll {
+				mode = "every match"
+			}
+			return fmt.Sprintf("%s  (%s; %d→%d lines, %d→%d bytes)", path, mode,
+				textLineCount(oldText), textLineCount(newText), len([]byte(oldText)), len([]byte(newText)))
+		}
+	}
+	return singleLine(toolCallPreview(string(call.Function.Name), call.Function.Arguments))
+}
+
+func textLineCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
 }
 
 // approvalDetailLines renders the reviewed content for the transcript: the

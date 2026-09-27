@@ -25,8 +25,8 @@ type Agent struct {
 	modelMu sync.RWMutex
 	model   contracts.InfaiModelAdaptor
 
-	MaxQ  uint64
-	tools []contracts.Tool
+	MaxQ           uint64
+	availableTools []contracts.Tool
 
 	shouldAutoCompact  func(*contracts.TokenUsage) bool
 	autoCompact        func(context.Context) ([]contracts.ChatMessage, error)
@@ -98,7 +98,7 @@ func NewAgent(
 		eventStream:        eventStream,
 		model:              model,
 		MaxQ:               o.maxQ,
-		tools:              o.tools,
+		availableTools:     o.tools,
 		shouldAutoCompact:  o.shouldCompact,
 		autoCompact:        o.autoCompact,
 		userCancellation:   userCancellation,
@@ -268,32 +268,24 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 		requestMessages = append(requestMessages, contracts.NewSystemMessage(a.systemPrompt))
 		requestMessages = append(requestMessages, workingSessionMem...)
 
-		generateCtx, cancelGenerate := context.WithCancel(ctx)
-		defer cancelGenerate()
+		generateCtx, cancelGenerate := context.WithCancelCause(ctx)
 		go func() {
 			select {
 			case <-a.userCancellation:
-				cancelGenerate()
-			case <-ctx.Done():
+				cancelGenerate(harnessErr.ErrTurnCanceled)
 			case <-generateCtx.Done():
 			}
 		}()
 
-		reply, usage, err := a.modelClient().Generate(generateCtx, requestMessages, a.tools, &contracts.GenerateOptions{
+		reply, usage, err := a.modelClient().Generate(generateCtx, requestMessages, a.availableTools, &contracts.GenerateOptions{
 			Stream: true,
 			OnDelta: func(kind contracts.EventStreamKind, text string) (isCanceled bool) {
-				select {
-				case <-a.userCancellation:
-					return true
-				case <-ctx.Done():
-					return true
-				case a.eventStream <- contracts.EventStream{Kind: kind, Timestamp: time.Now().UTC(), Content: &text}:
-					return false
-				}
+				return !a.publishEvent(generateCtx, contracts.EventStream{Kind: kind, Timestamp: time.Now().UTC(), Content: &text})
 			},
 		})
+		cancelGenerate(nil)
 		if err != nil {
-			if errors.Is(err, harnessErr.ErrTurnCanceled) {
+			if errors.Is(context.Cause(generateCtx), harnessErr.ErrTurnCanceled) {
 				lastHadToolCalls = false
 				continue
 			}
@@ -317,7 +309,7 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 
 		messages := []contracts.ChatMessage{reply}
 		lastHadToolCalls = len(reply.ToolCalls) > 0
-		if lastHadToolCalls {
+		if len(a.availableTools) != 0 && lastHadToolCalls {
 			for i := range reply.ToolCalls {
 				call := reply.ToolCalls[i]
 				if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventToolCall, Timestamp: time.Now().UTC(), ToolCall: &call}) { // for showing up that tool call is getting called.

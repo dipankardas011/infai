@@ -321,6 +321,46 @@ func TestToolCallPreviewFormatsKnownTools(t *testing.T) {
 	}
 }
 
+func TestApprovalCompactPreviewFormatsFileTools(t *testing.T) {
+	tests := []struct {
+		name      contracts.ToolType
+		arguments string
+		want      string
+	}{
+		{contracts.ReadTool, `{"path":"main.go","offset":10,"limit":4}`, "main.go  (lines 10-13)"},
+		{contracts.WriteTool, `{"path":"notes.txt","content":"first\nsecond"}`, "notes.txt  (2 lines, 12 bytes)"},
+		{contracts.EditTool, `{"path":"main.go","old_string":"old\nsame","new_string":"new\nsame","replace_all":true}`, "main.go  (every match; 2→2 lines, 8→8 bytes)"},
+	}
+	for _, tt := range tests {
+		call := contracts.ToolCall{Function: contracts.Function{Name: tt.name, Arguments: tt.arguments}}
+		if got := approvalCompactPreview(call); got != tt.want {
+			t.Fatalf("%s preview = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestHitlViewUsesCompactEditPreview(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.width = 180
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{
+		Name: contracts.EditTool,
+		Arguments: `{"path":"demo/workload_demov1.yaml","old_string":"apiVersion: apps/v1\nkind: Deployment\nmetadata:",` +
+			`"new_string":"# probe\napiVersion: apps/v1\nkind: Deployment\nmetadata:"}`,
+	}}})
+
+	view := ansi.Strip(m.hitlView())
+	for _, want := range []string{"edit", "demo/workload_demov1.yaml", "3→4 lines", "[A]llow"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("HITL view lacks %q:\n%s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"diff --git", "--- a/", "+++ b/", "@@"} {
+		if strings.Contains(view, unwanted) {
+			t.Fatalf("HITL compact view contains %q:\n%s", unwanted, view)
+		}
+	}
+}
+
 func TestParseUnifiedRowsTracksLineNumbers(t *testing.T) {
 	rows := parseUnifiedRows("--- a/x\n+++ b/x\n@@ -10,3 +20,3 @@\n context\n-removed\n+added\n tail")
 	want := []diffRow{
