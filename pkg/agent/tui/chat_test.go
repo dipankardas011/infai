@@ -469,6 +469,73 @@ func observerEvent(m *chatModel, kind contracts.EventStreamKind, content string)
 	}
 }
 
+// A reader who scrolled up keeps their place while the turn keeps producing:
+// live output follows the newest line only when the view is already there.
+func TestStreamingLeavesAReaderWhoScrolledUpWhereTheyAre(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.session.ID = uuid.New()
+	for i := range 200 {
+		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.scrollTranscript(-3 * m.transcriptHeight())
+	if m.atBottom() {
+		t.Fatal("scrolling up left the view pinned to the newest output")
+	}
+	anchored := m.anchor
+
+	_, _ = m.Update(observerEvent(m, contracts.DeltaContent, "zzz-newest-token"))
+	if m.anchor != anchored {
+		t.Fatalf("a stream event moved the view from %+v to %+v", anchored, m.anchor)
+	}
+	if m.atBottom() {
+		t.Fatal("the status row would stop saying the reader is on earlier output")
+	}
+	if content := ansi.Strip(m.viewport.GetContent()); strings.Contains(content, "zzz-newest-token") {
+		t.Fatalf("a stream event scrolled the reader to the newest output:\n%s", content)
+	}
+	last := m.blocks[len(m.blocks)-1]
+	if !strings.Contains(last.text, "zzz-newest-token") {
+		t.Fatalf("the token did not land in the block: %q", last.text)
+	}
+}
+
+// The reader who is at the newest line keeps following it, and scrolling back
+// down resumes following.
+func TestStreamingFollowsTheNewestLine(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.session.ID = uuid.New()
+	for i := range 200 {
+		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	_, _ = m.Update(observerEvent(m, contracts.DeltaContent, "followed-token"))
+	if !m.atBottom() {
+		t.Fatal("a stream event stopped a reader who was at the newest line")
+	}
+	if content := ansi.Strip(m.viewport.GetContent()); !strings.Contains(content, "followed-token") {
+		t.Fatalf("the newest output is not on screen:\n%s", content)
+	}
+
+	m.scrollTranscript(-m.transcriptHeight())
+	_, _ = m.Update(observerEvent(m, contracts.DeltaContent, " while-away"))
+	if m.atBottom() {
+		t.Fatal("a stream event re-pinned a reader who had scrolled up")
+	}
+
+	m.scrollTranscript(m.transcriptHeight() * 4)
+	if !m.atBottom() {
+		t.Fatal("scrolling to the end did not reach the newest output")
+	}
+	_, _ = m.Update(observerEvent(m, contracts.DeltaContent, " resumed"))
+	if content := ansi.Strip(m.viewport.GetContent()); !strings.Contains(content, "resumed") {
+		t.Fatalf("following did not resume after scrolling back down:\n%s", content)
+	}
+}
+
 // Model output is accepted as it arrives: each event draws on the spot, so the
 // screen always shows the newest text with no interval in between.
 func TestStreamingEventsRenderAsTheyArrive(t *testing.T) {

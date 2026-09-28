@@ -281,11 +281,18 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
 			return m, nil
 		}
+		// Live output follows the newest line only for a reader who is already
+		// there. Reading back through the transcript while a turn runs is what
+		// scrolling is for, so an event must not pull the view down from under
+		// them. Asked before the event lands: an event that adds a line moves
+		// the newest line, and afterwards the answer describes the transcript
+		// as it stands rather than the view the reader left.
+		follow := m.atBottom()
 		// Every event draws as it arrives. A refresh costs one block render
 		// rather than the whole message, because the block in flight is cached
 		// like every other one.
 		m.applySessionEvent(msg.event)
-		m.refreshTranscript(true)
+		m.refreshTranscript(follow)
 		m.reflow()
 		if msg.event.Kind == contracts.EventSubscriberGap {
 			return m, m.startSessionObserver(msg.sessionID)
