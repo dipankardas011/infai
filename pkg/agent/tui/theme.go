@@ -60,14 +60,15 @@ var everforest = struct {
 }
 
 type harnessStyles struct {
-	app           lipgloss.Style
-	header        lipgloss.Style
-	brand         lipgloss.Style
-	headerMeta    lipgloss.Style
-	composer      lipgloss.Style
-	status        lipgloss.Style
-	statusBusy    lipgloss.Style
-	statusWaiting lipgloss.Style
+	app             lipgloss.Style
+	header          lipgloss.Style
+	brand           lipgloss.Style
+	headerMeta      lipgloss.Style
+	composer        lipgloss.Style
+	composerWaiting lipgloss.Style
+	status          lipgloss.Style
+	statusBusy      lipgloss.Style
+	statusWaiting   lipgloss.Style
 	// statusOpen is a session the engine holds and is not working on: it is
 	// ready for a prompt, which reads as "go", not as "wait".
 	statusOpen      lipgloss.Style
@@ -115,14 +116,18 @@ type harnessStyles struct {
 
 func newHarnessStyles() harnessStyles {
 	return harnessStyles{
-		app:           lipgloss.NewStyle().Background(everforest.Background).Foreground(everforest.Text),
-		header:        lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Padding(0, 1),
-		brand:         lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
-		headerMeta:    lipgloss.NewStyle().Foreground(everforest.Muted),
-		composer:      lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
-		status:        lipgloss.NewStyle().Foreground(everforest.Muted),
-		statusBusy:    lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
-		statusWaiting: lipgloss.NewStyle().Foreground(everforest.Orange).Bold(true),
+		app:        lipgloss.NewStyle().Background(everforest.Background).Foreground(everforest.Text),
+		header:     lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Padding(0, 1),
+		brand:      lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
+		headerMeta: lipgloss.NewStyle().Foreground(everforest.Muted),
+		composer:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
+		// While a decision is pending the composer's frame drops to the plain
+		// surface, so the row recedes and the band above it is the only thing
+		// asking for an answer.
+		composerWaiting: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.Surface).Padding(0, 1),
+		status:          lipgloss.NewStyle().Foreground(everforest.Muted),
+		statusBusy:      lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
+		statusWaiting:   lipgloss.NewStyle().Foreground(everforest.Orange).Bold(true),
 		// A session the engine holds and is not working on reads as "go", so it
 		// takes the palette's go colour; one that has ended takes the quieter
 		// aqua, which keeps "open and waiting" from reading as "finished".
@@ -174,17 +179,27 @@ func newHarnessStyles() harnessStyles {
 	}
 }
 
-func styleTextarea(input *textarea.Model) {
+// styleTextarea paints the composer for the two states it has: taking a prompt,
+// and waiting on a decision that owns the keyboard. A waiting composer keeps its
+// draft — the text is still the reader's — but greys out, mark included, and
+// stops drawing a cursor. Nothing in the row reads as ready for input, and the
+// decision above it is the only thing asking for an answer.
+func styleTextarea(input *textarea.Model, waiting bool) {
+	text, mark := everforest.Text, everforest.Green
+	if waiting {
+		text, mark = everforest.Muted, everforest.Muted
+	}
 	s := input.Styles()
-	s.Focused.Base = lipgloss.NewStyle().Foreground(everforest.Text)
-	s.Focused.Text = lipgloss.NewStyle().Foreground(everforest.Text)
-	s.Focused.Prompt = lipgloss.NewStyle().Foreground(everforest.Green).Bold(true)
+	s.Focused.Base = lipgloss.NewStyle().Foreground(text)
+	s.Focused.Text = lipgloss.NewStyle().Foreground(text)
+	s.Focused.Prompt = lipgloss.NewStyle().Foreground(mark).Bold(true)
 	s.Focused.Placeholder = lipgloss.NewStyle().Foreground(everforest.Muted)
 	s.Focused.CursorLine = lipgloss.NewStyle()
 	s.Focused.Selection = lipgloss.NewStyle().Background(everforest.SurfaceAlt)
 	s.Blurred = s.Focused
-	s.Cursor.Color = everforest.Green
+	s.Cursor.Color = mark
 	input.SetStyles(s)
+	input.SetVirtualCursor(!waiting)
 }
 
 func everforestMarkdownStyle() ansi.StyleConfig {

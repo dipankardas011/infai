@@ -69,6 +69,7 @@ type chatModel struct {
 	status           contracts.SessionStatus
 	approval         *Approval
 	approvalShown    bool
+	composerWaiting  bool
 	approvalReason   bool
 	approvalDraft    string
 	tailKey          tailKey
@@ -198,7 +199,7 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 	input.MaxContentHeight = 200
 	input.KeyMap.InsertNewline.SetKeys("shift+enter", "alt+enter", "ctrl+j")
 	input.SetVirtualCursor(true)
-	styleTextarea(&input)
+	styleTextarea(&input, false)
 
 	// The viewport only renders the window it is handed: the model owns the
 	// scroll position, soft wrapping is done per block before it gets there,
@@ -240,11 +241,21 @@ const transcriptScrollStep = 3
 // continuation rows of a wrapped draft to the same width. The placeholder spells
 // out how to finish a reason, so the reserved block above does not have to.
 func (m *chatModel) refreshInputMark() {
+	// A pending decision owns the keyboard, so the composer is not taking a
+	// prompt. Capturing a reason is the exception: the decision asked for it.
+	waiting := m.approval != nil && !m.approvalReason
 	mark := inputMark
 	placeholder := "Ask, plan, build... (external editor ctrl+x)"
-	if m.approvalReason {
+	switch {
+	case m.approvalReason:
 		mark = "why▸ "
 		placeholder = "(reason to deny · ⏎ send · esc cancel)"
+	case waiting:
+		placeholder = "answer the decision above to continue"
+	}
+	if waiting != m.composerWaiting {
+		m.composerWaiting = waiting
+		styleTextarea(&m.composer, waiting)
 	}
 	m.composer.Placeholder = placeholder
 	width := lipgloss.Width(mark)
@@ -1508,6 +1519,9 @@ func (m *chatModel) taskChecklistView(width int) string {
 }
 
 func (m *chatModel) composerView() string {
+	if m.composerWaiting {
+		return fullWidth(m.styles.composerWaiting, m.width, m.composer.View())
+	}
 	return fullWidth(m.styles.composer, m.width, m.composer.View())
 }
 

@@ -272,6 +272,97 @@ func TestApprovalDetailScrollsWithTheTranscript(t *testing.T) {
 	}
 }
 
+// A pending decision owns the keyboard, so the composer greys out, drops its
+// cursor and says why — while keeping the draft that is waiting in it.
+func TestPendingDecisionDimsTheComposerAndKeepsTheDraft(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 24})
+	m.composer.SetValue("a queued prompt")
+	m.reflow()
+
+	if got := m.composer.Styles().Focused.Text.GetForeground(); got != everforest.Text {
+		t.Fatalf("composer text is %v while it takes prompts, want the bright text colour", got)
+	}
+	// The virtual cursor draws a reverse-video cell for the character it sits
+	// on, which is how a live composer says where typing would land.
+	if !strings.Contains(m.composer.View(), "\x1b[7;") {
+		t.Fatal("a composer taking prompts draws no cursor cell")
+	}
+
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{
+		Name: contracts.BashTool, Arguments: `{"command":"ls"}`,
+	}}})
+
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "a queued prompt") {
+		t.Fatalf("the pending decision dropped the draft:\n%s", view)
+	}
+	if !strings.Contains(view, inputMark) {
+		t.Fatalf("the waiting composer changed its mark instead of only greying:\n%s", view)
+	}
+	styles := m.composer.Styles().Focused
+	if got := styles.Text.GetForeground(); got != everforest.Muted {
+		t.Fatalf("composer text is %v while a decision waits, want the muted colour", got)
+	}
+	if got := styles.Prompt.GetForeground(); got != everforest.Muted {
+		t.Fatalf("composer mark is %v while a decision waits, want the muted colour", got)
+	}
+	if strings.Contains(m.composer.View(), "\x1b[7;") {
+		t.Fatal("a waiting composer still draws a cursor cell")
+	}
+	if m.styles.composerWaiting.Render("x") == m.styles.composer.Render("x") {
+		t.Fatal("the waiting composer frame does not recede")
+	}
+
+	// Answering hands the composer back with the draft intact.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+	if got := m.composer.Styles().Focused.Text.GetForeground(); got != everforest.Text {
+		t.Fatalf("composer text stayed dim after the decision: %v", got)
+	}
+	if got := m.composer.Value(); got != "a queued prompt" {
+		t.Fatalf("the draft did not survive the decision: %q", got)
+	}
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, inputMark) {
+		t.Fatalf("the composer did not take its prompt mark back:\n%s", view)
+	}
+}
+
+// Capturing a reason is the one thing a pending decision asks the composer to
+// do, so that mode keeps the composer live and marked as the reason field.
+func TestReasonModeKeepsTheComposerActive(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 24})
+	m.composer.SetValue("a queued prompt")
+	m.reflow()
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{
+		Name: contracts.BashTool, Arguments: `{"command":"ls"}`,
+	}}})
+
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'r', Text: "r"}))
+	if got := m.composer.Styles().Focused.Text.GetForeground(); got != everforest.Text {
+		t.Fatalf("the reason field is dimmed: %v", got)
+	}
+	if !strings.Contains(m.composer.View(), "\x1b[7;") {
+		t.Fatal("the reason field draws no cursor cell")
+	}
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "why▸") {
+		t.Fatalf("the reason field is not marked:\n%s", view)
+	}
+
+	// Leaving reason mode puts the composer back to waiting, draft and all.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	if got := m.composer.Styles().Focused.Text.GetForeground(); got != everforest.Muted {
+		t.Fatalf("the composer did not go back to waiting: %v", got)
+	}
+	if got := m.composer.Value(); got != "a queued prompt" {
+		t.Fatalf("leaving reason mode lost the draft: %q", got)
+	}
+}
+
 func TestChecklistDeltaIsNotRenderedAsTranscriptText(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.appendDelta(contracts.EventToolTaskCheckList, `{"items":[]}`)
