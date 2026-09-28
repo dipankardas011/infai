@@ -40,7 +40,7 @@ func TestComposerGrowsAndTranscriptYieldsSpace(t *testing.T) {
 	initial := m.viewport.Height()
 
 	m.composer.SetValue("one\ntwo\nthree\nfour")
-	m.reflow(false)
+	m.reflow()
 
 	if m.composer.Height() <= 1 {
 		t.Fatalf("composer height=%d want dynamic growth", m.composer.Height())
@@ -60,13 +60,13 @@ func TestReflowOnlyRendersTranscriptWhenWidthChanges(t *testing.T) {
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	m.blocks = append(m.blocks, block{role: "system", text: "pending refresh"})
-	m.reflow(false)
+	m.reflow()
 	if content := ansi.Strip(m.viewport.GetContent()); strings.Contains(content, "pending refresh") {
 		t.Fatalf("same-width reflow unexpectedly rebuilt transcript: %q", content)
 	}
 
 	m.width = 79
-	m.reflow(false)
+	m.reflow()
 	if content := ansi.Strip(m.viewport.GetContent()); !strings.Contains(content, "pending refresh") {
 		t.Fatalf("width-changing reflow did not rebuild transcript: %q", content)
 	}
@@ -84,9 +84,191 @@ func TestComposerGrowthKeepsTranscriptAtBottom(t *testing.T) {
 	}
 
 	m.composer.SetValue("one\ntwo\nthree\nfour")
-	m.reflow(false)
+	m.reflow()
 	if !m.viewport.AtBottom() {
 		t.Fatal("composer growth moved transcript away from bottom")
+	}
+}
+
+// renderedBlocks counts the blocks holding a cached render: the transcript
+// window is what decides that count.
+func renderedBlocks(m *chatModel) int {
+	count := 0
+	for i := range m.blocks {
+		if m.blocks[i].renderedValid {
+			count++
+		}
+	}
+	return count
+}
+
+func TestTranscriptRendersOnlyTheWindowAroundTheAnchor(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	for i := range 200 {
+		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	rendered := renderedBlocks(m)
+	if rendered == len(m.blocks) {
+		t.Fatalf("all %d blocks were rendered; the window should hold only what the screen reaches", rendered)
+	}
+	if rendered == 0 {
+		t.Fatal("the window rendered nothing")
+	}
+	if m.blocks[0].renderedValid {
+		t.Fatal("the first block was rendered although the view is pinned to the newest output")
+	}
+	if !m.blocks[len(m.blocks)-1].renderedValid {
+		t.Fatal("the newest block is outside the window")
+	}
+
+	// Scrolling up renders the blocks the view reaches, and only those.
+	before := rendered
+	m.scrollTranscript(-m.transcriptHeight())
+	after := renderedBlocks(m)
+	if after <= before {
+		t.Fatalf("scrolling up rendered %d blocks, want more than the %d already rendered", after, before)
+	}
+	if after == len(m.blocks) {
+		t.Fatalf("scrolling one screen rendered all %d blocks", after)
+	}
+}
+
+func TestResizeRendersOnlyTheWindow(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	for i := range 200 {
+		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	// A resize invalidates every block rendered at the old width, but only the
+	// ones in the window are rendered again.
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 81, Height: 24})
+	if rendered := renderedBlocks(m); rendered == len(m.blocks) {
+		t.Fatalf("resize rendered all %d blocks", rendered)
+	}
+	for i := range m.blocks {
+		if m.blocks[i].renderedValid && m.blocks[i].renderedWidth != m.transcriptWidth() {
+			t.Fatalf("block %d kept a rendering from the old width", i)
+		}
+	}
+}
+
+func TestScrollingUpAndDownKeepsThePosition(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	for i := range 200 {
+		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	if !m.atBottom() {
+		t.Fatal("a fresh transcript is not pinned to the newest output")
+	}
+
+	m.scrollTranscript(-m.transcriptHeight())
+	if m.atBottom() {
+		t.Fatal("scrolling up still reports the newest output")
+	}
+	top := ansi.Strip(m.viewport.GetContent())
+	if !strings.Contains(top, "Block ") {
+		t.Fatalf("scrolled transcript is empty:\n%s", top)
+	}
+
+	m.scrollTranscript(m.transcriptHeight())
+	if !m.atBottom() {
+		t.Fatal("scrolling back down did not reach the newest output")
+	}
+}
+
+func TestResizeKeepsTheReaderOnTheSameBlock(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	for i := range 200 {
+		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.scrollTranscript(-3 * m.transcriptHeight())
+	anchored := m.anchor
+	if m.atBottom() {
+		t.Fatal("scrolling up left the view pinned to the newest output")
+	}
+
+	// A resize reflows the blocks, but the block the reader was on stays at the
+	// top and the view does not jump to the newest output.
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	if m.anchor.block != anchored.block {
+		t.Fatalf("resize moved the top block from %d to %d", anchored.block, m.anchor.block)
+	}
+	if m.atBottom() {
+		t.Fatal("resize jumped the view to the newest output")
+	}
+	content := ansi.Strip(m.viewport.GetContent())
+	if !strings.Contains(content, fmt.Sprintf("Block %d", m.anchor.block)) {
+		t.Fatalf("the anchored block is not rendered after the resize:\n%s", content)
+	}
+}
+
+func TestResizeKeepsFollowingTheNewestOutput(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	for i := range 200 {
+		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	if !m.atBottom() {
+		t.Fatal("a fresh transcript is not pinned to the newest output")
+	}
+
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	if !m.atBottom() {
+		t.Fatal("a resize unpinned a view that was following the newest output")
+	}
+	content := ansi.Strip(m.viewport.GetContent())
+	if !strings.Contains(content, "Block 199") {
+		t.Fatalf("the newest block left the window on resize:\n%s", content)
+	}
+}
+
+func TestFollowKeepsTheNewestOutputVisible(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	for i := range 60 {
+		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+
+	m.blocks = append(m.blocks, block{role: "assistant", text: "## Newest"})
+	m.refreshTranscript(true)
+	if !m.atBottom() {
+		t.Fatal("following did not pin the view to the newest block")
+	}
+	if content := ansi.Strip(m.viewport.GetContent()); !strings.Contains(content, "Newest") {
+		t.Fatalf("the newest block is not in the window:\n%s", content)
+	}
+}
+
+func TestApprovalDetailScrollsWithTheTranscript(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	for i := range 40 {
+		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
+	}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{
+		Name: contracts.BashTool, Arguments: `{"command":"ls","workdir":"/w"}`,
+	}}})
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
+	m.refreshTranscript(true)
+
+	content := ansi.Strip(m.viewport.GetContent())
+	if !strings.Contains(content, "Human In the Loop") {
+		t.Fatalf("expanded decision detail is missing from the window:\n%s", content)
+	}
+	if !m.atBottom() {
+		t.Fatal("the expanded detail should stay pinned with the transcript end")
 	}
 }
 
@@ -239,8 +421,12 @@ func TestStreamingBlocksRenderMarkdownOnlyWhenComplete(t *testing.T) {
 	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "**careful reasoning**") {
 		t.Fatalf("active thinking block was rendered as Markdown: %q", content)
 	}
-	if m.blocks[0].renderedValid {
-		t.Fatal("active thinking block was cached before completion")
+	// The in-flight block is cached like any other, so the cache has to be
+	// dropped as its text grows; a stale render would drop the new delta.
+	m.appendDelta(contracts.DeltaReasoning, " More text.")
+	m.refreshTranscript(true)
+	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "More text.") {
+		t.Fatalf("in-flight block kept a stale render: %q", content)
 	}
 
 	m.appendDelta(contracts.DeltaContent, "Final **answer**.")
@@ -252,68 +438,53 @@ func TestStreamingBlocksRenderMarkdownOnlyWhenComplete(t *testing.T) {
 	if !strings.Contains(content, "Final **answer**.") {
 		t.Fatalf("active assistant block was rendered as Markdown: %q", content)
 	}
-	if !m.blocks[0].renderedValid || m.blocks[1].renderedValid {
-		t.Fatalf("render cache state = thinking %v, assistant %v", m.blocks[0].renderedValid, m.blocks[1].renderedValid)
-	}
 
 	cachedThinking := m.blocks[0].rendered
-	m.appendDelta(contracts.DeltaContent, " More text.")
+	m.appendDelta(contracts.DeltaContent, " And more.")
 	m.refreshTranscript(true)
 	if m.blocks[0].rendered != cachedThinking {
 		t.Fatal("completed thinking block was rendered again during assistant streaming")
 	}
 
-	_, _ = m.Update(turnDoneMsg{})
+	// The session reporting idle is what ends the turn on the live path.
+	idle := string(contracts.SessionIdle)
+	_, _ = m.Update(sessionEventMsg{
+		sessionID:  m.session.ID,
+		observerID: m.sessionObserverID,
+		event:      contracts.EventStream{Kind: contracts.EventSessionTransitionState, Content: &idle},
+	})
 	content = ansi.Strip(m.viewport.View())
 	if strings.Contains(content, "**answer**") || !m.blocks[1].renderedValid {
 		t.Fatalf("assistant block was not finalized as Markdown: %q", content)
 	}
 }
 
-func TestStreamingTranscriptRefreshesOncePerInterval(t *testing.T) {
+// observerEvent is one session event as the observer delivers it: the path a
+// running turn's model output takes to the transcript.
+func observerEvent(m *chatModel, kind contracts.EventStreamKind, content string) tea.Msg {
+	return sessionEventMsg{
+		sessionID:  m.session.ID,
+		observerID: m.sessionObserverID,
+		event:      contracts.EventStream{Kind: kind, Content: &content},
+	}
+}
+
+// Model output is accepted as it arrives: each event draws on the spot, so the
+// screen always shows the newest text with no interval in between.
+func TestStreamingEventsRenderAsTheyArrive(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
-	m.working = true
-	_, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+	m.session.ID = uuid.New()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
-	_, cmd := m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: "first "})
-	if cmd == nil || !m.streamTick {
-		t.Fatal("first stream delta did not start the refresh interval")
+	for _, token := range []string{"first ", "second ", "third"} {
+		_, _ = m.Update(observerEvent(m, contracts.DeltaContent, token))
+		if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, strings.TrimSpace(token)) {
+			t.Fatalf("token %q was not drawn on arrival: %q", token, content)
+		}
 	}
-	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "first") {
-		t.Fatalf("first stream delta was not displayed immediately: %q", content)
-	}
-
-	_, _ = m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: "second"})
-	if content := ansi.Strip(m.viewport.View()); strings.Contains(content, "second") {
-		t.Fatalf("subsequent delta refreshed before the interval: %q", content)
-	}
-	if !strings.Contains(m.blocks[0].text, "second") {
-		t.Fatal("subsequent delta was not retained while awaiting refresh")
-	}
-
-	tickID := m.streamTickID
-	_, cmd = m.Update(streamRefreshTickMsg{id: tickID})
-	if cmd == nil {
-		t.Fatal("active stream refresh interval was not continued")
-	}
-	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "first second") {
-		t.Fatalf("pending stream content was not displayed on interval: %q", content)
-	}
-
-	_, _ = m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: " resized"})
-	_, _ = m.Update(tea.WindowSizeMsg{Width: 61, Height: 20})
-	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "resized") {
-		t.Fatalf("resize did not display pending stream content: %q", content)
-	}
-
-	_, _ = m.Update(streamDeltaMsg{kind: contracts.DeltaContent, text: " complete"})
-	_, _ = m.Update(turnDoneMsg{})
-	if content := ansi.Strip(m.viewport.View()); !strings.Contains(content, "complete") {
-		t.Fatalf("turn completion did not display pending stream content: %q", content)
-	}
-	if m.streamTick || m.streamDirty {
-		t.Fatal("turn completion left the stream refresh interval active")
+	if !strings.Contains(m.blocks[0].text, "first second third") {
+		t.Fatalf("tokens were not accumulated in the block: %q", m.blocks[0].text)
 	}
 }
 
@@ -526,11 +697,14 @@ func TestMouseWheelScrollsTranscript(t *testing.T) {
 		m.blocks = append(m.blocks, block{role: "system", text: fmt.Sprintf("event %d", i)})
 	}
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 12})
-	before := m.viewport.YOffset()
+	before := ansi.Strip(m.viewport.GetContent())
 	_, _ = m.Update(tea.MouseWheelMsg(tea.Mouse{X: 1, Y: 2, Button: tea.MouseWheelUp}))
 
-	if after := m.viewport.YOffset(); after >= before {
-		t.Fatalf("viewport offset=%d want less than %d after wheel up", after, before)
+	if after := ansi.Strip(m.viewport.GetContent()); after == before {
+		t.Fatalf("wheel up did not move the transcript:\n%s", after)
+	}
+	if m.atBottom() {
+		t.Fatal("wheel up left the view pinned to the newest output")
 	}
 }
 

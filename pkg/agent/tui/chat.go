@@ -40,6 +40,7 @@ type block struct {
 	toolArgs      string
 	rendered      string
 	renderedWidth int
+	renderedLines int
 	renderedValid bool
 }
 
@@ -62,6 +63,7 @@ type chatModel struct {
 	height           int
 	areas            []rowArea
 	viewport         viewport.Model
+	anchor           transcriptAnchor
 	composer         textarea.Model
 	checklist        contracts.TaskChecklistState
 	status           contracts.SessionStatus
@@ -69,6 +71,10 @@ type chatModel struct {
 	approvalShown    bool
 	approvalReason   bool
 	approvalDraft    string
+	tailKey          tailKey
+	tailRendered     string
+	tailLines        int
+	tailValid        bool
 	modal            *modalModel
 	commandMenu      bool
 	commandSelection int
@@ -80,16 +86,12 @@ type chatModel struct {
 	cancelArmed       bool
 	cancelArmID       uint64
 	cancelStatus      string
-	stream            chan tea.Msg
 	sessionCancel     context.CancelFunc
 	sessionStream     chan tea.Msg
 	sessionObserverID uint64
 	initCmd           tea.Cmd
 	streaming         bool
 	streamingAt       int
-	streamTick        bool
-	streamTickID      uint64
-	streamDirty       bool
 	toolCallNames     map[string]string
 	skillNames        map[string]string
 }
@@ -118,11 +120,6 @@ type messageSentMsg struct {
 }
 type turnCanceledMsg struct{ err error }
 
-type streamDeltaMsg struct {
-	kind contracts.EventStreamKind
-	text string
-}
-
 type clipboardImageMsg struct {
 	image contracts.ImageInput
 	err   error
@@ -133,11 +130,6 @@ type editorDoneMsg struct {
 	err  error
 }
 
-type streamApprovalMsg struct{ update ApprovalUpdate }
-type turnDoneMsg struct {
-	reply *ChatReply
-	err   error
-}
 type sessionLoadedMsg struct {
 	output  *glue.SessionOutput
 	records []store.Record
@@ -181,10 +173,8 @@ type renamedMsg struct {
 }
 type animationTickMsg struct{}
 type cancelArmTimeoutMsg struct{ id uint64 }
-type streamRefreshTickMsg struct{ id uint64 }
 
 const cancelArmTimeout = 10 * time.Second
-const streamRefreshInterval = time.Second
 
 func runChatTUI(ctx context.Context, client Client, sessions []contracts.SessionSummary, opts RunOptions, in io.Reader, out io.Writer) error {
 	runCtx, cancel := context.WithCancel(ctx)
@@ -210,11 +200,12 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 	input.SetVirtualCursor(true)
 	styleTextarea(&input)
 
+	// The viewport only renders the window it is handed: the model owns the
+	// scroll position, soft wrapping is done per block before it gets there,
+	// and the wheel is handled with the rest of the transcript input.
 	view := viewport.New()
 	view.SoftWrap = false
 	view.FillHeight = true
-	view.MouseWheelEnabled = true
-	view.MouseWheelDelta = 3
 	view.Style = lipgloss.NewStyle().Padding(0, 1)
 
 	m := &chatModel{
@@ -241,6 +232,10 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 // capturing the reason a decision was denied.
 const inputMark = "∞ "
 
+// transcriptScrollStep is how far a wheel notch or ctrl+up/down moves the
+// transcript, in lines. It matches what the viewport used to scroll by.
+const transcriptScrollStep = 3
+
 // refreshInputMark names what the composer is currently for, and pads the
 // continuation rows of a wrapped draft to the same width. The placeholder spells
 // out how to finish a reason, so the reserved block above does not have to.
@@ -262,15 +257,17 @@ func (m *chatModel) refreshInputMark() {
 }
 
 func (m *chatModel) Init() tea.Cmd {
-	return tea.Batch(m.composer.Focus(), m.viewport.Init(), m.initCmd)
+	return tea.Batch(m.composer.Focus(), m.initCmd)
 }
 
 func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.reflow(true)
-		m.streamDirty = false
+		// A resize reflows the blocks around the anchor, so a reader stays on
+		// the block they were reading; only a view that was already at the
+		// newest output follows it.
+		m.reflow()
 		return m, nil
 	case sessionViewMsg:
 		if msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
@@ -278,15 +275,18 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.applySessionView(msg.view)
 		m.refreshTranscript(true)
-		m.reflow(false)
+		m.reflow()
 		return m, waitStream(m.ctx, m.sessionStream)
 	case sessionEventMsg:
 		if msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
 			return m, nil
 		}
+		// Every event draws as it arrives. A refresh costs one block render
+		// rather than the whole message, because the block in flight is cached
+		// like every other one.
 		m.applySessionEvent(msg.event)
 		m.refreshTranscript(true)
-		m.reflow(false)
+		m.reflow()
 		if msg.event.Kind == contracts.EventSubscriberGap {
 			return m, m.startSessionObserver(msg.sessionID)
 		}
@@ -308,7 +308,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.appendError(msg.err)
 			m.refreshTranscript(true)
-			m.reflow(false)
+			m.reflow()
 			if msg.ownsWork && m.session.ID != uuid.Nil {
 				return m, m.startSessionObserver(m.session.ID)
 			}
@@ -324,82 +324,19 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript(true)
 		}
 		return m, nil
-	case streamDeltaMsg:
-		switch msg.kind {
-		case contracts.EventProviderEvent:
-			status := statusLabel(msg.text)
-			if m.cancelArmed {
-				m.cancelStatus = status
-			} else {
-				m.workStatus = status
-			}
-		case contracts.EventToolTaskCheckList:
-			if state, err := decodeTaskChecklist(msg.text); err == nil {
-				m.checklist = state
-			}
-		}
-		wasStreaming, wasStreamingAt := m.streaming, m.streamingAt
-		m.appendDelta(msg.kind, msg.text)
-		wait := waitStream(m.ctx, m.stream)
-		if msg.kind == contracts.DeltaContent || msg.kind == contracts.DeltaReasoning {
-			if !wasStreaming || wasStreamingAt != m.streamingAt || !m.streamTick {
-				m.stopStreamRefresh()
-				m.refreshTranscript(true)
-				return m, tea.Batch(wait, m.startStreamRefresh())
-			}
-			m.streamDirty = true
-			return m, wait
-		}
-		if msg.kind != contracts.EventToolTaskCheckList {
-			m.stopStreamRefresh()
-			m.refreshTranscript(true)
-		}
-		return m, wait
-	case streamApprovalMsg:
-		m.handleApprovalUpdate(msg.update)
-		return m, waitStream(m.ctx, m.stream)
 	case clipboardImageMsg:
 		return m.handleClipboardImage(msg)
 	case editorDoneMsg:
 		if msg.err != nil {
 			m.appendError(fmt.Errorf("open editor: %w", msg.err))
 			m.refreshTranscript(true)
-			m.reflow(false)
+			m.reflow()
 			return m, nil
 		}
 		m.composer.SetValue(msg.text)
 		m.composer.CursorEnd()
 		m.updateCommandMenu()
-		m.reflow(false)
-		return m, nil
-	case turnDoneMsg:
-		m.stopStreamRefresh()
-		m.working = false
-		m.streaming = false
-		m.cancelArmed = false
-		m.cancelStatus = ""
-		m.workStatus = ""
-		if errors.Is(msg.err, context.Canceled) || msg.reply != nil && msg.reply.Status == "canceled" {
-			m.blocks = append(m.blocks, block{role: "status", text: statusLabel("generation canceled")})
-		} else if msg.err != nil {
-			m.appendError(msg.err)
-		} else if msg.reply != nil {
-			m.used = msg.reply.ContextTokens
-			if msg.reply.Model != "" {
-				m.session.Model = msg.reply.Model
-			}
-			if msg.reply.ContextWindow > 0 {
-				m.contextWindow = msg.reply.ContextWindow
-			}
-			if msg.reply.Name != "" {
-				m.session.Name = msg.reply.Name
-			}
-			if msg.reply.Pending != nil && m.modal == nil {
-				m.showApproval(msg.reply.Pending)
-			}
-		}
-		m.refreshTranscript(true)
-		m.reflow(false)
+		m.reflow()
 		return m, nil
 	case sessionLoadedMsg:
 		if msg.err != nil {
@@ -412,7 +349,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.availableThinking = msg.output.AvailableThinking
 		m.modalities = msg.output.Modalities
 		m.pending = nil
-		m.reflow(false)
+		m.reflow()
 		m.client.SetSession(msg.output.ID)
 		m.blocks = blocksFromRecords(msg.records)
 		m.checklist = taskChecklistFromRecords(msg.records)
@@ -451,7 +388,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.availableThinking = msg.output.AvailableThinking
 		m.modalities = msg.output.Modalities
 		m.pending = nil
-		m.reflow(false)
+		m.reflow()
 		m.client.SetSession(msg.output.ID)
 		m.blocks = nil
 		m.checklist = contracts.TaskChecklistState{}
@@ -469,7 +406,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.availableThinking = msg.output.AvailableThinking
 			m.modalities = msg.output.Modalities
 			m.pending = nil
-			m.reflow(false)
+			m.reflow()
 			m.blocks = append(m.blocks, block{role: "system", text: "Model switched to " + msg.output.Model + " @ " + msg.output.Provider})
 		}
 		m.modal = nil
@@ -529,20 +466,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelArmed = false
 			m.workStatus = m.cancelStatus
 			m.cancelStatus = ""
-			m.reflow(false)
+			m.reflow()
 		}
 		return m, nil
-	case streamRefreshTickMsg:
-		if !m.streamTick || msg.id != m.streamTickID {
-			return m, nil
-		}
-		if !m.streamDirty {
-			m.streamTick = false
-			return m, nil
-		}
-		m.streamDirty = false
-		m.refreshTranscript(true)
-		return m, streamRefreshTickCmd(msg.id)
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.PasteMsg:
@@ -550,7 +476,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.composer, cmd = m.composer.Update(msg)
 			m.updateCommandMenu()
-			m.reflow(false)
+			m.reflow()
 			return m, cmd
 		}
 		return m, nil
@@ -560,20 +486,24 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.areas) > 1 && (mouse.Y < m.areas[1].y || mouse.Y >= m.areas[1].y+m.areas[1].height) {
 				return m, nil
 			}
-			var cmd tea.Cmd
-			m.viewport, cmd = m.viewport.Update(msg)
-			m.reflow(false)
-			return m, cmd
+			if wheel, ok := msg.(tea.MouseWheelMsg); ok {
+				switch wheel.Button {
+				case tea.MouseWheelUp:
+					m.scrollTranscript(-transcriptScrollStep)
+				case tea.MouseWheelDown:
+					m.scrollTranscript(transcriptScrollStep)
+				}
+			}
+			return m, nil
 		}
 		return m, nil
 	}
 
 	if m.modal == nil {
-		var viewportCmd, composerCmd tea.Cmd
-		m.viewport, viewportCmd = m.viewport.Update(message)
+		var composerCmd tea.Cmd
 		m.composer, composerCmd = m.composer.Update(message)
-		m.reflow(false)
-		return m, tea.Batch(viewportCmd, composerCmd)
+		m.reflow()
+		return m, composerCmd
 	}
 	return m, nil
 }
@@ -594,13 +524,13 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.cancelArmID++
 			m.cancelStatus = m.workStatus
 			m.workStatus = "press esc again to cancel"
-			m.reflow(false)
+			m.reflow()
 			return m, cancelArmTimeoutCmd(m.cancelArmID)
 		} else {
 			m.cancelArmed = false
 			m.cancelStatus = ""
 			m.workStatus = "canceling"
-			m.reflow(false)
+			m.reflow()
 			return m, cancelTurnCmd(m.ctx, m.client, m.session.ID)
 		}
 	}
@@ -648,7 +578,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "esc":
 			m.commandMenu = false
-			m.reflow(false)
+			m.reflow()
 			return m, nil
 		case "up":
 			m.commandSelection = (m.commandSelection - 1 + len(matches)) % len(matches)
@@ -659,7 +589,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.composer.SetValue(matches[m.commandSelection].name)
 			m.commandMenu = false
-			m.reflow(false)
+			m.reflow()
 			return m, nil
 		case "enter":
 			for _, command := range matches {
@@ -670,28 +600,26 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.composer.SetValue(matches[m.commandSelection].name)
 			m.commandMenu = false
-			m.reflow(false)
+			m.reflow()
 			return m, nil
 		}
 	}
+	// Scrolling owns the transcript, so the layout does not have to run again:
+	// scrollTranscript already placed the window.
 	if key == "pgup" {
-		m.viewport.PageUp()
-		m.reflow(false)
+		m.scrollTranscript(-m.transcriptHeight())
 		return m, nil
 	}
 	if key == "pgdown" {
-		m.viewport.PageDown()
-		m.reflow(false)
+		m.scrollTranscript(m.transcriptHeight())
 		return m, nil
 	}
 	if key == "ctrl+up" {
-		m.viewport.ScrollUp(3)
-		m.reflow(false)
+		m.scrollTranscript(-transcriptScrollStep)
 		return m, nil
 	}
 	if key == "ctrl+down" {
-		m.viewport.ScrollDown(3)
-		m.reflow(false)
+		m.scrollTranscript(transcriptScrollStep)
 		return m, nil
 	}
 	if key == "enter" {
@@ -703,7 +631,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.composer.CursorEnd()
 			}
 			m.filePicker = nil
-			m.reflow(false)
+			m.reflow()
 			return m, nil
 		}
 		return m, m.submit()
@@ -713,7 +641,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "esc":
 			m.filePicker = nil
-			m.reflow(false)
+			m.reflow()
 			return m, nil
 		case "up":
 			m.filePicker.selected = (m.filePicker.selected - 1 + max(len(m.filePicker.matches), 1)) % max(len(m.filePicker.matches), 1)
@@ -739,7 +667,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.filePicker.filter("")
 	}
 	m.updateCommandMenu()
-	m.reflow(false)
+	m.reflow()
 	return m, cmd
 }
 
@@ -759,7 +687,7 @@ func (m *chatModel) cycleThinking() {
 		break
 	}
 	m.thinking = next
-	m.reflow(false)
+	m.reflow()
 }
 
 // handleSessionListKey routes the keys the session list owns: "d" deletes a
@@ -887,7 +815,7 @@ func (m *chatModel) submit() tea.Cmd {
 	if strings.HasPrefix(prompt, "/") && len(images) == 0 {
 		m.composer.Reset()
 		m.commandMenu = false
-		m.reflow(false)
+		m.reflow()
 		return m.runCommand(prompt)
 	}
 	if m.session.ID == uuid.Nil {
@@ -904,7 +832,7 @@ func (m *chatModel) submit() tea.Cmd {
 	}
 	m.composer.Reset()
 	m.commandMenu = false
-	m.reflow(false)
+	m.reflow()
 
 	input := contracts.UserInput{Text: encodeFileReferences(prompt, m.filePickerFiles()), Images: images}
 	// A prompt sent while a turn is running is queued by the session and served
@@ -985,15 +913,13 @@ func (m *chatModel) applySessionStatus(status contracts.SessionStatus) {
 	case contracts.SessionBusy, contracts.SessionWaitingApproval, contracts.SessionCompacting:
 		m.working = true
 	case contracts.SessionIdle:
-		m.stopStreamRefresh()
 		m.working = false
-		m.streaming = false
+		m.stopStreaming()
 		m.workStatus = ""
 		m.cancelArmed = false
 	case contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone:
-		m.stopStreamRefresh()
 		m.working = false
-		m.streaming = false
+		m.stopStreaming()
 		m.workStatus = ""
 		m.clearApproval()
 	}
@@ -1192,7 +1118,7 @@ func (m *chatModel) handleClipboardImage(msg clipboardImageMsg) (tea.Model, tea.
 	}
 	image.Name = clipboardImageName(len(m.pending)+1, image.MediaType)
 	m.pending = append(m.pending, image)
-	m.reflow(false)
+	m.reflow()
 	return m, nil
 }
 
@@ -1228,7 +1154,7 @@ func (m *chatModel) clearAttachments() {
 		return
 	}
 	m.pending = nil
-	m.reflow(false)
+	m.reflow()
 }
 
 func (m *chatModel) runCommand(command string) tea.Cmd {
@@ -1328,12 +1254,16 @@ func (m *chatModel) View() tea.View {
 	return v
 }
 
-func (m *chatModel) reflow(follow bool) {
+// reflow lays out the chrome and gives the transcript the space that is left.
+// It re-syncs the window only when the transcript's share of the screen changed:
+// a same-shape reflow leaves the viewport exactly as it was.
+func (m *chatModel) reflow() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
 	previousViewportWidth := m.viewport.Width()
-	wasAtBottom := m.viewport.AtBottom()
+	previousViewportHeight := m.viewport.Height()
+	wasAtBottom := m.atBottom()
 	m.refreshInputMark()
 	m.composer.SetWidth(contentWidth(m.styles.composer, m.width))
 	header := m.headerView()
@@ -1349,10 +1279,8 @@ func (m *chatModel) reflow(follow bool) {
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
-	if previousViewportWidth != main.width {
-		m.refreshTranscript(follow || wasAtBottom)
-	} else if follow || wasAtBottom {
-		m.viewport.GotoBottom()
+	if previousViewportWidth != main.width || previousViewportHeight != main.height {
+		m.refreshTranscript(wasAtBottom)
 	}
 }
 
@@ -1386,9 +1314,6 @@ func (m *chatModel) statusView() string {
 			m.styles.status.Render("ctx ")+contextProgressBar(m.styles, pct, 6)+m.styles.status.Render(fmt.Sprintf(" %d%% %s/%s", pct, tokenCount(m.used), tokenCount(m.contextWindow))),
 		)
 		rest = strings.Join(fields, separator)
-	}
-	if !m.viewport.AtBottom() {
-		rest += separator + m.styles.status.Render("viewing earlier output")
 	}
 	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, rest)
 }
@@ -1602,43 +1527,18 @@ func fullWidth(style lipgloss.Style, width int, content string) string {
 	return style.Width(width).Render(content)
 }
 
+// refreshTranscript brings the viewport back in step with the transcript.
+// follow pins the view to the newest output; otherwise the scroll position
+// stays where the reader left it.
 func (m *chatModel) refreshTranscript(follow bool) {
 	if m.viewport.Width() <= 0 {
 		return
 	}
-	wasAtBottom := m.viewport.AtBottom()
-	m.viewport.SetContent(m.renderTranscript())
-	if follow || wasAtBottom {
-		m.viewport.GotoBottom()
+	if follow {
+		m.followTranscript()
+		return
 	}
-}
-
-func (m *chatModel) renderTranscript() string {
-	width := max(m.viewport.Width()-m.viewport.Style.GetHorizontalFrameSize(), 1)
-	var rendered []string
-	for i := range m.blocks {
-		entry := &m.blocks[i]
-		streaming := m.streaming && m.streamingAt == i
-		content := entry.rendered
-		if streaming || !entry.renderedValid || entry.renderedWidth != width {
-			content = m.renderBlock(entry, width, streaming)
-			if !streaming {
-				entry.rendered = content
-				entry.renderedWidth = width
-				entry.renderedValid = true
-			}
-		}
-		if strings.TrimSpace(content) != "" {
-			rendered = append(rendered, strings.Trim(content, "\n"))
-		}
-	}
-	if m.approval != nil && m.approvalShown {
-		rendered = append(rendered, m.approvalDetailBlock(width))
-	}
-	if len(rendered) == 0 {
-		return m.styles.muted.Render("\nStart with a question, a task, or / for commands.")
-	}
-	return strings.Join(rendered, "\n\n")
+	m.syncTranscript()
 }
 
 func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string {
@@ -2244,22 +2144,6 @@ func cancelArmTimeoutCmd(id uint64) tea.Cmd {
 	return tea.Tick(cancelArmTimeout, func(time.Time) tea.Msg { return cancelArmTimeoutMsg{id: id} })
 }
 
-func (m *chatModel) startStreamRefresh() tea.Cmd {
-	m.streamTick = true
-	m.streamTickID++
-	return streamRefreshTickCmd(m.streamTickID)
-}
-
-func (m *chatModel) stopStreamRefresh() {
-	m.streamTick = false
-	m.streamDirty = false
-	m.streamTickID++
-}
-
-func streamRefreshTickCmd(id uint64) tea.Cmd {
-	return tea.Tick(streamRefreshInterval, func(time.Time) tea.Msg { return streamRefreshTickMsg{id: id} })
-}
-
 // applySessionAction updates the list in place for a close or a delete, so the
 // row the user was working on stays under the cursor.
 func (m *chatModel) applySessionAction(msg sessionActionedMsg) {
@@ -2553,39 +2437,47 @@ func loadingModal(label string) *modalModel {
 	return &modalModel{kind: modalNotice, title: label, body: "Please wait...", required: true}
 }
 
+// isContentDelta reports whether an event carries a piece of the model's own
+// output: the one kind of event that arrives token by token.
+func isContentDelta(kind contracts.EventStreamKind) bool {
+	return kind == contracts.DeltaContent || kind == contracts.DeltaReasoning
+}
+
 func (m *chatModel) appendDelta(kind contracts.EventStreamKind, text string) {
 	role := "assistant"
 	switch kind {
 	case contracts.DeltaReasoning:
 		role = "thinking"
 	case contracts.EventProviderEvent:
-		m.streaming = false
+		m.stopStreaming()
 		role, text = "status", statusLabel(text)
 	case contracts.CompactionSummary:
-		m.streaming = false
+		m.stopStreaming()
 		role = "compaction"
 	case contracts.EventManualCompactionTriggered, contracts.EventAutoCompactionTriggered:
-		m.streaming = false
+		m.stopStreaming()
 		role, text = "status", statusLabel(text)
 	case contracts.EventToolCall:
-		m.streaming = false
+		m.stopStreaming()
 		m.appendToolEvent("call", text)
 		return
 	case contracts.EventToolResult:
-		m.streaming = false
+		m.stopStreaming()
 		m.appendToolEvent("result", text)
 		return
 	case contracts.EventSkillLoad:
-		m.streaming = false
+		m.stopStreaming()
 		m.blocks = append(m.blocks, block{role: "skill", text: text})
 		return
 	case contracts.EventToolTaskCheckList:
 		// Checklist state is rendered in the header, never as transcript text.
 		return
 	}
-	streaming := kind == contracts.DeltaContent || kind == contracts.DeltaReasoning
+	streaming := isContentDelta(kind)
 	if streaming && m.streaming && m.streamingAt == len(m.blocks)-1 && m.blocks[m.streamingAt].role == role {
-		m.blocks[len(m.blocks)-1].text += text
+		entry := &m.blocks[len(m.blocks)-1]
+		entry.text += text
+		entry.renderedValid = false
 		return
 	}
 	if role == "status" && len(m.blocks) > 0 && m.blocks[len(m.blocks)-1].role == role {
@@ -2596,8 +2488,24 @@ func (m *chatModel) appendDelta(kind contracts.EventStreamKind, text string) {
 	}
 	m.blocks = append(m.blocks, block{role: role, text: text})
 	if streaming {
+		// A new block takes over the stream: the one that was streaming is
+		// complete, so it gets its markdown render.
+		m.stopStreaming()
 		m.streaming = true
 		m.streamingAt = len(m.blocks) - 1
+	}
+}
+
+// stopStreaming ends the block in flight. A block is rendered as plain text
+// while it streams — markdown waits for the whole message — so its cached
+// render has to be dropped for the final pass.
+func (m *chatModel) stopStreaming() {
+	if !m.streaming {
+		return
+	}
+	m.streaming = false
+	if m.streamingAt >= 0 && m.streamingAt < len(m.blocks) {
+		m.blocks[m.streamingAt].renderedValid = false
 	}
 }
 

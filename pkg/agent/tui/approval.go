@@ -36,7 +36,7 @@ func (m *chatModel) handleApprovalKey(key string) (tea.Model, tea.Cmd, bool) {
 			m.composer.CursorEnd()
 			m.approvalDraft = ""
 			m.refreshInputMark()
-			m.reflow(false)
+			m.reflow()
 			return m, nil, true
 		case "enter":
 			reason := strings.TrimSpace(m.composer.Value())
@@ -57,12 +57,12 @@ func (m *chatModel) handleApprovalKey(key string) (tea.Model, tea.Cmd, bool) {
 		m.approvalDraft = m.composer.Value()
 		m.composer.Reset()
 		m.refreshInputMark()
-		m.reflow(false)
+		m.reflow()
 		return m, nil, true
 	case "ctrl+g":
 		m.approvalShown = !m.approvalShown
 		m.refreshTranscript(true)
-		m.reflow(false)
+		m.reflow()
 		return m, nil, true
 	case "pgup", "pgdown", "ctrl+up", "ctrl+down":
 		return m, nil, false
@@ -87,7 +87,7 @@ func (m *chatModel) resolveApproval(decision, reason string) tea.Cmd {
 	}
 	m.blocks = append(m.blocks, block{role: "system", text: note})
 	m.refreshTranscript(true)
-	m.reflow(false)
+	m.reflow()
 	return resolveApprovalCmd(m.ctx, m.client, approval, decision, reason)
 }
 
@@ -99,7 +99,7 @@ func (m *chatModel) showApproval(approval *Approval) {
 	m.approvalShown = false
 	m.approvalReason = false
 	m.approvalDraft = ""
-	m.reflow(false)
+	m.reflow()
 }
 
 // clearApproval drops a decision that is no longer ours to make: another client
@@ -113,7 +113,7 @@ func (m *chatModel) clearApproval() {
 	m.approvalReason = false
 	m.approvalDraft = ""
 	m.refreshInputMark()
-	m.reflow(false)
+	m.reflow()
 }
 
 // approvalView is the reviewed content of a pending decision: the metadata body,
