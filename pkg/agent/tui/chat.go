@@ -1296,7 +1296,7 @@ func (m *chatModel) View() tea.View {
 	files := renderFilePicker(m.filePicker, m.width, m.styles)
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	parts := []string{header, m.viewport.View(), checklist, hitl, sessionRow, commands, files, attachments, composer, status}
+	parts := []string{header, m.viewport.View(), hitl, checklist, sessionRow, commands, files, attachments, composer, status}
 	if len(m.areas) == len(parts) {
 		parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
 		for i := range parts {
@@ -1345,7 +1345,7 @@ func (m *chatModel) reflow(follow bool) {
 	files := renderFilePicker(m.filePicker, m.width, m.styles)
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(checklist), intrinsic(hitl), intrinsic(sessionRow), intrinsic(commands), intrinsic(files), intrinsic(attachments), intrinsic(composer), intrinsic(status))
+	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(hitl), intrinsic(checklist), intrinsic(sessionRow), intrinsic(commands), intrinsic(files), intrinsic(attachments), intrinsic(composer), intrinsic(status))
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
