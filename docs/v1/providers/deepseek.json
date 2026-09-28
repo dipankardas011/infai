@@ -1,19 +1,20 @@
 {
-    "deepseek-v4-flash": {
+    "deepseek-flash": {
         "provider": "deepseek",
         "base_url": "https://api.deepseek.com",
         "api_type": "openai-completions",
-        "id": "deepseek-v4-flash",
-        "name": "DeepSeek V4 Flash",
+        "id": "deepseek-flash",
+        "name": "DeepSeek V4.1 Flash",
         "max_context_window": 1000000,
         "max_output_tokens": 384000,
         "default_temperature": null,
         "modality": [
-            "text"
+            "text",
+            "image"
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "off": "disabled",
+            "off": null,
             "minimal": null,
             "low": "low",
             "medium": null,
@@ -35,32 +36,9 @@
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "off": "disabled",
+            "off": null,
             "minimal": null,
             "low": null,
-            "medium": null,
-            "high": "high",
-            "max": "max"
-        }
-    },
-    "deepseek-v4-flash-vision-exp": {
-        "provider": "deepseek",
-        "base_url": "https://api.deepseek.com",
-        "api_type": "openai-completions",
-        "id": "deepseek-v4-flash-vision-exp",
-        "name": "DeepSeek V4 Flash Vision Exp",
-        "max_context_window": 1000000,
-        "max_output_tokens": 384000,
-        "default_temperature": null,
-        "modality": [
-            "text",
-            "image"
-        ],
-        "available_thinking": true,
-        "thinking_levels": {
-            "off": "disabled",
-            "minimal": null,
-            "low": "low",
             "medium": null,
             "high": "high",
             "max": "max"
