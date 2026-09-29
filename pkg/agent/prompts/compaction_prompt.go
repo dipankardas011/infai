@@ -53,7 +53,7 @@ func PlanCompaction(history []contracts.ChatMessage, keepRecentTurns bool) (toCo
 // CompactionInput assembles the summarizer's request: the serialized toCompact
 // messages wrapped in <conversation> tags, followed by the 7 Ws instruction.
 func CompactionInput(toCompact []contracts.ChatMessage, prevCheckpoint, taskChecklist string) (string, []contracts.ChatMessage, error) {
-	systemPrompt, err := CompactionAgentSystemPrompt()
+	systemPrompt, err := CompactionSystemPrompt()
 	if err != nil {
 		return "", nil, err
 	}
@@ -80,7 +80,7 @@ func CompactionInput(toCompact []contracts.ChatMessage, prevCheckpoint, taskChec
 	return systemPrompt, []contracts.ChatMessage{contracts.NewUserMessage(prompt.String())}, nil
 }
 
-func CompactionAgentSystemPrompt() (string, error) {
+func CompactionSystemPrompt() (string, error) {
 	const prompt = `You are a compaction summarizer. Your only job is to turn the conversation given to you into a continuation checkpoint that the very next turn of the same agent can continue from without re-reading the original conversation.
 
 You have exactly one turn. Output ONLY the checkpoint — no tool calls, no questions, no commentary about this instruction.

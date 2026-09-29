@@ -63,16 +63,25 @@ type compactionCommit struct {
 	History       []contracts.ChatMessage
 }
 
+func (s *InfaiAgentSession) modelClient() contracts.InfaiModelAdaptor {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.model
+}
+
 func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
-	if usage == nil || s.model.GetModelSpecs().Model().MaxContextLength == 0 {
+	if usage == nil {
+		return false
+	}
+	window := s.modelClient().GetModelSpecs().Model().MaxContextLength
+	if window == 0 {
 		return false
 	}
 	used := usage.TotalTokens
 	if used == 0 {
 		used = usage.PromptTokens + usage.CompletionTokens
 	}
-	threshold := float64(s.model.GetModelSpecs().Model().MaxContextLength) * 0.8
-	return float64(used) >= threshold
+	return float64(used) >= float64(window)*0.8
 }
 
 // CompactChat runs a manual compaction. The agent loop is parked while the
@@ -196,8 +205,8 @@ func (s *InfaiAgentSession) summarize(ctx context.Context, systemPrompt string, 
 	messages := make([]contracts.ChatMessage, 0, len(history)+1)
 	messages = append(messages, contracts.NewSystemMessage(systemPrompt))
 	messages = append(messages, history...)
-	// TODO: ask whether we need usage metrics from the compaction model?
-	reply, _, err := s.model.Generate(ctx, messages, nil, &contracts.GenerateOptions{})
+
+	reply, _, err := s.modelClient().Generate(ctx, messages, nil, &contracts.GenerateOptions{})
 	if err != nil {
 		return "", err
 	}
