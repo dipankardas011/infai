@@ -183,6 +183,20 @@ func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thin
 					reply.Usage = &usage
 					reply.ContextTokens = usage.TotalTokens
 				}
+			case contracts.EventCompactionExecuted:
+				if onDelta == nil || event.Compaction == nil {
+					break
+				}
+				if event.Compaction.Err != "" {
+					// The manual path is reported by the /compact result.
+					if event.Compaction.Automatic {
+						onDelta(event.Kind, "compaction failed: "+event.Compaction.Err)
+					}
+					break
+				}
+				if event.Compaction.Summary != "" {
+					onDelta(event.Kind, event.Compaction.Summary)
+				}
 			case contracts.DeltaContent:
 				reply.Reply += content
 				if onDelta != nil && content != "" {

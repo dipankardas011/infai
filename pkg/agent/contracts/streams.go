@@ -12,10 +12,6 @@ const (
 	DeltaContent EventStreamKind = "content"
 	// DeltaReasoning is the model's reasoning text (shown separately).
 	DeltaReasoning EventStreamKind = "reasoning"
-	// CompactionSummary is the summary a compaction produced. It is published
-	// once the compacted history is installed, so it marks the session as
-	// runnable again rather than mid-compaction.
-	CompactionSummary EventStreamKind = "compaction_summary"
 
 	// EventProviderEvent is the model provider speaking for itself: a retry
 	// notice, a failed request, an endpoint-level message.
@@ -52,6 +48,9 @@ const (
 	/// HITL
 	EventApprovalRequested EventStreamKind = "approval_requested"
 	EventApprovalResolved  EventStreamKind = "approval_resolved"
+
+	/// Compaction Result
+	EventCompactionExecuted EventStreamKind = "compaction_executed"
 )
 
 type EventStream struct {
@@ -63,6 +62,13 @@ type EventStream struct {
 	HITLCall    *ApprovalRequest     `json:"hitl_call"`
 	HITLResult  *ApprovalConclusion  `json:"hitl_result"`
 	Attachments *EventAttachments    `json:"attachments,omitempty"`
+	Compaction  *CompactionResult    `json:"compaction,omitempty"`
+}
+
+type CompactionResult struct {
+	Summary   string `json:"summary,omitempty"`
+	Err       string `json:"err,omitempty"`
+	Automatic bool   `json:"automatic,omitempty"`
 }
 
 type EventAttachments struct {

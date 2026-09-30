@@ -258,8 +258,10 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 				cAssistant.Fprint(out, text)
 			case contracts.EventProviderEvent:
 				cSystem.Fprintln(out, statusLabel(text))
-			case contracts.CompactionSummary:
-				printCompactionSummary(out, text)
+			case contracts.EventCompactionExecuted:
+				if text != "" {
+					printCompactionSummary(out, text)
+				}
 			case contracts.EventToolCall:
 				cSystem.Fprintf(out, "  ↳ tool call %s\n", text)
 			case contracts.EventToolResult:

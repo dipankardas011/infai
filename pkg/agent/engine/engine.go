@@ -133,7 +133,11 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	sess, err := session.NewSession(
 		e.ctx,
 		sessID,
+		uuid.Nil,
 		e.bgLogger.WithGroup("session"),
+		nil,
+		nil,
+		1000,
 		contracts.NewProvisionedModel(
 			providerConfig.Id,
 			opts.Provider,
@@ -388,6 +392,8 @@ func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, d
 }
 
 func (e *InfaiAgentEngine) CancelTurn(id uuid.UUID) error {
+	// TODO: we need to get to call the call the children to cancel their turn.
+
 	sess, ok := e.Session(id)
 	if !ok {
 		return harnessErr.ErrSessionNotFound
@@ -403,7 +409,7 @@ func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) err
 	if !ok {
 		return harnessErr.ErrSessionNotFound
 	}
-	return sess.CompactChat(ctx)
+	return sess.ManualCompactChat(ctx)
 }
 
 func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {

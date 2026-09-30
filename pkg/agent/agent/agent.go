@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"sync"
 	"time"
 
@@ -16,7 +15,7 @@ import (
 type Agent struct {
 	Kind contracts.AgentKind
 
-	mailbox        chan contracts.ChatMessage
+	mailbox        *contracts.AgentMailbox
 	commitTimeline func(context.Context, []contracts.ChatMessage) error
 	eventStream    chan<- contracts.EventStream
 	workingHistory workingSessionMemory
@@ -32,7 +31,7 @@ type Agent struct {
 	autoCompact        func(context.Context) ([]contracts.ChatMessage, error)
 	userCancellation   <-chan struct{}
 	toolCallDispatcher func([]contracts.ToolCall) ([]contracts.ChatMessage, bool)
-	evalFunc           func() bool
+	evalFunc           func(context.Context) error
 }
 
 type agentOption struct {
@@ -40,7 +39,7 @@ type agentOption struct {
 	tools         []contracts.Tool
 	shouldCompact func(*contracts.TokenUsage) bool
 	autoCompact   func(context.Context) ([]contracts.ChatMessage, error)
-	evalFunc      func() bool
+	evalFunc      func(context.Context) error
 }
 
 type AgentOptions func(*agentOption) error
@@ -67,7 +66,8 @@ func WithAutoCompaction(shouldCompact func(*contracts.TokenUsage) bool, autoComp
 	}
 }
 
-func WithEval(checkFunc func() bool) AgentOptions {
+// Use this only for agents which are noninteractive for now use for sidecar_loop.
+func WithEval(checkFunc func(context.Context) error) AgentOptions {
 	return func(ao *agentOption) error {
 		ao.evalFunc = checkFunc
 		return nil
@@ -77,6 +77,7 @@ func WithEval(checkFunc func() bool) AgentOptions {
 func NewAgent(
 	model contracts.InfaiModelAdaptor,
 	kind contracts.AgentKind,
+	agentMailbox *contracts.AgentMailbox,
 	commitTimeline func(context.Context, []contracts.ChatMessage) error,
 	eventStream chan<- contracts.EventStream,
 	userCancellation <-chan struct{},
@@ -84,7 +85,7 @@ func NewAgent(
 	systemPrompt string,
 	opts ...AgentOptions,
 ) (*Agent, error) {
-	o := &agentOption{maxQ: math.MaxUint16}
+	o := &agentOption{}
 	for _, opt := range opts {
 		if err := opt(o); err != nil {
 			return nil, err
@@ -93,7 +94,7 @@ func NewAgent(
 
 	return &Agent{
 		Kind:               kind,
-		mailbox:            make(chan contracts.ChatMessage, 10),
+		mailbox:            agentMailbox,
 		commitTimeline:     commitTimeline,
 		eventStream:        eventStream,
 		model:              model,
@@ -112,19 +113,6 @@ func (a *Agent) SetModel(model contracts.InfaiModelAdaptor) {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	a.model = model
-}
-
-func (a *Agent) Enqueue(ctx context.Context, message contracts.ChatMessage) error {
-	select {
-	case a.mailbox <- message:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (a *Agent) MailboxEmpty() bool {
-	return len(a.mailbox) == 0
 }
 
 type workingSessionMemory struct {
@@ -189,26 +177,19 @@ func (a *Agent) updateState(ctx context.Context, status contracts.SessionStatus)
 	})
 }
 
-func (a *Agent) drainInbox() []contracts.ChatMessage {
-	var batch []contracts.ChatMessage
-	for {
-		select {
-		case message := <-a.mailbox:
-			batch = append(batch, message)
-		default:
-			return batch
-		}
-	}
-}
-
 func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMessage) {
 	a.workingHistory.Set(activeTimeline)
 
 	lastHadToolCalls := false
-	for iter := uint64(1); iter <= a.MaxQ; iter++ {
-		unreadMessages := a.drainInbox()
+	lastEvalResPass := false
+	if a.evalFunc == nil {
+		lastEvalResPass = true // Short-circuit
+	}
 
-		if !lastHadToolCalls && len(unreadMessages) == 0 {
+	for iter := uint64(1); iter <= a.MaxQ; iter++ {
+		unreadMessages := a.mailbox.ConsumeAllFromInbox(ctx)
+
+		if !lastHadToolCalls && len(unreadMessages) == 0 && lastEvalResPass {
 			if !a.updateState(ctx, contracts.SessionIdle) {
 				return
 			}
@@ -221,7 +202,7 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 				select {
 				case <-ctx.Done():
 					return
-				case message := <-a.mailbox:
+				case message := <-a.mailbox.ListenForMessageInInbox(ctx):
 					unreadMessages = append(unreadMessages, message)
 				}
 			}
@@ -323,8 +304,13 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 			}
 			messages = append(messages, toolMessages...)
 		} else if a.evalFunc != nil {
-			result := a.evalFunc()
-			messages = append(messages, contracts.NewUserMessage(fmt.Sprintf("evalFunc status: %t", result)))
+			if err := a.evalFunc(ctx); err != nil {
+				messages = append(messages, contracts.NewUserMessage(fmt.Sprintf("evaluation status: FAIL => %v", err.Error())))
+				lastEvalResPass = false
+			} else {
+				messages = append(messages, contracts.NewUserMessage("evaluation status: PASS"))
+				lastEvalResPass = true
+			}
 		}
 
 		if err := a.commitTimeline(ctx, messages); err != nil {
@@ -340,7 +326,20 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 
 			replacement, err := a.autoCompact(ctx)
 			if err != nil {
-				return
+				// The history is unchanged, so there is nothing new to send to
+				// the model with. Clearing the pending-work flag parks the loop
+				// at the next iteration boundary instead of spending a request
+				// on a context already known not to fit. A message that is
+				// already queued still forces that request, which is the
+				// user's call to make.
+				//
+				// TODO: a loop kind does not park on the next iteration, it
+				// publishes SessionCompleted and returns, so a sidecar whose
+				// compaction fails ends as if it had finished its task. It
+				// needs to report a failure event as its result instead, so the
+				// parent sees a failed delegation rather than a completed one.
+				lastHadToolCalls = false
+				continue
 			}
 
 			// Continue the next iteration from the compacted history.

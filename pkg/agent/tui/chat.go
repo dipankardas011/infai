@@ -1014,6 +1014,19 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 		}
 	case contracts.EventApprovalResolved:
 		m.handleApprovalUpdate(ApprovalUpdate{Type: string(event.Kind), Approval: approvalFromRequest(event.HITLCall)})
+	case contracts.EventCompactionExecuted:
+		if event.Compaction == nil {
+			break
+		}
+		switch {
+		case event.Compaction.Err != "" && event.Compaction.Automatic:
+			// A manual failure is reported by the /compact result it answers; an
+			// automatic one has no caller, so this event is the only report.
+			m.stopStreaming()
+			m.appendError(errors.New("compaction failed: " + event.Compaction.Err))
+		case event.Compaction.Summary != "":
+			m.appendDelta(event.Kind, event.Compaction.Summary)
+		}
 	case contracts.NotifyAgentUsage:
 		var usage contracts.TokenUsage
 		if json.Unmarshal([]byte(content), &usage) == nil {
@@ -2472,7 +2485,7 @@ func (m *chatModel) appendDelta(kind contracts.EventStreamKind, text string) {
 	case contracts.EventProviderEvent:
 		m.stopStreaming()
 		role, text = "status", statusLabel(text)
-	case contracts.CompactionSummary:
+	case contracts.EventCompactionExecuted:
 		m.stopStreaming()
 		role = "compaction"
 	case contracts.EventManualCompactionTriggered, contracts.EventAutoCompactionTriggered:

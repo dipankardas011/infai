@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
+	"github.com/dipankardas011/infai/pkg/agent/evals"
 	"github.com/dipankardas011/infai/pkg/agent/memory"
 	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/prompts"
@@ -57,13 +59,17 @@ type InfaiAgentSession struct {
 	// Decisions the session is waiting on: a user cancellation, a tool
 	// approval from the user, or the agent adopting a branch point on its next
 	// write. The agent is the sole receiver of userCancellation.
-	userCancellation    chan struct{}
-	pendingApproval     *pendingApproval
-	pendingBranchParent uuid.UUID
+	userCancellation       chan struct{}
+	pendingApproval        *pendingApproval
+	pendingBranchParent    uuid.UUID
+	pendingSidecarResponse map[uuid.UUID]struct{}
 
 	// The principal agent and the model it runs on.
 	agent *agent.Agent
 	model contracts.InfaiModelAdaptor
+
+	// MessageBroker for AgentMessage as Inputs from external sys
+	agentMailbox *contracts.AgentMailbox
 
 	// Capabilities the agent runs with.
 	auditorPolicy   *auditor.AuditorPolicy
@@ -91,7 +97,11 @@ const userCanceledApprovalReason = "user canceled"
 func NewSession(
 	engineCtx context.Context,
 	id uuid.UUID,
+	parentId uuid.UUID,
 	l *slog.Logger,
+	userPrompt *string,
+	evalBashScript *string,
+	agentLoopMaxTurns uint64,
 	chosenModel contracts.ProvisionedModel,
 	cwd string,
 	ss *store.SessionStore,
@@ -103,15 +113,43 @@ func NewSession(
 		return nil, err
 	}
 
+	agentMailbox := contracts.NewAgentMailboxForSession()
+	agentMailbox.AllowFilling()
+	agentMailbox.AllowDraining()
+
+	var evalFunc func(context.Context) error
+
+	switch sessionAgentKind {
+	case contracts.SidecarLoopAgent, contracts.SingleLoopAgent:
+		if userPrompt == nil || *userPrompt == "" {
+			return nil, fmt.Errorf("user prompt is needed for the %s", sessionAgentKind)
+		}
+		if err := agentMailbox.SendMessage(engineCtx, contracts.NewUserMessage(*userPrompt)); err != nil {
+			return nil, err
+		}
+		agentMailbox.PreventFilling()
+
+		if evalBashScript == nil || *evalBashScript == "" {
+			return nil, fmt.Errorf("eval bash script is needed for the agentKind: %s", sessionAgentKind)
+		}
+
+		evalFunc = evals.NewEvalScriptHandler(cwd, *evalBashScript)
+	case contracts.InteractiveAgent:
+		agentLoopMaxTurns = math.MaxUint32
+	}
+
 	now := time.Now().UTC()
 	meta := store.SessionMeta{
-		ID:        id,
-		Provider:  model.GetModelSpecs().ProviderName(),
-		Model:     model.GetModelSpecs().Model().Id,
-		Cwd:       cwd,
-		CreatedAt: now,
-		UpdatedAt: now,
-		AgentKind: sessionAgentKind,
+		ID:             id,
+		ParentID:       parentId,
+		Provider:       model.GetModelSpecs().ProviderName(),
+		Model:          model.GetModelSpecs().Model().Id,
+		Cwd:            cwd,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		AgentKind:      sessionAgentKind,
+		EvalBashScript: evalBashScript,
+		MaxTurns:       agentLoopMaxTurns,
 	}
 	if err := ss.SaveMeta(meta); err != nil {
 		return nil, err
@@ -121,7 +159,7 @@ func NewSession(
 		return nil, err
 	}
 
-	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, aeComms)
+	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc)
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -143,7 +181,22 @@ func NewResumedSession(
 	if err != nil {
 		return nil, err
 	}
-	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, aeComms)
+	agentMailbox := contracts.NewAgentMailboxForSession()
+	agentMailbox.AllowFilling()
+	agentMailbox.AllowDraining()
+
+	var evalFunc func(context.Context) error
+
+	switch meta.AgentKind {
+	case contracts.SidecarLoopAgent, contracts.SingleLoopAgent:
+		agentMailbox.PreventFilling()
+
+		if meta.EvalBashScript != nil {
+			evalFunc = evals.NewEvalScriptHandler(meta.Cwd, *meta.EvalBashScript)
+		}
+	}
+
+	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc)
 }
 
 func newRuntimeSession(
@@ -154,7 +207,9 @@ func newRuntimeSession(
 	history []contracts.ChatMessage,
 	timeline *store.Timeline,
 	sessionStore *store.SessionStore,
+	am *contracts.AgentMailbox,
 	aeComms *comms.ISACChannel,
+	evalFunc func(context.Context) error,
 ) (*InfaiAgentSession, error) {
 	if engineCtx == nil {
 		return nil, errors.New("session: engine context is required")
@@ -177,6 +232,7 @@ func newRuntimeSession(
 		eventBus:         make(chan contracts.EventStream, 256),
 		subscribers:      make(map[*subscriber]struct{}),
 		aeComms:          aeComms,
+		agentMailbox:     am,
 	}
 
 	var err error
@@ -205,17 +261,28 @@ func newRuntimeSession(
 		return nil, err
 	}
 
+	opts := append(
+		[]agent.AgentOptions(nil),
+		agent.WithAutoCompaction(s.shouldCompact, s.autoCompact),
+		agent.WithMaxTurns(meta.MaxTurns),
+	)
+	if len(s.availableTools) > 0 {
+		opts = append(opts, agent.WithTools(s.availableTools...))
+	}
+	if evalFunc != nil {
+		opts = append(opts, agent.WithEval(evalFunc))
+	}
+
 	s.agent, err = agent.NewAgent(
 		s.model,
 		s.meta.AgentKind,
+		s.agentMailbox,
 		s.commitMessages,
 		s.eventBus,
 		s.userCancellation,
 		s.GenToolCallDispatchHandler(),
 		systemPrompt,
-		agent.WithMaxTurns(1000),
-		agent.WithTools(s.availableTools...),
-		agent.WithAutoCompaction(s.shouldCompact, s.autoCompact),
+		opts...,
 	)
 	if err != nil {
 		cancel(err)
@@ -276,7 +343,7 @@ func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) (contracts.TaskCheck
 		s.mu.Unlock()
 		return contracts.TaskChecklistState{}, fmt.Errorf("session must be idle before selecting a branch")
 	}
-	if !s.agent.MailboxEmpty() {
+	if !s.agentMailbox.IsEmpty() {
 		s.mu.Unlock()
 		return contracts.TaskChecklistState{}, errors.New("session has queued messages")
 	}
@@ -318,7 +385,7 @@ func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) (contracts.TaskCheck
 	}
 
 	s.mu.Lock()
-	if !s.agent.MailboxEmpty() {
+	if !s.agentMailbox.IsEmpty() {
 		s.mu.Unlock()
 		return contracts.TaskChecklistState{}, errors.New("session received a queued message while switching branches")
 	}
@@ -356,6 +423,10 @@ func (s *InfaiAgentSession) Rename(name string) error {
 	return s.store.SaveMeta(meta)
 }
 
+func (s *InfaiAgentSession) ParkAgentMessages(ctx context.Context, input contracts.ChatMessage) error {
+	return errors.New("session: ParkAgentMessages is not implemented")
+}
+
 func (s *InfaiAgentSession) EnqueueUserMessage(ctx context.Context, input contracts.UserInput) error {
 	if input.Empty() {
 		return fmt.Errorf("%w: message is required", harnessErr.ErrInvalidInput)
@@ -367,6 +438,14 @@ func (s *InfaiAgentSession) EnqueueUserMessage(ctx context.Context, input contra
 	input.Images = images
 
 	s.mu.Lock()
+	switch s.agent.Kind {
+	case contracts.SidecarLoopAgent:
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %s", harnessErr.ErrInvalidInput, "sidecar_loop agent does not support enqueue user messages")
+	case contracts.SingleLoopAgent:
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %s", harnessErr.ErrInvalidInput, "single_loop agent does not support enqueue user messages")
+	}
 
 	switch s.status {
 	case contracts.SessionCompacting:
@@ -411,7 +490,7 @@ func (s *InfaiAgentSession) EnqueueUserMessage(ctx context.Context, input contra
 		s.l.Error("persist session metadata", "session_id", meta.ID, "error", err)
 	}
 
-	if err := s.agent.Enqueue(ctx, contracts.NewUserMessageWithInput(input)); err != nil {
+	if err := s.agentMailbox.SendMessage(ctx, contracts.NewUserMessageWithInput(input)); err != nil {
 		return err
 	}
 	return nil
@@ -455,9 +534,6 @@ func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision contracts.App
 	s.mu.Lock()
 
 	switch s.status {
-	case contracts.SessionCompacting:
-		s.mu.Unlock()
-		return errors.New("session is compacting")
 	case contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone:
 		fatalErr := s.fatalErr
 		s.mu.Unlock()
@@ -561,10 +637,11 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			s.notifySubscribers(compactingEvent)
 			s.mu.Unlock()
 
-		case contracts.CompactionSummary:
-			// A compaction is over and its continuation is installed, so the
-			// session is runnable again. An automatic compaction is followed by
-			// the agent's next busy report, which is what resumes that turn.
+		case contracts.EventCompactionExecuted:
+			// A compaction is over, so the session is runnable again whether it
+			// produced a summary or failed; this is the only event that clears
+			// SessionCompacting. An automatic compaction is followed by the
+			// agent's next busy report, which is what resumes that turn.
 			idle := string(contracts.SessionIdle)
 			idleEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &idle}
 
