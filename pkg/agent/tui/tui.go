@@ -262,13 +262,12 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 				if text != "" {
 					printCompactionSummary(out, text)
 				}
-			case contracts.EventToolCall:
-				cSystem.Fprintf(out, "  ↳ tool call %s\n", text)
-			case contracts.EventToolResult:
-				cSystem.Fprintf(out, "  ↳ tool result %s\n", text)
-			case contracts.EventSkillLoad:
-				cSkill.Fprintf(out, "  ✦ skill %s\n", text)
 			case contracts.EventToolTaskCheckList:
+				// Only a branch selection publishes this event with content;
+				// the checklist tool's own result carries a structured payload
+				// that this stream does not flatten. It is the client's new
+				// checklist state, so it is rendered here rather than counted
+				// as tool output.
 				if state, err := decodeTaskChecklist(text); err == nil {
 					completed := 0
 					for _, item := range state.Items {

@@ -208,6 +208,10 @@ func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thin
 					onDelta(event.Kind, content)
 				}
 			default:
+				// Only content-bearing events arrive here. Tool calls, tool
+				// results, skill loads and compaction write structured fields
+				// instead, so they never reach this callback: a client that
+				// wants them reads the fields, not this stream.
 				if onDelta != nil && content != "" {
 					onDelta(event.Kind, content)
 				}
