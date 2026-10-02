@@ -326,18 +326,17 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 
 			replacement, err := a.autoCompact(ctx)
 			if err != nil {
+				if a.Kind == contracts.SidecarLoopAgent || a.Kind == contracts.SingleLoopAgent {
+					reason := fmt.Sprintf("sidecar compaction failed: %v", err)
+					a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventSessionFatal, Timestamp: time.Now().UTC(), Content: &reason})
+					return
+				}
 				// The history is unchanged, so there is nothing new to send to
 				// the model with. Clearing the pending-work flag parks the loop
 				// at the next iteration boundary instead of spending a request
 				// on a context already known not to fit. A message that is
 				// already queued still forces that request, which is the
 				// user's call to make.
-				//
-				// TODO: a loop kind does not park on the next iteration, it
-				// publishes SessionCompleted and returns, so a sidecar whose
-				// compaction fails ends as if it had finished its task. It
-				// needs to report a failure event as its result instead, so the
-				// parent sees a failed delegation rather than a completed one.
 				lastHadToolCalls = false
 				continue
 			}

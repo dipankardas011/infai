@@ -97,6 +97,10 @@ func (s *InfaiAgentSession) ManualCompactChat(ctx context.Context) error {
 		s.mu.Unlock()
 		return errors.New("session has queued messages")
 	}
+	if s.meta.AgentKind == contracts.SidecarLoopAgent || s.meta.AgentKind == contracts.SingleLoopAgent {
+		s.mu.Unlock()
+		return errors.New("not supported for sidecar loop and loop kind agents.")
+	}
 	s.agentMailbox.PreventDraining()
 	s.mu.Unlock()
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -578,6 +579,29 @@ func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision contracts.App
 	return nil
 }
 
+func (s *InfaiAgentSession) summaryMessageFromSidecarLoop() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, message := range slices.Backward(s.activeTimeline) {
+		if message.Role == "assistant" && strings.TrimSpace(message.Text()) != "" {
+			return message.Text()
+		}
+	}
+	return ""
+}
+
+func (s *InfaiAgentSession) sendSidecarLoopResult(ctx context.Context, response comms.DelegatedTaskResponse) {
+	payload, err := json.Marshal(response)
+	if err != nil {
+		s.l.ErrorContext(ctx, "encode sidecar result", "session_id", s.meta.ID, "error", err)
+		return
+	}
+	if err := s.aeComms.Send(ctx, &comms.AgentComm{From: s.meta.ID, To: s.meta.ParentID, Kind: comms.AgentCommKindResultSidecar, Payload: payload}); err != nil {
+		s.l.ErrorContext(ctx, "send sidecar result", "session_id", s.meta.ID, "error", err)
+	}
+}
+
 func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 	for {
 		var event contracts.EventStream
@@ -626,6 +650,18 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			// ended. The status says why on its own, so no reason is recorded.
 			if eventStatus == contracts.SessionCompleted || eventStatus == contracts.SessionMaxIterationExhausted {
 				s.recordSessionConclusion(eventStatus, "")
+				if s.meta.AgentKind == contracts.SidecarLoopAgent {
+					response := comms.DelegatedTaskResponse{From: s.meta.ID, Status: eventStatus}
+					if eventStatus == contracts.SessionMaxIterationExhausted {
+						response.Error = "sidecar exhausted its turn budget"
+					} else {
+						response.Summary = s.summaryMessageFromSidecarLoop()
+						if response.Summary == "" {
+							response.Error = "sidecar completed without an answer"
+						}
+					}
+					s.sendSidecarLoopResult(ctx, response)
+				}
 			}
 
 		case contracts.EventManualCompactionTriggered,
@@ -700,6 +736,9 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			s.inFlight = append(s.inFlight, event)
 			s.notifySubscribers(event)
 			s.mu.Unlock()
+			if s.meta.AgentKind == contracts.SidecarLoopAgent {
+				s.sendSidecarLoopResult(ctx, comms.DelegatedTaskResponse{From: s.meta.ID, Status: contracts.SessionTombstone, Error: reason})
+			}
 			s.cancel(cause)
 
 			s.recordSessionConclusion(contracts.SessionTombstone, reason)
