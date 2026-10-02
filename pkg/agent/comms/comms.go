@@ -12,12 +12,18 @@ import (
 type AgentCommKind string
 
 const (
-	AgentCommKindSubagent AgentCommKind = "subagent"
-	AgentCommKindSwarm    AgentCommKind = "swarm"
+	AgentCommDelegationConformation AgentCommKind = "delegation_conformation"
+
+	AgentCommKindSpawnSidecar  AgentCommKind = "spawn_sidecar_loop"
+	AgentCommKindResultSidecar AgentCommKind = "result_sidecar_loop"
+	AgentCommKindSwarm         AgentCommKind = "swarm"
 )
 
 var allKinds = []AgentCommKind{
-	AgentCommKindSubagent,
+	AgentCommDelegationConformation,
+	AgentCommKindSpawnSidecar,
+	AgentCommKindResultSidecar,
+	AgentCommKindSwarm,
 }
 
 // AgentComm is one internal message between the session and an agent.
