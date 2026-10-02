@@ -14,15 +14,20 @@ type AgentCommKind string
 const (
 	AgentCommDelegationConformation AgentCommKind = "delegation_conformation"
 
-	AgentCommKindSpawnSidecar  AgentCommKind = "spawn_sidecar_loop"
-	AgentCommKindResultSidecar AgentCommKind = "result_sidecar_loop"
-	AgentCommKindSwarm         AgentCommKind = "swarm"
+	AgentCommKindSpawnSidecar            AgentCommKind = "spawn_sidecar_loop"
+	AgentCommKindSpawnSidecarBackground  AgentCommKind = "spawn_sidecar_loop_background"
+	AgentCommKindResultSidecar           AgentCommKind = "result_sidecar_loop"
+	AgentCommKindResultSidecarBackground AgentCommKind = "result_sidecar_loop_background"
+
+	AgentCommKindSwarm AgentCommKind = "swarm"
 )
 
 var allKinds = []AgentCommKind{
 	AgentCommDelegationConformation,
 	AgentCommKindSpawnSidecar,
+	AgentCommKindSpawnSidecarBackground,
 	AgentCommKindResultSidecar,
+	AgentCommKindResultSidecarBackground,
 	AgentCommKindSwarm,
 }
 

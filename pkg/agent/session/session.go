@@ -17,6 +17,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/auditor"
 	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/delegate"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/evals"
 	"github.com/dipankardas011/infai/pkg/agent/memory"
@@ -59,10 +60,9 @@ type InfaiAgentSession struct {
 	// Decisions the session is waiting on: a user cancellation, a tool
 	// approval from the user, or the agent adopting a branch point on its next
 	// write. The agent is the sole receiver of userCancellation.
-	userCancellation       chan struct{}
-	pendingApproval        *pendingApproval
-	pendingBranchParent    uuid.UUID
-	pendingSidecarResponse map[uuid.UUID]struct{}
+	userCancellation    chan struct{}
+	pendingApproval     *pendingApproval
+	pendingBranchParent uuid.UUID
 
 	// The principal agent and the model it runs on.
 	agent *agent.Agent
@@ -255,6 +255,10 @@ func newRuntimeSession(
 	}
 	s.configureMemoryTools()
 
+	if s.meta.AgentKind == contracts.InteractiveAgent {
+		s.configureDelegationTools()
+	}
+
 	systemPrompt, err := prompts.GetBasicSystemPrompt(s.availableTools, s.availableSkills, s.meta.Cwd)
 	if err != nil {
 		cancel(err)
@@ -305,6 +309,12 @@ func newRuntimeSession(
 	s.wg.Go(func() {
 		s.agent.StartLoop(s.ctx, s.activeTimeline)
 	})
+	switch s.meta.AgentKind {
+	case contracts.InteractiveAgent:
+		s.wg.Go(func() {
+			s.subscribeForAgentMessages()
+		})
+	}
 
 	s.wg.Go(func() {
 		<-s.ctx.Done()
@@ -423,10 +433,6 @@ func (s *InfaiAgentSession) Rename(name string) error {
 	return s.store.SaveMeta(meta)
 }
 
-func (s *InfaiAgentSession) ParkAgentMessages(ctx context.Context, input contracts.ChatMessage) error {
-	return errors.New("session: ParkAgentMessages is not implemented")
-}
-
 func (s *InfaiAgentSession) EnqueueUserMessage(ctx context.Context, input contracts.UserInput) error {
 	if input.Empty() {
 		return fmt.Errorf("%w: message is required", harnessErr.ErrInvalidInput)
@@ -438,7 +444,7 @@ func (s *InfaiAgentSession) EnqueueUserMessage(ctx context.Context, input contra
 	input.Images = images
 
 	s.mu.Lock()
-	switch s.agent.Kind {
+	switch s.meta.AgentKind {
 	case contracts.SidecarLoopAgent:
 		s.mu.Unlock()
 		return fmt.Errorf("%w: %s", harnessErr.ErrInvalidInput, "sidecar_loop agent does not support enqueue user messages")
@@ -778,6 +784,27 @@ func (s *InfaiAgentSession) commitCompaction(commit compactionCommit) error {
 	s.inFlight = s.inFlight[:0]
 	s.mu.Unlock()
 	return nil
+}
+
+func (s *InfaiAgentSession) subscribeForAgentMessages() {
+	unsubscribe, err := s.aeComms.Subscribe(comms.AgentCommKindResultSidecarBackground, func(ac *comms.AgentComm) {
+		var response comms.DelegatedTaskResponse
+		if err := json.Unmarshal(ac.Payload, &response); err != nil {
+			s.l.WarnContext(s.ctx, "dropping undecodable sidecar answer", "session_id", s.meta.ID, "error", err)
+			return
+		}
+		if err := s.agentMailbox.SendMessage(s.ctx, contracts.NewSidecarAgentResponse(delegate.AnswerText(response), response.From.String())); err != nil {
+			s.l.WarnContext(s.ctx, "could not deliver a sidecar answer", "session_id", s.meta.ID, "agent_id", response.From, "error", err)
+		}
+	})
+	if err != nil {
+		s.l.ErrorContext(s.ctx, "a session that cannot hear its sidecars cannot delegate",
+			"session_id", s.meta.ID, "error", err)
+		return
+	}
+
+	<-s.ctx.Done()
+	unsubscribe()
 }
 
 // releaseSubscribers ends every attached client's stream, so a client's

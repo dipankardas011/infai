@@ -55,6 +55,9 @@ const (
 	BashTool          ToolType = "bash"
 	ReadSkillTool     ToolType = "read_skill"
 	TaskChecklistTool ToolType = "task_checklist"
+
+	SpawnSidecarLoopTool           ToolType = "spawn_sidecar_loop"
+	SpawnBackgroundSidecarLoopTool ToolType = "spawn_background_sidecar_loop"
 )
 
 func IsToolTypeSkill(t ToolType) bool {

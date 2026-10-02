@@ -5,11 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/actuators"
 	"github.com/dipankardas011/infai/pkg/agent/auditor"
+	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/delegate"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/memory"
 	"github.com/google/uuid"
@@ -44,6 +47,16 @@ func (s *InfaiAgentSession) configureMemoryTools() {
 	s.availableTools = append(s.availableTools, memoryTools...)
 }
 
+func (s *InfaiAgentSession) configureDelegationTools() {
+	if s.meta.AgentKind != contracts.InteractiveAgent {
+		return
+	}
+	if len(s.availableTools) == 0 {
+		s.availableTools = []contracts.Tool{}
+	}
+	s.availableTools = append(s.availableTools, delegate.SpawnSidecarLoopTool(), delegate.SpawnBackgroundSidecarLoopTool())
+}
+
 func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCall) ([]contracts.ChatMessage, bool) {
 
 	checkIfAllowedToolCall := func(tc contracts.ToolCall) bool {
@@ -61,6 +74,13 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 	return func(tcs []contracts.ToolCall) ([]contracts.ChatMessage, bool) {
 		toolMessages := make([]contracts.ChatMessage, 0, len(tcs))
 		turnCanceled := false
+		caller := delegate.Caller{
+			SessionID: s.meta.ID,
+			Comms:     s.aeComms,
+			Cancelled: s.userCancellation,
+		}
+		foregroundIDs := []uuid.UUID{}
+		foregroundCalls := []contracts.ToolCall{}
 
 		for _, tc := range tcs {
 			if turnCanceled {
@@ -392,6 +412,38 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
 				})
+			case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+				sidecarID, err := delegate.RequestSidecar(s.ctx, caller, tc)
+				if err != nil {
+					status = contracts.ToolExecutionError
+					content = err.Error()
+					if errors.Is(err, harnessErr.ErrTurnCanceled) {
+						turnCanceled = true
+					}
+				} else if tc.Function.Name == contracts.SpawnSidecarLoopTool {
+					foregroundIDs = append(foregroundIDs, sidecarID)
+					foregroundCalls = append(foregroundCalls, tc)
+					continue
+				} else {
+					content = delegate.GraftedMessageForBackgroundSidecarLoop(sidecarID)
+				}
+
+				result := contracts.ToolExecutionResult{
+					Status:   status,
+					CallID:   tc.ID,
+					CallName: tc.Function.Name,
+				}
+				if err != nil {
+					result.Error = content
+				} else {
+					result.Output = content
+				}
+				s.publish(contracts.EventStream{
+					Kind:       contracts.EventToolResult,
+					Timestamp:  time.Now().UTC(),
+					ToolResult: &result,
+				})
+
 			default:
 				status = contracts.ToolExecutionError
 				content = contracts.NewToolExecutionError(
@@ -414,6 +466,71 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 			}
 
 			toolMessages = append(toolMessages, contracts.NewToolMessage(tc.ID, content, status))
+		}
+
+		if len(foregroundIDs) > 0 {
+			answers, waitErr := delegate.WaitForSidecars(s.ctx, caller, foregroundIDs, func(response comms.DelegatedTaskResponse) {
+				idx := slices.Index(foregroundIDs, response.From)
+				if idx == -1 {
+					return
+				}
+				call := foregroundCalls[idx]
+				content, err := delegate.Answer(response)
+				result := contracts.ToolExecutionResult{
+					Status:   contracts.ToolExecutionSuccess,
+					CallID:   call.ID,
+					CallName: call.Function.Name,
+					Output:   content,
+				}
+				if err != nil {
+					result.Status = contracts.ToolExecutionError
+					result.Output = ""
+					result.Error = err.Error()
+				}
+				s.publish(contracts.EventStream{
+					Kind:       contracts.EventToolResult,
+					Timestamp:  time.Now().UTC(),
+					ToolResult: &result,
+				})
+			})
+
+			for i, sidecarID := range foregroundIDs {
+				call := foregroundCalls[i]
+				status := contracts.ToolExecutionSuccess
+				content := ""
+
+				if response, ok := answers[sidecarID]; ok {
+					var err error
+					content, err = delegate.Answer(response)
+					if err != nil {
+						status = contracts.ToolExecutionError
+						content = err.Error()
+					}
+				} else {
+					status = contracts.ToolExecutionError
+					content = "the sidecar did not answer"
+					if waitErr != nil {
+						content = waitErr.Error()
+						if errors.Is(waitErr, harnessErr.ErrTurnCanceled) {
+							turnCanceled = true
+						}
+					}
+				}
+
+				if _, answered := answers[sidecarID]; !answered {
+					s.publish(contracts.EventStream{
+						Kind:      contracts.EventToolResult,
+						Timestamp: time.Now().UTC(),
+						ToolResult: &contracts.ToolExecutionResult{
+							Status:   status,
+							CallID:   call.ID,
+							CallName: call.Function.Name,
+							Error:    content,
+						},
+					})
+				}
+				toolMessages = append(toolMessages, contracts.NewToolMessage(call.ID, content, status))
+			}
 		}
 
 		return toolMessages, turnCanceled
