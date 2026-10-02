@@ -328,7 +328,16 @@ func newRuntimeSession(
 func (s *InfaiAgentSession) Meta() store.SessionMeta {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.meta
+	meta := s.meta
+	meta.Offsprings = append([]uuid.UUID(nil), meta.Offsprings...)
+	return meta
+}
+
+func (s *InfaiAgentSession) AddOffspring(id uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.meta.Offsprings = append(s.meta.Offsprings, id)
 }
 
 func (s *InfaiAgentSession) Status() contracts.SessionStatus {

@@ -49,7 +49,7 @@ func (e *InfaiAgentEngine) ListAllProviderModels() []glue.ListModelOutput {
 	return providerModels
 }
 
-func (e *InfaiAgentEngine) Provider(name string) (contracts.LLMProviderConfiguration, bool) {
+func (e *InfaiAgentEngine) LLMProvider(name string) (contracts.LLMProviderConfiguration, bool) {
 	e.providerMu.Lock()
 	defer e.providerMu.Unlock()
 	provider, ok := e.providers.Providers[name]

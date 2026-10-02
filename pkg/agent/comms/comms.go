@@ -51,7 +51,10 @@ var (
 	ErrKindAlreadySubbed  = errors.New("already subscribed to this kind")
 )
 
-type agentInbox map[AgentCommKind]chan *AgentComm
+type agentInbox struct {
+	kinds map[AgentCommKind]chan *AgentComm
+	done  chan struct{}
+}
 
 // AgentComms is the session-owned communication hub.
 // Agents have per-kind private inboxes; all agents share one engine inbox.
@@ -82,9 +85,9 @@ func (c *AgentComms) RegisterSessionAgent(id uuid.UUID) error {
 		return errors.New("agent already registered")
 	}
 
-	inbox := make(agentInbox, len(allKinds))
+	inbox := agentInbox{kinds: make(map[AgentCommKind]chan *AgentComm, len(allKinds)), done: make(chan struct{})}
 	for _, k := range allKinds {
-		inbox[k] = make(chan *AgentComm, 8)
+		inbox.kinds[k] = make(chan *AgentComm, 8)
 	}
 	c.sessAgentInboxes[id] = inbox
 	return nil
@@ -98,9 +101,7 @@ func (c *AgentComms) UnregisterSessionAgent(id uuid.UUID) {
 	if !ok {
 		return
 	}
-	for _, ch := range inbox {
-		close(ch)
-	}
+	close(inbox.done)
 	delete(c.sessAgentInboxes, id)
 }
 
@@ -113,14 +114,14 @@ func (c *AgentComms) SendToSessionAgent(ctx context.Context, id uuid.UUID, msg *
 		c.mu.RUnlock()
 		return ErrAgentNotRegistered
 	}
-	ch, ok := inbox[msg.Kind]
+	ch, ok := inbox.kinds[msg.Kind]
 	if !ok {
 		c.mu.RUnlock()
 		return ErrUnknownKind
 	}
 	c.mu.RUnlock()
 
-	return sendComm(ctx, ch, c.done, msg)
+	return sendComm(ctx, ch, c.done, inbox.done, msg)
 }
 
 // SubscribeForSessionAgentsEvents is used by the engine to read all outbound agent messages.
@@ -154,7 +155,13 @@ func (c *AgentComms) NewSessionAgentComms(id uuid.UUID) *ISACChannel {
 
 // Send fires a message to the engine. Set ReplyFor if you expect a response.
 func (iac *ISACChannel) Send(ctx context.Context, msg *AgentComm) error {
-	return sendComm(ctx, iac.c.engineInbox, iac.c.done, msg)
+	iac.c.mu.RLock()
+	inbox, ok := iac.c.sessAgentInboxes[iac.agentId]
+	iac.c.mu.RUnlock()
+	if !ok {
+		return ErrAgentNotRegistered
+	}
+	return sendComm(ctx, iac.c.engineInbox, iac.c.done, inbox.done, msg)
 }
 
 // Subscribe registers a handler for a specific kind. Returns a closer — call it
@@ -167,7 +174,7 @@ func (iac *ISACChannel) Subscribe(kind AgentCommKind, handler func(*AgentComm)) 
 	if !ok {
 		return nil, ErrAgentNotRegistered
 	}
-	ch, ok := inbox[kind]
+	ch, ok := inbox.kinds[kind]
 	if !ok {
 		return nil, ErrUnknownKind
 	}
@@ -184,12 +191,11 @@ func (iac *ISACChannel) Subscribe(kind AgentCommKind, handler func(*AgentComm)) 
 	go func() {
 		for {
 			select {
-			case msg, open := <-ch:
-				if !open {
-					return
-				}
+			case msg := <-ch:
 				handler(msg)
 			case <-ctx.Done():
+				return
+			case <-inbox.done:
 				return
 			case <-iac.c.done:
 				return
@@ -205,7 +211,7 @@ func (iac *ISACChannel) Subscribe(kind AgentCommKind, handler func(*AgentComm)) 
 	}, nil
 }
 
-func sendComm(ctx context.Context, out chan *AgentComm, done <-chan struct{}, msg *AgentComm) error {
+func sendComm(ctx context.Context, out chan *AgentComm, done <-chan struct{}, agentDone <-chan struct{}, msg *AgentComm) error {
 	select {
 	case out <- msg:
 		return nil
@@ -213,6 +219,8 @@ func sendComm(ctx context.Context, out chan *AgentComm, done <-chan struct{}, ms
 		return ctx.Err()
 	case <-done:
 		return ErrAgentCommsClosed
+	case <-agentDone:
+		return ErrAgentNotRegistered
 	}
 }
 

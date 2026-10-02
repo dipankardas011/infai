@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -37,6 +38,7 @@ type InfaiAgentEngine struct {
 	mu                  sync.Mutex
 	activeSessionAgents map[uuid.UUID]*session.InfaiAgentSession
 	aseComms            *comms.AgentComms
+	children            map[uuid.UUID]map[uuid.UUID]comms.AgentCommKind
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -56,10 +58,13 @@ func NewInfaiAgentEngine(parent context.Context, bgLogger *slog.Logger, cfg *con
 		providers:           contracts.LLMProviders{Providers: make(map[string]contracts.LLMProviderConfiguration)},
 		sessionStore:        sessionStore,
 		activeSessionAgents: make(map[uuid.UUID]*session.InfaiAgentSession),
+		children:            make(map[uuid.UUID]map[uuid.UUID]comms.AgentCommKind),
 		stopCh:              make(chan struct{}),
 		aseComms:            comms.NewAgentComms(),
 		engineCfg:           cfg,
 	}
+
+	go engine.listenForAgentComms()
 
 	ctx, cancel := context.WithTimeoutCause(context.Background(), time.Minute, fmt.Errorf("toke > 1minute to get provider configs"))
 	defer cancel()
@@ -71,10 +76,14 @@ func NewInfaiAgentEngine(parent context.Context, bgLogger *slog.Logger, cfg *con
 
 	select {
 	case <-ctx.Done():
+		engine.cancel(context.Cause(ctx))
+		engine.aseComms.Close()
 		bgLogger.ErrorContext(ctx, "Failed to get LoadConfiguredProviders", "reason", context.Cause(ctx))
 		return nil, context.Cause(ctx)
 	case errChan := <-loadingProviderErr:
 		if errChan != nil {
+			engine.cancel(errChan)
+			engine.aseComms.Close()
 			bgLogger.ErrorContext(ctx, "Failed to get LoadConfiguredProviders", "reason", errChan)
 			return nil, errChan
 		}
@@ -84,6 +93,177 @@ func NewInfaiAgentEngine(parent context.Context, bgLogger *slog.Logger, cfg *con
 }
 
 // ---- Sessions ----
+
+func (e *InfaiAgentEngine) listenForAgentComms() {
+	for {
+		msg, err := e.aseComms.SubscribeForSessionAgentsEvents(e.ctx)
+		if err != nil {
+			e.bgLogger.ErrorContext(e.ctx, "failure in subscribe for sessionagentEvents", "error", err)
+			return
+		}
+		switch msg.Kind {
+		case comms.AgentCommKindSpawnSidecar, comms.AgentCommKindSpawnSidecarBackground:
+			go e.spawnSidecar(msg)
+		case comms.AgentCommKindResultSidecar:
+			e.relaySidecarResult(msg)
+		default:
+			e.bgLogger.Warn("unhandled agent comm", "kind", msg.Kind, "from", msg.From)
+		}
+	}
+}
+
+func (e *InfaiAgentEngine) spawnSidecar(msg *comms.AgentComm) {
+	var request comms.DelegationToSidecarLoop
+	err := json.Unmarshal(msg.Payload, &request)
+	if err != nil {
+		e.bgLogger.ErrorContext(e.ctx, "failed to unmarshal for spawnSidecar event in engine", "error", err)
+		return
+	}
+
+	if request.ParentID != msg.From {
+		err = errors.New("delegation parent does not match sender")
+	}
+
+	var childID uuid.UUID
+	if err == nil {
+		childID, err = e.createSidecarSession(msg.From, request, msg.Kind)
+	}
+
+	decision := comms.DelegationConformation{DelegatedTo: childID}
+	if err != nil {
+		decision.Err = err.Error()
+	}
+
+	payload, marshalErr := json.Marshal(decision)
+	if marshalErr != nil {
+		e.bgLogger.Error("encode delegation decision", "error", marshalErr)
+		return
+	}
+
+	if sendErr := e.aseComms.SendToSessionAgent(
+		e.ctx,
+		msg.From,
+		&comms.AgentComm{
+			Kind:    comms.AgentCommDelegationConformation,
+			To:      msg.From,
+			Payload: payload,
+		},
+	); sendErr != nil {
+		e.bgLogger.Warn("deliver delegation decision", "parent", msg.From, "error", sendErr)
+	}
+}
+
+func (e *InfaiAgentEngine) createSidecarSession(parentID uuid.UUID, request comms.DelegationToSidecarLoop, kind comms.AgentCommKind) (uuid.UUID, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	select {
+	case <-e.stopCh:
+		return uuid.Nil, harnessErr.ErrEngineShuttingDown
+	default:
+	}
+
+	parent, ok := e.activeSessionAgents[parentID]
+	if !ok {
+		return uuid.Nil, errors.New("delegation parent is not active")
+	}
+	parentMeta := parent.Meta()
+	if parentMeta.AgentKind != contracts.InteractiveAgent || parent.Status() == contracts.SessionTombstone {
+		return uuid.Nil, errors.New("delegation parent is not active")
+	}
+
+	engineLLMProviders, ok := e.LLMProvider(parentMeta.Provider)
+	if !ok {
+		return uuid.Nil, harnessErr.ErrNoProvider
+	}
+
+	model, ok := engineLLMProviders.Models[parentMeta.Model]
+	if !ok {
+		return uuid.Nil, fmt.Errorf("engine: model %q not configured for provider %q", parentMeta.Model, parentMeta.Provider)
+	}
+
+	id, err := uuid.NewV7()
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	if err := e.aseComms.RegisterSessionAgent(id); err != nil {
+		return uuid.Nil, err
+	}
+	cwd := request.Cwd
+	if cwd == "" {
+		cwd = parentMeta.Cwd
+	}
+	child, err := session.NewSession(
+		e.ctx,
+		id,
+		parentID,
+		e.bgLogger.WithGroup("session"),
+		&request.Task,
+		&request.AcceptanceScript,
+		request.MaxTurns,
+		contracts.NewProvisionedModel(
+			engineLLMProviders.Id,
+			parentMeta.Provider,
+			engineLLMProviders.BaseEndpoint,
+			engineLLMProviders.APIType,
+			engineLLMProviders.Auth,
+			model,
+		),
+		cwd,
+		e.sessionStore,
+		e.aseComms.NewSessionAgentComms(id),
+		contracts.SidecarLoopAgent,
+	)
+	if err != nil {
+		e.aseComms.UnregisterSessionAgent(id)
+		return uuid.Nil, err
+	}
+
+	parentMeta.Offsprings = append(parentMeta.Offsprings, id)
+	if err := e.sessionStore.SaveMeta(parentMeta); err != nil {
+		child.Close()
+		e.aseComms.UnregisterSessionAgent(id)
+		return uuid.Nil, err
+	}
+	parent.AddOffspring(id)
+	e.activeSessionAgents[id] = child
+	if e.children[parentID] == nil {
+		e.children[parentID] = make(map[uuid.UUID]comms.AgentCommKind)
+	}
+	e.children[parentID][id] = kind
+	return id, nil
+}
+
+func (e *InfaiAgentEngine) relaySidecarResult(msg *comms.AgentComm) {
+	e.mu.Lock()
+	_, isParentOnline := e.activeSessionAgents[msg.To]
+	kind, isChildOnline := e.children[msg.To][msg.From]
+	e.mu.Unlock()
+
+	if !isParentOnline || !isChildOnline {
+		e.bgLogger.Warn("dropping sidecar result without active parent", "parent", msg.To, "child", msg.From)
+		return
+	}
+
+	resultKind := comms.AgentCommKindResultSidecar
+	if kind == comms.AgentCommKindSpawnSidecarBackground {
+		resultKind = comms.AgentCommKindResultSidecarBackground
+	}
+
+	if err := e.aseComms.SendToSessionAgent(
+		e.ctx,
+		msg.To,
+		&comms.AgentComm{
+			From:    msg.From,
+			To:      msg.To,
+			Kind:    resultKind,
+			Payload: msg.Payload,
+		},
+	); err != nil {
+		e.bgLogger.Warn("deliver sidecar result", "parent", msg.To, "child", msg.From, "error", err)
+	}
+}
 
 type CreateSessionOptions struct {
 	Provider  string
@@ -114,7 +294,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		opts.AgentKind = contracts.InteractiveAgent
 	}
 
-	providerConfig, ok := e.Provider(opts.Provider)
+	providerConfig, ok := e.LLMProvider(opts.Provider)
 	if !ok {
 		return nil, fmt.Errorf("engine: provider %q not configured", opts.Provider)
 	}
@@ -208,7 +388,7 @@ func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgent
 		return nil, err
 	}
 
-	providerConfig, ok := e.Provider(meta.Provider)
+	providerConfig, ok := e.LLMProvider(meta.Provider)
 	if !ok {
 		_ = timeline.Close()
 		return nil, harnessErr.ErrNoProvider
@@ -272,7 +452,7 @@ func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId s
 	if !ok {
 		return nil, harnessErr.ErrSessionNotFound
 	}
-	providerConfig, ok := e.Provider(providerName)
+	providerConfig, ok := e.LLMProvider(providerName)
 	if !ok {
 		return nil, harnessErr.ErrNoProvider
 	}
