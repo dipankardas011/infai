@@ -28,7 +28,7 @@ type SessionMeta struct {
 	AgentKind contracts.AgentKind `json:"agent_kind"`
 
 	EvalBashScript *string `json:"eval_bash_script"`
-	MaxTurns       uint64  `json:"max_turns"`
+	MaxTurns       *uint64 `json:"max_turns,omitempty"`
 
 	// Conclusion records how the session ended, written once when it does and
 	// never rewritten. Nil while the session has not ended.
@@ -53,7 +53,7 @@ type sessionFile struct {
 	Conclusion     *SessionConclusion  `json:"conclusion,omitempty"`
 	AgentKind      contracts.AgentKind `json:"agent_kind"`
 	EvalBashScript *string             `json:"eval_bash_script"`
-	MaxTurns       uint64              `json:"max_turns"`
+	MaxTurns       *uint64             `json:"max_turns,omitempty"`
 }
 
 // this helps when we resume we can use this to get the client connection up.

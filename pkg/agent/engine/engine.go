@@ -202,7 +202,7 @@ func (e *InfaiAgentEngine) createSidecarSession(parentID uuid.UUID, request comm
 		e.bgLogger.WithGroup("session"),
 		&request.Task,
 		&request.AcceptanceScript,
-		request.MaxTurns,
+		&request.MaxTurns,
 		contracts.NewProvisionedModel(
 			engineLLMProviders.Id,
 			parentMeta.Provider,
@@ -319,7 +319,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		e.bgLogger.WithGroup("session"),
 		nil,
 		nil,
-		1000,
+		nil,
 		contracts.NewProvisionedModel(
 			providerConfig.Id,
 			opts.Provider,

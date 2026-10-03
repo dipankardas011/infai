@@ -131,6 +131,29 @@ func TestFileManagerRejectsEmptyEditString(t *testing.T) {
 	}
 }
 
+func TestFileManagerRejectsNoOpEdit(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := mustManager(t, root)
+	if _, err := m.read("note.txt", nil, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, replaceAll := range []bool{false, true} {
+		if n, err := m.edit("note.txt", "content", "content", replaceAll); n != 0 || err == nil || !strings.Contains(err.Error(), "must differ") {
+			t.Fatalf("no-op edit (replace_all=%t) = (%d, %v), want a rejected no-op", replaceAll, n, err)
+		}
+		if got, err := os.ReadFile(path); err != nil || string(got) != "content" {
+			t.Fatalf("file after rejected edit = %q, %v", got, err)
+		}
+	}
+	if n, err := m.edit("note.txt", "content", "updated", false); n != 1 || err != nil {
+		t.Fatalf("subsequent edit = (%d, %v), want one replacement", n, err)
+	}
+}
+
 func TestFileToolExecutionsReturnJSON(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("needle\n"), 0o600); err != nil {

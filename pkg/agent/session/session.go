@@ -104,7 +104,7 @@ func NewSession(
 	l *slog.Logger,
 	userPrompt *string,
 	evalBashScript *string,
-	agentLoopMaxTurns uint64,
+	LimitAgentMaxTurns *uint64,
 	chosenModel contracts.ProvisionedModel,
 	cwd string,
 	ss *store.SessionStore,
@@ -137,8 +137,6 @@ func NewSession(
 		}
 
 		evalFunc = evals.NewEvalScriptHandler(cwd, *evalBashScript)
-	case contracts.InteractiveAgent:
-		agentLoopMaxTurns = math.MaxUint32
 	}
 
 	now := time.Now().UTC()
@@ -153,7 +151,7 @@ func NewSession(
 		UpdatedAt:      now,
 		AgentKind:      sessionAgentKind,
 		EvalBashScript: evalBashScript,
-		MaxTurns:       agentLoopMaxTurns,
+		MaxTurns:       LimitAgentMaxTurns,
 	}
 	if err := ss.SaveMeta(meta); err != nil {
 		return nil, err
@@ -270,10 +268,14 @@ func newRuntimeSession(
 		return nil, err
 	}
 
+	maxTurns := uint64(math.MaxUint32)
+	if meta.MaxTurns != nil {
+		maxTurns = *meta.MaxTurns
+	}
 	opts := append(
 		[]agent.AgentOptions(nil),
 		agent.WithAutoCompaction(s.shouldCompact, s.autoCompact),
-		agent.WithMaxTurns(meta.MaxTurns),
+		agent.WithMaxTurns(maxTurns),
 	)
 	if len(s.availableTools) > 0 {
 		opts = append(opts, agent.WithTools(s.availableTools...))
