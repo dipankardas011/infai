@@ -572,13 +572,37 @@ func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, d
 }
 
 func (e *InfaiAgentEngine) CancelTurn(id uuid.UUID) error {
-	// TODO: we need to get to call the call the children to cancel their turn.
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
-	sess, ok := e.Session(id)
+	sess, ok := e.activeSessionAgents[id]
 	if !ok {
 		return harnessErr.ErrSessionNotFound
 	}
+	if sess.Status() != contracts.SessionBusy && sess.Status() != contracts.SessionWaitingApproval {
+		return harnessErr.ErrNoTurnToCancel
+	}
+	for childID, kind := range e.children[id] {
+		if kind == comms.AgentCommKindSpawnSidecar {
+			e.cancelSidecarTree(childID)
+		}
+	}
 	return sess.CancelTurn()
+}
+
+func (e *InfaiAgentEngine) cancelSidecarTree(id uuid.UUID) {
+	sess, ok := e.activeSessionAgents[id]
+	if !ok {
+		return
+	}
+	for childID := range e.children[id] {
+		e.cancelSidecarTree(childID)
+	}
+	if sess.Status() != contracts.SessionCompleted && sess.Status() != contracts.SessionMaxIterationExhausted && sess.Status() != contracts.SessionTombstone {
+		sess.Close()
+		e.aseComms.UnregisterSessionAgent(id)
+		delete(e.activeSessionAgents, id)
+	}
 }
 
 // CompactSession creates a continuation checkpoint for an active session.
@@ -594,19 +618,29 @@ func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) err
 
 func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 	e.mu.Lock()
-	sess, ok := e.activeSessionAgents[id]
-	if ok {
-		delete(e.activeSessionAgents, id)
-	}
-	e.mu.Unlock()
-
-	if !ok {
+	defer e.mu.Unlock()
+	if _, ok := e.activeSessionAgents[id]; !ok {
 		return harnessErr.ErrSessionNotFound
 	}
+	e.closeSessionTree(id)
+	return nil
+}
+
+// closeSessionTree is called with e.mu held so a new child cannot appear
+// between closing descendants and closing their parent.
+func (e *InfaiAgentEngine) closeSessionTree(id uuid.UUID) {
+	sess, ok := e.activeSessionAgents[id]
+	if !ok {
+		return
+	}
+	for childID := range e.children[id] {
+		e.closeSessionTree(childID)
+	}
+	delete(e.children, id)
 	sess.Close()
 	e.aseComms.UnregisterSessionAgent(id)
+	delete(e.activeSessionAgents, id)
 	e.bgLogger.Info("session closed", "session_id", id)
-	return nil
 }
 
 // DeleteSession closes the session when it is resident, then removes its
@@ -755,26 +789,20 @@ func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
 
 	e.stopOnce.Do(func() {
 		close(e.stopCh)
-		e.cancel(harnessErr.ErrEngineShuttingDown)
 	})
 	e.mu.Lock()
-	sessions := make(map[uuid.UUID]*session.InfaiAgentSession, len(e.activeSessionAgents))
 	for id, sess := range e.activeSessionAgents {
-		sessions[id] = sess
-		delete(e.activeSessionAgents, id)
-	}
-	e.mu.Unlock()
-
-	for id, sess := range sessions {
-		sess.Close()
-		e.aseComms.UnregisterSessionAgent(id)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if sess.Meta().ParentID == uuid.Nil {
+			e.closeSessionTree(id)
 		}
 	}
+	e.mu.Unlock()
+	e.cancel(harnessErr.ErrEngineShuttingDown)
 	e.aseComms.Close()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	e.bgLogger.DebugContext(ctx, "engine shutdown complete")
 	return nil

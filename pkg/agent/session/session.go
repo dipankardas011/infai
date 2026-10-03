@@ -61,9 +61,10 @@ type InfaiAgentSession struct {
 	// Decisions the session is waiting on: a user cancellation, a tool
 	// approval from the user, or the agent adopting a branch point on its next
 	// write. The agent is the sole receiver of userCancellation.
-	userCancellation    chan struct{}
-	pendingApproval     *pendingApproval
-	pendingBranchParent uuid.UUID
+	userCancellation             chan struct{}
+	pendingApproval              *pendingApproval
+	pendingBranchParent          uuid.UUID
+	pendingBackgroundSidecarLoop map[uuid.UUID]struct{}
 
 	// The principal agent and the model it runs on.
 	agent *agent.Agent
@@ -217,23 +218,24 @@ func newRuntimeSession(
 	}
 	ctx, cancel := context.WithCancelCause(engineCtx)
 	s := &InfaiAgentSession{
-		l:                l,
-		ctx:              ctx,
-		cancel:           cancel,
-		closeDone:        make(chan struct{}),
-		userCancellation: make(chan struct{}, 1),
-		meta:             meta,
-		status:           contracts.SessionIdle,
-		model:            model,
-		timeline:         timeline,
-		store:            sessionStore,
-		auditorPolicy:    auditor.NewAuditorPolicy(),
-		taskChecklist:    memory.NewTaskChecklist(),
-		activeTimeline:   append([]contracts.ChatMessage(nil), history...),
-		eventBus:         make(chan contracts.EventStream, 256),
-		subscribers:      make(map[*subscriber]struct{}),
-		aeComms:          aeComms,
-		agentMailbox:     am,
+		l:                            l,
+		ctx:                          ctx,
+		cancel:                       cancel,
+		closeDone:                    make(chan struct{}),
+		userCancellation:             make(chan struct{}, 1),
+		pendingBackgroundSidecarLoop: make(map[uuid.UUID]struct{}),
+		meta:                         meta,
+		status:                       contracts.SessionIdle,
+		model:                        model,
+		timeline:                     timeline,
+		store:                        sessionStore,
+		auditorPolicy:                auditor.NewAuditorPolicy(),
+		taskChecklist:                memory.NewTaskChecklist(),
+		activeTimeline:               append([]contracts.ChatMessage(nil), history...),
+		eventBus:                     make(chan contracts.EventStream, 256),
+		subscribers:                  make(map[*subscriber]struct{}),
+		aeComms:                      aeComms,
+		agentMailbox:                 am,
 	}
 
 	var err error
@@ -338,6 +340,12 @@ func (s *InfaiAgentSession) AddOffspring(id uuid.UUID) {
 	defer s.mu.Unlock()
 
 	s.meta.Offsprings = append(s.meta.Offsprings, id)
+}
+
+func (s *InfaiAgentSession) TrackBackgroundSidecar(id uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingBackgroundSidecarLoop[id] = struct{}{}
 }
 
 func (s *InfaiAgentSession) Status() contracts.SessionStatus {
@@ -841,9 +849,23 @@ func (s *InfaiAgentSession) subscribeForAgentMessages() {
 			s.l.WarnContext(s.ctx, "dropping undecodable sidecar answer", "session_id", s.meta.ID, "error", err)
 			return
 		}
-		if err := s.agentMailbox.SendMessage(s.ctx, contracts.NewSidecarAgentResponse(delegate.AnswerText(response), response.From.String())); err != nil {
-			s.l.WarnContext(s.ctx, "could not deliver a sidecar answer", "session_id", s.meta.ID, "agent_id", response.From, "error", err)
+		if response.From != ac.From {
+			s.l.WarnContext(s.ctx, "missmatch if response from and acfrom", "response.from", response.From, "ac.From", ac.From)
+			return
 		}
+		s.mu.Lock()
+		_, pending := s.pendingBackgroundSidecarLoop[response.From]
+		if !pending {
+			s.mu.Unlock()
+			return
+		}
+		if err := s.agentMailbox.SendMessage(s.ctx, contracts.NewSidecarAgentResponse(delegate.AnswerText(response), response.From.String())); err != nil {
+			s.mu.Unlock()
+			s.l.ErrorContext(s.ctx, "could not deliver a sidecar answer", "session_id", s.meta.ID, "agent_id", response.From, "error", err)
+			return
+		}
+		delete(s.pendingBackgroundSidecarLoop, response.From)
+		s.mu.Unlock()
 	})
 	if err != nil {
 		s.l.ErrorContext(s.ctx, "a session that cannot hear its sidecars cannot delegate",
@@ -853,6 +875,24 @@ func (s *InfaiAgentSession) subscribeForAgentMessages() {
 
 	<-s.ctx.Done()
 	unsubscribe()
+}
+
+func (s *InfaiAgentSession) settleBackgroundSidecars() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for id := range s.pendingBackgroundSidecarLoop {
+		message := contracts.NewSidecarAgentResponse(
+			delegate.AnswerText(comms.DelegatedTaskResponse{From: id, Status: contracts.SessionTombstone, Error: "session closed"}),
+			id.String(),
+		)
+		if _, err := s.timeline.AppendToHead(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &message}); err != nil {
+			s.l.Error("persist closed sidecar answer", "session_id", s.meta.ID, "sidecar_id", id, "error", err)
+			continue
+		}
+		s.activeTimeline = append(s.activeTimeline, message)
+		delete(s.pendingBackgroundSidecarLoop, id)
+	}
 }
 
 // releaseSubscribers ends every attached client's stream, so a client's
@@ -880,6 +920,7 @@ func (s *InfaiAgentSession) Close() {
 		s.recordSessionConclusion(contracts.SessionTombstone, "session closed")
 		s.cancel(harnessErr.ErrSessionClosed)
 		s.wg.Wait()
+		s.settleBackgroundSidecars()
 
 		s.releaseSubscribers()
 		if s.timeline != nil {

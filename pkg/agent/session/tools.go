@@ -425,6 +425,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					foregroundCalls = append(foregroundCalls, tc)
 					continue
 				} else {
+					s.TrackBackgroundSidecar(sidecarID)
 					content = delegate.GraftedMessageForBackgroundSidecarLoop(sidecarID)
 				}
 
