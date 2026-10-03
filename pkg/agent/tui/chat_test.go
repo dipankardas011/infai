@@ -777,13 +777,22 @@ func TestWordDiffSegmentsEmphasizeChanges(t *testing.T) {
 	}
 }
 
-func TestRenderEditDiffBlockShowsGuttersAndEmphasis(t *testing.T) {
+// An edit preview is built from a snippet, so it knows where the text is inside
+// the snippet and nowhere else. It must not print line numbers: the client
+// cannot see the file they would have to come from, and a snippet's coordinates
+// shown as file lines read as a wrong location.
+func TestRenderEditDiffBlockDrawsNoFileLineNumbers(t *testing.T) {
 	styles := newHarnessStyles()
 	args := `{"path":"main.go","old_string":"return old","new_string":"return new"}`
 	rendered := ansi.Strip(renderEditDiffBlock("▲", styles.system, styles, args, 70))
-	for _, want := range []string{"edit  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new"} {
+	for _, want := range []string{"edit  main.go", "- return old", "+ return new"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("edit diff lacks %q:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{"@@", "1   -", "  1 +"} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("edit diff shows snippet coordinates %q:\n%s", unwanted, rendered)
 		}
 	}
 }
@@ -1546,13 +1555,15 @@ func TestApprovalDetailRendersEditDiff(t *testing.T) {
 
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"Human In the Loop", "tool_call: edit", "TARGET  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new", "[A]llow", "[D]eny"} {
+	for _, want := range []string{"Human In the Loop", "tool_call: edit", "TARGET  main.go", "- return old", "+ return new", "[A]llow", "[D]eny"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("edit approval detail lacks %q:\n%s", want, content)
 		}
 	}
-	if strings.Contains(content, "BEFORE") || strings.Contains(content, "AFTER") {
-		t.Fatalf("edit approval detail still shows BEFORE/AFTER:\n%s", content)
+	for _, unwanted := range []string{"BEFORE", "AFTER", "@@"} {
+		if strings.Contains(content, unwanted) {
+			t.Fatalf("edit approval detail still shows %q:\n%s", unwanted, content)
+		}
 	}
 }
 
@@ -1890,6 +1901,15 @@ func TestBlocksFromRecordsShowsToolCallsAndResults(t *testing.T) {
 }
 
 func TestReadToolResultSummaryPreservesErrors(t *testing.T) {
+	if got := transcriptToolResultDisplay("edit", "success", `{"replacements":1}`, ""); got != "success · 1 replacement" {
+		t.Fatalf("edit result display = %q", got)
+	}
+	if got := transcriptToolResultDisplay("edit", "success", `{"replacements":6}`, ""); got != "success · 6 replacements" {
+		t.Fatalf("replace-all result display = %q", got)
+	}
+	if got := transcriptToolResultDisplay("edit", "success", `{"replacements":1}`, ""); got == "success\n{\"replacements\":1}" {
+		t.Fatalf("edit result display still shows the raw result: %q", got)
+	}
 	if got := transcriptToolResultDisplay("read", "success", "one\ntwo\n", ""); got != "success · 2 lines, 8 bytes" {
 		t.Fatalf("successful read summary=%q", got)
 	}

@@ -261,7 +261,7 @@ func approvalDetailLines(view approvalView, width int, styles harnessStyles) []s
 			lines = append(lines, bandLine(styles.hitl, width, ""))
 		}
 		oldWidth, newWidth := diffGutterWidths(view.rows)
-		codeWidth := max(width-(oldWidth+newWidth+4), 1)
+		codeWidth := max(width-diffGutterWidth(oldWidth, newWidth), 1)
 		for _, row := range view.rows {
 			lines = append(lines, renderDiffRow(row, oldWidth, newWidth, codeWidth, styles)...)
 		}

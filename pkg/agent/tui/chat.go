@@ -1861,8 +1861,7 @@ func renderWriteDiffBlock(marker string, markerStyle lipgloss.Style, styles harn
 func renderDiffBlock(header, marker string, rows []diffRow, width int, styles harnessStyles) string {
 	indent := lipgloss.Width(marker) + 1
 	oldWidth, newWidth := diffGutterWidths(rows)
-	gutterWidth := oldWidth + newWidth + 4 // "old new marker " + trailing space
-	codeWidth := max(width-indent-gutterWidth, 1)
+	codeWidth := max(width-indent-diffGutterWidth(oldWidth, newWidth), 1)
 
 	lines := []string{header}
 	for _, row := range rows {
@@ -1910,7 +1909,25 @@ func editDiffRows(path, oldText, newText string) []diffRow {
 	rows := parseUnifiedRows(stripDiffNoNewline(udiff.Unified("a/"+path, "b/"+path, oldText, newText)))
 	emphasizeDiffRows(rows)
 	applyDiffSyntax(rows, path, oldText, newText)
-	return rows
+	return withoutPositions(rows)
+}
+
+// withoutPositions drops the hunk headers and the line numbers of a diff that
+// was built from a snippet. The snippet is all the client has: the file it came
+// from is on the server, so the numbers a snippet diff produces point at the
+// snippet rather than at the file. A row without a position draws no gutter,
+// because a wrong line number is worse than none. The syntax colours have
+// already been taken from the numbered rows.
+func withoutPositions(rows []diffRow) []diffRow {
+	kept := make([]diffRow, 0, len(rows))
+	for _, row := range rows {
+		if row.marker == '@' {
+			continue
+		}
+		row.oldNum, row.newNum = 0, 0
+		kept = append(kept, row)
+	}
+	return kept
 }
 
 func writeDiffRows(path, content string) []diffRow {
@@ -2082,8 +2099,11 @@ func parseHunkRange(field string) int {
 	return n
 }
 
+// diffGutterWidths returns the width of each line-number column. Both are zero
+// when no row carries a position, which is what tells the renderer to draw no
+// gutter at all.
 func diffGutterWidths(rows []diffRow) (int, int) {
-	oldWidth, newWidth := 1, 1
+	oldWidth, newWidth := 0, 0
 	for _, row := range rows {
 		if row.oldNum > 0 {
 			oldWidth = max(oldWidth, len(strconv.Itoa(row.oldNum)))
@@ -2093,6 +2113,16 @@ func diffGutterWidths(rows []diffRow) (int, int) {
 		}
 	}
 	return oldWidth, newWidth
+}
+
+// diffGutterWidth is how much of a row the gutter costs: two columns of numbers,
+// the marker and the spaces between them, or just the marker and its space when
+// no row carries a position.
+func diffGutterWidth(oldWidth, newWidth int) int {
+	if oldWidth == 0 && newWidth == 0 {
+		return 2
+	}
+	return oldWidth + newWidth + 4
 }
 
 func emphasizeDiffRows(rows []diffRow) {
@@ -2141,21 +2171,9 @@ func wordDiffSegments(oldLine, newLine string) ([]diffSegment, []diffSegment) {
 
 // renderDiffRow returns one rendered visual line per wrapped segment. Long
 // source lines are wrapped to codeWidth so every visual line is exactly the
-// same width; the gutter is only printed on the first visual line.
+// same width; the gutter is only printed on the first visual line, and a row
+// with no position in any file draws the marker alone.
 func renderDiffRow(row diffRow, oldWidth, newWidth, codeWidth int, styles harnessStyles) []string {
-	gutterWidth := oldWidth + newWidth + 4
-	if row.marker == '@' {
-		return []string{lipgloss.NewStyle().Foreground(everforest.Blue).Width(gutterWidth + codeWidth).Render(row.text)}
-	}
-	oldStr, newStr := "", ""
-	if row.oldNum > 0 {
-		oldStr = strconv.Itoa(row.oldNum)
-	}
-	if row.newNum > 0 {
-		newStr = strconv.Itoa(row.newNum)
-	}
-	gutter := fmt.Sprintf("%*s %*s %c ", oldWidth, oldStr, newWidth, newStr, row.marker)
-
 	bg := everforest.Background
 	emphFg := everforest.Text
 	switch row.marker {
@@ -2165,10 +2183,30 @@ func renderDiffRow(row diffRow, oldWidth, newWidth, codeWidth int, styles harnes
 		bg, emphFg = everforest.DiffInsertBg, everforest.Green
 	}
 	gutterStyle := lipgloss.NewStyle().Foreground(everforest.Muted).Background(bg)
-	blankGutter := gutterStyle.Render(strings.Repeat(" ", gutterWidth))
-
 	visual := wrapDiffSegments(row, codeWidth)
 	lines := make([]string, 0, len(visual))
+
+	if oldWidth == 0 && newWidth == 0 {
+		for i, segments := range visual {
+			marker := string(row.marker)
+			if i > 0 {
+				marker = " "
+			}
+			lines = append(lines, gutterStyle.Render(marker+" ")+renderDiffSegments(segments, everforest.Text, emphFg, bg, codeWidth))
+		}
+		return lines
+	}
+
+	oldStr, newStr := "", ""
+	if row.oldNum > 0 {
+		oldStr = strconv.Itoa(row.oldNum)
+	}
+	if row.newNum > 0 {
+		newStr = strconv.Itoa(row.newNum)
+	}
+	gutter := fmt.Sprintf("%*s %*s %c ", oldWidth, oldStr, newWidth, newStr, row.marker)
+	blankGutter := gutterStyle.Render(strings.Repeat(" ", diffGutterWidth(oldWidth, newWidth)))
+
 	for i, segments := range visual {
 		g := gutter
 		if i > 0 {
@@ -3008,6 +3046,19 @@ func transcriptToolResultDisplay(name, status, output, resultErr string) string 
 				return summary + "\n" + result.Output
 			}
 			return summary
+		}
+	}
+	if name == string(contracts.EditTool) && resultErr == "" {
+		// The result is the count of replacements. Every match is reported, so
+		// a replace_all says how many places it changed.
+		var result struct {
+			Replacements int `json:"replacements"`
+		}
+		if json.Unmarshal([]byte(output), &result) == nil {
+			if result.Replacements == 1 {
+				return status + " · 1 replacement"
+			}
+			return fmt.Sprintf("%s · %d replacements", status, result.Replacements)
 		}
 	}
 	if name != string(contracts.ReadTool) || status != string(contracts.ToolExecutionSuccess) || resultErr != "" {
