@@ -677,15 +677,7 @@ func (e *InfaiAgentEngine) DeleteSession(id uuid.UUID) error {
 }
 
 func (e *InfaiAgentEngine) deleteSession(id uuid.UUID) error {
-	switch err := e.CloseSession(id); {
-	case err == nil:
-	case errors.Is(err, harnessErr.ErrSessionNotFound):
-		if _, loadErr := e.sessionStore.LoadMeta(id); loadErr != nil {
-			return harnessErr.ErrSessionNotFound
-		}
-	default:
-		return err
-	}
+	e.closeSessionTree(id)
 
 	if err := e.sessionStore.Delete(id); err != nil {
 		return err
