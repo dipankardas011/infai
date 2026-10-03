@@ -298,11 +298,15 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 				}
 			}
 			toolMessages, dispatcherCanceled := a.toolCallDispatcher(reply.ToolCalls)
+			messages = append(messages, toolMessages...)
 			if dispatcherCanceled {
+				if err := a.commitTimeline(ctx, messages); err != nil {
+					return
+				}
+				a.workingHistory.Append(messages...)
 				lastHadToolCalls = false
 				continue
 			}
-			messages = append(messages, toolMessages...)
 		} else if a.evalFunc != nil {
 			if err := a.evalFunc(ctx); err != nil {
 				messages = append(messages, contracts.NewUserMessage(fmt.Sprintf("evaluation status: FAIL => %v", err.Error())))

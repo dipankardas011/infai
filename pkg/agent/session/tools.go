@@ -470,30 +470,35 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 		}
 
 		if len(foregroundIDs) > 0 {
-			answers, waitErr := delegate.WaitForSidecars(s.ctx, caller, foregroundIDs, func(response comms.DelegatedTaskResponse) {
-				idx := slices.Index(foregroundIDs, response.From)
-				if idx == -1 {
-					return
-				}
-				call := foregroundCalls[idx]
-				content, err := delegate.Answer(response)
-				result := contracts.ToolExecutionResult{
-					Status:   contracts.ToolExecutionSuccess,
-					CallID:   call.ID,
-					CallName: call.Function.Name,
-					Output:   content,
-				}
-				if err != nil {
-					result.Status = contracts.ToolExecutionError
-					result.Output = ""
-					result.Error = err.Error()
-				}
-				s.publish(contracts.EventStream{
-					Kind:       contracts.EventToolResult,
-					Timestamp:  time.Now().UTC(),
-					ToolResult: &result,
-				})
-			})
+			answers, waitErr := delegate.WaitForSidecars(
+				s.ctx,
+				caller,
+				foregroundIDs,
+				func(response comms.DelegatedTaskResponse) {
+					idx := slices.Index(foregroundIDs, response.From)
+					if idx == -1 {
+						return
+					}
+					call := foregroundCalls[idx]
+					content, err := delegate.Answer(response)
+					result := contracts.ToolExecutionResult{
+						Status:   contracts.ToolExecutionSuccess,
+						CallID:   call.ID,
+						CallName: call.Function.Name,
+						Output:   content,
+					}
+					if err != nil {
+						result.Status = contracts.ToolExecutionError
+						result.Output = ""
+						result.Error = err.Error()
+					}
+					s.publish(contracts.EventStream{
+						Kind:       contracts.EventToolResult,
+						Timestamp:  time.Now().UTC(),
+						ToolResult: &result,
+					})
+				},
+			)
 
 			for i, sidecarID := range foregroundIDs {
 				call := foregroundCalls[i]
@@ -514,6 +519,14 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 						content = waitErr.Error()
 						if errors.Is(waitErr, harnessErr.ErrTurnCanceled) {
 							turnCanceled = true
+							status = contracts.ToolExecutionDenied
+							content = contracts.NewToolExecutionError(
+								call.Function.Name,
+								"turn_canceled",
+								"the turn was canceled by the user while waiting for the sidecar",
+								contracts.ResponsibilityUser,
+								waitErr,
+							).Error()
 						}
 					}
 				}
