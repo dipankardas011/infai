@@ -452,7 +452,7 @@ func sessionEntryRows(option modalOption, selected, armed bool, width int, style
 	}
 
 	nameWidth := func(tail string) int {
-		return min(width-lipgloss.Width(prefix)-lipgloss.Width(tail)-2, maxSessionNameWidth)
+		return min(width-lipgloss.Width(prefix)-lipgloss.Width(option.tree)-lipgloss.Width(tail)-2, maxSessionNameWidth)
 	}
 
 	wanted := min(lipgloss.Width(option.label), maxSessionNameWidth)
@@ -460,7 +460,7 @@ func sessionEntryRows(option modalOption, selected, armed bool, width int, style
 	if wanted <= nameWidth(rich.plain) {
 		tail = rich
 	}
-	name := ansi.Truncate(option.label, max(nameWidth(tail.plain), 1), "…")
+	name := option.tree + ansi.Truncate(option.label, max(nameWidth(tail.plain), 1), "…")
 	gap := strings.Repeat(" ", max(width-lipgloss.Width(prefix)-lipgloss.Width(name)-lipgloss.Width(tail.plain), 1))
 	detail := "    " + sessionDetailLine(option.detailParts, max(width-4, 1))
 

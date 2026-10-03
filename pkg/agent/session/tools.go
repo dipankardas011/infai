@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -631,8 +632,11 @@ func (s *InfaiAgentSession) performHITL(ctx context.Context, agentID uuid.UUID, 
 		"decision", decision.Decision,
 	)
 	if decision.Decision != contracts.ApprovalApprove {
-		if decision.Reason == userCanceledApprovalReason {
+		if decision.Decision == contracts.ApprovalDeny && decision.Reason == userCanceledApprovalReason {
 			return harnessErr.ErrTurnCanceled
+		}
+		if decision.Reason != "" {
+			return fmt.Errorf("%w: %s", harnessErr.ErrApprovalDenied, decision.Reason)
 		}
 		return harnessErr.ErrApprovalDenied
 	}

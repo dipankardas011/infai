@@ -100,6 +100,7 @@ func NewSession(
 	engineCtx context.Context,
 	id uuid.UUID,
 	parentId uuid.UUID,
+	name string,
 	l *slog.Logger,
 	userPrompt *string,
 	evalBashScript *string,
@@ -144,6 +145,7 @@ func NewSession(
 	meta := store.SessionMeta{
 		ID:             id,
 		ParentID:       parentId,
+		Name:           name,
 		Provider:       model.GetModelSpecs().ProviderName(),
 		Model:          model.GetModelSpecs().Model().Id,
 		Cwd:            cwd,

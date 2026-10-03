@@ -27,6 +27,7 @@ const (
 // for session-list API consumers.
 type SessionSummary struct {
 	ID        uuid.UUID     `json:"id"`
+	ParentID  uuid.UUID     `json:"parent_id,omitempty"`
 	Name      string        `json:"name,omitempty"`
 	Provider  string        `json:"provider"`
 	Model     string        `json:"model"`

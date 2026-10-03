@@ -243,9 +243,12 @@ const transcriptScrollStep = 3
 func (m *chatModel) refreshInputMark() {
 	// A pending decision owns the keyboard, so the composer is not taking a
 	// prompt. Capturing a reason is the exception: the decision asked for it.
-	waiting := m.approval != nil && !m.approvalReason
+	waiting := (m.approval != nil && !m.approvalReason) || m.session.AgentKind == contracts.SidecarLoopAgent
 	mark := inputMark
 	placeholder := "Ask, plan, build... (external editor ctrl+x)"
+	if m.session.AgentKind == contracts.SidecarLoopAgent {
+		placeholder = "Read-only sidecar · Ctrl+O to open sessions"
+	}
 	switch {
 	case m.approvalReason:
 		mark = "why▸ "
@@ -490,7 +493,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.PasteMsg:
-		if m.modal == nil {
+		if m.modal == nil && m.session.AgentKind != contracts.SidecarLoopAgent {
 			var cmd tea.Cmd
 			m.composer, cmd = m.composer.Update(msg)
 			m.updateCommandMenu()
@@ -536,7 +539,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if model, cmd, handled := m.handleApprovalKey(key); handled {
 		return model, cmd
 	}
-	if m.working && key == "esc" {
+	if m.working && key == "esc" && m.session.AgentKind != contracts.SidecarLoopAgent {
 		if !m.cancelArmed {
 			m.cancelArmed = true
 			m.cancelArmID++
@@ -557,8 +560,14 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.Key().Keystroke() {
 	case "ctrl+x":
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			return m, nil
+		}
 		return m, editComposerCmd(m.composer.Value())
 	case "ctrl+v":
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			return m, nil
+		}
 		return m, m.pasteImage()
 	case "ctrl+u":
 		// Clear staged images and the composer text; with none staged, ctrl+u
@@ -574,9 +583,11 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// queued by the session and served next. The session workspace and the
 		// model picker stay closed, because both reattach the client to a
 		// different session rather than feed this turn.
-		switch key {
-		case "ctrl+o", "ctrl+m":
-			return m, nil
+		if m.session.AgentKind != contracts.SidecarLoopAgent {
+			switch key {
+			case "ctrl+o", "ctrl+m":
+				return m, nil
+			}
 		}
 	}
 	if key == "ctrl+o" {
@@ -584,10 +595,16 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, listSessionsCmd(m.ctx, m.client)
 	}
 	if key == "ctrl+m" {
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			return m, nil
+		}
 		m.modal = loadingModal("Loading models")
 		return m, listProvidersCmd(m.ctx, m.client, true)
 	}
 	if key == "ctrl+t" {
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			return m, nil
+		}
 		m.cycleThinking()
 		return m, nil
 	}
@@ -638,6 +655,9 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if key == "ctrl+down" {
 		m.scrollTranscript(transcriptScrollStep)
+		return m, nil
+	}
+	if m.session.AgentKind == contracts.SidecarLoopAgent {
 		return m, nil
 	}
 	if key == "enter" {
@@ -728,6 +748,10 @@ func (m *chatModel) handleSessionListKey(key string) (tea.Cmd, bool) {
 		if option.session == uuid.Nil {
 			return nil, false
 		}
+		if option.agentKind == contracts.SidecarLoopAgent && option.sessionActive {
+			m.showNotice("Sidecar belongs to its caller", "Close the caller session before deleting its sidecar.", false)
+			return nil, true
+		}
 		if armed == option.session {
 			return deleteSessionCmd(m.ctx, m.client, option.session), true
 		}
@@ -736,6 +760,10 @@ func (m *chatModel) handleSessionListKey(key string) (tea.Cmd, bool) {
 	case "c":
 		if option.session == uuid.Nil {
 			return nil, false
+		}
+		if option.agentKind == contracts.SidecarLoopAgent {
+			m.showNotice("Sidecar belongs to its caller", "Close the caller session to stop its sidecars.", false)
+			return nil, true
 		}
 		if !option.sessionActive {
 			// The engine has nothing to tear down: the session is saved history,
@@ -835,6 +863,11 @@ func (m *chatModel) submit() tea.Cmd {
 		m.commandMenu = false
 		m.reflow()
 		return m.runCommand(prompt)
+	}
+	if m.session.AgentKind == contracts.SidecarLoopAgent {
+		m.appendError(errors.New("sidecar sessions do not accept chat messages; open the caller session to continue"))
+		m.refreshTranscript(true)
+		return nil
 	}
 	if m.session.ID == uuid.Nil {
 		// Keep the draft and attachments so the user can retry once a session
@@ -1205,6 +1238,10 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 	}
 	switch command {
 	case "/model":
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			m.showNotice("Sidecar is read-only", "Switch models from the caller session.", false)
+			return nil
+		}
 		m.modal = loadingModal("Loading models")
 		return listProvidersCmd(m.ctx, m.client, true)
 	case "/sessions":
@@ -1214,6 +1251,10 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		m.modal = loadingModal("Loading models")
 		return listProvidersCmd(m.ctx, m.client, false)
 	case "/compact":
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			m.showNotice("Sidecar is read-only", "Manual compaction is unavailable for sidecar sessions.", false)
+			return nil
+		}
 		if m.session.ID == uuid.Nil {
 			m.appendError(errors.New("no active session"))
 			m.refreshTranscript(true)
@@ -1609,9 +1650,17 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	case "tool":
 		marker := "▲"
 		markerStyle := m.styles.system
+		if entry.toolName == string(contracts.SpawnSidecarLoopTool) || entry.toolName == string(contracts.SpawnBackgroundSidecarLoopTool) {
+			marker = "↗"
+			markerStyle = m.styles.agentSidecar
+		}
 		if entry.toolKind == "result" {
 			marker = "▼"
 			markerStyle = m.styles.active
+			if entry.toolName == string(contracts.SpawnSidecarLoopTool) || entry.toolName == string(contracts.SpawnBackgroundSidecarLoopTool) {
+				marker = "↙"
+				markerStyle = m.styles.agentSidecar
+			}
 			if entry.toolStatus != "success" {
 				markerStyle = m.styles.error
 			}
@@ -2231,28 +2280,53 @@ func sessionConcluded(status contracts.SessionStatus) bool {
 
 func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required bool) {
 	options := []modalOption{{label: "Start a new session", shortcut: 'n'}}
+	byID := make(map[uuid.UUID]struct{}, len(sessions))
+	children := make(map[uuid.UUID][]contracts.SessionSummary)
 	for _, session := range sessions {
-		status := session.Status
-		if status == "" {
-			status = contracts.SessionIdle
+		byID[session.ID] = struct{}{}
+		children[session.ParentID] = append(children[session.ParentID], session)
+	}
+	seen := make(map[uuid.UUID]struct{}, len(sessions))
+	var addChildren func(uuid.UUID, string)
+	addChildren = func(parent uuid.UUID, indent string) {
+		for i, session := range children[parent] {
+			if _, exists := seen[session.ID]; exists {
+				continue
+			}
+			seen[session.ID] = struct{}{}
+			status := session.Status
+			if status == "" {
+				status = contracts.SessionIdle
+			}
+			name := session.Name
+			if name == "" {
+				name = "Untitled session"
+			}
+			parts := []string{orModel(session.Model), humanTime(session.UpdatedAt)}
+			if session.Cwd != "" {
+				parts = append(parts, session.Cwd)
+			}
+			tree, nextIndent := "", indent
+			if parent != uuid.Nil {
+				tree = indent + "├─ "
+				nextIndent = indent + "│  "
+				if i == len(children[parent])-1 {
+					tree = indent + "└─ "
+					nextIndent = indent + "   "
+				}
+			}
+			options = append(options, modalOption{
+				label: name, tree: tree, detailParts: parts,
+				session: session.ID, sessionStatus: status, sessionActive: session.Active, agentKind: session.AgentKind,
+			})
+			addChildren(session.ID, nextIndent)
 		}
-		name := session.Name
-		if name == "" {
-			name = "Untitled session"
+	}
+	addChildren(uuid.Nil, "")
+	for _, session := range sessions {
+		if _, found := byID[session.ParentID]; !found && session.ParentID != uuid.Nil {
+			addChildren(session.ParentID, "")
 		}
-		parts := []string{orModel(session.Model), humanTime(session.UpdatedAt)}
-		if session.Cwd != "" {
-			parts = append(parts, session.Cwd)
-		}
-		option := modalOption{
-			label:         name,
-			detailParts:   parts,
-			session:       session.ID,
-			sessionStatus: status,
-			sessionActive: session.Active,
-			agentKind:     session.AgentKind,
-		}
-		options = append(options, option)
 	}
 	numberSessionOptions(options)
 	m.modal = &modalModel{kind: modalSessions, options: options, required: required}
@@ -2328,6 +2402,19 @@ func stripDiffNoNewline(diff string) string {
 // text never repeats it. Unknown tools fall back to pretty-printed arguments.
 func toolCallPreview(name, arguments string) string {
 	switch contracts.ToolType(name) {
+	case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+		var args struct {
+			AgentName string `json:"agent_name"`
+			Task      string `json:"task"`
+			Cwd       string `json:"cwd"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return prettyToolArguments(arguments)
+		}
+		if args.Cwd != "" {
+			return args.AgentName + "\ncwd  " + args.Cwd + "\n" + args.Task
+		}
+		return args.AgentName + "\n" + args.Task
 	case contracts.ReadTool:
 		preview, ok := readToolCallPreview(arguments)
 		if !ok {

@@ -8,8 +8,9 @@ import (
 type DelegationToSidecarLoop struct {
 	ParentID uuid.UUID `json:"parent_id"`
 
-	Task string `json:"task"`
-	Cwd  string `json:"cwd,omitempty"`
+	AgentName string `json:"agent_name"`
+	Task      string `json:"task"`
+	Cwd       string `json:"cwd,omitempty"`
 
 	AcceptanceScript string `json:"acceptance_script,omitempty"`
 	MaxTurns         uint64 `json:"max_turns,omitempty"`

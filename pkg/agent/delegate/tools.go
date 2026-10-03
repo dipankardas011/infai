@@ -20,6 +20,10 @@ func SpawnSidecarLoopTool() contracts.Tool {
 		Parameters: contracts.ToolParameters{
 			Type: "object",
 			Properties: map[string]any{
+				"agent_name": map[string]any{
+					"type":        "string",
+					"description": "Short name for the sidecar (at most 70 characters).",
+				},
 				"cwd": map[string]any{
 					"type":        "string",
 					"description": "working directory for the sidecar loop/agent",
@@ -37,7 +41,7 @@ func SpawnSidecarLoopTool() contracts.Tool {
 					"description": "Turn budget for the sidecar; the engine clamps it.",
 				},
 			},
-			RequiredFields:       []string{"task", "acceptance_script", "max_turns"},
+			RequiredFields:       []string{"agent_name", "task", "acceptance_script", "max_turns"},
 			AdditionalProperties: false,
 		},
 	}
@@ -50,6 +54,10 @@ func SpawnBackgroundSidecarLoopTool() contracts.Tool {
 		Parameters: contracts.ToolParameters{
 			Type: "object",
 			Properties: map[string]any{
+				"agent_name": map[string]any{
+					"type":        "string",
+					"description": "Short name for the sidecar (at most 70 characters).",
+				},
 				"cwd": map[string]any{
 					"type":        "string",
 					"description": "working directory for the sidecar loop/agent",
@@ -67,7 +75,7 @@ func SpawnBackgroundSidecarLoopTool() contracts.Tool {
 					"description": "Turn budget for the sidecar; the engine clamps it.",
 				},
 			},
-			RequiredFields:       []string{"task", "acceptance_script", "max_turns"},
+			RequiredFields:       []string{"agent_name", "task", "acceptance_script", "max_turns"},
 			AdditionalProperties: false,
 		},
 	}
@@ -106,6 +114,7 @@ func RequestSidecar(ctx context.Context, caller Caller, call contracts.ToolCall)
 
 	request, err := json.Marshal(comms.DelegationToSidecarLoop{
 		ParentID:         caller.SessionID,
+		AgentName:        args.AgentName,
 		Task:             args.Task,
 		Cwd:              args.Cwd,
 		AcceptanceScript: args.AcceptanceScript,
@@ -229,6 +238,7 @@ func AnswerText(response comms.DelegatedTaskResponse) string {
 }
 
 type spawnArgs struct {
+	AgentName        string `json:"agent_name"`
 	Task             string `json:"task"`
 	Cwd              string `json:"cwd"`
 	AcceptanceScript string `json:"acceptance_script"`
@@ -239,6 +249,10 @@ func parseArgs(call contracts.ToolCall) (spawnArgs, error) {
 	args, err := contracts.DecodeToolArguments[spawnArgs](call.Function.Name, call)
 	if err != nil {
 		return args, err
+	}
+	args.AgentName = strings.TrimSpace(args.AgentName)
+	if args.AgentName == "" || utf8.RuneCountInString(args.AgentName) > 70 {
+		return args, contracts.NewToolExecutionError(call.Function.Name, "invalid_arguments", "agent_name must be 1 to 70 characters", contracts.ResponsibilityAgent, nil)
 	}
 	if strings.TrimSpace(args.Task) == "" || strings.TrimSpace(args.AcceptanceScript) == "" || args.MaxTurns == 0 {
 		return args, contracts.NewToolExecutionError(call.Function.Name, "invalid_arguments", "task, acceptance_script, and max_turns (greater than zero) are required", contracts.ResponsibilityAgent, nil)

@@ -198,6 +198,7 @@ func (e *InfaiAgentEngine) createSidecarSession(parentID uuid.UUID, request comm
 		e.ctx,
 		id,
 		parentID,
+		request.AgentName,
 		e.bgLogger.WithGroup("session"),
 		&request.Task,
 		&request.AcceptanceScript,
@@ -314,6 +315,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		e.ctx,
 		sessID,
 		uuid.Nil,
+		"",
 		e.bgLogger.WithGroup("session"),
 		nil,
 		nil,
@@ -726,6 +728,7 @@ func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 		}
 		summaries = append(summaries, contracts.SessionSummary{
 			ID:        meta.ID,
+			ParentID:  meta.ParentID,
 			Name:      meta.Name,
 			Provider:  meta.Provider,
 			Model:     meta.Model,
