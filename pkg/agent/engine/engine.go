@@ -579,6 +579,9 @@ func (e *InfaiAgentEngine) CancelTurn(id uuid.UUID) error {
 	if !ok {
 		return harnessErr.ErrSessionNotFound
 	}
+	if meta := sess.Meta(); meta.AgentKind == contracts.SidecarLoopAgent {
+		return fmt.Errorf("%w: sidecar_loop session cannot be canceled directly; cancel its caller session %s", harnessErr.ErrInvalidInput, meta.ParentID)
+	}
 	if sess.Status() != contracts.SessionBusy && sess.Status() != contracts.SessionWaitingApproval {
 		return harnessErr.ErrNoTurnToCancel
 	}
@@ -599,7 +602,11 @@ func (e *InfaiAgentEngine) cancelSidecarTree(id uuid.UUID) {
 		e.cancelSidecarTree(childID)
 	}
 	if sess.Status() != contracts.SessionCompleted && sess.Status() != contracts.SessionMaxIterationExhausted && sess.Status() != contracts.SessionTombstone {
-		sess.Close()
+		if sess.Meta().AgentKind == contracts.SidecarLoopAgent {
+			sess.CloseWithReason("parent turn canceled")
+		} else {
+			sess.Close()
+		}
 		e.aseComms.UnregisterSessionAgent(id)
 		delete(e.activeSessionAgents, id)
 	}
@@ -619,8 +626,12 @@ func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) err
 func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if _, ok := e.activeSessionAgents[id]; !ok {
+	sess, ok := e.activeSessionAgents[id]
+	if !ok {
 		return harnessErr.ErrSessionNotFound
+	}
+	if meta := sess.Meta(); meta.AgentKind == contracts.SidecarLoopAgent {
+		return fmt.Errorf("%w: sidecar_loop session cannot be closed directly; close its caller session %s", harnessErr.ErrInvalidInput, meta.ParentID)
 	}
 	e.closeSessionTree(id)
 	return nil

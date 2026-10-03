@@ -908,6 +908,10 @@ func (s *InfaiAgentSession) releaseSubscribers() {
 }
 
 func (s *InfaiAgentSession) Close() {
+	s.CloseWithReason("session closed")
+}
+
+func (s *InfaiAgentSession) CloseWithReason(reason string) {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		// Teardown leaves the concluded status readable, so a client that asks
@@ -917,7 +921,7 @@ func (s *InfaiAgentSession) Close() {
 		s.mu.Unlock()
 		// A session that already concluded keeps the conclusion it recorded;
 		// one that is only being closed records that, which is what happened.
-		s.recordSessionConclusion(contracts.SessionTombstone, "session closed")
+		s.recordSessionConclusion(contracts.SessionTombstone, reason)
 		s.cancel(harnessErr.ErrSessionClosed)
 		s.wg.Wait()
 		s.settleBackgroundSidecars()

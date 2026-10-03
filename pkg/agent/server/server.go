@@ -80,6 +80,8 @@ func (s *Server) handleCancelTurn(w http.ResponseWriter, r *http.Request) {
 	switch err := s.engine.CancelTurn(id); {
 	case errors.Is(err, harnessErr.ErrSessionNotFound):
 		s.writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, harnessErr.ErrInvalidInput):
+		s.writeError(w, http.StatusConflict, err)
 	case errors.Is(err, harnessErr.ErrNoTurnToCancel):
 		s.writeError(w, http.StatusConflict, err)
 	case err != nil:
@@ -514,6 +516,10 @@ func (s *Server) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 	if err := s.engine.CloseSession(id); err != nil {
 		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		if errors.Is(err, harnessErr.ErrInvalidInput) {
+			s.writeError(w, http.StatusConflict, err)
 			return
 		}
 		s.writeError(w, http.StatusInternalServerError, err)
