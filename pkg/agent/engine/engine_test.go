@@ -35,7 +35,9 @@ func TestSidecarNameIsPersistedOnCreation(t *testing.T) {
 		activeSessionAgents: make(map[uuid.UUID]*session.InfaiAgentSession),
 		children:            make(map[uuid.UUID]map[uuid.UUID]comms.AgentCommKind), stopCh: make(chan struct{}),
 	}
-	parent, err := session.NewSession(e.ctx, parentID, uuid.Nil, "", logger, nil, nil, 1,
+	// An interactive session carries no turn limit: the engine passes nil for
+	// one, and the loop falls back to the session default.
+	parent, err := session.NewSession(e.ctx, parentID, uuid.Nil, "", logger, nil, nil, nil,
 		contracts.NewProvisionedModel(provider.Id, "test", provider.BaseEndpoint, provider.APIType, provider.Auth, model),
 		t.TempDir(), ss, hub.NewSessionAgentComms(parentID), contracts.InteractiveAgent)
 	if err != nil {
