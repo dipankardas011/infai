@@ -38,7 +38,8 @@ func SpawnSidecarLoopTool() contracts.Tool {
 				},
 				"max_turns": map[string]any{
 					"type":        "integer",
-					"description": "Turn budget for the sidecar; the engine clamps it.",
+					"enum":        []int{20, 40, 100},
+					"description": "Maximum model generations for the sidecar. A tool call uses one generation; another is needed to inspect its result.",
 				},
 			},
 			RequiredFields:       []string{"agent_name", "task", "acceptance_script", "max_turns"},
@@ -72,7 +73,8 @@ func SpawnBackgroundSidecarLoopTool() contracts.Tool {
 				},
 				"max_turns": map[string]any{
 					"type":        "integer",
-					"description": "Turn budget for the sidecar; the engine clamps it.",
+					"enum":        []int{20, 40, 100},
+					"description": "Maximum model generations for the sidecar. A tool call uses one generation; another is needed to inspect its result.",
 				},
 			},
 			RequiredFields:       []string{"agent_name", "task", "acceptance_script", "max_turns"},
@@ -254,8 +256,11 @@ func parseArgs(call contracts.ToolCall) (spawnArgs, error) {
 	if args.AgentName == "" || utf8.RuneCountInString(args.AgentName) > 70 {
 		return args, contracts.NewToolExecutionError(call.Function.Name, "invalid_arguments", "agent_name must be 1 to 70 characters", contracts.ResponsibilityAgent, nil)
 	}
-	if strings.TrimSpace(args.Task) == "" || strings.TrimSpace(args.AcceptanceScript) == "" || args.MaxTurns == 0 {
-		return args, contracts.NewToolExecutionError(call.Function.Name, "invalid_arguments", "task, acceptance_script, and max_turns (greater than zero) are required", contracts.ResponsibilityAgent, nil)
+	if strings.TrimSpace(args.Task) == "" || strings.TrimSpace(args.AcceptanceScript) == "" {
+		return args, contracts.NewToolExecutionError(call.Function.Name, "invalid_arguments", "task and acceptance_script are required", contracts.ResponsibilityAgent, nil)
+	}
+	if args.MaxTurns != 20 && args.MaxTurns != 40 && args.MaxTurns != 100 {
+		return args, contracts.NewToolExecutionError(call.Function.Name, "invalid_arguments", "max_turns must be 20, 40, or 100", contracts.ResponsibilityAgent, nil)
 	}
 	if !utf8.ValidString(args.AcceptanceScript) || strings.ContainsRune(args.AcceptanceScript, '\x00') || strings.ContainsRune(args.AcceptanceScript, '\r') {
 		return args, contracts.NewToolExecutionError(call.Function.Name, "invalid_arguments", "acceptance_script must be valid UTF-8 bash source without NUL or carriage returns", contracts.ResponsibilityAgent, nil)

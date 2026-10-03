@@ -538,6 +538,8 @@ func TestStreamingBlocksRenderMarkdownOnlyWhenComplete(t *testing.T) {
 	}
 
 	// The session reporting idle is what ends the turn on the live path.
+	m.session.ID = uuid.New()
+	m.sessionCancel = func() {}
 	idle := string(contracts.SessionIdle)
 	_, _ = m.Update(sessionEventMsg{
 		sessionID:  m.session.ID,
@@ -566,6 +568,7 @@ func TestStreamingLeavesAReaderWhoScrolledUpWhereTheyAre(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.session.ID = uuid.New()
+	m.sessionCancel = func() {}
 	for i := range 200 {
 		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
 	}
@@ -598,6 +601,7 @@ func TestStreamingFollowsTheNewestLine(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.session.ID = uuid.New()
+	m.sessionCancel = func() {}
 	for i := range 200 {
 		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
 	}
@@ -633,6 +637,7 @@ func TestStreamingEventsRenderAsTheyArrive(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.session.ID = uuid.New()
+	m.sessionCancel = func() {}
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
 	for _, token := range []string{"first ", "second ", "third"} {
@@ -863,6 +868,61 @@ func TestMouseWheelScrollsTranscript(t *testing.T) {
 	}
 	if m.atBottom() {
 		t.Fatal("wheel up left the view pinned to the newest output")
+	}
+}
+
+func TestSidecarChatIsReadOnly(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.session = store.SessionMeta{ID: uuid.New(), AgentKind: contracts.SidecarLoopAgent}
+	m.working = true
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
+	if m.composer.Value() != "" {
+		t.Fatalf("sidecar accepted composer input: %q", m.composer.Value())
+	}
+	m.composer.SetValue("try to send")
+	if cmd := m.submit(); cmd != nil {
+		t.Fatal("sidecar dispatched a chat message")
+	}
+	if cmd := m.runCommand("/compact"); cmd != nil {
+		t.Fatal("sidecar dispatched manual compaction")
+	}
+	if cmd := m.runCommand("/model"); cmd != nil {
+		t.Fatal("sidecar opened the model picker")
+	}
+}
+
+func TestSidecarHierarchyInSessionList(t *testing.T) {
+	parent, child := uuid.New(), uuid.New()
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{
+		{ID: child, ParentID: parent, Name: "Worker", AgentKind: contracts.SidecarLoopAgent},
+		{ID: parent, Name: "Caller", AgentKind: contracts.InteractiveAgent},
+	}, false)
+	if len(m.modal.options) != 3 || m.modal.options[1].session != parent || m.modal.options[2].session != child {
+		t.Fatalf("session order = %+v, want caller then sidecar", m.modal.options)
+	}
+	if m.modal.options[2].tree != "└─ " {
+		t.Fatalf("sidecar tree = %q, want child connector", m.modal.options[2].tree)
+	}
+}
+
+func TestSidecarApprovalShowsAcceptanceScript(t *testing.T) {
+	call := contracts.ToolCall{Function: contracts.Function{
+		Name:      contracts.SpawnSidecarLoopTool,
+		Arguments: `{"agent_name":"Worker","task":"Check the build","acceptance_script":"go build ./...\necho done","max_turns":3}`,
+	}}
+	body, script := formatApprovalToolCall(call)
+	for _, want := range []string{"SIDECAR  Worker", "TURN BUDGET  3", "TASK\nCheck the build", "ACCEPTANCE SCRIPT (must be read-only)"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("approval body lacks %q: %q", want, body)
+		}
+	}
+	if script != "go build ./...\necho done" {
+		t.Fatalf("script = %q, want unescaped Bash source", script)
+	}
+	if preview := approvalCompactPreview(call); !strings.Contains(preview, "Worker") || !strings.Contains(preview, "acceptance script") {
+		t.Fatalf("compact preview = %q", preview)
 	}
 }
 
@@ -1206,19 +1266,29 @@ func TestWorkingTurnQueuesInputWithoutReplacingStatus(t *testing.T) {
 	}
 }
 
-func TestWorkingTurnKeepsWorkspaceClosedAndCancelArmed(t *testing.T) {
-	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+func TestWorkingTurnOpensSessionsWithoutCancelingTurn(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
 	m.modal = nil
+	m.session.ID = uuid.New()
 	m.working = true
 	m.workStatus = "working"
+	m.status = contracts.SessionBusy
 
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
-	if m.modal != nil {
-		t.Fatal("working turn opened the session workspace")
+	if m.modal == nil || !m.working || m.status != contracts.SessionBusy {
+		t.Fatal("opening sessions changed the running turn")
+	}
+	if m.sessionCancel != nil {
+		t.Fatal("opening sessions left the observer attached")
+	}
+	_, _ = m.Update(sessionsListedMsg{})
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	if cmd == nil || m.modal != nil || m.sessionCancel == nil {
+		t.Fatal("dismissing sessions did not resume observation")
 	}
 
 	escape := tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
-	_, cmd := m.Update(escape)
+	_, cmd = m.Update(escape)
 	if cmd == nil || !m.cancelArmed {
 		t.Fatal("first escape did not arm cancellation timeout")
 	}
@@ -1905,6 +1975,90 @@ func TestModelSwitchClearsPendingAttachments(t *testing.T) {
 
 	if m.pending != nil {
 		t.Fatalf("pending survived model switch: %+v", m.pending)
+	}
+}
+
+func TestSessionListCancelsObserverAndDropsQueuedEvents(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		open func(*chatModel) tea.Cmd
+	}{
+		{"slash", func(m *chatModel) tea.Cmd { return m.runCommand("/sessions") }},
+		{"ctrl+o", func(m *chatModel) tea.Cmd {
+			_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
+			return cmd
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+			m.modal = nil
+			m.session.ID = uuid.New()
+			m.used = 19
+			m.contextWindow = 100
+			observerCtx, canceled := context.WithCancel(context.Background())
+			m.sessionCancel = canceled
+			defer canceled()
+			oldID := m.sessionObserverID
+			if cmd := tc.open(m); cmd == nil {
+				t.Fatal("session list command missing")
+			}
+			if m.sessionCancel != nil || m.sessionStream != nil || m.sessionObserverID == oldID || observerCtx.Err() != context.Canceled {
+				t.Fatal("old observer remained attached")
+			}
+			usage := `{"total_tokens":99}`
+			_, _ = m.Update(sessionEventMsg{sessionID: m.session.ID, observerID: oldID, event: contracts.EventStream{Kind: contracts.NotifyAgentUsage, Content: &usage}})
+			_, _ = m.Update(sessionJoinDoneMsg{sessionID: m.session.ID, observerID: oldID, err: fmt.Errorf("old join")})
+			if m.used != 19 || len(m.blocks) != 0 {
+				t.Fatalf("queued observer messages changed state: used=%d blocks=%d", m.used, len(m.blocks))
+			}
+		})
+	}
+}
+
+func TestSessionLoadResetsStatusAndIgnoresOldObserver(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.modal = nil
+	oldID := uuid.New()
+	m.session = store.SessionMeta{ID: oldID, Provider: "old", Model: "old-model", Cwd: "/old"}
+	m.used, m.contextWindow, m.thinking = 87, 100, contracts.ThinkingLow
+	m.status, m.working, m.workStatus = contracts.SessionBusy, true, "old work"
+	_ = m.startSessionObserver(oldID)
+	oldObserver := m.sessionObserverID
+	m.openSessionList()
+	newID := uuid.New()
+	_, _ = m.Update(sessionLoadedMsg{output: &glue.SessionOutput{
+		SessionMeta:   store.SessionMeta{ID: newID, Provider: "new", Model: "new-model", Cwd: "/new"},
+		ContextWindow: 200, Thinking: contracts.ThinkingHigh,
+	}})
+	status := ansi.Strip(m.statusView())
+	for _, want := range []string{"new-model (new)", "/new", "thinking high", "0% 0/200"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("status lacks %q: %q", want, status)
+		}
+	}
+	if strings.Contains(status, "old-model") || m.working || m.workStatus != "" {
+		t.Fatalf("old turn survived load: status=%q work=%q", status, m.workStatus)
+	}
+	usage := `{"total_tokens":98}`
+	_, _ = m.Update(sessionEventMsg{sessionID: oldID, observerID: oldObserver, event: contracts.EventStream{Kind: contracts.NotifyAgentUsage, Content: &usage}})
+	if m.used != 0 {
+		t.Fatal("old observer changed new session usage")
+	}
+}
+
+func TestFailedSessionLoadResumesOldObserver(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.session.ID = uuid.New()
+	m.modal = nil
+	_ = m.startSessionObserver(m.session.ID)
+	m.openSessionList()
+	_, _ = m.Update(sessionLoadedMsg{err: fmt.Errorf("not found")})
+	if m.modal == nil || m.sessionCancel != nil {
+		t.Fatal("failed load should show notice while detached")
+	}
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd == nil || m.modal != nil || m.sessionCancel == nil {
+		t.Fatal("acknowledgment did not resume old observer")
 	}
 }
 

@@ -78,7 +78,7 @@ func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd 
 - Independent tool calls in parallel; dependent calls strictly sequential.
 - Use task_checklist for multi-step work. Keep exactly one item in_progress while working and update it as work completes. A harness-provided <task_checklist> block is a session checkpoint, not a user request; later successful task_checklist results supersede it.
 - Treat task_checklist results as internal harness state. Do not quote or paste their JSON into the user-facing answer; refer to the checklist naturally and continue the work.
-- Use subagents for broad research or heavy output to protect your context — and never duplicate their work. Launch independent subagents together in one message and continue useful work while they run; block on a subagent only when your next step depends on its result. The main agent plans and reasons; subagents execute.
+- Delegate only fully independent tasks with no overlapping file ownership or shared-state changes; give each sidecar complete context and a read-only acceptance check. Choose a separate working directory inside current one when the tasks require isolation (setting cwd alone does not isolate files in the same repository). Pick max_turns based on task in hand. Use a foreground sidecar when its answer blocks your next step; use a background sidecar when you have other useful work to do. Review its result before claiming completion; handle small or tightly coupled tasks yourself.
 - Read a file before proposing changes to it.
 </tool_discipline>
 

@@ -284,15 +284,22 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.reflow()
 		return m, nil
 	case sessionViewMsg:
-		if msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
+		if m.sessionCancel == nil || msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
 			return m, nil
 		}
+		m.used = 0
+		m.workStatus = ""
+		m.workBegan = time.Time{}
+		m.status = contracts.SessionIdle
+		m.working = false
+		m.toolCallNames = make(map[string]string)
+		m.skillNames = make(map[string]string)
 		m.applySessionView(msg.view)
 		m.refreshTranscript(true)
 		m.reflow()
 		return m, waitStream(m.ctx, m.sessionStream)
 	case sessionEventMsg:
-		if msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
+		if m.sessionCancel == nil || msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
 			return m, nil
 		}
 		// Live output follows the newest line only for a reader who is already
@@ -313,7 +320,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitStream(m.ctx, m.sessionStream)
 	case sessionJoinDoneMsg:
-		if msg.sessionID == m.session.ID && msg.observerID == m.sessionObserverID && msg.err != nil && !errors.Is(msg.err, context.Canceled) {
+		if m.sessionCancel != nil && msg.sessionID == m.session.ID && msg.observerID == m.sessionObserverID && msg.err != nil && !errors.Is(msg.err, context.Canceled) {
 			m.appendError(msg.err)
 			m.refreshTranscript(true)
 		}
@@ -365,16 +372,32 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.session = msg.output.SessionMeta
+		m.used = 0
+		m.workStatus = ""
+		m.workBegan = time.Time{}
+		m.working = false
+		m.cancelArmed = false
+		m.cancelStatus = ""
+		m.status = contracts.SessionIdle
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
 		m.modalities = msg.output.Modalities
 		m.pending = nil
-		m.reflow()
+		m.approval = nil
+		m.approvalReason = false
+		m.approvalShown = false
+		m.approvalDraft = ""
+		m.stopStreaming()
+		m.commandMenu = false
+		m.filePicker = nil
+		m.toolCallNames = make(map[string]string)
+		m.skillNames = make(map[string]string)
 		m.client.SetSession(msg.output.ID)
 		m.blocks = blocksFromRecords(msg.records)
 		m.checklist = taskChecklistFromRecords(msg.records)
 		m.modal = nil
+		m.reflow()
 		m.refreshTranscript(true)
 		return m, m.startSessionObserver(msg.output.ID)
 	case sessionsListedMsg:
@@ -404,17 +427,32 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.session = msg.output.SessionMeta
+		m.workStatus = ""
+		m.workBegan = time.Time{}
+		m.working = false
+		m.cancelArmed = false
+		m.cancelStatus = ""
+		m.status = contracts.SessionIdle
+		m.approval = nil
+		m.approvalReason = false
+		m.approvalShown = false
+		m.approvalDraft = ""
+		m.stopStreaming()
+		m.commandMenu = false
+		m.filePicker = nil
+		m.toolCallNames = make(map[string]string)
+		m.skillNames = make(map[string]string)
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
 		m.modalities = msg.output.Modalities
 		m.pending = nil
-		m.reflow()
 		m.client.SetSession(msg.output.ID)
 		m.blocks = nil
 		m.checklist = contracts.TaskChecklistState{}
 		m.used = 0
 		m.modal = nil
+		m.reflow()
 		m.refreshTranscript(true)
 		return m, m.startSessionObserver(msg.output.ID)
 	case modelSetMsg:
@@ -534,12 +572,16 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
+	if key == "ctrl+o" && m.modal == nil {
+		m.openSessionList()
+		return m, listSessionsCmd(m.ctx, m.client)
+	}
 	// A pending decision owns the keyboard: the turn is blocked until it is
 	// answered, so the composer is not accepting prompts anyway.
 	if model, cmd, handled := m.handleApprovalKey(key); handled {
 		return model, cmd
 	}
-	if m.working && key == "esc" && m.session.AgentKind != contracts.SidecarLoopAgent {
+	if m.working && key == "esc" && m.session.AgentKind != contracts.SidecarLoopAgent && m.modal == nil {
 		if !m.cancelArmed {
 			m.cancelArmed = true
 			m.cancelArmID++
@@ -580,19 +622,11 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.working {
 		// A running turn does not stop the composer: a prompt typed now is
-		// queued by the session and served next. The session workspace and the
-		// model picker stay closed, because both reattach the client to a
-		// different session rather than feed this turn.
-		if m.session.AgentKind != contracts.SidecarLoopAgent {
-			switch key {
-			case "ctrl+o", "ctrl+m":
-				return m, nil
-			}
+		// queued by the session and served next. The model picker stays closed
+		// while that turn runs.
+		if m.session.AgentKind != contracts.SidecarLoopAgent && key == "ctrl+m" {
+			return m, nil
 		}
-	}
-	if key == "ctrl+o" {
-		m.modal = loadingModal("Loading sessions")
-		return m, listSessionsCmd(m.ctx, m.client)
 	}
 	if key == "ctrl+m" {
 		if m.session.AgentKind == contracts.SidecarLoopAgent {
@@ -796,7 +830,14 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.modal.move(-1)
 	case "esc":
 		if !m.modal.required {
+			if m.modal.kind == modalSessions {
+				return m.resumeSessionFromList()
+			}
 			m.modal = nil
+			m.reflow()
+			if m.session.ID != uuid.Nil && m.sessionCancel == nil {
+				return m.startSessionObserver(m.session.ID)
+			}
 		}
 	case "enter":
 		return m.activateModal(m.modal.selected)
@@ -813,6 +854,15 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
+func (m *chatModel) resumeSessionFromList() tea.Cmd {
+	m.modal = nil
+	m.reflow()
+	if m.session.ID != uuid.Nil {
+		return m.startSessionObserver(m.session.ID)
+	}
+	return nil
+}
+
 func (m *chatModel) activateModal(index int) tea.Cmd {
 	if m.modal == nil || index < 0 || index >= len(m.modal.options) {
 		return nil
@@ -823,6 +873,9 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 		if option.session == uuid.Nil {
 			m.modal = loadingModal("Loading models")
 			return listProvidersCmd(m.ctx, m.client, false)
+		}
+		if option.session == m.session.ID {
+			return m.resumeSessionFromList()
 		}
 		m.modal = loadingModal("Opening session")
 		return loadSessionCmd(m.ctx, m.client, option.session)
@@ -841,6 +894,10 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 		}
 	case modalNotice:
 		m.modal = nil
+		m.reflow()
+		if m.session.ID != uuid.Nil && m.sessionCancel == nil {
+			return m.startSessionObserver(m.session.ID)
+		}
 	}
 	return nil
 }
@@ -910,6 +967,22 @@ func cancelTurnCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
 	return func() tea.Msg {
 		return turnCanceledMsg{err: client.CancelTurn(ctx, id)}
 	}
+}
+
+func (m *chatModel) openSessionList() {
+	if m.sessionCancel != nil {
+		m.sessionCancel()
+		m.sessionCancel = nil
+	}
+	m.sessionObserverID++
+	m.sessionStream = nil
+	if m.cancelArmed {
+		m.workStatus = m.cancelStatus
+	}
+	m.cancelArmed = false
+	m.cancelStatus = ""
+	m.modal = loadingModal("Loading sessions")
+	m.reflow()
 }
 
 func (m *chatModel) startSessionObserver(sessionID uuid.UUID) tea.Cmd {
@@ -1245,7 +1318,7 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		m.modal = loadingModal("Loading models")
 		return listProvidersCmd(m.ctx, m.client, true)
 	case "/sessions":
-		m.modal = loadingModal("Loading sessions")
+		m.openSessionList()
 		return listSessionsCmd(m.ctx, m.client)
 	case "/new":
 		m.modal = loadingModal("Loading models")
@@ -2245,6 +2318,11 @@ func (m *chatModel) applySessionAction(msg sessionActionedMsg) {
 	}
 
 	if msg.action == "close" {
+		if msg.id == m.session.ID {
+			m.session = store.SessionMeta{}
+			m.client.SetSession(uuid.Nil)
+			m.reflow()
+		}
 		if !sessionConcluded(m.modal.options[index].sessionStatus) {
 			m.modal.options[index].sessionStatus = contracts.SessionTombstone
 		}
@@ -2256,6 +2334,7 @@ func (m *chatModel) applySessionAction(msg sessionActionedMsg) {
 	if msg.id == m.session.ID {
 		m.session = store.SessionMeta{}
 		m.client.SetSession(uuid.Nil)
+		m.reflow()
 	}
 	m.modal.options = append(m.modal.options[:index], m.modal.options[index+1:]...)
 	numberSessionOptions(m.modal.options)
