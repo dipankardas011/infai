@@ -659,6 +659,24 @@ func (e *InfaiAgentEngine) closeSessionTree(id uuid.UUID) {
 // DeleteSession closes the session when it is resident, then removes its
 // timeline and metadata from disk. A saved session has nothing to close.
 func (e *InfaiAgentEngine) DeleteSession(id uuid.UUID) error {
+	if m, loadErr := e.sessionStore.LoadMeta(id); loadErr != nil {
+		return harnessErr.ErrSessionNotFound
+	} else {
+		if m.ParentID != uuid.Nil {
+			return fmt.Errorf("%w: only sessions with no parents can be commanded for deletion rest of its offsprings gets deleted along with it", harnessErr.ErrInvalidInput)
+		}
+		for _, offspring := range m.Offsprings {
+			if err := e.deleteSession(offspring); err != nil {
+				e.bgLogger.Error("session deleted failed", "session_id", id, "err", err)
+				return err
+			}
+		}
+	}
+
+	return e.deleteSession(id)
+}
+
+func (e *InfaiAgentEngine) deleteSession(id uuid.UUID) error {
 	switch err := e.CloseSession(id); {
 	case err == nil:
 	case errors.Is(err, harnessErr.ErrSessionNotFound):

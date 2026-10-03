@@ -1079,7 +1079,7 @@ func TestSessionListDeletesOnlyAfterASecondKey(t *testing.T) {
 		t.Fatalf("first d left pendingDelete=%v, want %v", m.modal.pendingDelete, id)
 	}
 	armed := ansi.Strip(m.View().Content)
-	for _, want := range []string{"delete?", "press d again to delete this session"} {
+	for _, want := range []string{"delete?", "press d again to permanently delete this session and its sidecars", "active work stops"} {
 		if !strings.Contains(armed, want) {
 			t.Fatalf("armed list lacks %q:\n%s", want, armed)
 		}
@@ -1129,6 +1129,36 @@ func TestSessionListAnyOtherKeyCancelsAnArmedDelete(t *testing.T) {
 	_, cmd = m.Update(tea.KeyPressMsg(tea.Key{Code: 'd', Text: "d"}))
 	if cmd != nil {
 		t.Fatal("an armed delete survived the close that answered it")
+	}
+}
+
+func TestDeleteRefreshesSessionsFromServer(t *testing.T) {
+	parent, child, other := uuid.New(), uuid.New(), uuid.New()
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{
+		{ID: parent, Name: "caller"},
+		{ID: child, ParentID: parent, Name: "sidecar"},
+		{ID: other, Name: "other"},
+	}, false)
+	_, cmd := m.Update(sessionActionedMsg{action: "delete", id: parent})
+	if cmd == nil {
+		t.Fatal("successful delete did not request refreshed sessions")
+	}
+	if _, ok := cmd().(sessionsListedMsg); !ok {
+		t.Fatal("delete did not call ListSessions")
+	}
+	_, _ = m.Update(sessionsListedMsg{sessions: []contracts.SessionSummary{{ID: other, Name: "other"}}})
+	if len(m.modal.options) != 2 || m.modal.options[1].session != other {
+		t.Fatalf("stale offspring remained in refreshed list: %+v", m.modal.options)
+	}
+}
+
+func TestFailedDeleteDoesNotRefreshSessions(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{{ID: uuid.New(), Name: "saved"}}, false)
+	_, cmd := m.Update(sessionActionedMsg{action: "delete", err: fmt.Errorf("failed")})
+	if cmd != nil || m.modal == nil || m.modal.kind != modalNotice {
+		t.Fatal("failed delete should show error without refreshing")
 	}
 }
 

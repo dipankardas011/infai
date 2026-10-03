@@ -289,7 +289,7 @@ func renderSessionWorkspace(m *modalModel, width, height int, styles harnessStyl
 			styles.screenBody.Render("Start fresh, inspect active work, or resume a saved session."))
 	footerText := "n new  ·  ↑/↓ navigate sessions  ·  enter open  ·  c close  ·  d delete"
 	if m.pendingDelete != uuid.Nil {
-		footerText = "press d again to delete this session  ·  any other key cancels"
+		footerText = "press d again to permanently delete this session and its sidecars  ·  active work stops  ·  any other key cancels"
 	}
 	if !m.required {
 		footerText += "  ·  esc back"

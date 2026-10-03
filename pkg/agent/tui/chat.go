@@ -413,6 +413,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.applySessionAction(msg)
+		if msg.action == "delete" && m.modal != nil && m.modal.kind == modalSessions {
+			return m, listSessionsCmd(m.ctx, m.client)
+		}
 		return m, nil
 	case providersListedMsg:
 		if msg.err != nil {
