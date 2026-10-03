@@ -312,7 +312,6 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 				messages = append(messages, contracts.NewUserMessage(fmt.Sprintf("evaluation status: FAIL => %v", err.Error())))
 				lastEvalResPass = false
 			} else {
-				messages = append(messages, contracts.NewUserMessage("evaluation status: PASS"))
 				lastEvalResPass = true
 			}
 		}
