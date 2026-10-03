@@ -30,6 +30,9 @@ import (
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
+// block is one entry in the transcript. A tool call is a single block: the call's
+// own preview, then the result that answers it, once it lands — toolDetail holds
+// what came back, and the block's marker carries how it ended.
 type block struct {
 	role          string
 	text          string
@@ -38,6 +41,7 @@ type block struct {
 	toolStatus    string
 	toolName      string
 	toolArgs      string
+	toolDetail    string
 	rendered      string
 	renderedWidth int
 	renderedLines int
@@ -93,8 +97,11 @@ type chatModel struct {
 	initCmd           tea.Cmd
 	streaming         bool
 	streamingAt       int
-	toolCallNames     map[string]string
-	skillNames        map[string]string
+	// toolCallBlocks is where each call's block is, so the result that answers it
+	// can be folded into it. A call with no block of its own — a skill load —
+	// maps to -1.
+	toolCallBlocks map[string]int
+	skillNames     map[string]string
 }
 
 type sessionViewMsg struct {
@@ -210,14 +217,14 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 	view.Style = lipgloss.NewStyle().Padding(0, 1)
 
 	m := &chatModel{
-		ctx:           ctx,
-		client:        client,
-		styles:        newHarnessStyles(),
-		viewport:      view,
-		composer:      input,
-		clipboard:     defaultClipboard(),
-		toolCallNames: make(map[string]string),
-		skillNames:    make(map[string]string),
+		ctx:            ctx,
+		client:         client,
+		styles:         newHarnessStyles(),
+		viewport:       view,
+		composer:       input,
+		clipboard:      defaultClipboard(),
+		toolCallBlocks: make(map[string]int),
+		skillNames:     make(map[string]string),
 	}
 	if opts.SessionID != uuid.Nil {
 		m.modal = loadingModal("Opening session")
@@ -292,7 +299,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.workBegan = time.Time{}
 		m.status = contracts.SessionIdle
 		m.working = false
-		m.toolCallNames = make(map[string]string)
+		m.toolCallBlocks = make(map[string]int)
 		m.skillNames = make(map[string]string)
 		m.applySessionView(msg.view)
 		m.refreshTranscript(true)
@@ -391,7 +398,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.stopStreaming()
 		m.commandMenu = false
 		m.filePicker = nil
-		m.toolCallNames = make(map[string]string)
+		m.toolCallBlocks = make(map[string]int)
 		m.skillNames = make(map[string]string)
 		m.client.SetSession(msg.output.ID)
 		m.blocks = blocksFromRecords(msg.records)
@@ -443,7 +450,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.stopStreaming()
 		m.commandMenu = false
 		m.filePicker = nil
-		m.toolCallNames = make(map[string]string)
+		m.toolCallBlocks = make(map[string]int)
 		m.skillNames = make(map[string]string)
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
@@ -1077,12 +1084,13 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 	case contracts.EventToolCall:
 		if event.ToolCall != nil {
 			name := string(event.ToolCall.Function.Name)
-			m.toolCallNames[event.ToolCall.ID] = name
+			block := -1
 			if isSkillTool(name) {
 				m.skillNames[event.ToolCall.ID] = skillNameFromCall(*event.ToolCall)
-				break
+			} else {
+				block = m.appendToolEvent("call", contracts.ToolCallDisplay(*event.ToolCall))
 			}
-			m.appendToolEvent("call", contracts.ToolCallDisplay(*event.ToolCall))
+			m.toolCallBlocks[event.ToolCall.ID] = block
 		} else {
 			m.appendToolEvent("call", content)
 		}
@@ -1094,13 +1102,7 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 		if isSkillTool(string(event.ToolResult.CallName)) {
 			break
 		}
-		result := string(event.ToolResult.CallName) + " [" + string(event.ToolResult.Status) + "]"
-		if event.ToolResult.Error != "" {
-			result += ": " + event.ToolResult.Error
-		} else if event.ToolResult.Output != "" {
-			result += "\n" + event.ToolResult.Output
-		}
-		m.appendToolEvent("result", result)
+		m.applyToolResult(event.ToolResult.CallID, string(event.ToolResult.CallName), string(event.ToolResult.Status), event.ToolResult.Output, event.ToolResult.Error)
 	case contracts.EventToolTaskCheckList:
 		if event.ToolResult != nil {
 			if state, err := decodeTaskChecklist(event.ToolResult.Output); err == nil {
@@ -1724,33 +1726,125 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	case "skill":
 		content = renderChatMarker("✦", m.styles.skill, m.styles.skill, entry.text, width)
 	case "tool":
-		marker := "▲"
-		markerStyle := m.styles.system
-		if entry.toolName == string(contracts.SpawnSidecarLoopTool) || entry.toolName == string(contracts.SpawnBackgroundSidecarLoopTool) {
-			marker = "↗"
-			markerStyle = m.styles.agentSidecar
-		}
-		if entry.toolKind == "result" {
-			marker = "▼"
-			markerStyle = m.styles.active
-			if entry.toolName == string(contracts.SpawnSidecarLoopTool) || entry.toolName == string(contracts.SpawnBackgroundSidecarLoopTool) {
-				marker = "↙"
-				markerStyle = m.styles.agentSidecar
-			}
-			if entry.toolStatus != "success" {
-				markerStyle = m.styles.error
-			}
-		}
-		switch {
-		case entry.toolKind == "call" && entry.toolName == string(contracts.EditTool) && entry.toolArgs != "":
-			content = renderEditDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
-		case entry.toolKind == "call" && entry.toolName == string(contracts.WriteTool) && entry.toolArgs != "":
-			content = renderWriteDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
-		default:
-			content = renderToolMarker(marker, markerStyle, m.styles.tool, entry.toolName, entry.text, width)
-		}
+		content = m.renderToolBlock(entry, width)
 	}
 	return content
+}
+
+// renderToolBlock draws one tool call: the call's own preview, then whatever its
+// result adds beneath it. The transcript keeps a single block per call — the
+// marker carries the outcome, so a result never gets a block of its own.
+func (m *chatModel) renderToolBlock(entry *block, width int) string {
+	marker, markerStyle := m.toolMarker(entry)
+	var content string
+	switch {
+	case entry.toolKind == "call" && entry.toolName == string(contracts.EditTool) && entry.toolArgs != "":
+		content = renderEditDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
+	case entry.toolKind == "call" && entry.toolName == string(contracts.WriteTool) && entry.toolArgs != "":
+		content = renderWriteDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
+	case entry.toolKind == "call" && entry.toolName == string(contracts.BashTool) && entry.toolArgs != "":
+		content = renderBashCall(marker, markerStyle, m.styles, entry.toolArgs, width)
+	default:
+		content = renderToolMarker(marker, markerStyle, m.styles.tool, entry.toolName, entry.text, width)
+	}
+	return content + m.renderToolResult(entry, width)
+}
+
+// renderToolResult draws what a call produced, directly under it: the call is the
+// request and its output follows. A call that failed writes its result in the
+// failure colour, so a failure reads as one without a second pyramid saying so.
+func (m *chatModel) renderToolResult(entry *block, width int) string {
+	detail := strings.TrimRight(entry.toolDetail, "\n")
+	if detail == "" {
+		return ""
+	}
+	marker, _ := m.toolMarker(entry)
+	indent := lipgloss.Width(marker) + 1
+	style := m.styles.tool
+	if entry.toolStatus != "" && entry.toolStatus != string(contracts.ToolExecutionSuccess) {
+		style = m.styles.error
+	}
+	lines := strings.Split(lipgloss.Wrap(detail, max(width-indent, 1), ""), "\n")
+	for i := range lines {
+		lines[i] = strings.Repeat(" ", indent) + style.Render(lines[i])
+	}
+	return "\n" + strings.Join(lines, "\n")
+}
+
+// renderBashCall draws a bash call as the command it runs: the working directory
+// and timeout it was given, then the script itself with the shell's prompt, lit
+// by the bash lexer. The command is bash; the output is not — it is whatever the
+// command printed — so the output stays plain text.
+func renderBashCall(marker string, markerStyle lipgloss.Style, styles harnessStyles, args string, width int) string {
+	var input struct {
+		Command string `json:"command"`
+		Workdir string `json:"workdir"`
+		Timeout *int   `json:"timeout"`
+	}
+	if err := json.Unmarshal([]byte(args), &input); err != nil || input.Command == "" {
+		return renderToolMarker(marker, markerStyle, styles.tool, string(contracts.BashTool), prettyToolArguments(args), width)
+	}
+	const prompt = "$ "
+	indent := lipgloss.Width(marker) + 1
+	head := markerStyle.Render(marker) + " " + markerStyle.Bold(true).Render(string(contracts.BashTool))
+	if input.Workdir != "" {
+		head += styles.muted.Render("  cwd " + input.Workdir)
+	}
+	if input.Timeout != nil {
+		head += styles.muted.Render(fmt.Sprintf("  timeout %ds", *input.Timeout))
+	}
+	// The script is wrapped short of the prompt it is drawn behind.
+	return head + "\n" + indentBlock(bashCallScript(input.Command, max(width-indent-lipgloss.Width(prompt), 1), styles), indent)
+}
+
+// bashCallScript renders a command the way the approval pane renders it, with a
+// prompt on the first line: the same script has to read the same wherever it is
+// shown.
+func bashCallScript(command string, width int, styles harnessStyles) string {
+	prompt := styles.muted.Render("$ ")
+	lines := strings.Split(renderApprovalScript(command, width, styles), "\n")
+	lines[0] = prompt + lines[0]
+	for i := 1; i < len(lines); i++ {
+		lines[i] = strings.Repeat(" ", lipgloss.Width(prompt)) + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// indentBlock shifts every line of a rendered block right, so it hangs under the
+// marker it belongs to.
+func indentBlock(text string, indent int) string {
+	pad := strings.Repeat(" ", indent)
+	lines := strings.Split(text, "\n")
+	for i := range lines {
+		lines[i] = pad + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// toolMarker is the pyramid a tool block carries. Its shape says which tool ran;
+// its colour says how the call ended — green for one that worked, red for one
+// that failed, neutral while it is still running.
+func (m *chatModel) toolMarker(entry *block) (string, lipgloss.Style) {
+	if isSidecarTool(entry.toolName) {
+		// A sidecar keeps its own colour: which child this was stays readable
+		// apart from which tool ran. A failure is still a failure.
+		if entry.toolStatus != "" && entry.toolStatus != string(contracts.ToolExecutionSuccess) {
+			return "↗", m.styles.error
+		}
+		return "↗", m.styles.agentSidecar
+	}
+	switch entry.toolStatus {
+	case string(contracts.ToolExecutionSuccess):
+		return "▲", m.styles.active
+	case "":
+		return "▲", m.styles.system
+	default:
+		return "▲", m.styles.error
+	}
+}
+
+func isSidecarTool(name string) bool {
+	return name == string(contracts.SpawnSidecarLoopTool) || name == string(contracts.SpawnBackgroundSidecarLoopTool)
 }
 
 func renderChatMarker(marker string, markerStyle, bodyStyle lipgloss.Style, text string, width int) string {
@@ -1768,6 +1862,9 @@ func renderChatMarker(marker string, markerStyle, bodyStyle lipgloss.Style, text
 	return strings.Join(lines, "\n")
 }
 
+// renderToolMarker draws a marker, the name of what it marks when there is one,
+// and the body under it: the body's first line rides the marker's line, and the
+// rest are indented beneath it, wrapped to the width.
 func renderToolMarker(marker string, markerStyle, bodyStyle lipgloss.Style, name, text string, width int) string {
 	detail := strings.TrimSpace(text)
 	if name != "" && (detail == name || strings.HasPrefix(detail, name+" ") || strings.HasPrefix(detail, name+"\n")) {
@@ -2750,31 +2847,54 @@ func (m *chatModel) stopStreaming() {
 	}
 }
 
-func (m *chatModel) appendToolEvent(kind, text string) {
+// appendToolEvent adds a tool block and reports where it landed, or -1 when the
+// event produced no block at all. A call is drawn from its arguments; a result
+// that arrived without its call is drawn on its own, from the text it carries.
+func (m *chatModel) appendToolEvent(kind, text string) int {
 	name := ""
 	if fields := strings.Fields(text); len(fields) > 0 {
 		name = fields[0]
 	}
 	if isChecklistTool(name) {
-		return
+		return -1
 	}
 	display, arguments := text, ""
 	if kind == "call" {
 		arguments = strings.TrimSpace(strings.TrimPrefix(text, name))
 		display = toolCallPreview(name, arguments)
 	}
-	status := ""
+	status, detail := "", ""
 	if kind == "result" {
+		display = ""
 		if parsedName, parsedStatus, output, resultErr, ok := parseToolResultEvent(text); ok {
 			name, status = parsedName, parsedStatus
-			if output != "" || resultErr != "" {
-				display = transcriptToolResultDisplay(name, status, output, resultErr)
-			}
+			detail = toolResultDetail(name, status, output, resultErr)
 		} else {
 			status = string(contracts.ToolExecutionError)
+			detail = text
 		}
 	}
-	m.blocks = append(m.blocks, block{role: "tool", text: display, toolKind: kind, toolStatus: status, toolName: name, toolArgs: arguments})
+	m.blocks = append(m.blocks, block{role: "tool", text: display, toolKind: kind, toolStatus: status, toolName: name, toolArgs: arguments, toolDetail: detail})
+	return len(m.blocks) - 1
+}
+
+// applyToolResult folds a tool result into the block of the call it answers. A
+// result whose call is not in the transcript — a timeline that does not reach
+// back to it — stands alone, because something did run.
+func (m *chatModel) applyToolResult(callID, name, status, output, resultErr string) {
+	detail := toolResultDetail(name, status, output, resultErr)
+	shown := displayStatus(name, status, output)
+	if at, ok := m.toolCallBlocks[callID]; ok && at >= 0 && at < len(m.blocks) {
+		entry := &m.blocks[at]
+		if name != "" {
+			entry.toolName = name
+		}
+		entry.toolStatus = shown
+		entry.toolDetail = detail
+		entry.renderedValid = false
+		return
+	}
+	m.blocks = append(m.blocks, block{role: "tool", toolKind: "result", toolName: name, toolStatus: shown, toolDetail: detail})
 }
 
 func parseToolResultEvent(text string) (name, status, output, resultErr string, ok bool) {
@@ -2895,8 +3015,13 @@ func selectBranchCmd(ctx context.Context, client Client, sessionID uuid.UUID, ev
 	}
 }
 
+// blocksFromRecords rebuilds a transcript from a saved timeline. A result is
+// folded into the block of the call it answers, the same way the live stream
+// folds it, so a resumed session reads exactly like the session that produced
+// it.
 func blocksFromRecords(records []store.Record) []block {
 	var blocks []block
+	callBlocks := make(map[string]int)
 	skillCallIDs := make(map[string]struct{})
 	toolCallNames := make(map[string]string)
 	for _, record := range records {
@@ -2941,17 +3066,31 @@ func blocksFromRecords(records []store.Record) []block {
 					if isChecklistTool(toolName) {
 						continue
 					}
+					callBlocks[call.ID] = len(blocks)
 					blocks = append(blocks, block{role: "tool", text: toolCallPreview(toolName, call.Function.Arguments), toolKind: "call", toolName: toolName, toolArgs: call.Function.Arguments})
 				}
 			case "tool":
 				toolName := toolCallNames[message.ToolCallID]
-				if _, skill := skillCallIDs[message.ToolCallID]; !skill && !isChecklistTool(toolName) {
-					status := string(message.Status)
-					if status == "" {
-						status = string(contracts.ToolExecutionSuccess)
-					}
-					blocks = append(blocks, block{role: "tool", text: transcriptToolResultDisplay(toolName, status, message.Text(), ""), toolKind: "result", toolStatus: status, toolName: toolName})
+				if _, skill := skillCallIDs[message.ToolCallID]; skill || isChecklistTool(toolName) {
+					continue
 				}
+				status := string(message.Status)
+				if status == "" {
+					status = string(contracts.ToolExecutionSuccess)
+				}
+				result := block{
+					role:       "tool",
+					toolKind:   "result",
+					toolName:   toolName,
+					toolStatus: displayStatus(toolName, status, message.Text()),
+					toolDetail: toolResultDetail(toolName, status, message.Text(), ""),
+				}
+				if index, ok := callBlocks[message.ToolCallID]; ok {
+					blocks[index].toolStatus = result.toolStatus
+					blocks[index].toolDetail = result.toolDetail
+					continue
+				}
+				blocks = append(blocks, result)
 			}
 		}
 	}
@@ -3016,66 +3155,69 @@ func toolCallDisplay(call contracts.ToolCall) string {
 	return string(call.Function.Name) + " " + call.Function.Arguments
 }
 
-func toolResultDisplay(status, output, resultErr string) string {
+// toolResultDetail is what a tool's result adds beneath its call. The marker
+// already says how the call ended, so the status is never repeated here.
+//
+// The tools whose result is the work show it: bash shows its exit code and
+// output, a sidecar shows what it answered. Everything else reports itself
+// through the marker alone — a file change is already drawn in the call's own
+// preview, and a search or a read has nothing to add to it. Anything that failed
+// says why, whatever it is.
+func toolResultDetail(name, status, output, resultErr string) string {
 	if resultErr != "" {
-		return status + ": " + resultErr
+		return resultErr
 	}
-	if output != "" {
-		return status + "\n" + output
+	if status != "" && status != string(contracts.ToolExecutionSuccess) {
+		return output
 	}
-	return status
+	switch contracts.ToolType(name) {
+	case contracts.BashTool:
+		return bashResultBody(output)
+	case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+		return strings.TrimRight(output, "\n")
+	}
+	return ""
 }
 
-func transcriptToolResultDisplay(name, status, output, resultErr string) string {
-	if name == string(contracts.BashTool) && resultErr == "" {
-		var result struct {
-			ExitCode  int    `json:"exit_code"`
-			Output    string `json:"output"`
-			Truncated bool   `json:"truncated"`
-			TimedOut  bool   `json:"timed_out"`
-		}
-		if json.Unmarshal([]byte(output), &result) == nil {
-			summary := fmt.Sprintf("%s · exit %d", status, result.ExitCode)
-			if result.TimedOut {
-				summary += " · timed out"
-			}
-			if result.Truncated {
-				summary += " · output truncated"
-			}
-			if result.Output != "" {
-				return summary + "\n" + result.Output
-			}
-			return summary
-		}
+// bashResultBody is a bash result without its status: the exit code, the flags
+// worth knowing, then the output itself.
+func bashResultBody(output string) string {
+	var result struct {
+		ExitCode  int    `json:"exit_code"`
+		Output    string `json:"output"`
+		Truncated bool   `json:"truncated"`
+		TimedOut  bool   `json:"timed_out"`
 	}
-	if name == string(contracts.EditTool) && resultErr == "" {
-		// The result is the count of replacements. Every match is reported, so
-		// a replace_all says how many places it changed.
-		var result struct {
-			Replacements int `json:"replacements"`
-		}
-		if json.Unmarshal([]byte(output), &result) == nil {
-			if result.Replacements == 1 {
-				return status + " · 1 replacement"
-			}
-			return fmt.Sprintf("%s · %d replacements", status, result.Replacements)
-		}
+	if json.Unmarshal([]byte(output), &result) != nil {
+		return strings.TrimRight(output, "\n")
 	}
-	if name != string(contracts.ReadTool) || status != string(contracts.ToolExecutionSuccess) || resultErr != "" {
-		return toolResultDisplay(status, output, resultErr)
+	summary := fmt.Sprintf("exit %d", result.ExitCode)
+	if result.TimedOut {
+		summary += " · timed out"
 	}
-	lines := 0
-	if output != "" {
-		lines = strings.Count(output, "\n")
-		if !strings.HasSuffix(output, "\n") {
-			lines++
-		}
+	if result.Truncated {
+		summary += " · output truncated"
 	}
-	lineLabel := "lines"
-	if lines == 1 {
-		lineLabel = "line"
+	if body := strings.TrimRight(result.Output, "\n"); body != "" {
+		return summary + "\n" + body
 	}
-	return fmt.Sprintf("%s · %d %s, %d bytes", status, lines, lineLabel, len([]byte(output)))
+	return summary
+}
+
+// displayStatus is the status the transcript colours a call by. A bash command
+// that exited nonzero is shown as failed even though the tool itself ran: the
+// exit code is the failure the reader is looking for.
+func displayStatus(name, status, output string) string {
+	if contracts.ToolType(name) != contracts.BashTool || status != string(contracts.ToolExecutionSuccess) {
+		return status
+	}
+	var result struct {
+		ExitCode int `json:"exit_code"`
+	}
+	if json.Unmarshal([]byte(output), &result) == nil && result.ExitCode != 0 {
+		return string(contracts.ToolExecutionError)
+	}
+	return status
 }
 
 type timelineTreeRow struct {

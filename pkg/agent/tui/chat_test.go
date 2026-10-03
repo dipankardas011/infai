@@ -658,19 +658,20 @@ func TestTranscriptUsesCompactRoleMarkers(t *testing.T) {
 		{role: "user", text: "question"},
 		{role: "thinking", text: "reasoning"},
 		{role: "skill", text: "green-software"},
-		{role: "tool", toolKind: "call", toolName: "search", text: `search {"path":"."}`},
-		{role: "tool", toolKind: "result", toolStatus: "success", toolName: "search", text: "search success"},
+		{role: "tool", toolKind: "call", toolName: "search", text: `search {"path":"."}`, toolStatus: "success"},
 		{role: "assistant", text: "answer"},
 	}
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
 
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"● question", "◌ reasoning", "✦ green-software", `▲ search {"path":"."}`, "▼ search success", "● answer"} {
+	for _, want := range []string{"● question", "◌ reasoning", "✦ green-software", `▲ search {"path":"."}`, "● answer"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("chat transcript does not contain %q", want)
 		}
 	}
-	for _, unwanted := range []string{"YOU", "THINKING", "Skill loaded:", "tool call:", "tool result:"} {
+	// One block per call: the result rides under the call it answers, so no
+	// result of its own is drawn.
+	for _, unwanted := range []string{"YOU", "THINKING", "Skill loaded:", "tool call:", "tool result:", "▼"} {
 		if strings.Contains(content, unwanted) {
 			t.Fatalf("chat transcript still contains %q", unwanted)
 		}
@@ -1886,67 +1887,238 @@ func TestBlocksFromRecordsShowsToolCallsAndResults(t *testing.T) {
 	}
 
 	blocks := blocksFromRecords(records)
-	if len(blocks) != 2 {
-		t.Fatalf("blocks=%d want 2: %#v", len(blocks), blocks)
+	if len(blocks) != 1 {
+		t.Fatalf("blocks=%d want 1: %#v", len(blocks), blocks)
 	}
 	if blocks[0].role != "tool" || blocks[0].text != "README.md" {
 		t.Fatalf("tool call block=%#v", blocks[0])
 	}
-	if blocks[1].role != "tool" || blocks[1].text != "success · 1 line, 19 bytes" {
-		t.Fatalf("tool result block=%#v", blocks[1])
+	if blocks[0].toolName != "read" || blocks[0].toolStatus != string(contracts.ToolExecutionSuccess) {
+		t.Fatalf("folded result=%#v, want a successful read", blocks[0])
 	}
-	if blocks[1].toolName != "read" {
-		t.Fatalf("tool result name=%q want read", blocks[1].toolName)
+	if blocks[0].toolDetail != "" {
+		t.Fatalf("a read that worked adds %q, want nothing", blocks[0].toolDetail)
 	}
 }
 
-func TestReadToolResultSummaryPreservesErrors(t *testing.T) {
-	if got := transcriptToolResultDisplay("edit", "success", `{"replacements":1}`, ""); got != "success · 1 replacement" {
-		t.Fatalf("edit result display = %q", got)
+// A bash call reads as the command and then its output, under one pyramid: the
+// command is the request, and what follows it is what came back.
+func TestToolBlockPutsTheOutputUnderTheCommand(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	entry := &block{
+		role:       "tool",
+		toolKind:   "call",
+		toolName:   string(contracts.BashTool),
+		toolArgs:   `{"command":"go test ./...","workdir":"scripts","timeout":30}`,
+		toolStatus: string(contracts.ToolExecutionSuccess),
+		toolDetail: "exit 1\n--- FAIL: TestThing",
 	}
-	if got := transcriptToolResultDisplay("edit", "success", `{"replacements":6}`, ""); got != "success · 6 replacements" {
-		t.Fatalf("replace-all result display = %q", got)
+
+	plain := ansi.Strip(m.renderToolBlock(entry, 80))
+	for _, want := range []string{"▲ bash  cwd scripts  timeout 30s", "$ go test ./...", "exit 1", "--- FAIL: TestThing"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("bash block lacks %q:\n%s", want, plain)
+		}
 	}
-	if got := transcriptToolResultDisplay("edit", "success", `{"replacements":1}`, ""); got == "success\n{\"replacements\":1}" {
-		t.Fatalf("edit result display still shows the raw result: %q", got)
+	if strings.Index(plain, "$ go test ./...") > strings.Index(plain, "exit 1") {
+		t.Fatalf("the output is drawn before the command it came from:\n%s", plain)
 	}
-	if got := transcriptToolResultDisplay("read", "success", "one\ntwo\n", ""); got != "success · 2 lines, 8 bytes" {
-		t.Fatalf("successful read summary=%q", got)
+	// One pyramid per call, carrying the outcome: a second marker on the output
+	// was the noise this replaced.
+	if strings.Contains(plain, "▼") || strings.Contains(plain, "↙") {
+		t.Fatalf("the output carries a pyramid of its own:\n%s", plain)
 	}
-	if got := transcriptToolResultDisplay("read", "error", "", "permission denied"); got != "error: permission denied" {
-		t.Fatalf("read error=%q want full error", got)
+}
+
+// A failure is written in the failure colour, so a failed call reads as one
+// without a marker saying so.
+func TestToolBlockWritesAFailedResultInRed(t *testing.T) {
+	// '#e67e80' and '#859289' as the truecolor sequences the formatter writes.
+	const red, muted = "38;2;230;126;128", "38;2;133;146;137"
+
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	failed := &block{
+		role: "tool", toolKind: "call", toolName: string(contracts.BashTool),
+		toolArgs: `{"command":"go test ./..."}`, toolStatus: string(contracts.ToolExecutionError),
+		toolDetail: "exit 1\n--- FAIL: TestThing",
 	}
+	if line := rawToolLine(m.renderToolBlock(failed, 80), "FAIL"); !strings.Contains(line, red) {
+		t.Fatalf("a failed result is not red: %q", line)
+	}
+
+	worked := &block{
+		role: "tool", toolKind: "call", toolName: string(contracts.BashTool),
+		toolArgs: `{"command":"go test ./..."}`, toolStatus: string(contracts.ToolExecutionSuccess),
+		toolDetail: "exit 0\nok",
+	}
+	if line := rawToolLine(m.renderToolBlock(worked, 80), "ok"); !strings.Contains(line, muted) {
+		t.Fatalf("a result that worked is not in the body colour: %q", line)
+	}
+}
+
+// A call that has not answered yet shows the command alone: nothing follows it,
+// and the pyramid says the call is still running by staying neutral.
+func TestToolBlockShowsNothingAfterARunningCall(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	entry := &block{
+		role: "tool", toolKind: "call", toolName: string(contracts.BashTool),
+		toolArgs: `{"command":"sleep 60"}`,
+	}
+	plain := ansi.Strip(m.renderToolBlock(entry, 80))
+	if !strings.Contains(plain, "$ sleep 60") {
+		t.Fatalf("running bash call lacks its command:\n%s", plain)
+	}
+	if strings.Contains(plain, "exit ") {
+		t.Fatalf("running bash call shows a result:\n%s", plain)
+	}
+}
+
+// The command is bash, so it is lit by the bash lexer the approval pane uses. The
+// output is whatever the command printed — not bash — so it stays plain.
+func TestToolBlockHighlightsTheBashCommandOnly(t *testing.T) {
+	// '#a7c080', the colour a bash string literal gets, and '#83c092', the one a
+	// builtin gets, as the truecolor sequences the formatter writes.
+	const stringColor, builtinColor = "38;2;167;192;128", "38;2;131;192;146"
+
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	entry := &block{
+		role: "tool", toolKind: "call", toolName: string(contracts.BashTool),
+		toolArgs:   `{"command":"echo \"hi\" && ls -la"}`,
+		toolStatus: string(contracts.ToolExecutionSuccess),
+		toolDetail: "exit 0\ndone",
+	}
+
+	raw := m.renderToolBlock(entry, 80)
+	script, output := rawToolLine(raw, "ls -la"), rawToolLine(raw, "done")
+	if !strings.Contains(script, stringColor) || !strings.Contains(script, builtinColor) {
+		t.Fatalf("the command is not lit by the bash lexer: %q", script)
+	}
+	if strings.Contains(output, stringColor) || strings.Contains(output, builtinColor) {
+		t.Fatalf("the output is lit as bash: %q", output)
+	}
+}
+
+// rawToolLine is the first rendered line containing needle, with its escapes
+// intact: what a colour assertion needs.
+func rawToolLine(rendered, needle string) string {
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	return ""
+}
+
+// A result is folded under the call it answers, so what it contributes is a
+// body beside the marker rather than a block of its own. The marker carries the
+// status, so the body never repeats it.
+func TestToolResultDetailShowsWhatTheToolDid(t *testing.T) {
 	bashOutput := `{"exit_code":7,"output":"full output\n","truncated":true}`
-	if got := transcriptToolResultDisplay("bash", "success", bashOutput, ""); got != "success · exit 7 · output truncated\nfull output\n" {
-		t.Fatalf("bash result=%q", got)
+	tests := []struct {
+		name      string
+		tool      contracts.ToolType
+		status    contracts.ToolExecutionStatus
+		output    string
+		resultErr string
+		want      string
+	}{
+		{
+			name: "bash shows its exit code and output", tool: contracts.BashTool, status: contracts.ToolExecutionSuccess,
+			output: bashOutput, want: "exit 7 · output truncated\nfull output",
+		},
+		{
+			name: "bash without a structured result keeps its text", tool: contracts.BashTool, status: contracts.ToolExecutionSuccess,
+			output: "legacy output", want: "legacy output",
+		},
+		{
+			name: "a read that worked adds nothing", tool: contracts.ReadTool, status: contracts.ToolExecutionSuccess,
+			output: "one\ntwo\n", want: "",
+		},
+		{
+			name: "a search that worked adds nothing", tool: contracts.SearchTool, status: contracts.ToolExecutionSuccess,
+			output: `[{"path":"main.go","line":3}]`, want: "",
+		},
+		{
+			name: "an edit that worked adds nothing", tool: contracts.EditTool, status: contracts.ToolExecutionSuccess,
+			output: `{"replacements":1}`, want: "",
+		},
+		{
+			name: "a write that worked adds nothing", tool: contracts.WriteTool, status: contracts.ToolExecutionSuccess,
+			output: `{"status":"written"}`, want: "",
+		},
+		{
+			name: "an edit that failed says why", tool: contracts.EditTool, status: contracts.ToolExecutionError,
+			resultErr: "old_string matched 2 times; use replace_all", want: "old_string matched 2 times; use replace_all",
+		},
+		{
+			name: "a read that failed says why", tool: contracts.ReadTool, status: contracts.ToolExecutionError,
+			resultErr: "permission denied", want: "permission denied",
+		},
+		{
+			name: "a denied call says so", tool: contracts.BashTool, status: contracts.ToolExecutionDenied,
+			resultErr: "tool execution was denied by session policy", want: "tool execution was denied by session policy",
+		},
 	}
-	if got := transcriptToolResultDisplay("bash", "success", "legacy output", ""); got != "success\nlegacy output" {
-		t.Fatalf("legacy bash result=%q", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := toolResultDetail(string(tt.tool), string(tt.status), tt.output, tt.resultErr); got != tt.want {
+				t.Fatalf("detail = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
+// A command that exited nonzero failed, whatever the tool's own status was: the
+// green pyramid has to mean the thing the reader ran worked.
+func TestDisplayStatusMarksNonzeroBashExitAsFailure(t *testing.T) {
+	if got := displayStatus(string(contracts.BashTool), string(contracts.ToolExecutionSuccess), `{"exit_code":1}`); got != string(contracts.ToolExecutionError) {
+		t.Fatalf("status = %q, want %q", got, contracts.ToolExecutionError)
+	}
+	if got := displayStatus(string(contracts.BashTool), string(contracts.ToolExecutionSuccess), `{"exit_code":0}`); got != string(contracts.ToolExecutionSuccess) {
+		t.Fatalf("status = %q, want %q", got, contracts.ToolExecutionSuccess)
+	}
+	if got := displayStatus(string(contracts.EditTool), string(contracts.ToolExecutionSuccess), `{"replacements":1}`); got != string(contracts.ToolExecutionSuccess) {
+		t.Fatalf("status = %q, want %q", got, contracts.ToolExecutionSuccess)
+	}
+}
+
+// A session that is live and the same session rebuilt from its timeline have to
+// read alike: the result is folded into the call in both.
 func TestLiveAndResumedBashResultsMatch(t *testing.T) {
 	payload := `{"exit_code":7,"output":"full output\n","truncated":true}`
+	call := contracts.ToolCall{ID: "call-1", Type: "function", Function: contracts.Function{
+		Name: contracts.BashTool, Arguments: `{"command":"make test"}`,
+	}}
+
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
-	m.appendDelta(contracts.EventToolResult, "bash [success]\n"+payload)
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventToolCall, ToolCall: &call})
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventToolResult, ToolResult: &contracts.ToolExecutionResult{
+		Status: contracts.ToolExecutionSuccess, CallID: call.ID, CallName: contracts.BashTool, Output: payload,
+	}})
 	if len(m.blocks) != 1 {
-		t.Fatalf("live blocks=%d", len(m.blocks))
+		t.Fatalf("live blocks=%d want 1", len(m.blocks))
 	}
 
-	call := contracts.ToolCall{ID: "call-1", Type: "function", Function: contracts.Function{Name: contracts.BashTool}}
 	toolMessage := contracts.NewToolMessage(call.ID, payload, contracts.ToolExecutionSuccess)
 	resumed := blocksFromRecords([]store.Record{
 		{Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}}},
 		{Kind: store.KindMessage, Message: &toolMessage},
 	})
-	if len(resumed) != 2 {
-		t.Fatalf("resumed blocks=%d", len(resumed))
+	if len(resumed) != 1 {
+		t.Fatalf("resumed blocks=%d want 1", len(resumed))
 	}
-	if m.blocks[0].text != resumed[1].text {
-		t.Fatalf("live result %q != resumed result %q", m.blocks[0].text, resumed[1].text)
+
+	if m.blocks[0].toolDetail != resumed[0].toolDetail {
+		t.Fatalf("live detail %q != resumed detail %q", m.blocks[0].toolDetail, resumed[0].toolDetail)
 	}
-	if !strings.Contains(m.blocks[0].text, "full output") {
-		t.Fatalf("live result omits bash output: %q", m.blocks[0].text)
+	if m.blocks[0].toolStatus != resumed[0].toolStatus {
+		t.Fatalf("live status %q != resumed status %q", m.blocks[0].toolStatus, resumed[0].toolStatus)
+	}
+	if !strings.Contains(m.blocks[0].toolDetail, "exit 7") || !strings.Contains(m.blocks[0].toolDetail, "full output") {
+		t.Fatalf("bash detail = %q, want the exit code and the output", m.blocks[0].toolDetail)
+	}
+	if m.blocks[0].toolStatus != string(contracts.ToolExecutionError) {
+		t.Fatalf("status = %q, want a failed command to read as failed", m.blocks[0].toolStatus)
 	}
 }
 
