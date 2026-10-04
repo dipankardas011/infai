@@ -494,6 +494,63 @@ func TestSessionRowShowsParentBelowSidecarName(t *testing.T) {
 	}
 }
 
+func TestArrowKeysNavigateRelatedSessionsAcrossHITL(t *testing.T) {
+	parentID, firstChild, secondChild := uuid.New(), uuid.New(), uuid.New()
+	client := &navigationChatClient{}
+	m := newChatModel(context.Background(), client, nil, RunOptions{})
+	m.modal = nil
+	m.width = 100
+	m.session = store.SessionMeta{ID: uuid.New(), ParentID: parentID, Name: "worker"}
+	m.parentName = "Orchestrator"
+	m.parentAgentKind = contracts.InteractiveAgent
+	m.sidecars = []contracts.SidecarStatus{{ID: firstChild, Name: "first"}, {ID: secondChild, Name: "second"}}
+	m.composer.SetValue("draft")
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	if m.relatedSessionSelection != uuid.Nil {
+		t.Fatal("relationship navigation stole an arrow from a non-empty composer")
+	}
+
+	m.approval = &Approval{}
+	m.composer.SetValue("draft preserved while approval is pending")
+
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	if m.relatedSessionSelection != parentID {
+		t.Fatalf("first down selected %s, want parent %s", m.relatedSessionSelection, parentID)
+	}
+	highlighted := m.parentRowView()
+	m.relatedSessionSelection = uuid.Nil
+	plain := m.parentRowView()
+	if highlighted == plain || ansi.Strip(highlighted) != ansi.Strip(plain) {
+		t.Fatal("selected parent row did not receive a presentation-only highlight")
+	}
+
+	m.relatedSessionSelection = parentID
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	if m.relatedSessionSelection != firstChild {
+		t.Fatalf("second down selected %s, want first child %s", m.relatedSessionSelection, firstChild)
+	}
+	highlighted = m.sidecarRowsView()
+	m.relatedSessionSelection = uuid.Nil
+	plain = m.sidecarRowsView()
+	if highlighted == plain || ansi.Strip(highlighted) != ansi.Strip(plain) {
+		t.Fatal("selected sidecar row did not receive a presentation-only highlight")
+	}
+	m.relatedSessionSelection = firstChild
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
+	if m.relatedSessionSelection != parentID {
+		t.Fatalf("up selected %s, want parent %s", m.relatedSessionSelection, parentID)
+	}
+
+	_, cmd := m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd == nil {
+		t.Fatal("enter did not open the selected parent")
+	}
+	_ = cmd()
+	if client.opened != parentID {
+		t.Fatalf("opened session = %s, want parent %s", client.opened, parentID)
+	}
+}
+
 // A caller that delegated lists its children under its own row, each with the
 // marks the session list uses, so the caller shows what a sidecar is doing
 // without the reader joining it.
@@ -2694,6 +2751,16 @@ func TestSessionLoadClearsPendingAttachments(t *testing.T) {
 	if m.pending != nil {
 		t.Fatalf("pending survived session load: %+v", m.pending)
 	}
+}
+
+type navigationChatClient struct {
+	stubChatClient
+	opened uuid.UUID
+}
+
+func (c *navigationChatClient) LoadSession(_ context.Context, id uuid.UUID) (*glue.SessionOutput, error) {
+	c.opened = id
+	return &glue.SessionOutput{SessionMeta: store.SessionMeta{ID: id}}, nil
 }
 
 type parentIdentityChatClient struct {

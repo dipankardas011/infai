@@ -75,21 +75,22 @@ type chatModel struct {
 	checklist contracts.TaskChecklistState
 	status    contracts.SessionStatus
 	// sidecars is the latest status reported by each session this one
-	sidecars         []contracts.SidecarStatus
-	sidecarsSession  uuid.UUID
-	approval         *Approval
-	approvalShown    bool
-	composerWaiting  bool
-	approvalReason   bool
-	approvalDraft    string
-	tailKey          tailKey
-	tailRendered     string
-	tailLines        int
-	tailValid        bool
-	modal            *modalModel
-	commandMenu      bool
-	commandSelection int
-	filePicker       *filePicker
+	sidecars                []contracts.SidecarStatus
+	sidecarsSession         uuid.UUID
+	relatedSessionSelection uuid.UUID
+	approval                *Approval
+	approvalShown           bool
+	composerWaiting         bool
+	approvalReason          bool
+	approvalDraft           string
+	tailKey                 tailKey
+	tailRendered            string
+	tailLines               int
+	tailValid               bool
+	modal                   *modalModel
+	commandMenu             bool
+	commandSelection        int
+	filePicker              *filePicker
 
 	working           bool
 	workBegan         time.Time
@@ -389,6 +390,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.session = msg.output.SessionMeta
 		m.parentName = msg.parentName
 		m.parentAgentKind = msg.parentAgentKind
+		m.relatedSessionSelection = uuid.Nil
 		m.used = 0
 		m.workStatus = ""
 		m.workBegan = time.Time{}
@@ -449,6 +451,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.session = msg.output.SessionMeta
 		m.parentName = ""
 		m.parentAgentKind = ""
+		m.relatedSessionSelection = uuid.Nil
 		m.workStatus = ""
 		m.workBegan = time.Time{}
 		m.working = false
@@ -597,6 +600,25 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+o" && m.modal == nil {
 		m.openSessionList()
 		return m, listSessionsCmd(m.ctx, m.client)
+	}
+	// Relationship navigation stays available even while HITL owns the rest of
+	// the keyboard. Menus with their own arrow navigation retain precedence.
+	if m.modal == nil && !m.commandMenu && m.filePicker == nil &&
+		(strings.TrimSpace(m.composer.Value()) == "" || (m.approval != nil && !m.approvalReason)) {
+		switch key {
+		case "up":
+			if m.moveRelatedSessionSelection(-1) {
+				return m, nil
+			}
+		case "down":
+			if m.moveRelatedSessionSelection(1) {
+				return m, nil
+			}
+		case "enter":
+			if m.relatedSessionSelection != uuid.Nil {
+				return m, m.openRelatedSession(m.relatedSessionSelection)
+			}
+		}
 	}
 	// A pending decision owns the keyboard: the turn is blocked until it is
 	// answered, so the composer is not accepting prompts anyway.
@@ -1033,6 +1055,60 @@ func cancelTurnCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
 	return func() tea.Msg {
 		return turnCanceledMsg{err: client.CancelTurn(ctx, id)}
 	}
+}
+
+func (m *chatModel) moveRelatedSessionSelection(delta int) bool {
+	ids := make([]uuid.UUID, 0, len(m.sidecars)+1)
+	if m.session.ParentID != uuid.Nil {
+		ids = append(ids, m.session.ParentID)
+	}
+	for _, sidecar := range m.sidecars {
+		if sidecar.ID != uuid.Nil && sidecar.ID != m.session.ID {
+			ids = append(ids, sidecar.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return false
+	}
+	selected := -1
+	for i, id := range ids {
+		if id == m.relatedSessionSelection {
+			selected = i
+			break
+		}
+	}
+	if selected == -1 {
+		if delta < 0 {
+			selected = len(ids) - 1
+		} else {
+			selected = 0
+		}
+	} else {
+		selected = (selected + delta + len(ids)) % len(ids)
+	}
+	m.relatedSessionSelection = ids[selected]
+	return true
+}
+
+func (m *chatModel) openRelatedSession(id uuid.UUID) tea.Cmd {
+	if id == uuid.Nil || id == m.session.ID {
+		return nil
+	}
+	if m.sessionCancel != nil {
+		m.sessionCancel()
+		m.sessionCancel = nil
+	}
+	m.sessionObserverID++
+	m.sessionStream = nil
+	if m.cancelArmed {
+		m.workStatus = m.cancelStatus
+	}
+	m.cancelArmed = false
+	m.cancelStatus = ""
+	m.relatedSessionSelection = uuid.Nil
+	m.modal = loadingModal("Opening session")
+	m.reflow()
+	return loadSessionCmd(m.ctx, m.client, id)
 }
 
 func (m *chatModel) openSessionList() {
@@ -1664,6 +1740,9 @@ func (m *chatModel) parentRowView() string {
 	}
 	name = truncateLine(name, inner-lipgloss.Width(treePrefix)-lipgloss.Width(kindPrefix))
 	gap := strings.Repeat(" ", max(inner-lipgloss.Width(treePrefix)-lipgloss.Width(kindPrefix)-lipgloss.Width(name), 0))
+	if m.relatedSessionSelection == m.session.ParentID {
+		return " " + m.styles.screenSel.Width(inner).Render(treePrefix+kindPrefix+name+gap) + " "
+	}
 	return " " +
 		sessionTree(treePrefix, m.styles.statusRow.PaddingRight(0)) +
 		kindStyle.Render(kindPrefix) +
@@ -1747,6 +1826,10 @@ func (m *chatModel) sidecarRowsView() string {
 			name = truncateLine(name, nameRoom)
 		}
 		gap := strings.Repeat(" ", max(inner-lipgloss.Width(tree)-lipgloss.Width(kindPrefix)-lipgloss.Width(name)-lipgloss.Width(tail), 1))
+		if m.relatedSessionSelection == child.ID {
+			rows = append(rows, " "+m.styles.screenSel.Width(inner).Render(tree+kindPrefix+name+gap+tail)+" ")
+			continue
+		}
 
 		rows = append(rows, " "+
 			sessionTree(tree, treeRow)+
