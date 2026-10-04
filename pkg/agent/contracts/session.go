@@ -48,6 +48,31 @@ const (
 	SwarmAgent       AgentKind = "swarm"
 )
 
+// IsInConcludedState reports whether a status ends a session of the given kind, leaving
+// nothing to run. Which statuses conclude a session depends on the kind, because
+// it is what that kind can reach.
+func IsInConcludedState(kind AgentKind, status SessionStatus) bool {
+	type combo struct {
+		kind   AgentKind
+		status SessionStatus
+	}
+	o := combo{kind, status}
+	switch o {
+	case combo{SidecarLoopAgent, SessionMaxIterationExhausted},
+		combo{SidecarLoopAgent, SessionTombstone},
+		combo{SidecarLoopAgent, SessionCompleted},
+
+		combo{SingleLoopAgent, SessionTombstone},
+		combo{SingleLoopAgent, SessionCompleted},
+		combo{SingleLoopAgent, SessionMaxIterationExhausted},
+
+		combo{InteractiveAgent, SessionMaxIterationExhausted}:
+		return true
+	default:
+		return false
+	}
+}
+
 type AgentMailbox struct {
 	drainValve atomic.Bool
 	fillValve  atomic.Bool

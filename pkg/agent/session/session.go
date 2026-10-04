@@ -216,6 +216,14 @@ func newRuntimeSession(
 	if engineCtx == nil {
 		return nil, errors.New("session: engine context is required")
 	}
+
+	status := contracts.SessionIdle
+	concluded := false
+	if meta.Conclusion != nil && contracts.IsInConcludedState(meta.AgentKind, meta.Conclusion.Status) {
+		status = meta.Conclusion.Status
+		concluded = true
+	}
+
 	ctx, cancel := context.WithCancelCause(engineCtx)
 	s := &InfaiAgentSession{
 		l:                            l,
@@ -225,7 +233,7 @@ func newRuntimeSession(
 		userCancellation:             make(chan struct{}, 1),
 		pendingBackgroundSidecarLoop: make(map[uuid.UUID]struct{}),
 		meta:                         meta,
-		status:                       contracts.SessionIdle,
+		status:                       status,
 		model:                        model,
 		timeline:                     timeline,
 		store:                        sessionStore,
@@ -313,9 +321,11 @@ func newRuntimeSession(
 	s.wg.Go(func() {
 		s.handlerForSessionEvents(s.ctx)
 	})
-	s.wg.Go(func() {
-		s.agent.StartLoop(s.ctx, s.activeTimeline)
-	})
+	if !concluded {
+		s.wg.Go(func() {
+			s.agent.StartLoop(s.ctx, s.activeTimeline)
+		})
+	}
 	switch s.meta.AgentKind {
 	case contracts.InteractiveAgent:
 		s.wg.Go(func() {
@@ -371,6 +381,10 @@ func (s *InfaiAgentSession) ViewTimeline() ([]store.Event, uuid.UUID, error) {
 
 func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) (contracts.TaskChecklistState, error) {
 	s.mu.Lock()
+	if s.meta.AgentKind == contracts.SidecarLoopAgent {
+		s.mu.Unlock()
+		return contracts.TaskChecklistState{}, errors.New("sidecar_loop sessions cannot select a branch")
+	}
 	if s.status != contracts.SessionIdle {
 		s.mu.Unlock()
 		return contracts.TaskChecklistState{}, fmt.Errorf("session must be idle before selecting a branch")
@@ -613,24 +627,16 @@ func (s *InfaiAgentSession) summaryMessageFromSidecarLoop() string {
 }
 
 // moveStatusLocked is how an event moves the session's status. It is the only
-// writer while the session is live, so the rule lives here instead of in every
-// reader: a status a session has concluded on is final, and an event still
-// unwinding during teardown must not revive the session it just concluded.
-//
-// A delegated session is done on any of the concluding statuses, not only the
-// tombstone: once it reports completed or exhausted, its caller has the result
-// and must not watch the row flip back off it.
+// writer while the session is live, so the rule lives in contracts.IsInConcludedState
+// rather than in each reader: a status a session has concluded on is final, and
+// an event still unwinding during teardown must not revive the session it just
+// concluded. That is what keeps a delegated session's row off a status it has
+// already left.
 //
 // NOTE: The caller must hold s.mu.
 func (s *InfaiAgentSession) moveStatusLocked(status contracts.SessionStatus) {
-	switch s.meta.AgentKind {
-	case contracts.SingleLoopAgent, contracts.SidecarLoopAgent:
-		switch s.status {
-		case contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone:
-			return
-		default:
-		}
-	default:
+	if contracts.IsInConcludedState(s.meta.AgentKind, s.status) {
+		return
 	}
 	s.status = status
 }
@@ -639,10 +645,6 @@ func (s *InfaiAgentSession) moveStatusLocked(status contracts.SessionStatus) {
 // doing. A session the engine created for itself has no parent to tell. The
 // report carries the session's own identity and status, so the caller can show
 // the child without joining it: the parent fans each report out to its clients.
-//
-// A session that has been torn down makes no further reports: the tombstone it
-// went out with is the last word, and an event unwinding behind the close must
-// not walk it back.
 func (s *InfaiAgentSession) reportStatusToParent(status contracts.SessionStatus) {
 	s.mu.Lock()
 	parentID, id, name, kind := s.meta.ParentID, s.meta.ID, s.meta.Name, s.meta.AgentKind
@@ -834,10 +836,10 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			}
 			// Before the cancel: a report sent after it has no live session to
 			// carry it.
-			s.reportStatusToParent(contracts.SessionTombstone)
+			s.reportStatusToParent(status)
 			s.cancel(cause)
 
-			s.recordSessionConclusion(contracts.SessionTombstone, reason)
+			s.recordSessionConclusion(status, reason)
 
 		default:
 			s.l.Warn("session received an event no case handles so dropping it", "session_id", s.meta.ID, "kind", event.Kind)
