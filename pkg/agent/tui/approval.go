@@ -85,7 +85,7 @@ func (m *chatModel) resolveApproval(decision, reason string) tea.Cmd {
 	if reason != "" {
 		note += ": " + reason
 	}
-	m.blocks = append(m.blocks, block{role: "system", text: note})
+	m.blocks = append(m.blocks, block{role: "event", text: note})
 	m.refreshTranscript(true)
 	m.reflow()
 	return resolveApprovalCmd(m.ctx, m.client, approval, decision, reason)

@@ -372,7 +372,7 @@ func TestChecklistDeltaIsNotRenderedAsTranscriptText(t *testing.T) {
 	}
 }
 
-func TestChecklistUsesAQuietSeparatedPanel(t *testing.T) {
+func TestChecklistUsesAQuietInset(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.width = 80
 	m.checklist = contracts.TaskChecklistState{Items: []contracts.TaskChecklistItem{
@@ -382,10 +382,13 @@ func TestChecklistUsesAQuietSeparatedPanel(t *testing.T) {
 
 	rendered := m.checklistView()
 	plain := ansi.Strip(rendered)
-	for _, want := range []string{"│ Task Checklist 1/2 complete", "│ ✓ Done — verified", "│ ◐ Working — in progress"} {
+	for _, want := range []string{"Task Checklist 1/2 complete", "✓ Done — verified", "◐ Working — in progress"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("checklist lacks %q:\n%s", want, plain)
 		}
+	}
+	if strings.Contains(plain, "│") {
+		t.Fatalf("checklist retained a vertical border:\n%s", plain)
 	}
 	if !strings.Contains(rendered, m.styles.muted.Render("Done — verified")) {
 		t.Fatal("completed task text is not muted")
@@ -1784,8 +1787,14 @@ func TestApprovalKeysAnswerTheDecision(t *testing.T) {
 		t.Fatal("approval still pending after a denial")
 	}
 	last := m.blocks[len(m.blocks)-1]
+	if last.role != "event" {
+		t.Fatalf("approval transcript role = %q, want event", last.role)
+	}
 	if !strings.Contains(last.text, "deny_with_reason") || !strings.Contains(last.text, "delete only inside build") {
 		t.Fatalf("transcript recorded %q", last.text)
+	}
+	if rendered, want := m.renderBlock(&last, 80, false), m.styles.event.Width(80).Render("· "+last.text); rendered != want {
+		t.Fatal("approval event is not rendered with the event color")
 	}
 }
 
@@ -2259,6 +2268,7 @@ func TestTimelineRoleColors(t *testing.T) {
 		"user":        everforest.Blue,
 		"assistant":   everforest.Green,
 		"thinking":    everforest.Muted,
+		"event":       everforest.Orange,
 		"system":      everforest.Purple,
 		"tool_call":   everforest.Purple,
 		"tool_result": everforest.Orange,
@@ -2309,8 +2319,8 @@ func TestTimelineEventDisplaysClassifiesToolResultsByCall(t *testing.T) {
 	if displays := timelineEventDisplays(result("bash-1", `{"exit_code":0,"output":"hi"}`), toolNames); len(displays) != 1 || displays[0].role != "tool_result" {
 		t.Fatalf("bash exit status displays=%#v want one tool_result", displays)
 	}
-	if displays := timelineEventDisplays(result("check-1", "{}"), toolNames); len(displays) != 1 || displays[0].role != "system" {
-		t.Fatalf("checklist result displays=%#v want one system row", displays)
+	if displays := timelineEventDisplays(result("check-1", "{}"), toolNames); len(displays) != 1 || displays[0].role != "event" {
+		t.Fatalf("checklist result displays=%#v want one event row", displays)
 	}
 	if displays := timelineEventDisplays(result("check-1", "task_checklist add requires a title"), toolNames); displays != nil {
 		t.Fatalf("failed checklist result displays=%#v want none", displays)

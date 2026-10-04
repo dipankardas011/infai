@@ -491,7 +491,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.modalities = msg.output.Modalities
 			m.pending = nil
 			m.reflow()
-			m.blocks = append(m.blocks, block{role: "system", text: "Model switched to " + msg.output.Model + " @ " + msg.output.Provider})
+			m.blocks = append(m.blocks, block{role: "event", text: "Model switched to " + msg.output.Model + " @ " + msg.output.Provider})
 		}
 		m.modal = nil
 		m.refreshTranscript(true)
@@ -520,7 +520,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendError(msg.err)
 		} else {
 			m.checklist = msg.checklist
-			m.blocks = append(m.blocks, block{role: "system", text: branchSelectionLabel(msg.event)})
+			m.blocks = append(m.blocks, block{role: "event", text: branchSelectionLabel(msg.event)})
 		}
 		m.modal = nil
 		m.refreshTranscript(true)
@@ -536,7 +536,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendError(msg.err)
 		} else if msg.meta != nil {
 			m.session.Name = msg.meta.Name
-			m.blocks = append(m.blocks, block{role: "system", text: "Session renamed to " + msg.meta.Name})
+			m.blocks = append(m.blocks, block{role: "event", text: "Session renamed to " + msg.meta.Name})
 		}
 		m.refreshTranscript(true)
 		return m, nil
@@ -1633,16 +1633,11 @@ func (m *chatModel) attachmentsView() string {
 // turn state rather than chrome, so it sits with the transcript instead of
 // stacking on top of the input.
 func (m *chatModel) checklistView() string {
-	panel := lipgloss.NewStyle().
-		BorderLeft(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(everforest.SurfaceAlt).
-		PaddingLeft(1)
-	checklist := m.taskChecklistView(max(m.width-2-panel.GetHorizontalFrameSize(), 1))
+	checklist := m.taskChecklistView(max(m.width-2, 1))
 	if checklist == "" {
 		return ""
 	}
-	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, panel.Render(checklist))
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, checklist)
 }
 
 // sessionRowView is the row above the composer: which session this is, what
@@ -2012,8 +2007,10 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 		content = renderChatMarker("◌", m.styles.muted, lipgloss.NewStyle(), text, width)
 	case "error":
 		content = m.styles.error.Width(width).Render("ERROR  " + entry.text)
-	case "system", "status":
+	case "system":
 		content = m.styles.system.Width(width).Render("· " + entry.text)
+	case "event", "status":
+		content = m.styles.event.Width(width).Render("· " + entry.text)
 	case "compaction":
 		content = m.styles.thinking.Width(width).Render("CONTEXT COMPACTED")
 		if body := strings.Trim(m.renderThinkingMarkdown(entry.text, width), "\n"); body != "" {
@@ -3659,7 +3656,7 @@ func timelineEventDisplays(event TimelineEvent, toolNames map[string]string) []t
 				if _, err := decodeTaskChecklist(message.Text()); err != nil {
 					return nil
 				}
-				return []timelineDisplay{{role: "system", text: "task checklist updated"}}
+				return []timelineDisplay{{role: "event", text: "task checklist updated"}}
 			}
 			return []timelineDisplay{{role: "tool_result", text: timelineLine(message.Text())}}
 		}

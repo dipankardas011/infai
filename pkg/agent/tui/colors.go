@@ -16,7 +16,8 @@ var (
 	cThinking   = color.New(color.FgHiBlack)          // model reasoning (dark grey), theme: Muted
 	cAssistant  = color.New(color.FgGreen)            // model answers (● dot, green), theme: Green
 	cHeader     = color.New(color.FgHiBlack)          // footer + separators
-	cSystem     = color.New(color.FgMagenta)          // system/notices, theme: Purple
+	cSystem     = color.New(color.FgMagenta)          // system/help, theme: Purple
+	cEvent      = color.New(color.FgYellow)           // lifecycle events, theme: Orange
 	cToolCall   = color.New(color.FgMagenta)          // tool calls and their arguments, theme: Purple
 	cToolResult = color.New(color.FgYellow)           // tool results and their output, theme: Orange
 	cTree       = color.New(color.FgHiBlack)          // the timeline's tree guides, theme: Faint
@@ -35,6 +36,8 @@ func timelineRoleColor(role string) *color.Color {
 		return cAssistant
 	case "thinking":
 		return cThinking
+	case "event":
+		return cEvent
 	case "system":
 		return cSystem
 	case "tool_call":

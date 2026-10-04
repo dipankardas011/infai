@@ -178,7 +178,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 		if _, records, err := c.GetSession(ctx, resume); err == nil {
 			renderHistory(out, records)
 		}
-		cSystem.Fprintf(out, "resumed session %s\n", resume)
+		cEvent.Fprintf(out, "resumed session %s\n", resume)
 	}
 
 	for {
@@ -258,7 +258,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 				}
 				cAssistant.Fprint(out, text)
 			case contracts.EventProviderEvent:
-				cSystem.Fprintln(out, statusLabel(text))
+				cEvent.Fprintln(out, statusLabel(text))
 			case contracts.EventCompactionExecuted:
 				if text != "" {
 					printCompactionSummary(out, text)
@@ -276,7 +276,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 							completed++
 						}
 					}
-					cSystem.Fprintf(out, "  tasks %d/%d complete\n", completed, len(state.Items))
+					cEvent.Fprintf(out, "  tasks %d/%d complete\n", completed, len(state.Items))
 				}
 			}
 		}, nil)
@@ -455,7 +455,7 @@ multi-line: end a line with \ to continue typing on the next line`)
 			return false, err
 		}
 		s.session.Name = name
-		cSystem.Fprintf(out, "session renamed to %q\n", name)
+		cEvent.Fprintf(out, "session renamed to %q\n", name)
 		return false, nil
 
 	case "/sessions":

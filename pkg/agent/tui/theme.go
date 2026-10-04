@@ -97,6 +97,7 @@ type harnessStyles struct {
 	imageBadge       lipgloss.Style
 	thinking         lipgloss.Style
 	system           lipgloss.Style
+	event            lipgloss.Style
 	error            lipgloss.Style
 	tool             lipgloss.Style
 	skill            lipgloss.Style
@@ -157,6 +158,7 @@ func newHarnessStyles() harnessStyles {
 		imageBadge:  lipgloss.NewStyle().Background(everforest.Green).Foreground(everforest.Background).Bold(true),
 		thinking:    lipgloss.NewStyle().Foreground(everforest.Muted).Italic(true),
 		system:      lipgloss.NewStyle().Foreground(everforest.Purple),
+		event:       lipgloss.NewStyle().Foreground(everforest.Orange),
 		error:       lipgloss.NewStyle().Foreground(everforest.Red),
 		tool:        lipgloss.NewStyle().Foreground(everforest.Muted),
 		skill:       lipgloss.NewStyle().Foreground(everforest.Aqua),

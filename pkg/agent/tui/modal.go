@@ -220,6 +220,8 @@ func timelineRoleStyle(base lipgloss.Style, role string) lipgloss.Style {
 		return base.Foreground(everforest.Muted)
 	case "tool_result":
 		return base.Foreground(everforest.Orange)
+	case "event":
+		return base.Foreground(everforest.Orange)
 	case "system":
 		return base.Foreground(everforest.Purple)
 	case "tool_call":
