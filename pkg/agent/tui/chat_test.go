@@ -372,6 +372,31 @@ func TestChecklistDeltaIsNotRenderedAsTranscriptText(t *testing.T) {
 	}
 }
 
+func TestChecklistUsesAQuietSeparatedPanel(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.width = 80
+	m.checklist = contracts.TaskChecklistState{Items: []contracts.TaskChecklistItem{
+		{Title: "Done", Description: "verified", Status: contracts.TaskCompleted},
+		{Title: "Working", Description: "in progress", Status: contracts.TaskInProgress},
+	}}
+
+	rendered := m.checklistView()
+	plain := ansi.Strip(rendered)
+	for _, want := range []string{"│ Task Checklist 1/2 complete", "│ ✓ Done — verified", "│ ◐ Working — in progress"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("checklist lacks %q:\n%s", want, plain)
+		}
+	}
+	if !strings.Contains(rendered, m.styles.muted.Render("Done — verified")) {
+		t.Fatal("completed task text is not muted")
+	}
+	for i, line := range strings.Split(plain, "\n") {
+		if got := lipgloss.Width(line); got > m.width {
+			t.Fatalf("checklist row %d width=%d exceeds %d", i, got, m.width)
+		}
+	}
+}
+
 func TestEmptyCommandMenuDoesNotReserveARow(t *testing.T) {
 	areas := layoutRows(80, 12,
 		intrinsic("header"), fill(), intrinsic("status"), intrinsic(""), intrinsic("composer"),

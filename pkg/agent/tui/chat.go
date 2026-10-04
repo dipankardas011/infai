@@ -1633,11 +1633,16 @@ func (m *chatModel) attachmentsView() string {
 // turn state rather than chrome, so it sits with the transcript instead of
 // stacking on top of the input.
 func (m *chatModel) checklistView() string {
-	checklist := m.taskChecklistView(max(m.width-2, 1))
+	panel := lipgloss.NewStyle().
+		BorderLeft(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(everforest.SurfaceAlt).
+		PaddingLeft(1)
+	checklist := m.taskChecklistView(max(m.width-2-panel.GetHorizontalFrameSize(), 1))
 	if checklist == "" {
 		return ""
 	}
-	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, checklist)
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, panel.Render(checklist))
 }
 
 // sessionRowView is the row above the composer: which session this is, what
@@ -1913,22 +1918,27 @@ func (m *chatModel) taskChecklistView(width int) string {
 			completed++
 		}
 	}
-	lines := []string{m.styles.system.Bold(true).Render(fmt.Sprintf("Task Checklist %d/%d complete", completed, len(m.checklist.Items)))}
+	lines := []string{m.styles.muted.Bold(true).Render(fmt.Sprintf("Task Checklist %d/%d complete", completed, len(m.checklist.Items)))}
 	visible := min(len(m.checklist.Items), 4)
 	for _, item := range m.checklist.Items[:visible] {
 		marker := "○"
-		style := m.styles.inactive
+		markerStyle := m.styles.inactive
 		switch item.Status {
 		case contracts.TaskInProgress:
-			marker, style = "◐", m.styles.statusBusy
+			marker, markerStyle = "◐", lipgloss.NewStyle().Foreground(everforest.Yellow)
 		case contracts.TaskCompleted:
-			marker, style = "✓", m.styles.active
+			marker, markerStyle = "✓", lipgloss.NewStyle().Foreground(everforest.Green)
 		}
-		line := marker + " " + item.Title
+		text := item.Title
 		if item.Description != "" {
-			line += "  ·  " + item.Description
+			text += " — " + item.Description
 		}
-		lines = append(lines, style.Render(truncateLine(line, width)))
+		if width <= lipgloss.Width(marker)+1 {
+			lines = append(lines, markerStyle.Render(truncateLine(marker, width)))
+			continue
+		}
+		text = truncateLine(text, width-lipgloss.Width(marker)-1)
+		lines = append(lines, markerStyle.Render(marker)+" "+m.styles.muted.Render(text))
 	}
 	if len(m.checklist.Items) > visible {
 		lines = append(lines, m.styles.muted.Render(fmt.Sprintf("… %d more", len(m.checklist.Items)-visible)))
