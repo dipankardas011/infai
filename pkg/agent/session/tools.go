@@ -340,7 +340,21 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 				})
 
 			case contracts.BashTool:
-				output, err := s.fileManager.BashExecution(s.ctx, tc)
+				bashCtx, cancelBash := context.WithCancelCause(s.ctx)
+				cancellationDone := make(chan struct{})
+				go func() {
+					defer close(cancellationDone)
+					select {
+					case <-s.userCancellation:
+						cancelBash(harnessErr.ErrTurnCanceled)
+					case <-bashCtx.Done():
+					}
+				}()
+
+				output, err := s.fileManager.BashExecution(bashCtx, tc)
+				cause := context.Cause(bashCtx)
+				cancelBash(nil)
+				<-cancellationDone
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
@@ -348,7 +362,20 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					Output:   output,
 					CallName: tc.Function.Name,
 				}
-				if err != nil {
+				if errors.Is(cause, harnessErr.ErrTurnCanceled) {
+					turnCanceled = true
+					status = contracts.ToolExecutionDenied
+					content = contracts.NewToolExecutionError(
+						tc.Function.Name,
+						"turn_canceled",
+						"the turn was canceled by the user while the command was running",
+						contracts.ResponsibilityUser,
+						cause,
+					).Error()
+					result.Status = status
+					result.Output = ""
+					result.Error = content
+				} else if err != nil {
 					status = contracts.ToolExecutionError
 					content = err.Error()
 					result.Status = contracts.ToolExecutionError

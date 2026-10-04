@@ -308,7 +308,27 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 				continue
 			}
 		} else if a.evalFunc != nil {
-			if err := a.evalFunc(ctx); err != nil {
+			evalCtx, cancelEval := context.WithCancelCause(ctx)
+			cancellationDone := make(chan struct{})
+			go func() {
+				defer close(cancellationDone)
+				select {
+				case <-a.userCancellation:
+					cancelEval(harnessErr.ErrTurnCanceled)
+				case <-evalCtx.Done():
+				}
+			}()
+
+			err := a.evalFunc(evalCtx)
+			cause := context.Cause(evalCtx)
+			cancelEval(nil)
+			<-cancellationDone
+
+			if errors.Is(cause, harnessErr.ErrTurnCanceled) {
+				lastHadToolCalls = false
+				continue
+			}
+			if err != nil {
 				messages = append(messages, contracts.NewUserMessage(fmt.Sprintf("evaluation status: FAIL => %v", err.Error())))
 				lastEvalResPass = false
 			} else {
