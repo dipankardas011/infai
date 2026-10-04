@@ -77,84 +77,14 @@ func (m *modalModel) optionForShortcut(key rune) (int, bool) {
 	return 0, false
 }
 
-func renderModal(m *modalModel, width, height int, styles harnessStyles) string {
-	if m == nil || width <= 0 || height <= 0 {
-		return ""
-	}
-	modalStyle := styles.modal
-	if modalStyle.GetHorizontalFrameSize() >= width || modalStyle.GetVerticalFrameSize() >= height {
-		modalStyle = modalStyle.Padding(0)
-	}
-	labels := make([]string, 0, len(m.options)+2)
-	labels = append(labels, m.title, m.body)
-	for _, option := range m.options {
-		label := option.label
-		if m.kind == modalTimeline {
-			label = option.tree + timelineForkLabel(option.fork) + timelineRoleLabel(option.role) + label
-		}
-		labels = append(labels, label)
-	}
-	frameWidth := modalStyle.GetHorizontalFrameSize()
-	boxWidth := min(intrinsicTextWidth(labels...)+frameWidth+2, width)
-	innerWidth := contentWidth(modalStyle, boxWidth)
-
-	var rows []string
-	rows = append(rows, styles.modalTitle.Render(strings.ToUpper(m.title)))
-	if m.body != "" {
-		body := styles.modalBody.Width(innerWidth).Render(m.body)
-		reserved := lipgloss.Height(rows[0])
-		if len(m.options) > 0 {
-			reserved += 2 // section gap and at least one selectable row
-		}
-		bodyHeight := max(height-modalStyle.GetVerticalFrameSize()-reserved, 0)
-		body = lipgloss.NewStyle().MaxHeight(bodyHeight).Render(body)
-		if body != "" {
-			rows = append(rows, "", body)
-		}
-	}
-	if len(m.options) > 0 {
-		rows = append(rows, "")
-	}
-
-	chromeHeight := lipgloss.Height(strings.Join(rows, "\n")) + modalStyle.GetVerticalFrameSize()
-	start, end := visibleRange(len(m.options), m.selected, height-chromeHeight)
-	showRange := start > 0 || end < len(m.options)
-	if showRange && end-start > 1 {
-		start, end = visibleRange(len(m.options), m.selected, end-start-1)
-	}
-	for i := start; i < end; i++ {
-		option := m.options[i]
-		if m.kind == modalTimeline && innerWidth >= 5 {
-			rows = append(rows, renderTimelineOption(option, i == m.selected, innerWidth, styles))
-			continue
-		}
-		shortcut := ""
-		if option.shortcut != 0 {
-			shortcut = fmt.Sprintf("  [%c]", option.shortcut)
-		}
-		label := option.label
-		maxLabel := max(innerWidth-lipgloss.Width(shortcut)-3, 1)
-		label = lipgloss.NewStyle().MaxWidth(maxLabel).Render(label)
-		line := label + shortcut
-		if i == m.selected {
-			line = styles.modalActive.Width(innerWidth).Render("› " + line)
-		} else {
-			line = styles.modalOption.Width(innerWidth).Render(line)
-		}
-		rows = append(rows, line)
-	}
-	if showRange {
-		rows = append(rows, styles.muted.Render(fmt.Sprintf("  %d-%d of %d", start+1, end, len(m.options))))
-	}
-
-	return modalStyle.Width(boxWidth).MaxHeight(height).Render(strings.Join(rows, "\n"))
-}
-
-func renderTimelineOption(option modalOption, selected bool, width int, styles harnessStyles) string {
-	rowStyle := styles.modalOption.PaddingLeft(0)
+// renderTimelineRow renders one branch-timeline row at exactly width cells: a
+// two-cell cursor, a two-cell current-event marker, then the tree, the fork
+// glyph, the role, and the label, which takes what is left.
+func renderTimelineRow(option modalOption, selected bool, width int, styles harnessStyles) string {
+	rowStyle := styles.screenRow
 	cursor := "  "
 	if selected {
-		rowStyle = styles.modalActive.PaddingLeft(0)
+		rowStyle = styles.screenSel
 		cursor = "› "
 	}
 	markerStyle := rowStyle
@@ -176,16 +106,21 @@ func renderTimelineOption(option modalOption, selected bool, width int, styles h
 		)
 	}
 	labelWidth := available - chromeWidth
-	label := lipgloss.NewStyle().MaxWidth(labelWidth).Render(option.label)
+	// Truncate rather than let the frame wrap: one display is one line, so the
+	// rows the screen counts are the lines it draws.
+	label := rowStyle.Width(labelWidth).Render(ansi.Truncate(option.label, labelWidth, "…"))
 	forkStyle := rowStyle
 	if option.fork == "branch" {
 		forkStyle = forkStyle.Foreground(everforest.Purple).Bold(true)
 	}
 	roleStyle := timelineRoleStyle(rowStyle, option.role)
+	// The tree is structure, not content: it recedes to the faintest colour so
+	// the guides do not compete with the rows they connect.
+	treeStyle := rowStyle.Foreground(everforest.Faint)
 	return lipgloss.JoinHorizontal(lipgloss.Top,
 		rowStyle.Width(2).Render(cursor),
 		markerStyle.Width(2).Render(marker),
-		rowStyle.Render(option.tree),
+		treeStyle.Render(option.tree),
 		forkStyle.Render(fork),
 		roleStyle.Render(role),
 		rowStyle.Width(labelWidth).Render(label),
@@ -216,12 +151,14 @@ func timelineRoleStyle(base lipgloss.Style, role string) lipgloss.Style {
 		return base.Foreground(everforest.Blue)
 	case "assistant":
 		return base.Foreground(everforest.Green)
-	case "thinking", "tool_result":
+	case "thinking":
 		return base.Foreground(everforest.Muted)
+	case "tool_result":
+		return base.Foreground(everforest.Orange)
 	case "system":
 		return base.Foreground(everforest.Purple)
 	case "tool_call":
-		return base.Foreground(everforest.Text)
+		return base.Foreground(everforest.Purple)
 	case "skill":
 		return base.Foreground(everforest.Aqua)
 	default:
@@ -252,6 +189,10 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 	rows := make([]string, 0, end-start)
 	for i := start; i < end; i++ {
 		option := m.options[i]
+		if m.kind == modalTimeline {
+			rows = append(rows, renderTimelineRow(option, i == m.selected, contentWidth, styles))
+			continue
+		}
 		rowStyle := styles.screenRow
 		prefix := "  "
 		if i == m.selected {

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -1363,37 +1364,36 @@ func (m *chatModel) View() tea.View {
 	if m.width <= 0 || m.height <= 0 {
 		return tea.NewView("")
 	}
-	header := m.headerView()
-	status := m.statusView()
-	sessionRow := m.sessionRowView()
-	checklist := m.checklistView()
-	hitl := m.hitlView()
-	commands := m.commandMenuView()
-	files := renderFilePicker(m.filePicker, m.width, m.styles)
-	attachments := m.attachmentsView()
-	composer := m.composerView()
-	parts := []string{header, m.viewport.View(), hitl, checklist, sessionRow, commands, files, attachments, composer, status}
-	if len(m.areas) == len(parts) {
-		parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
-		for i := range parts {
-			parts[i] = fitArea(m.areas[i], parts[i])
-		}
-	}
-	visibleParts := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part != "" {
-			visibleParts = append(visibleParts, part)
-		}
-	}
-	base := lipgloss.JoinVertical(lipgloss.Left, visibleParts...)
-	if m.modal != nil && m.modal.kind != modalTimeline {
+	var base string
+	if m.modal != nil {
+		// A modal is a screen of its own: the chat behind it is not built at
+		// all, so a keystroke on a 4k-event branch timeline costs the rows it
+		// shows and nothing else.
 		base = renderSelectionScreen(m.modal, m.width, m.height, m.styles)
-	} else if m.modal != nil {
-		dialog := renderModal(m.modal, m.width, m.height, m.styles)
-		base = lipgloss.NewCompositor(
-			lipgloss.NewLayer(base),
-			centeredLayer(dialog, m.width, m.height).Z(1),
-		).Render()
+	} else {
+		header := m.headerView()
+		status := m.statusView()
+		sessionRow := m.sessionRowView()
+		checklist := m.checklistView()
+		hitl := m.hitlView()
+		commands := m.commandMenuView()
+		files := renderFilePicker(m.filePicker, m.width, m.styles)
+		attachments := m.attachmentsView()
+		composer := m.composerView()
+		parts := []string{header, m.viewport.View(), hitl, checklist, sessionRow, commands, files, attachments, composer, status}
+		if len(m.areas) == len(parts) {
+			parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
+			for i := range parts {
+				parts[i] = fitArea(m.areas[i], parts[i])
+			}
+		}
+		visibleParts := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if part != "" {
+				visibleParts = append(visibleParts, part)
+			}
+		}
+		base = lipgloss.JoinVertical(lipgloss.Left, visibleParts...)
 	}
 	v := tea.NewView(base)
 	v.AltScreen = true
@@ -2731,11 +2731,12 @@ func readToolCallPreview(arguments string) (string, bool) {
 
 func (m *chatModel) showTimeline(view *TimelineView) {
 	rows := timelineTreeRows(view.Events)
+	toolNames := timelineToolNames(view.Events)
 	options := make([]modalOption, 0, len(rows))
 	selected := 0
 	for i := range rows {
 		event := rows[i].event
-		displays := timelineEventDisplays(event)
+		displays := timelineEventDisplays(event, toolNames)
 		for displayIndex, display := range displays {
 			isHeadRow := event.ID == view.Head && displayIndex == len(displays)-1
 			tree, fork := rows[i].prefix, rows[i].fork
@@ -3111,10 +3112,22 @@ func isSkillTool(name string) bool { return name == string(contracts.ReadSkillTo
 
 func isChecklistTool(name string) bool { return name == string(contracts.TaskChecklistTool) }
 
+// decodeTaskChecklist decodes a task checklist state. Unknown fields are
+// rejected: without that any tool result that happens to be a JSON object — a
+// bash result is the common case — unmarshals into an empty state and reads as
+// a checklist update.
 func decodeTaskChecklist(text string) (contracts.TaskChecklistState, error) {
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.DisallowUnknownFields()
 	var state contracts.TaskChecklistState
-	err := json.Unmarshal([]byte(text), &state)
-	return state, err
+	if err := decoder.Decode(&state); err != nil {
+		return contracts.TaskChecklistState{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return contracts.TaskChecklistState{}, errors.New("checklist state must contain one JSON object")
+	}
+	return state, nil
 }
 
 func taskChecklistFromRecords(records []store.Record) contracts.TaskChecklistState {
@@ -3311,27 +3324,45 @@ type timelineDisplay struct {
 	text string
 }
 
-func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
+// timelineToolNames maps a tool call id to the tool that made it, so a tool
+// result is classified by the call it answers rather than by its payload.
+func timelineToolNames(events []TimelineEvent) map[string]string {
+	names := make(map[string]string)
+	for _, event := range events {
+		if event.Record == nil || event.Record.Message == nil || event.Record.Message.Role != "assistant" {
+			continue
+		}
+		for _, call := range event.Record.Message.ToolCalls {
+			names[call.ID] = string(call.Function.Name)
+		}
+	}
+	return names
+}
+
+func timelineEventDisplays(event TimelineEvent, toolNames map[string]string) []timelineDisplay {
 	if event.Record == nil {
 		return previewDisplays(event.Preview)
 	}
 	if event.Record.Message != nil {
 		message := event.Record.Message
 		if message.Role == "user" {
-			return []timelineDisplay{{role: "user", text: singleLine(message.Text())}}
+			return []timelineDisplay{{role: "user", text: timelineLine(message.Text())}}
 		}
 		if message.Role == "tool" {
-			if _, err := decodeTaskChecklist(message.Text()); err == nil {
+			if isChecklistTool(toolNames[message.ToolCallID]) {
+				if _, err := decodeTaskChecklist(message.Text()); err != nil {
+					return nil
+				}
 				return []timelineDisplay{{role: "system", text: "task checklist updated"}}
 			}
-			return []timelineDisplay{{role: "tool_result", text: singleLine(message.Text())}}
+			return []timelineDisplay{{role: "tool_result", text: timelineLine(message.Text())}}
 		}
 		displays := make([]timelineDisplay, 0, 2+len(message.ToolCalls))
 		if message.ReasoningContent != "" {
-			displays = append(displays, timelineDisplay{role: "thinking", text: singleLine(message.ReasoningContent)})
+			displays = append(displays, timelineDisplay{role: "thinking", text: timelineLine(message.ReasoningContent)})
 		}
 		if message.Text() != "" {
-			displays = append(displays, timelineDisplay{role: "assistant", text: singleLine(message.Text())})
+			displays = append(displays, timelineDisplay{role: "assistant", text: timelineLine(message.Text())})
 		}
 		for _, call := range message.ToolCalls {
 			toolName := string(call.Function.Name)
@@ -3342,7 +3373,7 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 			if isChecklistTool(toolName) {
 				continue
 			}
-			displays = append(displays, timelineDisplay{role: "tool_call", text: singleLine(toolCallDisplay(call))})
+			displays = append(displays, timelineDisplay{role: "tool_call", text: timelineLine(toolCallDisplay(call))})
 		}
 		if len(displays) == 0 {
 			displays = append(displays, timelineDisplay{role: "assistant", text: "empty response"})
@@ -3350,9 +3381,9 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 		return displays
 	}
 	if event.Record.Compaction != nil {
-		return []timelineDisplay{{role: "assistant", text: "context compacted: " + singleLine(event.Record.Compaction.Summary)}}
+		return []timelineDisplay{{role: "assistant", text: "context compacted: " + timelineLine(event.Record.Compaction.Summary)}}
 	}
-	text := singleLine(event.Record.Text)
+	text := timelineLine(event.Record.Text)
 	if text == "" {
 		text = strings.ReplaceAll(string(event.Kind), "_", " ")
 	}
@@ -3387,6 +3418,38 @@ func imageBadgeText(count int) string {
 
 func singleLine(value string) string {
 	return strings.Join(strings.Fields(value), " ")
+}
+
+// timelineTextLimit bounds one timeline display. A row is truncated to the
+// terminal width anyway, so a write or edit preview — which can carry a whole
+// file — never needs to become a multi-kilobyte label.
+const timelineTextLimit = 400
+
+// timelineLine collapses whitespace and stops after timelineTextLimit runes. It
+// stops as it scans, unlike singleLine, so a huge preview is never flattened in
+// full just to be cut down.
+func timelineLine(value string) string {
+	var b strings.Builder
+	space := false
+	count := 0
+	for _, r := range value {
+		if unicode.IsSpace(r) {
+			space = true
+			continue
+		}
+		if space && count > 0 {
+			b.WriteByte(' ')
+			count++
+		}
+		space = false
+		b.WriteRune(r)
+		count++
+		if count >= timelineTextLimit {
+			b.WriteString("…")
+			break
+		}
+	}
+	return b.String()
 }
 
 func branchSelectionLabel(event TimelineEvent) string {

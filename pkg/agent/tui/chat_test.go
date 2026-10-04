@@ -1373,41 +1373,24 @@ func TestNormalizeMarkdownMath(t *testing.T) {
 	}
 }
 
-func TestModalMeasuresContentWithinTerminal(t *testing.T) {
-	m := &modalModel{
-		title: "Models",
-		body:  "Choose one",
-		options: []modalOption{
-			{label: "small"},
-			{label: "a considerably longer model name"},
-		},
-	}
-	rendered := renderModal(m, 52, 12, newHarnessStyles())
-	if width := lipgloss.Width(rendered); width > 52 {
-		t.Fatalf("modal width=%d exceeds terminal width", width)
-	}
-	if height := lipgloss.Height(rendered); height > 12 {
-		t.Fatalf("modal height=%d exceeds terminal height", height)
-	}
-}
-
-func TestLongModalAndShortLayoutStayWithinTerminal(t *testing.T) {
+func TestSelectionScreenStaysWithinTerminal(t *testing.T) {
 	options := make([]modalOption, 30)
 	for i := range options {
 		options[i] = modalOption{label: strings.Repeat("long option ", 8)}
 	}
 	m := &modalModel{
+		kind:     modalModels,
 		title:    "Approval",
-		body:     strings.Repeat("long approval details ", 40),
+		body:     "Choose one",
 		options:  options,
 		selected: len(options) - 1,
 	}
-	rendered := renderModal(m, 40, 10, newHarnessStyles())
-	if width := lipgloss.Width(rendered); width > 40 {
-		t.Fatalf("modal width=%d exceeds terminal width", width)
+	rendered := renderSelectionScreen(m, 40, 10, newHarnessStyles())
+	if width := lipgloss.Width(rendered); width != 40 {
+		t.Fatalf("screen width=%d want 40", width)
 	}
-	if height := lipgloss.Height(rendered); height > 10 {
-		t.Fatalf("modal height=%d exceeds terminal height", height)
+	if height := lipgloss.Height(rendered); height != 10 {
+		t.Fatalf("screen height=%d want 10", height)
 	}
 
 	areas := layoutRows(20, 2, intrinsic("header"), fill(), intrinsic("status"), intrinsic("composer"))
@@ -1761,7 +1744,10 @@ func TestTimelineTreeRowsShowForkWithoutMessageStaircase(t *testing.T) {
 	}
 }
 
-func TestTimelinePopupKeepsTranscriptAndHidesEventIDs(t *testing.T) {
+// A branch timeline is a screen of its own, like the model picker: it replaces
+// the transcript rather than sitting over it, and every row reads as tree,
+// fork, role, and label.
+func TestTimelineScreenReplacesTranscriptAndHidesEventIDs(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.blocks = []block{{role: "system", text: "transcript remains visible"}}
@@ -1776,13 +1762,16 @@ func TestTimelinePopupKeepsTranscriptAndHidesEventIDs(t *testing.T) {
 	}}})
 
 	content := m.View().Content
-	for _, want := range []string{"transcript remains visible", "BRANCH TIMELINE", "* marks the current event", "user:", "explain this branch"} {
+	for _, want := range []string{"BRANCH TIMELINE", "* marks the current event", "user:", "explain this branch"} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("timeline popup does not contain %q", want)
+			t.Fatalf("timeline screen does not contain %q", want)
 		}
 	}
+	if strings.Contains(content, "transcript remains visible") {
+		t.Fatal("timeline screen still composites the transcript behind it")
+	}
 	if strings.Contains(content, eventID.String()) || strings.Contains(content, shortID(eventID)) {
-		t.Fatal("timeline popup exposes an event ID")
+		t.Fatal("timeline screen exposes an event ID")
 	}
 	if !m.modal.options[0].current {
 		t.Fatal("timeline head is not marked as the current event")
@@ -1790,7 +1779,7 @@ func TestTimelinePopupKeepsTranscriptAndHidesEventIDs(t *testing.T) {
 }
 
 func TestTimelineBranchUsesColoredUnicodeGlyph(t *testing.T) {
-	rendered := renderTimelineOption(modalOption{
+	rendered := renderTimelineRow(modalOption{
 		label: "alternate prompt", role: "user", tree: "├─ ", fork: "branch",
 	}, false, 50, newHarnessStyles())
 	if !strings.Contains(rendered, "⎇") {
@@ -1802,11 +1791,26 @@ func TestTimelineBranchUsesColoredUnicodeGlyph(t *testing.T) {
 }
 
 func TestTimelineOriginalHasNoTextLabel(t *testing.T) {
-	rendered := renderTimelineOption(modalOption{
+	rendered := renderTimelineRow(modalOption{
 		label: "existing prompt", role: "user", tree: "└─ ", fork: "original",
 	}, false, 50, newHarnessStyles())
 	if strings.Contains(rendered, "original") {
 		t.Fatal("timeline original path still contains a text label")
+	}
+}
+
+// The tree is structure, not content: its guides and connectors recede to the
+// faintest colour, while the row they connect keeps its role colour.
+func TestTimelineTreeRecedesBehindTheRow(t *testing.T) {
+	styles := newHarnessStyles()
+	rendered := renderTimelineRow(modalOption{
+		label: "hello", role: "user", tree: "│  ├─ ",
+	}, false, 60, styles)
+	if want := styles.screenRow.Foreground(everforest.Faint).Render("│  ├─ "); !strings.Contains(rendered, want) {
+		t.Fatalf("timeline tree is not painted in the faint colour: %q", rendered)
+	}
+	if want := styles.screenRow.Foreground(everforest.Blue).Render("user: "); !strings.Contains(rendered, want) {
+		t.Fatalf("timeline row lost its role colour: %q", rendered)
 	}
 }
 
@@ -1816,8 +1820,8 @@ func TestTimelineRoleColors(t *testing.T) {
 		"assistant":   everforest.Green,
 		"thinking":    everforest.Muted,
 		"system":      everforest.Purple,
-		"tool_call":   everforest.Text,
-		"tool_result": everforest.Muted,
+		"tool_call":   everforest.Purple,
+		"tool_result": everforest.Orange,
 		"skill":       everforest.Aqua,
 	}
 	for role, want := range tests {
@@ -1832,9 +1836,44 @@ func TestTimelineEventDisplayUsesSupportedRoles(t *testing.T) {
 	call := contracts.ToolCall{Function: contracts.Function{Name: contracts.ReadSkillTool, Arguments: `{"name":"code-review"}`}}
 	displays := timelineEventDisplays(TimelineEvent{Record: &store.Record{
 		Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}},
-	}})
+	}}, nil)
 	if len(displays) != 1 || displays[0].role != "skill" || displays[0].text != "code-review" {
 		t.Fatalf("timeline displays=%#v want one code-review skill", displays)
+	}
+}
+
+// A tool result that happens to be a JSON object is not a checklist update.
+// Only the result of a task_checklist call is, so a bash result carrying an
+// object is tool output, and a checklist call that failed leaves no row at all.
+func TestTimelineEventDisplaysClassifiesToolResultsByCall(t *testing.T) {
+	bashCall := contracts.ToolCall{ID: "bash-1", Function: contracts.Function{Name: contracts.BashTool}}
+	checkCall := contracts.ToolCall{ID: "check-1", Function: contracts.Function{Name: contracts.TaskChecklistTool}}
+	caller := TimelineEvent{Record: &store.Record{
+		Kind:    store.KindMessage,
+		Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{bashCall, checkCall}},
+	}}
+	toolNames := timelineToolNames([]TimelineEvent{caller})
+
+	result := func(callID, text string) TimelineEvent {
+		return TimelineEvent{Record: &store.Record{
+			Kind:    store.KindMessage,
+			Message: &contracts.ChatMessage{Role: "tool", ToolCallID: callID, Content: &text},
+		}}
+	}
+	// A bash result that is empty JSON: it decodes as a checklist state, so the
+	// call it answers is the only thing that can place it.
+	if displays := timelineEventDisplays(result("bash-1", "{}"), toolNames); len(displays) != 1 || displays[0].role != "tool_result" {
+		t.Fatalf("bash result displays=%#v want one tool_result", displays)
+	}
+	// A bash result with fields the checklist state does not have.
+	if displays := timelineEventDisplays(result("bash-1", `{"exit_code":0,"output":"hi"}`), toolNames); len(displays) != 1 || displays[0].role != "tool_result" {
+		t.Fatalf("bash exit status displays=%#v want one tool_result", displays)
+	}
+	if displays := timelineEventDisplays(result("check-1", "{}"), toolNames); len(displays) != 1 || displays[0].role != "system" {
+		t.Fatalf("checklist result displays=%#v want one system row", displays)
+	}
+	if displays := timelineEventDisplays(result("check-1", "task_checklist add requires a title"), toolNames); displays != nil {
+		t.Fatalf("failed checklist result displays=%#v want none", displays)
 	}
 }
 
@@ -1845,7 +1884,7 @@ func TestTimelineEventDisplaysThinkingAndAnswer(t *testing.T) {
 			Role: "assistant", Content: &answer, ReasoningContent: "Reasoning process",
 		},
 	}}
-	displays := timelineEventDisplays(event)
+	displays := timelineEventDisplays(event, nil)
 	if len(displays) != 2 || displays[0].role != "thinking" || displays[1].role != "assistant" {
 		t.Fatalf("timeline displays=%#v want thinking then assistant", displays)
 	}

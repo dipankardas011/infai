@@ -11,15 +11,16 @@ import "github.com/fatih/color"
 // theme colour it stands in for. fatih/color drops the ANSI codes when the
 // output is not a terminal, so piping stays plain.
 var (
-	cPrompt         = color.New(color.FgBlue)             // the "> " input marker
-	cUser           = color.New(color.FgBlue, color.Bold) // user messages (● dot), theme: Blue
-	cThinking       = color.New(color.FgHiBlack)          // model reasoning (dark grey), theme: Muted
-	cAssistant      = color.New(color.FgGreen)            // model answers (● dot, green), theme: Green
-	cHeader         = color.New(color.FgHiBlack)          // footer + separators
-	cSystem         = color.New(color.FgMagenta)          // system/notices, theme: Purple
-	cToolCallText   = color.New(color.FgHiWhite)          // tool-call text and arguments, theme: Text
-	cToolResultText = color.New(color.FgHiBlack)          // tool-result text and output, theme: Muted
-	cSkill          = color.New(color.FgHiCyan)           // skill loads, theme: Aqua
+	cPrompt     = color.New(color.FgBlue)             // the "> " input marker
+	cUser       = color.New(color.FgBlue, color.Bold) // user messages (● dot), theme: Blue
+	cThinking   = color.New(color.FgHiBlack)          // model reasoning (dark grey), theme: Muted
+	cAssistant  = color.New(color.FgGreen)            // model answers (● dot, green), theme: Green
+	cHeader     = color.New(color.FgHiBlack)          // footer + separators
+	cSystem     = color.New(color.FgMagenta)          // system/notices, theme: Purple
+	cToolCall   = color.New(color.FgMagenta)          // tool calls and their arguments, theme: Purple
+	cToolResult = color.New(color.FgYellow)           // tool results and their output, theme: Orange
+	cTree       = color.New(color.FgHiBlack)          // the timeline's tree guides, theme: Faint
+	cSkill      = color.New(color.FgHiCyan)           // skill loads, theme: Aqua
 )
 
 // timelineRoleColor is the timeline's role palette, used by both the
@@ -37,9 +38,9 @@ func timelineRoleColor(role string) *color.Color {
 	case "system":
 		return cSystem
 	case "tool_call":
-		return cToolCallText
+		return cToolCall
 	case "tool_result":
-		return cToolResultText
+		return cToolResult
 	case "skill":
 		return cSkill
 	default:

@@ -316,13 +316,13 @@ func renderHistory(out io.Writer, records []store.Record) {
 			cAssistant.Fprintf(out, "● %s\n", m.Text())
 			for _, call := range m.ToolCalls {
 				cSystem.Fprint(out, "  ▲ ")
-				cToolCallText.Fprintf(out, "tool call %s\n", toolCallDisplay(call))
+				cToolCall.Fprintf(out, "tool call %s\n", toolCallDisplay(call))
 			}
 			fmt.Fprintln(out)
 		case "tool":
 			cSystem.Fprint(out, "  ▲")
 			cAssistant.Fprint(out, "▲")
-			cToolResultText.Fprintf(out, " tool result [%s] %s\n", m.ToolCallID, m.Text())
+			cToolResult.Fprintf(out, " tool result [%s] %s\n", m.ToolCallID, m.Text())
 			fmt.Fprintln(out)
 		}
 	}
@@ -542,9 +542,10 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 		return err
 	}
 	rows := timelineTreeRows(view.Events)
+	toolNames := timelineToolNames(view.Events)
 	options := make([]TimelineEvent, 0, len(rows))
 	for _, row := range rows {
-		displays := timelineEventDisplays(row.event)
+		displays := timelineEventDisplays(row.event, toolNames)
 		for displayIndex, display := range displays {
 			current := "  "
 			if row.event.ID == view.Head && displayIndex == len(displays)-1 {
@@ -555,7 +556,9 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 				tree = row.subprefix + strings.Repeat(" ", lipgloss.Width(fork))
 				fork = ""
 			}
-			fmt.Fprintf(out, "  %d  %s%s%s", len(options), current, tree, fork)
+			fmt.Fprintf(out, "  %d  %s", len(options), current)
+			cTree.Fprintf(out, "%s", tree)
+			fmt.Fprint(out, fork)
 			if roleColor := timelineRoleColor(display.role); roleColor != nil {
 				roleColor.Fprintf(out, "%s:", display.role)
 			} else {
