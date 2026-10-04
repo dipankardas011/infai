@@ -1108,6 +1108,15 @@ func (m *chatModel) applySessionStatus(status contracts.SessionStatus) {
 }
 
 func (m *chatModel) applySessionEvent(event contracts.EventStream) {
+	// Only a message's own tokens keep it in flight. Everything else — the
+	// usage that closes a generate call, a tool call, a status change — ends
+	// it, so the block stops being drawn as plain text and renders its
+	// markdown. Leaving this to the individual cases meant an answer stayed
+	// raw from its tool call until the next step's first token, which for a
+	// long-running tool is the whole tool's lifetime.
+	if !isContentDelta(event.Kind) {
+		m.stopStreaming()
+	}
 	content := ""
 	if event.Content != nil {
 		content = *event.Content

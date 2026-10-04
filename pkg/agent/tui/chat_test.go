@@ -562,6 +562,36 @@ func observerEvent(m *chatModel, kind contracts.EventStreamKind, content string)
 	}
 }
 
+// A tool call ends the answer that asked for it. The block must stop streaming
+// there, so its markdown renders while the tool runs rather than staying raw
+// until the next step's first token.
+func TestToolCallFinalizesTheAnswerItFollows(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.session.ID = uuid.New()
+	m.sessionCancel = func() {}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 20})
+
+	_, _ = m.Update(observerEvent(m, contracts.DeltaContent, "Audit **done**."))
+	call := contracts.ToolCall{
+		ID: "call-1", Type: "function",
+		Function: contracts.Function{Name: contracts.BashTool, Arguments: `{"command":"ls"}`},
+	}
+	_, _ = m.Update(sessionEventMsg{
+		sessionID:  m.session.ID,
+		observerID: m.sessionObserverID,
+		event:      contracts.EventStream{Kind: contracts.EventToolCall, ToolCall: &call},
+	})
+
+	content := ansi.Strip(m.viewport.View())
+	if strings.Contains(content, "**done**") {
+		t.Fatalf("the answer is still showing its raw source after its tool call: %q", content)
+	}
+	if !strings.Contains(content, "Audit done.") {
+		t.Fatalf("the answer is missing from the transcript: %q", content)
+	}
+}
+
 // A reader who scrolled up keeps their place while the turn keeps producing:
 // live output follows the newest line only when the view is already there.
 func TestStreamingLeavesAReaderWhoScrolledUpWhereTheyAre(t *testing.T) {
