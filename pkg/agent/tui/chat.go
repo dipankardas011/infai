@@ -2010,7 +2010,7 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	case "system":
 		content = m.styles.system.Width(width).Render("· " + entry.text)
 	case "event", "status":
-		content = m.styles.event.Width(width).Render("· " + entry.text)
+		content = m.styles.event.Width(width).Render("◆ " + entry.text)
 	case "compaction":
 		content = m.styles.thinking.Width(width).Render("CONTEXT COMPACTED")
 		if body := strings.Trim(m.renderThinkingMarkdown(entry.text, width), "\n"); body != "" {

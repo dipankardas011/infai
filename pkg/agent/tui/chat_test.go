@@ -1793,7 +1793,7 @@ func TestApprovalKeysAnswerTheDecision(t *testing.T) {
 	if !strings.Contains(last.text, "deny_with_reason") || !strings.Contains(last.text, "delete only inside build") {
 		t.Fatalf("transcript recorded %q", last.text)
 	}
-	if rendered, want := m.renderBlock(&last, 80, false), m.styles.event.Width(80).Render("· "+last.text); rendered != want {
+	if rendered, want := m.renderBlock(&last, 80, false), m.styles.event.Width(80).Render("◆ "+last.text); rendered != want {
 		t.Fatal("approval event is not rendered with the event color")
 	}
 }
