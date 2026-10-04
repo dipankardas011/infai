@@ -22,16 +22,18 @@ const (
 )
 
 type modalOption struct {
-	label    string
-	role     string
-	current  bool
-	tree     string
-	fork     string
-	shortcut rune
-	provider string
-	model    string
-	session  uuid.UUID
-	event    *TimelineEvent
+	label   string
+	role    string
+	current bool
+	tree    string
+	// detailTree continues ancestor branches through the session's detail row.
+	detailTree string
+	fork       string
+	shortcut   rune
+	provider   string
+	model      string
+	session    uuid.UUID
+	event      *TimelineEvent
 	// detailParts is the identifying fields of a session row, most important
 	// first, so a narrow list can drop the ones that fit worst.
 	detailParts []string
@@ -494,7 +496,13 @@ func sessionEntryRows(option modalOption, selected, armed bool, width int, style
 	if selected {
 		detailStyle = detailStyle.Background(everforest.SelectionBg)
 	}
-	detail := "    " + sessionDetailLine(option.detailParts, max(width-4, 1))
+	detailText := sessionDetailLine(option.detailParts, max(width-4, 1))
+	detail := detailStyle.Render("    " + detailText)
+	if option.tree != "" {
+		detail = detailStyle.Render("  ") +
+			sessionTree(option.detailTree, detailStyle) +
+			detailStyle.Render(detailText)
+	}
 	return []string{sessionRow(rowStyle, line, width), sessionRow(detailStyle, detail, width)}
 }
 

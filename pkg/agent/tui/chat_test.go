@@ -1181,8 +1181,8 @@ func TestSidecarHierarchyInSessionList(t *testing.T) {
 	if len(m.modal.options) != 3 || m.modal.options[1].session != parent || m.modal.options[2].session != child {
 		t.Fatalf("session order = %+v, want caller then sidecar", m.modal.options)
 	}
-	if m.modal.options[2].tree != "└─ " {
-		t.Fatalf("sidecar tree = %q, want child connector", m.modal.options[2].tree)
+	if m.modal.options[2].tree != "└─ " || m.modal.options[2].detailTree != "   " {
+		t.Fatalf("sidecar tree = (%q, %q), want child connector and aligned detail", m.modal.options[2].tree, m.modal.options[2].detailTree)
 	}
 }
 
@@ -2199,7 +2199,7 @@ func TestTimelineTreeRecedesBehindTheRow(t *testing.T) {
 func TestSessionListTreeRecedesBehindTheRow(t *testing.T) {
 	styles := newHarnessStyles()
 	option := modalOption{
-		label: "sidecar child", tree: "└─ ",
+		label: "sidecar child", tree: "├─ ", detailTree: "│  ", detailParts: []string{"model"},
 		sessionStatus: contracts.SessionBusy, agentKind: contracts.SidecarLoopAgent,
 	}
 	for _, selected := range []bool{false, true} {
@@ -2211,11 +2211,20 @@ func TestSessionListTreeRecedesBehindTheRow(t *testing.T) {
 		if selected {
 			rowStyle = styles.screenSel
 		}
-		if want := rowStyle.Foreground(everforest.Faint).Render("└─ "); !strings.Contains(rows[0], want) {
+		if want := rowStyle.Foreground(everforest.Faint).Render("├─ "); !strings.Contains(rows[0], want) {
 			t.Fatalf("selected=%v session tree is not faint: %q", selected, rows[0])
 		}
-		if got := lipgloss.Width(ansi.Strip(rows[0])); got != 80 {
-			t.Fatalf("selected=%v session row width=%d want 80", selected, got)
+		detailStyle := styles.inactive
+		if selected {
+			detailStyle = detailStyle.Background(everforest.SelectionBg)
+		}
+		if want := detailStyle.Foreground(everforest.Faint).Render("│  "); !strings.Contains(rows[1], want) {
+			t.Fatalf("selected=%v detail row breaks the tree guide: %q", selected, rows[1])
+		}
+		for i, row := range rows {
+			if got := lipgloss.Width(ansi.Strip(row)); got != 80 {
+				t.Fatalf("selected=%v row %d width=%d want 80", selected, i, got)
+			}
 		}
 	}
 }

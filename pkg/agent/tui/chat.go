@@ -2809,17 +2809,19 @@ func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required b
 			if session.Cwd != "" {
 				parts = append(parts, session.Cwd)
 			}
-			tree, nextIndent := "", indent
+			tree, detailTree, nextIndent := "", "", indent
 			if parent != uuid.Nil {
 				tree = indent + "├─ "
+				detailTree = indent + "│  "
 				nextIndent = indent + "│  "
 				if i == len(children[parent])-1 {
 					tree = indent + "└─ "
+					detailTree = indent + "   "
 					nextIndent = indent + "   "
 				}
 			}
 			options = append(options, modalOption{
-				label: name, tree: tree, detailParts: parts,
+				label: name, tree: tree, detailTree: detailTree, detailParts: parts,
 				session: session.ID, sessionStatus: status, sessionActive: session.Active, agentKind: session.AgentKind,
 			})
 			addChildren(session.ID, nextIndent)
