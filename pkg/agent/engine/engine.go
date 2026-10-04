@@ -780,6 +780,16 @@ func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 	return summaries
 }
 
+// GetSessionIdentity returns only persisted display identity, avoiding timeline
+// loading when a child session needs to identify its caller.
+func (e *InfaiAgentEngine) GetSessionIdentity(id uuid.UUID) (string, contracts.AgentKind, error) {
+	meta, err := e.sessionStore.LoadMeta(id)
+	if err != nil {
+		return "", "", err
+	}
+	return meta.Name, meta.AgentKind, nil
+}
+
 // GetSessionRecords returns a session's meta plus its active timeline records.
 func (e *InfaiAgentEngine) GetSessionRecords(id uuid.UUID) (store.SessionMeta, []store.Record, error) {
 	meta, err := e.sessionStore.LoadMeta(id)

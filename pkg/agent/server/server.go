@@ -48,6 +48,7 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("POST /v1/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /v1/sessions", s.handleListSessions)
 	mux.HandleFunc("GET /v1/sessions/{id}", s.handleGetSession)
+	mux.HandleFunc("GET /v1/sessions/{id}/identity", s.handleGetSessionIdentity)
 	mux.HandleFunc("GET /v1/sessions/{id}/timeline", s.handleGetTimeline)
 	mux.HandleFunc("POST /v1/sessions/{id}/timeline/branch", s.handleBranchTimeline)
 	mux.HandleFunc("POST /v1/sessions/{id}/load", s.handleLoadSession)
@@ -251,6 +252,24 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, s.engine.ListSessions())
+}
+
+func (s *Server) handleGetSessionIdentity(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	name, agentKind, err := s.engine.GetSessionIdentity(id)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, glue.SessionIdentityResponse{Name: name, AgentKind: agentKind})
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {

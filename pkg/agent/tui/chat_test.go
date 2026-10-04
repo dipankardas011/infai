@@ -469,6 +469,31 @@ func TestSessionRowCarriesNameKindAndStatus(t *testing.T) {
 	}
 }
 
+func TestSessionRowShowsParentBelowSidecarName(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.width = 100
+	m.session = store.SessionMeta{
+		ID: uuid.New(), ParentID: uuid.New(), Name: "Build worker", AgentKind: contracts.SidecarLoopAgent,
+	}
+	m.parentName = "Orchestrator"
+	m.parentAgentKind = contracts.InteractiveAgent
+
+	rows := strings.Split(ansi.Strip(m.sessionRowView()), "\n")
+	var sessionRow, parentRow int = -1, -1
+	for i, row := range rows {
+		if strings.Contains(row, "Build worker") {
+			sessionRow = i
+		}
+		if strings.Contains(row, "↖ ⬢ Orchestrator") {
+			parentRow = i
+		}
+	}
+	if sessionRow == -1 || parentRow != sessionRow+1 {
+		t.Fatalf("parent row is not directly below the sidecar row: %q", rows)
+	}
+}
+
 // A caller that delegated lists its children under its own row, each with the
 // marks the session list uses, so the caller shows what a sidecar is doing
 // without the reader joining it.
@@ -2639,6 +2664,25 @@ func TestFailedSessionLoadResumesOldObserver(t *testing.T) {
 	}
 }
 
+func TestSessionLoadFetchesParentIdentity(t *testing.T) {
+	parentID := uuid.New()
+	client := &parentIdentityChatClient{parentID: parentID}
+
+	msg, ok := loadSessionCmd(context.Background(), client, uuid.New())().(sessionLoadedMsg)
+	if !ok {
+		t.Fatal("load command did not return sessionLoadedMsg")
+	}
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	if client.requestedParent != parentID {
+		t.Fatalf("requested parent = %s, want %s", client.requestedParent, parentID)
+	}
+	if msg.parentName != "Orchestrator" || msg.parentAgentKind != contracts.InteractiveAgent {
+		t.Fatalf("parent identity = (%q, %q), want (Orchestrator, interactive)", msg.parentName, msg.parentAgentKind)
+	}
+}
+
 func TestSessionLoadClearsPendingAttachments(t *testing.T) {
 	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
 	m.modal = nil
@@ -2650,6 +2694,21 @@ func TestSessionLoadClearsPendingAttachments(t *testing.T) {
 	if m.pending != nil {
 		t.Fatalf("pending survived session load: %+v", m.pending)
 	}
+}
+
+type parentIdentityChatClient struct {
+	stubChatClient
+	parentID        uuid.UUID
+	requestedParent uuid.UUID
+}
+
+func (c *parentIdentityChatClient) LoadSession(context.Context, uuid.UUID) (*glue.SessionOutput, error) {
+	return &glue.SessionOutput{SessionMeta: store.SessionMeta{ID: uuid.New(), ParentID: c.parentID}}, nil
+}
+
+func (c *parentIdentityChatClient) GetSessionIdentity(_ context.Context, id uuid.UUID) (string, contracts.AgentKind, error) {
+	c.requestedParent = id
+	return "Orchestrator", contracts.InteractiveAgent, nil
 }
 
 type stubChatClient struct{}
@@ -2674,6 +2733,9 @@ func (stubChatClient) LoadSession(context.Context, uuid.UUID) (*glue.SessionOutp
 }
 func (stubChatClient) GetSession(context.Context, uuid.UUID) (*store.SessionMeta, []store.Record, error) {
 	return nil, nil, nil
+}
+func (stubChatClient) GetSessionIdentity(context.Context, uuid.UUID) (string, contracts.AgentKind, error) {
+	return "", "", nil
 }
 func (stubChatClient) DeleteSession(context.Context, uuid.UUID) error { return nil }
 func (stubChatClient) CloseSession(context.Context, uuid.UUID) error  { return nil }

@@ -55,6 +55,8 @@ type chatModel struct {
 	styles harnessStyles
 
 	session           store.SessionMeta
+	parentName        string
+	parentAgentKind   contracts.AgentKind
 	contextWindow     uint64
 	thinking          contracts.InfaiThinkingLevel
 	availableThinking []contracts.InfaiThinkingLevel
@@ -143,9 +145,11 @@ type editorDoneMsg struct {
 }
 
 type sessionLoadedMsg struct {
-	output  *glue.SessionOutput
-	records []store.Record
-	err     error
+	output          *glue.SessionOutput
+	parentName      string
+	parentAgentKind contracts.AgentKind
+	records         []store.Record
+	err             error
 }
 type sessionsListedMsg struct {
 	sessions []contracts.SessionSummary
@@ -383,6 +387,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.session = msg.output.SessionMeta
+		m.parentName = msg.parentName
+		m.parentAgentKind = msg.parentAgentKind
 		m.used = 0
 		m.workStatus = ""
 		m.workBegan = time.Time{}
@@ -441,6 +447,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.session = msg.output.SessionMeta
+		m.parentName = ""
+		m.parentAgentKind = ""
 		m.workStatus = ""
 		m.workBegan = time.Time{}
 		m.working = false
@@ -1622,10 +1630,46 @@ func (m *chatModel) sessionRowView() string {
 	// The blank row above is what separates the session row from the transcript;
 	// the bottom line sits flush against the composer.
 	line := " " + name + gap + marks + " "
+	if parent := m.parentRowView(); parent != "" {
+		line += "\n" + parent
+	}
 	if children := m.sidecarRowsView(); children != "" {
-		line = line + "\n" + children
+		line += "\n" + children
 	}
 	return m.styles.statusRow.PaddingTop(1).Render(line)
+}
+
+// parentRowView identifies the caller directly beneath a child session. The
+// upward-left arrow keeps the relationship distinct from an agent-kind mark.
+func (m *chatModel) parentRowView() string {
+	if m.session.ParentID == uuid.Nil {
+		return ""
+	}
+	inner := max(m.width-2, 1)
+	treePrefix := "↖ "
+	if inner <= lipgloss.Width(treePrefix) {
+		return " " + sessionTree(truncateLine(treePrefix, inner), m.styles.statusRow.PaddingRight(0)) + " "
+	}
+	kindGlyph, kindStyle := agentKindMark(m.parentAgentKind, m.styles)
+	kindPrefix := ""
+	if kindGlyph != "" {
+		kindPrefix = kindGlyph + " "
+	}
+	if lipgloss.Width(treePrefix)+lipgloss.Width(kindPrefix) > inner {
+		kindPrefix = ""
+	}
+	name := strings.TrimSpace(m.parentName)
+	if name == "" {
+		name = "Untitled session"
+	}
+	name = truncateLine(name, inner-lipgloss.Width(treePrefix)-lipgloss.Width(kindPrefix))
+	gap := strings.Repeat(" ", max(inner-lipgloss.Width(treePrefix)-lipgloss.Width(kindPrefix)-lipgloss.Width(name), 0))
+	return " " +
+		sessionTree(treePrefix, m.styles.statusRow.PaddingRight(0)) +
+		kindStyle.Render(kindPrefix) +
+		m.styles.sessionName.Render(name) +
+		gap +
+		" "
 }
 
 // upsertSidecar folds one report into the row for the session that sent it. A
@@ -3086,7 +3130,15 @@ func loadSessionCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
 			return sessionLoadedMsg{err: err}
 		}
 		_, records, err := client.GetSession(ctx, id)
-		return sessionLoadedMsg{output: meta, records: records, err: err}
+		if err != nil {
+			return sessionLoadedMsg{err: err}
+		}
+		parentName := ""
+		var parentAgentKind contracts.AgentKind
+		if meta.ParentID != uuid.Nil {
+			parentName, parentAgentKind, err = client.GetSessionIdentity(ctx, meta.ParentID)
+		}
+		return sessionLoadedMsg{output: meta, parentName: parentName, parentAgentKind: parentAgentKind, records: records, err: err}
 	}
 }
 

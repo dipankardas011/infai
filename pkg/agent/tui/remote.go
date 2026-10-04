@@ -422,6 +422,26 @@ func (c *RemoteClient) LoadSession(ctx context.Context, id uuid.UUID) (*glue.Ses
 	return &out, nil
 }
 
+func (c *RemoteClient) GetSessionIdentity(ctx context.Context, id uuid.UUID) (string, contracts.AgentKind, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions/"+id.String()+"/identity", nil)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", readAPIError(resp)
+	}
+	var out glue.SessionIdentityResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", "", err
+	}
+	return out.Name, out.AgentKind, nil
+}
+
 // GetSession fetches a session's meta and active timeline records so a resumed
 // session can render its history.
 func (c *RemoteClient) GetSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, []store.Record, error) {
