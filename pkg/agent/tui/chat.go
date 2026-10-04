@@ -601,6 +601,10 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.openSessionList()
 		return m, listSessionsCmd(m.ctx, m.client)
 	}
+	if key == "esc" && m.modal == nil && m.relatedSessionSelection != uuid.Nil {
+		m.relatedSessionSelection = uuid.Nil
+		return m, nil
+	}
 	// Relationship navigation stays available even while HITL owns the rest of
 	// the keyboard. Menus with their own arrow navigation retain precedence.
 	if m.modal == nil && !m.commandMenu && m.filePicker == nil &&

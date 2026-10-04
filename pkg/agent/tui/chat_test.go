@@ -540,6 +540,14 @@ func TestArrowKeysNavigateRelatedSessionsAcrossHITL(t *testing.T) {
 	if m.relatedSessionSelection != parentID {
 		t.Fatalf("up selected %s, want parent %s", m.relatedSessionSelection, parentID)
 	}
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	if m.relatedSessionSelection != uuid.Nil {
+		t.Fatalf("escape kept relationship selection %s", m.relatedSessionSelection)
+	}
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	if m.relatedSessionSelection != parentID {
+		t.Fatalf("down after escape selected %s, want parent %s", m.relatedSessionSelection, parentID)
+	}
 
 	_, cmd := m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	if cmd == nil {
