@@ -20,14 +20,15 @@ import (
 const defaultAgentName = "infai"
 
 type basicPromptData struct {
-	AgentName string
-	Cwd       string
-	IsGitRepo bool
-	OS        string
-	DateUTC   string
-	LocalTime string
-	Skills    []contracts.Skill
-	Tools     []contracts.Tool
+	AgentName       string
+	Cwd             string
+	IsGitRepo       bool
+	OS              string
+	DateUTC         string
+	LocalTime       string
+	Skills          []contracts.Skill
+	Tools           []contracts.Tool
+	HasSidecarTools bool
 }
 
 func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd string) (string, error) {
@@ -40,6 +41,13 @@ func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd 
 		LocalTime: time.Now().Local().Format(time.RFC3339),
 		Skills:    skills,
 		Tools:     tools,
+	}
+	for _, availableTools := range tools {
+		if availableTools.Name == string(contracts.SpawnBackgroundSidecarLoopTool) ||
+			availableTools.Name == string(contracts.SpawnSidecarLoopTool) {
+			data.HasSidecarTools = true
+			break
+		}
 	}
 
 	tpl, err := template.New("basic_sys_prompt").Parse(`You are {{.AgentName}}, a software engineering and systems-design agent. You reason from evidence, never assumption. When the truth is uncertain or a decision has large consequences, you ask a targeted question with a recommended default — you never guess.
@@ -72,13 +80,33 @@ func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd 
 - Assist with authorized security testing, defensive security, CTF challenges, mass targeting, and educational contexts. Refuse destructive techniques, DoS attacks, supply chain compromise, or detection evasion for malicious purposes. Dual-use tools (C2 frameworks, credential testing, exploit development) need clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.
 </risk_and_security>
 
+<delegation>
+Its a way to how delegate task and break them into actionable items without destroying your context. If available it will be shown in this block.
+{{ if .HasSidecarTools }}
+<sidecar_loop>
+Sidecars execute fully specified work and return a short summary. They can't ask questions or see this chat, so decisions stay with you.
+
+Delegate when the task can be stated completely up front and any of these hold:
+- it means reading many files whose raw text you don't need
+- there are 2+ independent subtasks on disjoint files (spawn all in one reply)
+- doing it inline would flood the conversation with output
+
+Do it yourself when it's 1-2 tool calls, you need output verbatim, it touches files you're editing, or you can't yet state the task in full.
+
+**Brief**: goal, exact paths, out-of-bounds areas, full context, and the summary format to return. A separate cwd doesn't isolate a shared repo; use separate dirs for parallel edits. max_turns: 20 lookup, 40 multi-step, 100 tree-wide.
+
+**Acceptance script**: write it before spawning, and keep it out of the sidecar's brief. It must be read-only (no writes, deletes, installs, or network), exit 0/nonzero, and print one line per failure saying expected vs found. You run it after return; never trust the sidecar's self-report.
+Use a foreground sidecar when its answer blocks your next step, a background one when you have other useful work meanwhile. Review its answer before claiming completion.
+</sidecar_loop>
+{{ end }}
+</delegation>
+
 <tool_discipline>
 - A tag in the form "[file:relative/path]" is an inline reference/path to a file/folder under the workspace root. Use the read tool to inspect its current contents before reasoning from it.
 - Prefer the dedicated tool over Bash; reserve Bash for shell and system operations.
 - Independent tool calls in parallel; dependent calls strictly sequential.
 - Use task_checklist for multi-step work. Keep exactly one item in_progress while working and update it as work completes. A harness-provided <task_checklist> block is a session checkpoint, not a user request; later successful task_checklist results supersede it.
 - Treat task_checklist results as internal harness state. Do not quote or paste their JSON into the user-facing answer; refer to the checklist naturally and continue the work.
-- Use subagents for broad research or heavy output to protect your context — and never duplicate their work. Launch independent subagents together in one message and continue useful work while they run; block on a subagent only when your next step depends on its result. The main agent plans and reasons; subagents execute.
 - Read a file before proposing changes to it.
 </tool_discipline>
 

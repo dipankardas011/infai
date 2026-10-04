@@ -183,6 +183,20 @@ func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thin
 					reply.Usage = &usage
 					reply.ContextTokens = usage.TotalTokens
 				}
+			case contracts.EventCompactionExecuted:
+				if onDelta == nil || event.Compaction == nil {
+					break
+				}
+				if event.Compaction.Err != "" {
+					// The manual path is reported by the /compact result.
+					if event.Compaction.Automatic {
+						onDelta(event.Kind, "compaction failed: "+event.Compaction.Err)
+					}
+					break
+				}
+				if event.Compaction.Summary != "" {
+					onDelta(event.Kind, event.Compaction.Summary)
+				}
 			case contracts.DeltaContent:
 				reply.Reply += content
 				if onDelta != nil && content != "" {
@@ -194,6 +208,10 @@ func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thin
 					onDelta(event.Kind, content)
 				}
 			default:
+				// Only content-bearing events arrive here. Tool calls, tool
+				// results, skill loads and compaction write structured fields
+				// instead, so they never reach this callback: a client that
+				// wants them reads the fields, not this stream.
 				if onDelta != nil && content != "" {
 					onDelta(event.Kind, content)
 				}
@@ -402,6 +420,26 @@ func (c *RemoteClient) LoadSession(ctx context.Context, id uuid.UUID) (*glue.Ses
 		return nil, err
 	}
 	return &out, nil
+}
+
+func (c *RemoteClient) GetSessionIdentity(ctx context.Context, id uuid.UUID) (string, contracts.AgentKind, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions/"+id.String()+"/identity", nil)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", readAPIError(resp)
+	}
+	var out glue.SessionIdentityResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", "", err
+	}
+	return out.Name, out.AgentKind, nil
 }
 
 // GetSession fetches a session's meta and active timeline records so a resumed

@@ -47,6 +47,10 @@ func (s *InfaiAgentSession) SetModel(choosenModel contracts.ProvisionedModel) er
 	}
 
 	s.mu.Lock()
+	if s.meta.AgentKind == contracts.SidecarLoopAgent {
+		s.mu.Unlock()
+		return errors.New("sidecar_loop sessions cannot change model")
+	}
 	if s.status != contracts.SessionIdle {
 		s.mu.Unlock()
 		return errors.New("session must be idle to change models")
@@ -68,6 +72,9 @@ func (s *InfaiAgentSession) SetThinkingPattern(pattern contracts.InfaiThinkingLe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.meta.AgentKind == contracts.SidecarLoopAgent {
+		return errors.New("sidecar_loop sessions cannot change the thinking pattern")
+	}
 	if s.status != contracts.SessionIdle {
 		return errors.New("session must be idle to change thinking")
 	}

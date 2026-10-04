@@ -2,8 +2,11 @@ package comms
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -20,8 +23,8 @@ func TestAgentCommsRoutesMessages(t *testing.T) {
 	iac := hub.NewSessionAgentComms(agentID)
 
 	t.Run("engine to agent", func(t *testing.T) {
-		inbound := subscribeInbox(t, iac, AgentCommKindSubagent)
-		want := &AgentComm{To: agentID, Kind: AgentCommKindSubagent}
+		inbound := subscribeInbox(t, iac, AgentCommKindResultSidecar)
+		want := &AgentComm{To: agentID, Kind: AgentCommKindResultSidecar}
 		ctx := testContext(t)
 
 		if err := hub.SendToSessionAgent(ctx, agentID, want); err != nil {
@@ -37,7 +40,7 @@ func TestAgentCommsRoutesMessages(t *testing.T) {
 	})
 
 	t.Run("agent to engine", func(t *testing.T) {
-		want := &AgentComm{From: agentID, Kind: AgentCommKindSubagent}
+		want := &AgentComm{From: agentID, Kind: AgentCommKindResultSidecar}
 		ctx := testContext(t)
 
 		if err := iac.Send(ctx, want); err != nil {
@@ -65,7 +68,7 @@ func TestAgentCommsSharesEngineInbox(t *testing.T) {
 
 	ctx := testContext(t)
 	for _, id := range []uuid.UUID{firstID, secondID} {
-		if err := hub.NewSessionAgentComms(id).Send(ctx, &AgentComm{From: id, Kind: AgentCommKindSubagent}); err != nil {
+		if err := hub.NewSessionAgentComms(id).Send(ctx, &AgentComm{From: id, Kind: AgentCommKindResultSidecar}); err != nil {
 			t.Fatalf("agent %s send to engine: %v", id, err)
 		}
 	}
@@ -80,8 +83,8 @@ func TestAgentCommsSharesEngineInbox(t *testing.T) {
 	}
 
 	want := map[uuid.UUID]AgentCommKind{
-		firstID:  AgentCommKindSubagent,
-		secondID: AgentCommKindSubagent,
+		firstID:  AgentCommKindResultSidecar,
+		secondID: AgentCommKindResultSidecar,
 	}
 	if len(received) != len(want) {
 		t.Fatalf("received %#v, want %#v", received, want)
@@ -101,10 +104,10 @@ func TestAgentCommsRejectsUnknownAgent(t *testing.T) {
 	iac := hub.NewSessionAgentComms(agentID)
 	ctx := testContext(t)
 
-	if err := hub.SendToSessionAgent(ctx, agentID, &AgentComm{To: agentID, Kind: AgentCommKindSubagent}); err != ErrAgentNotRegistered {
+	if err := hub.SendToSessionAgent(ctx, agentID, &AgentComm{To: agentID, Kind: AgentCommKindResultSidecar}); err != ErrAgentNotRegistered {
 		t.Fatalf("send to unregistered agent error = %v, want %v", err, ErrAgentNotRegistered)
 	}
-	if _, err := iac.Subscribe(AgentCommKindSubagent, func(*AgentComm) {}); err != ErrAgentNotRegistered {
+	if _, err := iac.Subscribe(AgentCommKindResultSidecar, func(*AgentComm) {}); err != ErrAgentNotRegistered {
 		t.Fatalf("subscribe on unregistered agent error = %v, want %v", err, ErrAgentNotRegistered)
 	}
 
@@ -113,7 +116,7 @@ func TestAgentCommsRejectsUnknownAgent(t *testing.T) {
 	}
 	hub.UnregisterSessionAgent(agentID)
 
-	if err := hub.SendToSessionAgent(ctx, agentID, &AgentComm{To: agentID, Kind: AgentCommKindSubagent}); err != ErrAgentNotRegistered {
+	if err := hub.SendToSessionAgent(ctx, agentID, &AgentComm{To: agentID, Kind: AgentCommKindResultSidecar}); err != ErrAgentNotRegistered {
 		t.Fatalf("send to unregistered agent error = %v, want %v", err, ErrAgentNotRegistered)
 	}
 }
@@ -124,6 +127,126 @@ func TestAgentCommsClose(t *testing.T) {
 
 	if _, err := hub.SubscribeForSessionAgentsEvents(context.Background()); err != ErrAgentCommsClosed {
 		t.Fatalf("receive error = %v, want %v", err, ErrAgentCommsClosed)
+	}
+}
+
+// The delegation round trip the spawn tools will use, in the order the four
+// kinds carry it: the caller asks for a sidecar, the engine answers with the
+// sidecar's own AgentID on the conformation kind, and the sidecar's outcome
+// arrives later on the result kind carrying that same id. Nothing in the
+// request identifies it — the engine's answer is what creates the identity.
+func TestDelegationRoundTrip(t *testing.T) {
+	hub := NewAgentComms()
+	t.Cleanup(hub.Close)
+
+	callerID := uuid.New()
+	if err := hub.RegisterSessionAgent(callerID); err != nil {
+		t.Fatalf("register caller: %v", err)
+	}
+	caller := hub.NewSessionAgentComms(callerID)
+
+	conformations := make(chan DelegationConformation, 1)
+	unsubscribeConformations, err := caller.Subscribe(AgentCommDelegationConformation, func(msg *AgentComm) {
+		var conformation DelegationConformation
+		if err := json.Unmarshal(msg.Payload, &conformation); err != nil {
+			return
+		}
+		conformations <- conformation
+	})
+	if err != nil {
+		t.Fatalf("subscribe for conformations: %v", err)
+	}
+	t.Cleanup(unsubscribeConformations)
+
+	results := make(chan DelegatedTaskResponse, 1)
+	unsubscribeResults, err := caller.Subscribe(AgentCommKindResultSidecar, func(msg *AgentComm) {
+		var response DelegatedTaskResponse
+		if err := json.Unmarshal(msg.Payload, &response); err != nil {
+			return
+		}
+		results <- response
+	})
+	if err != nil {
+		t.Fatalf("subscribe for results: %v", err)
+	}
+	t.Cleanup(unsubscribeResults)
+
+	ctx := testContext(t)
+	request, err := json.Marshal(DelegationToSidecarLoop{ParentID: callerID, Task: "check the thing"})
+	if err != nil {
+		t.Fatalf("encode request: %v", err)
+	}
+	if err := caller.Send(ctx, &AgentComm{
+		From:    callerID,
+		Kind:    AgentCommKindSpawnSidecar,
+		Payload: request,
+	}); err != nil {
+		t.Fatalf("send spawn request: %v", err)
+	}
+
+	// The engine reads one inbox, so the kind is what tells it what arrived.
+	msg, err := hub.SubscribeForSessionAgentsEvents(ctx)
+	if err != nil {
+		t.Fatalf("read engine inbox: %v", err)
+	}
+	assert.Equal(t, AgentCommKindSpawnSidecar, msg.Kind)
+
+	var read DelegationToSidecarLoop
+	if err := json.Unmarshal(msg.Payload, &read); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	assert.Equal(t, callerID, read.ParentID)
+	assert.Equal(t, "check the thing", read.Task)
+
+	// It answers with the sidecar it created, addressed to whoever asked.
+	sidecarID := uuid.New()
+	conformation, err := json.Marshal(DelegationConformation{DelegatedTo: sidecarID})
+	if err != nil {
+		t.Fatalf("encode conformation: %v", err)
+	}
+	if err := hub.SendToSessionAgent(ctx, msg.From, &AgentComm{
+		From:    sidecarID,
+		To:      callerID,
+		Kind:    AgentCommDelegationConformation,
+		Payload: conformation,
+	}); err != nil {
+		t.Fatalf("send conformation: %v", err)
+	}
+
+	select {
+	case got := <-conformations:
+		assert.Equal(t, sidecarID, got.DelegatedTo)
+		assert.Empty(t, got.Err)
+	case <-ctx.Done():
+		t.Fatal("the caller received no conformation")
+	}
+
+	// The sidecar finishes, and its outcome names it, so the caller knows which
+	// delegation it settles without the request having carried an id.
+	response, err := json.Marshal(DelegatedTaskResponse{
+		From:    sidecarID,
+		Status:  contracts.SessionCompleted,
+		Summary: "the answer",
+	})
+	if err != nil {
+		t.Fatalf("encode response: %v", err)
+	}
+	if err := hub.SendToSessionAgent(ctx, callerID, &AgentComm{
+		From:    sidecarID,
+		To:      callerID,
+		Kind:    AgentCommKindResultSidecar,
+		Payload: response,
+	}); err != nil {
+		t.Fatalf("send result: %v", err)
+	}
+
+	select {
+	case got := <-results:
+		assert.Equal(t, sidecarID, got.From)
+		assert.Equal(t, contracts.SessionCompleted, got.Status)
+		assert.Equal(t, "the answer", got.Summary)
+	case <-ctx.Done():
+		t.Fatal("the caller received no result")
 	}
 }
 

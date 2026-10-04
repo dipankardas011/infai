@@ -97,6 +97,25 @@ func TestEditToolRequiresUniqueExactMatch(t *testing.T) {
 	})
 }
 
+func TestEditToolRejectsNoOpReplacement(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "note.txt", "same")
+	m := manager(t, root)
+	execute(t, m, contracts.ReadTool, map[string]any{"path": "note.txt"})
+
+	for _, replaceAll := range []bool{false, true} {
+		err := executeError(t, m, contracts.EditTool, map[string]any{
+			"path": "note.txt", "old_string": "same", "new_string": "same", "replace_all": replaceAll,
+		})
+		if !strings.Contains(err, "unchanged_edit") {
+			t.Fatalf("no-op edit error = %s, want unchanged_edit", err)
+		}
+	}
+	if got := readFile(t, filepath.Join(root, "note.txt")); got != "same" {
+		t.Fatalf("file after rejected edit = %q", got)
+	}
+}
+
 func TestFileToolsRejectInvisibleCharacters(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "note.txt", "safe")

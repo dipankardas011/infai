@@ -85,7 +85,7 @@ func (m *chatModel) resolveApproval(decision, reason string) tea.Cmd {
 	if reason != "" {
 		note += ": " + reason
 	}
-	m.blocks = append(m.blocks, block{role: "system", text: note})
+	m.blocks = append(m.blocks, block{role: "event", text: note})
 	m.refreshTranscript(true)
 	m.reflow()
 	return resolveApprovalCmd(m.ctx, m.client, approval, decision, reason)
@@ -208,6 +208,14 @@ func approvalSubject(approval *Approval) (name, preview string) {
 
 func approvalCompactPreview(call contracts.ToolCall) string {
 	switch contracts.ToolType(call.Function.Name) {
+	case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+		var args struct {
+			AgentName string `json:"agent_name"`
+			Task      string `json:"task"`
+		}
+		if json.Unmarshal([]byte(call.Function.Arguments), &args) == nil {
+			return args.AgentName + " · task + acceptance script · " + singleLine(args.Task)
+		}
 	case contracts.ReadTool:
 		if preview, ok := readToolCallPreview(call.Function.Arguments); ok {
 			return preview
@@ -253,7 +261,7 @@ func approvalDetailLines(view approvalView, width int, styles harnessStyles) []s
 			lines = append(lines, bandLine(styles.hitl, width, ""))
 		}
 		oldWidth, newWidth := diffGutterWidths(view.rows)
-		codeWidth := max(width-(oldWidth+newWidth+4), 1)
+		codeWidth := max(width-diffGutterWidth(oldWidth, newWidth), 1)
 		for _, row := range view.rows {
 			lines = append(lines, renderDiffRow(row, oldWidth, newWidth, codeWidth, styles)...)
 		}
@@ -279,6 +287,24 @@ func approvalDiffRows(call contracts.ToolCall) []diffRow {
 
 func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 	switch contracts.ToolType(call.Function.Name) {
+	case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+		var args struct {
+			AgentName        string `json:"agent_name"`
+			Task             string `json:"task"`
+			Cwd              string `json:"cwd"`
+			AcceptanceScript string `json:"acceptance_script"`
+			MaxTurns         uint64 `json:"max_turns"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+			return prettyToolArguments(call.Function.Arguments), ""
+		}
+		cwd := args.Cwd
+		if cwd == "" {
+			cwd = "caller workspace"
+		}
+		body := fmt.Sprintf("SIDECAR  %s\nWORKING DIRECTORY  %s\nTURN BUDGET  %d\n\nTASK\n%s\n\nACCEPTANCE SCRIPT (must be read-only)",
+			args.AgentName, cwd, args.MaxTurns, args.Task)
+		return body, args.AcceptanceScript
 	case contracts.ReadTool:
 		preview, ok := readToolCallPreview(call.Function.Arguments)
 		if !ok {
@@ -362,7 +388,7 @@ func renderApprovalBody(body string, width int, styles harnessStyles) string {
 	var rendered []string
 	for _, line := range strings.Split(body, "\n") {
 		style := styles.hitlMuted
-		if line == "SCRIPT" {
+		if line == "SCRIPT" || line == "TASK" || line == "ACCEPTANCE SCRIPT (must be read-only)" {
 			style = styles.active.Background(everforest.AttentionBg).Bold(true)
 		}
 		rendered = append(rendered, strings.Split(style.Width(width).Render(line), "\n")...)

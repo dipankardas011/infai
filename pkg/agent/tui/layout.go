@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"strings"
-
 	"charm.land/lipgloss/v2"
 )
 
@@ -97,22 +95,6 @@ func fitArea(area rowArea, content string) string {
 		return ""
 	}
 	return lipgloss.NewStyle().Width(area.width).Height(area.height).MaxHeight(area.height).Render(content)
-}
-
-func centeredLayer(content string, width, height int) *lipgloss.Layer {
-	x := max((width-lipgloss.Width(content))/2, 0)
-	y := max((height-lipgloss.Height(content))/2, 0)
-	return lipgloss.NewLayer(content).X(x).Y(y)
-}
-
-func intrinsicTextWidth(values ...string) int {
-	widest := 0
-	for _, value := range values {
-		for line := range strings.SplitSeq(value, "\n") {
-			widest = max(widest, lipgloss.Width(line))
-		}
-	}
-	return widest
 }
 
 func contentWidth(style lipgloss.Style, available int) int {

@@ -1,6 +1,9 @@
 package contracts
 
 import (
+	"context"
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,6 +27,7 @@ const (
 // for session-list API consumers.
 type SessionSummary struct {
 	ID        uuid.UUID     `json:"id"`
+	ParentID  uuid.UUID     `json:"parent_id,omitempty"`
 	Name      string        `json:"name,omitempty"`
 	Provider  string        `json:"provider"`
 	Model     string        `json:"model"`
@@ -43,3 +47,97 @@ const (
 	SingleLoopAgent  AgentKind = "loop"
 	SwarmAgent       AgentKind = "swarm"
 )
+
+// IsInConcludedState reports whether a status ends a session of the given kind, leaving
+// nothing to run. Which statuses conclude a session depends on the kind, because
+// it is what that kind can reach.
+func IsInConcludedState(kind AgentKind, status SessionStatus) bool {
+	type combo struct {
+		kind   AgentKind
+		status SessionStatus
+	}
+	o := combo{kind, status}
+	switch o {
+	case combo{SidecarLoopAgent, SessionMaxIterationExhausted},
+		combo{SidecarLoopAgent, SessionTombstone},
+		combo{SidecarLoopAgent, SessionCompleted},
+
+		combo{SingleLoopAgent, SessionTombstone},
+		combo{SingleLoopAgent, SessionCompleted},
+		combo{SingleLoopAgent, SessionMaxIterationExhausted},
+
+		combo{InteractiveAgent, SessionMaxIterationExhausted}:
+		return true
+	default:
+		return false
+	}
+}
+
+type AgentMailbox struct {
+	drainValve atomic.Bool
+	fillValve  atomic.Bool
+	mailbox    chan ChatMessage
+}
+
+func NewAgentMailboxForSession() *AgentMailbox {
+	return &AgentMailbox{mailbox: make(chan ChatMessage, 10)}
+}
+
+func (am *AgentMailbox) IsEmpty() bool { return len(am.mailbox) == 0 }
+
+// Purpose to avoid the agent to inject during manualCompaction duration. (but then why not have the same spinWait in the workingHistory of agent?)
+func (am *AgentMailbox) PreventDraining() { am.drainValve.Store(false) }
+func (am *AgentMailbox) AllowDraining()   { am.drainValve.Store(true) }
+
+// for sidecar_loop as only one message
+func (am *AgentMailbox) PreventFilling() { am.fillValve.Store(false) }
+func (am *AgentMailbox) AllowFilling()   { am.fillValve.Store(true) }
+
+func (am *AgentMailbox) SendMessage(ctx context.Context, message ChatMessage) error {
+	if !am.fillValve.Load() {
+		return fmt.Errorf("Adding message to agent mailbox")
+	}
+
+	select {
+	case am.mailbox <- message:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (am *AgentMailbox) spinWaiting(ctx context.Context) {
+	for tc := time.NewTicker(time.Second); ; {
+		select {
+		case <-tc.C:
+			if am.drainValve.Load() {
+				tc.Stop()
+				return
+			}
+		case <-ctx.Done():
+			tc.Stop()
+			return
+		}
+
+	}
+}
+
+func (am *AgentMailbox) ConsumeAllFromInbox(ctx context.Context) []ChatMessage {
+	am.spinWaiting(ctx)
+
+	var batch []ChatMessage
+
+	for {
+		select {
+		case message := <-am.mailbox:
+			batch = append(batch, message)
+		default:
+			return batch
+		}
+	}
+}
+
+func (am *AgentMailbox) ListenForMessageInInbox(ctx context.Context) <-chan ChatMessage {
+	am.spinWaiting(ctx)
+	return am.mailbox
+}

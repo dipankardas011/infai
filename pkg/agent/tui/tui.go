@@ -71,6 +71,7 @@ type Client interface {
 	CreateSession(ctx context.Context, opts SessionCreateOptions) (*glue.SessionOutput, error)
 	LoadSession(ctx context.Context, id uuid.UUID) (*glue.SessionOutput, error)
 	GetSession(ctx context.Context, id uuid.UUID) (*store.SessionMeta, []store.Record, error)
+	GetSessionIdentity(ctx context.Context, id uuid.UUID) (string, contracts.AgentKind, error)
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	CloseSession(ctx context.Context, id uuid.UUID) error
 	RenameSession(ctx context.Context, id uuid.UUID, name string) (*store.SessionMeta, error)
@@ -177,7 +178,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 		if _, records, err := c.GetSession(ctx, resume); err == nil {
 			renderHistory(out, records)
 		}
-		cSystem.Fprintf(out, "resumed session %s\n", resume)
+		cEvent.Fprintf(out, "resumed session %s\n", resume)
 	}
 
 	for {
@@ -257,16 +258,17 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 				}
 				cAssistant.Fprint(out, text)
 			case contracts.EventProviderEvent:
-				cSystem.Fprintln(out, statusLabel(text))
-			case contracts.CompactionSummary:
-				printCompactionSummary(out, text)
-			case contracts.EventToolCall:
-				cSystem.Fprintf(out, "  ↳ tool call %s\n", text)
-			case contracts.EventToolResult:
-				cSystem.Fprintf(out, "  ↳ tool result %s\n", text)
-			case contracts.EventSkillLoad:
-				cSkill.Fprintf(out, "  ✦ skill %s\n", text)
+				cEvent.Fprintln(out, statusLabel(text))
+			case contracts.EventCompactionExecuted:
+				if text != "" {
+					printCompactionSummary(out, text)
+				}
 			case contracts.EventToolTaskCheckList:
+				// Only a branch selection publishes this event with content;
+				// the checklist tool's own result carries a structured payload
+				// that this stream does not flatten. It is the client's new
+				// checklist state, so it is rendered here rather than counted
+				// as tool output.
 				if state, err := decodeTaskChecklist(text); err == nil {
 					completed := 0
 					for _, item := range state.Items {
@@ -274,7 +276,7 @@ func runLine(ctx context.Context, c Client, in io.Reader, out io.Writer, opts Ru
 							completed++
 						}
 					}
-					cSystem.Fprintf(out, "  tasks %d/%d complete\n", completed, len(state.Items))
+					cEvent.Fprintf(out, "  tasks %d/%d complete\n", completed, len(state.Items))
 				}
 			}
 		}, nil)
@@ -315,13 +317,13 @@ func renderHistory(out io.Writer, records []store.Record) {
 			cAssistant.Fprintf(out, "● %s\n", m.Text())
 			for _, call := range m.ToolCalls {
 				cSystem.Fprint(out, "  ▲ ")
-				cToolCallText.Fprintf(out, "tool call %s\n", toolCallDisplay(call))
+				cToolCall.Fprintf(out, "tool call %s\n", toolCallDisplay(call))
 			}
 			fmt.Fprintln(out)
 		case "tool":
 			cSystem.Fprint(out, "  ▲")
 			cAssistant.Fprint(out, "▲")
-			cToolResultText.Fprintf(out, " tool result [%s] %s\n", m.ToolCallID, m.Text())
+			cToolResult.Fprintf(out, " tool result [%s] %s\n", m.ToolCallID, m.Text())
 			fmt.Fprintln(out)
 		}
 	}
@@ -453,7 +455,7 @@ multi-line: end a line with \ to continue typing on the next line`)
 			return false, err
 		}
 		s.session.Name = name
-		cSystem.Fprintf(out, "session renamed to %q\n", name)
+		cEvent.Fprintf(out, "session renamed to %q\n", name)
 		return false, nil
 
 	case "/sessions":
@@ -541,9 +543,10 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 		return err
 	}
 	rows := timelineTreeRows(view.Events)
+	toolNames := timelineToolNames(view.Events)
 	options := make([]TimelineEvent, 0, len(rows))
 	for _, row := range rows {
-		displays := timelineEventDisplays(row.event)
+		displays := timelineEventDisplays(row.event, toolNames)
 		for displayIndex, display := range displays {
 			current := "  "
 			if row.event.ID == view.Head && displayIndex == len(displays)-1 {
@@ -554,7 +557,9 @@ func runBranchTimeline(ctx context.Context, c Client, out io.Writer, s *replStat
 				tree = row.subprefix + strings.Repeat(" ", lipgloss.Width(fork))
 				fork = ""
 			}
-			fmt.Fprintf(out, "  %d  %s%s%s", len(options), current, tree, fork)
+			fmt.Fprintf(out, "  %d  %s", len(options), current)
+			cTree.Fprintf(out, "%s", tree)
+			fmt.Fprint(out, fork)
 			if roleColor := timelineRoleColor(display.role); roleColor != nil {
 				roleColor.Fprintf(out, "%s:", display.role)
 			} else {

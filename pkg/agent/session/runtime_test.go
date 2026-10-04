@@ -73,6 +73,10 @@ func newBareRuntimeSession(t *testing.T, model contracts.InfaiModelAdaptor, time
 	if err := sessionStore.SaveMeta(meta); err != nil {
 		t.Fatal(err)
 	}
+	mailbox := contracts.NewAgentMailboxForSession()
+	mailbox.AllowFilling()
+	mailbox.AllowDraining()
+
 	s := &InfaiAgentSession{
 		l:                slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ctx:              ctx,
@@ -88,8 +92,9 @@ func newBareRuntimeSession(t *testing.T, model contracts.InfaiModelAdaptor, time
 		activeTimeline:   append([]contracts.ChatMessage(nil), history...),
 		eventBus:         make(chan contracts.EventStream, 256),
 		subscribers:      make(map[*subscriber]struct{}),
+		agentMailbox:     mailbox,
 	}
-	s.agent, err = agent.NewAgent(model, contracts.InteractiveAgent, s.commitMessages, s.eventBus, s.userCancellation, func([]contracts.ToolCall) ([]contracts.ChatMessage, bool) { return nil, false }, "test system prompt", agent.WithMaxTurns(100), agent.WithAutoCompaction(s.shouldCompact, s.autoCompact))
+	s.agent, err = agent.NewAgent(model, contracts.InteractiveAgent, mailbox, s.commitMessages, s.eventBus, s.userCancellation, func([]contracts.ToolCall) ([]contracts.ChatMessage, bool) { return nil, false }, "test system prompt", agent.WithMaxTurns(100), agent.WithAutoCompaction(s.shouldCompact, s.autoCompact))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +109,10 @@ func startRuntimeSession(s *InfaiAgentSession) {
 	}()
 	go func() {
 		defer s.wg.Done()
-		s.agent.StartLoop(s.ctx, s.activeTimeline)
+		s.mu.Lock()
+		timeline := append([]contracts.ChatMessage(nil), s.activeTimeline...)
+		s.mu.Unlock()
+		s.agent.StartLoop(s.ctx, timeline)
 	}()
 }
 
@@ -307,6 +315,36 @@ func TestApprovalSurvivesObserverDisconnectAndCanBeResolved(t *testing.T) {
 	waitForSessionStatus(t, s, contracts.SessionBusy)
 }
 
+func TestApprovalDenialReturnsReason(t *testing.T) {
+	s := newBareRuntimeSession(t, nil, nil, nil)
+	startRuntimeSession(s)
+	defer s.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- s.performHITL(s.ctx, s.meta.ID, contracts.ToolCall{ID: "call-1", Function: contracts.Function{Name: contracts.BashTool}})
+	}()
+	waitForSessionStatus(t, s, contracts.SessionWaitingApproval)
+	view, _, unsubscribe, err := s.JoinSessionEvents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsubscribe()
+	if view.PendingApproval == nil {
+		t.Fatal("pending approval missing")
+	}
+	request := view.PendingApproval
+	if err := s.ResolveApproval(request.ID, contracts.ApprovalConclusion{
+		ReqID: request.ID, Fingerprint: request.Fingerprint,
+		Decision: contracts.ApprovalDenyWithReason, Reason: "user canceled",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; !errors.Is(err, harnessErr.ErrApprovalDenied) || !strings.Contains(err.Error(), "user canceled") {
+		t.Fatalf("denial error = %v, want approval denied with reason", err)
+	}
+}
+
 func TestManualCompactionRejectsChatAndReplacesHistory(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -327,7 +365,7 @@ func TestManualCompactionRejectsChatAndReplacesHistory(t *testing.T) {
 	waitForSessionStatus(t, s, contracts.SessionIdle)
 
 	compacted := make(chan error, 1)
-	go func() { compacted <- s.CompactChat(context.Background()) }()
+	go func() { compacted <- s.ManualCompactChat(context.Background()) }()
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
@@ -353,7 +391,11 @@ func TestManualCompactionRejectsChatAndReplacesHistory(t *testing.T) {
 	}
 }
 
-func TestAutomaticCompactionFailureCancelsWaitingAgent(t *testing.T) {
+// An automatic compaction can fail on a provider that is simply down. The
+// history is unchanged, so the session must stay runnable and report the failure
+// rather than concluding: concluding would leave a session that looks alive with
+// no one left to drain its mailbox.
+func TestAutomaticCompactionFailureLeavesSessionRunnable(t *testing.T) {
 	model := newRuntimeTestModel(10)
 	model.generate = func(_ context.Context, _ []contracts.ChatMessage, _ []contracts.Tool, opts *contracts.GenerateOptions) (contracts.ChatMessage, *contracts.TokenUsage, error) {
 		if opts != nil && opts.Stream {
@@ -371,27 +413,45 @@ func TestAutomaticCompactionFailureCancelsWaitingAgent(t *testing.T) {
 	defer s.Close()
 	waitForSessionStatus(t, s, contracts.SessionIdle)
 
+	_, events, unsubscribe, err := s.JoinSessionEvents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsubscribe()
+
 	if err := s.EnqueueUserMessage(context.Background(), contracts.UserInput{Text: "trigger"}); err != nil {
 		t.Fatal(err)
 	}
-	waitForSessionStatus(t, s, contracts.SessionTombstone)
-	waitForSessionCancellation(t, s, "summarizer failed")
-}
 
-func waitForSessionCancellation(t *testing.T, s *InfaiAgentSession, want string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if cause := context.Cause(s.ctx); cause != nil {
-			if !strings.Contains(cause.Error(), want) {
-				t.Fatalf("session cancellation cause = %v, want it to contain %q", cause, want)
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	var reported *contracts.CompactionResult
+	for reported == nil {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				t.Fatal("event channel closed before the failure was reported")
 			}
-			return
+			if event.Kind == contracts.EventCompactionExecuted {
+				reported = event.Compaction
+			}
+		case <-deadline.C:
+			t.Fatalf("no compaction failure was reported; status = %q", s.Status())
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("session context was never canceled, want cause containing %q", want)
-		}
-		time.Sleep(time.Millisecond)
+	}
+	if !reported.Automatic {
+		t.Error("the failure was reported as a manual compaction")
+	}
+	if !strings.Contains(reported.Err, "summarizer failed") {
+		t.Fatalf("compaction error = %q, want it to contain %q", reported.Err, "summarizer failed")
+	}
+
+	waitForSessionStatus(t, s, contracts.SessionIdle)
+	if cause := context.Cause(s.ctx); cause != nil {
+		t.Fatalf("an automatic compaction failure concluded the session: %v", cause)
+	}
+	if err := s.EnqueueUserMessage(context.Background(), contracts.UserInput{Text: "still here"}); err != nil {
+		t.Fatalf("session no longer accepts messages after a compaction failure: %v", err)
 	}
 }
 
@@ -403,7 +463,7 @@ func TestSelectBranchRejectsQueuedPrompt(t *testing.T) {
 	}
 	s := newBareRuntimeSession(t, nil, timeline, nil)
 	defer s.Close()
-	if err := s.agent.Enqueue(context.Background(), contracts.NewUserMessage("already queued")); err != nil {
+	if err := s.agentMailbox.SendMessage(context.Background(), contracts.NewUserMessage("already queued")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.SelectBranch(selected.ID); err == nil || !strings.Contains(err.Error(), "queued messages") {
@@ -517,7 +577,7 @@ func TestManualCompactionAppliesToFirstPromptAfterCompaction(t *testing.T) {
 	// blocked in its select before compacting.
 	time.Sleep(100 * time.Millisecond)
 
-	if err := s.CompactChat(context.Background()); err != nil {
+	if err := s.ManualCompactChat(context.Background()); err != nil {
 		t.Fatalf("manual compaction: %v", err)
 	}
 	waitForSessionStatus(t, s, contracts.SessionIdle)

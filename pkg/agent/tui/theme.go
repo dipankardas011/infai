@@ -17,6 +17,7 @@ var everforest = struct {
 	SurfaceAlt color.Color
 	Text       color.Color
 	Muted      color.Color
+	Faint      color.Color
 	Red        color.Color
 	Orange     color.Color
 	Yellow     color.Color
@@ -43,6 +44,7 @@ var everforest = struct {
 	SurfaceAlt: lipgloss.Color("#374145"),
 	Text:       lipgloss.Color("#d3c6aa"),
 	Muted:      lipgloss.Color("#859289"),
+	Faint:      lipgloss.Color("#7a8478"), // Everforest grey0, the terminal's bright black
 	Red:        lipgloss.Color("#e67e80"),
 	Orange:     lipgloss.Color("#e69875"),
 	Yellow:     lipgloss.Color("#dbbc7f"),
@@ -95,14 +97,11 @@ type harnessStyles struct {
 	imageBadge       lipgloss.Style
 	thinking         lipgloss.Style
 	system           lipgloss.Style
+	event            lipgloss.Style
 	error            lipgloss.Style
 	tool             lipgloss.Style
 	skill            lipgloss.Style
-	modal            lipgloss.Style
-	modalTitle       lipgloss.Style
 	modalBody        lipgloss.Style
-	modalOption      lipgloss.Style
-	modalActive      lipgloss.Style
 	screenTitle      lipgloss.Style
 	screenBody       lipgloss.Style
 	screenRow        lipgloss.Style
@@ -159,14 +158,11 @@ func newHarnessStyles() harnessStyles {
 		imageBadge:  lipgloss.NewStyle().Background(everforest.Green).Foreground(everforest.Background).Bold(true),
 		thinking:    lipgloss.NewStyle().Foreground(everforest.Muted).Italic(true),
 		system:      lipgloss.NewStyle().Foreground(everforest.Purple),
+		event:       lipgloss.NewStyle().Foreground(everforest.Orange),
 		error:       lipgloss.NewStyle().Foreground(everforest.Red),
 		tool:        lipgloss.NewStyle().Foreground(everforest.Muted),
 		skill:       lipgloss.NewStyle().Foreground(everforest.Aqua),
-		modal:       lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Border(lipgloss.RoundedBorder()).BorderForeground(everforest.Green).Padding(1, 2),
-		modalTitle:  lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Green).Bold(true),
 		modalBody:   lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Muted),
-		modalOption: lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).PaddingLeft(2),
-		modalActive: lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true).PaddingLeft(1),
 		screenTitle: lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
 		screenBody:  lipgloss.NewStyle().Foreground(everforest.Muted),
 		screenRow:   lipgloss.NewStyle().Foreground(everforest.Text),

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -30,6 +31,9 @@ import (
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
+// block is one entry in the transcript. A tool call is a single block: the call's
+// own preview, then the result that answers it, once it lands — toolDetail holds
+// what came back, and the block's marker carries how it ended.
 type block struct {
 	role          string
 	text          string
@@ -38,6 +42,7 @@ type block struct {
 	toolStatus    string
 	toolName      string
 	toolArgs      string
+	toolDetail    string
 	rendered      string
 	renderedWidth int
 	renderedLines int
@@ -50,6 +55,8 @@ type chatModel struct {
 	styles harnessStyles
 
 	session           store.SessionMeta
+	parentName        string
+	parentAgentKind   contracts.AgentKind
 	contextWindow     uint64
 	thinking          contracts.InfaiThinkingLevel
 	availableThinking []contracts.InfaiThinkingLevel
@@ -59,27 +66,31 @@ type chatModel struct {
 	used              uint64
 	blocks            []block
 
-	width            int
-	height           int
-	areas            []rowArea
-	viewport         viewport.Model
-	anchor           transcriptAnchor
-	composer         textarea.Model
-	checklist        contracts.TaskChecklistState
-	status           contracts.SessionStatus
-	approval         *Approval
-	approvalShown    bool
-	composerWaiting  bool
-	approvalReason   bool
-	approvalDraft    string
-	tailKey          tailKey
-	tailRendered     string
-	tailLines        int
-	tailValid        bool
-	modal            *modalModel
-	commandMenu      bool
-	commandSelection int
-	filePicker       *filePicker
+	width     int
+	height    int
+	areas     []rowArea
+	viewport  viewport.Model
+	anchor    transcriptAnchor
+	composer  textarea.Model
+	checklist contracts.TaskChecklistState
+	status    contracts.SessionStatus
+	// sidecars is the latest status reported by each session this one
+	sidecars                []contracts.SidecarStatus
+	sidecarsSession         uuid.UUID
+	relatedSessionSelection uuid.UUID
+	approval                *Approval
+	approvalShown           bool
+	composerWaiting         bool
+	approvalReason          bool
+	approvalDraft           string
+	tailKey                 tailKey
+	tailRendered            string
+	tailLines               int
+	tailValid               bool
+	modal                   *modalModel
+	commandMenu             bool
+	commandSelection        int
+	filePicker              *filePicker
 
 	working           bool
 	workBegan         time.Time
@@ -93,8 +104,11 @@ type chatModel struct {
 	initCmd           tea.Cmd
 	streaming         bool
 	streamingAt       int
-	toolCallNames     map[string]string
-	skillNames        map[string]string
+	// toolCallBlocks is where each call's block is, so the result that answers it
+	// can be folded into it. A call with no block of its own — a skill load —
+	// maps to -1.
+	toolCallBlocks map[string]int
+	skillNames     map[string]string
 }
 
 type sessionViewMsg struct {
@@ -132,9 +146,11 @@ type editorDoneMsg struct {
 }
 
 type sessionLoadedMsg struct {
-	output  *glue.SessionOutput
-	records []store.Record
-	err     error
+	output          *glue.SessionOutput
+	parentName      string
+	parentAgentKind contracts.AgentKind
+	records         []store.Record
+	err             error
 }
 type sessionsListedMsg struct {
 	sessions []contracts.SessionSummary
@@ -210,14 +226,14 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 	view.Style = lipgloss.NewStyle().Padding(0, 1)
 
 	m := &chatModel{
-		ctx:           ctx,
-		client:        client,
-		styles:        newHarnessStyles(),
-		viewport:      view,
-		composer:      input,
-		clipboard:     defaultClipboard(),
-		toolCallNames: make(map[string]string),
-		skillNames:    make(map[string]string),
+		ctx:            ctx,
+		client:         client,
+		styles:         newHarnessStyles(),
+		viewport:       view,
+		composer:       input,
+		clipboard:      defaultClipboard(),
+		toolCallBlocks: make(map[string]int),
+		skillNames:     make(map[string]string),
 	}
 	if opts.SessionID != uuid.Nil {
 		m.modal = loadingModal("Opening session")
@@ -243,9 +259,12 @@ const transcriptScrollStep = 3
 func (m *chatModel) refreshInputMark() {
 	// A pending decision owns the keyboard, so the composer is not taking a
 	// prompt. Capturing a reason is the exception: the decision asked for it.
-	waiting := m.approval != nil && !m.approvalReason
+	waiting := (m.approval != nil && !m.approvalReason) || m.session.AgentKind == contracts.SidecarLoopAgent
 	mark := inputMark
 	placeholder := "Ask, plan, build... (external editor ctrl+x)"
+	if m.session.AgentKind == contracts.SidecarLoopAgent {
+		placeholder = "Read-only sidecar · Ctrl+O to open sessions"
+	}
 	switch {
 	case m.approvalReason:
 		mark = "why▸ "
@@ -281,15 +300,22 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.reflow()
 		return m, nil
 	case sessionViewMsg:
-		if msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
+		if m.sessionCancel == nil || msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
 			return m, nil
 		}
+		m.used = 0
+		m.workStatus = ""
+		m.workBegan = time.Time{}
+		m.status = contracts.SessionIdle
+		m.working = false
+		m.toolCallBlocks = make(map[string]int)
+		m.skillNames = make(map[string]string)
 		m.applySessionView(msg.view)
 		m.refreshTranscript(true)
 		m.reflow()
 		return m, waitStream(m.ctx, m.sessionStream)
 	case sessionEventMsg:
-		if msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
+		if m.sessionCancel == nil || msg.sessionID != m.session.ID || msg.observerID != m.sessionObserverID {
 			return m, nil
 		}
 		// Live output follows the newest line only for a reader who is already
@@ -310,7 +336,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitStream(m.ctx, m.sessionStream)
 	case sessionJoinDoneMsg:
-		if msg.sessionID == m.session.ID && msg.observerID == m.sessionObserverID && msg.err != nil && !errors.Is(msg.err, context.Canceled) {
+		if m.sessionCancel != nil && msg.sessionID == m.session.ID && msg.observerID == m.sessionObserverID && msg.err != nil && !errors.Is(msg.err, context.Canceled) {
 			m.appendError(msg.err)
 			m.refreshTranscript(true)
 		}
@@ -362,16 +388,35 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.session = msg.output.SessionMeta
+		m.parentName = msg.parentName
+		m.parentAgentKind = msg.parentAgentKind
+		m.relatedSessionSelection = uuid.Nil
+		m.used = 0
+		m.workStatus = ""
+		m.workBegan = time.Time{}
+		m.working = false
+		m.cancelArmed = false
+		m.cancelStatus = ""
+		m.status = contracts.SessionIdle
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
 		m.modalities = msg.output.Modalities
 		m.pending = nil
-		m.reflow()
+		m.approval = nil
+		m.approvalReason = false
+		m.approvalShown = false
+		m.approvalDraft = ""
+		m.stopStreaming()
+		m.commandMenu = false
+		m.filePicker = nil
+		m.toolCallBlocks = make(map[string]int)
+		m.skillNames = make(map[string]string)
 		m.client.SetSession(msg.output.ID)
 		m.blocks = blocksFromRecords(msg.records)
 		m.checklist = taskChecklistFromRecords(msg.records)
 		m.modal = nil
+		m.reflow()
 		m.refreshTranscript(true)
 		return m, m.startSessionObserver(msg.output.ID)
 	case sessionsListedMsg:
@@ -387,6 +432,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.applySessionAction(msg)
+		if msg.action == "delete" && m.modal != nil && m.modal.kind == modalSessions {
+			return m, listSessionsCmd(m.ctx, m.client)
+		}
 		return m, nil
 	case providersListedMsg:
 		if msg.err != nil {
@@ -401,17 +449,35 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.session = msg.output.SessionMeta
+		m.parentName = ""
+		m.parentAgentKind = ""
+		m.relatedSessionSelection = uuid.Nil
+		m.workStatus = ""
+		m.workBegan = time.Time{}
+		m.working = false
+		m.cancelArmed = false
+		m.cancelStatus = ""
+		m.status = contracts.SessionIdle
+		m.approval = nil
+		m.approvalReason = false
+		m.approvalShown = false
+		m.approvalDraft = ""
+		m.stopStreaming()
+		m.commandMenu = false
+		m.filePicker = nil
+		m.toolCallBlocks = make(map[string]int)
+		m.skillNames = make(map[string]string)
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
 		m.modalities = msg.output.Modalities
 		m.pending = nil
-		m.reflow()
 		m.client.SetSession(msg.output.ID)
 		m.blocks = nil
 		m.checklist = contracts.TaskChecklistState{}
 		m.used = 0
 		m.modal = nil
+		m.reflow()
 		m.refreshTranscript(true)
 		return m, m.startSessionObserver(msg.output.ID)
 	case modelSetMsg:
@@ -425,7 +491,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.modalities = msg.output.Modalities
 			m.pending = nil
 			m.reflow()
-			m.blocks = append(m.blocks, block{role: "system", text: "Model switched to " + msg.output.Model + " @ " + msg.output.Provider})
+			m.blocks = append(m.blocks, block{role: "event", text: "Model switched to " + msg.output.Model + " @ " + msg.output.Provider})
 		}
 		m.modal = nil
 		m.refreshTranscript(true)
@@ -454,7 +520,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendError(msg.err)
 		} else {
 			m.checklist = msg.checklist
-			m.blocks = append(m.blocks, block{role: "system", text: branchSelectionLabel(msg.event)})
+			m.blocks = append(m.blocks, block{role: "event", text: branchSelectionLabel(msg.event)})
 		}
 		m.modal = nil
 		m.refreshTranscript(true)
@@ -470,7 +536,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendError(msg.err)
 		} else if msg.meta != nil {
 			m.session.Name = msg.meta.Name
-			m.blocks = append(m.blocks, block{role: "system", text: "Session renamed to " + msg.meta.Name})
+			m.blocks = append(m.blocks, block{role: "event", text: "Session renamed to " + msg.meta.Name})
 		}
 		m.refreshTranscript(true)
 		return m, nil
@@ -490,7 +556,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.PasteMsg:
-		if m.modal == nil {
+		if m.modal == nil && m.session.AgentKind != contracts.SidecarLoopAgent {
 			var cmd tea.Cmd
 			m.composer, cmd = m.composer.Update(msg)
 			m.updateCommandMenu()
@@ -531,12 +597,39 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
+	if key == "ctrl+o" && m.modal == nil {
+		m.openSessionList()
+		return m, listSessionsCmd(m.ctx, m.client)
+	}
+	if key == "esc" && m.modal == nil && m.relatedSessionSelection != uuid.Nil {
+		m.relatedSessionSelection = uuid.Nil
+		return m, nil
+	}
+	// Relationship navigation stays available even while HITL owns the rest of
+	// the keyboard. Menus with their own arrow navigation retain precedence.
+	if m.modal == nil && !m.commandMenu && m.filePicker == nil &&
+		(strings.TrimSpace(m.composer.Value()) == "" || (m.approval != nil && !m.approvalReason)) {
+		switch key {
+		case "up":
+			if m.moveRelatedSessionSelection(-1) {
+				return m, nil
+			}
+		case "down":
+			if m.moveRelatedSessionSelection(1) {
+				return m, nil
+			}
+		case "enter":
+			if m.relatedSessionSelection != uuid.Nil {
+				return m, m.openRelatedSession(m.relatedSessionSelection)
+			}
+		}
+	}
 	// A pending decision owns the keyboard: the turn is blocked until it is
 	// answered, so the composer is not accepting prompts anyway.
 	if model, cmd, handled := m.handleApprovalKey(key); handled {
 		return model, cmd
 	}
-	if m.working && key == "esc" {
+	if m.working && key == "esc" && m.session.AgentKind != contracts.SidecarLoopAgent && m.modal == nil {
 		if !m.cancelArmed {
 			m.cancelArmed = true
 			m.cancelArmID++
@@ -557,8 +650,14 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.Key().Keystroke() {
 	case "ctrl+x":
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			return m, nil
+		}
 		return m, editComposerCmd(m.composer.Value())
 	case "ctrl+v":
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			return m, nil
+		}
 		return m, m.pasteImage()
 	case "ctrl+u":
 		// Clear staged images and the composer text; with none staged, ctrl+u
@@ -571,23 +670,23 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.working {
 		// A running turn does not stop the composer: a prompt typed now is
-		// queued by the session and served next. The session workspace and the
-		// model picker stay closed, because both reattach the client to a
-		// different session rather than feed this turn.
-		switch key {
-		case "ctrl+o", "ctrl+m":
+		// queued by the session and served next. The model picker stays closed
+		// while that turn runs.
+		if m.session.AgentKind != contracts.SidecarLoopAgent && key == "ctrl+m" {
 			return m, nil
 		}
 	}
-	if key == "ctrl+o" {
-		m.modal = loadingModal("Loading sessions")
-		return m, listSessionsCmd(m.ctx, m.client)
-	}
 	if key == "ctrl+m" {
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			return m, nil
+		}
 		m.modal = loadingModal("Loading models")
 		return m, listProvidersCmd(m.ctx, m.client, true)
 	}
 	if key == "ctrl+t" {
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			return m, nil
+		}
 		m.cycleThinking()
 		return m, nil
 	}
@@ -638,6 +737,9 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if key == "ctrl+down" {
 		m.scrollTranscript(transcriptScrollStep)
+		return m, nil
+	}
+	if m.session.AgentKind == contracts.SidecarLoopAgent {
 		return m, nil
 	}
 	if key == "enter" {
@@ -728,6 +830,10 @@ func (m *chatModel) handleSessionListKey(key string) (tea.Cmd, bool) {
 		if option.session == uuid.Nil {
 			return nil, false
 		}
+		if option.agentKind == contracts.SidecarLoopAgent && option.sessionActive {
+			m.showNotice("Sidecar belongs to its caller", "Close the caller session before deleting its sidecar.", false)
+			return nil, true
+		}
 		if armed == option.session {
 			return deleteSessionCmd(m.ctx, m.client, option.session), true
 		}
@@ -736,6 +842,10 @@ func (m *chatModel) handleSessionListKey(key string) (tea.Cmd, bool) {
 	case "c":
 		if option.session == uuid.Nil {
 			return nil, false
+		}
+		if option.agentKind == contracts.SidecarLoopAgent {
+			m.showNotice("Sidecar belongs to its caller", "Close the caller session to stop its sidecars.", false)
+			return nil, true
 		}
 		if !option.sessionActive {
 			// The engine has nothing to tear down: the session is saved history,
@@ -752,10 +862,54 @@ func (m *chatModel) handleSessionListKey(key string) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// handleTimelineSearchKey routes the branch timeline's search keys: opening the
+// prompt, typing a query, and cycling the hits it found. It reports whether it
+// consumed the key, so the list's own navigation only sees the rest.
+func (m *chatModel) handleTimelineSearchKey(msg tea.KeyPressMsg, key string) (tea.Cmd, bool) {
+	modal := m.modal
+	if modal.searching {
+		switch key {
+		case "esc":
+			modal.searching = false
+			modal.search("")
+		case "enter":
+			modal.searching = false
+		case "backspace":
+			if runes := []rune(modal.query); len(runes) > 0 {
+				modal.search(string(runes[:len(runes)-1]))
+			}
+		default:
+			if text := msg.Key().Text; text != "" {
+				modal.search(modal.query + text)
+			}
+		}
+		// A search in flight owns every key: the list must not move under a
+		// query being typed.
+		return nil, true
+	}
+	switch key {
+	case "/":
+		modal.search("")
+		modal.searching = true
+	case "n":
+		modal.nextMatch(1)
+	case "N":
+		modal.nextMatch(-1)
+	default:
+		return nil, false
+	}
+	return nil, true
+}
+
 func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
 	if m.modal.kind == modalSessions {
 		if cmd, handled := m.handleSessionListKey(key); handled {
+			return cmd
+		}
+	}
+	if m.modal.kind == modalTimeline {
+		if cmd, handled := m.handleTimelineSearchKey(msg, key); handled {
 			return cmd
 		}
 	}
@@ -768,7 +922,14 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.modal.move(-1)
 	case "esc":
 		if !m.modal.required {
+			if m.modal.kind == modalSessions {
+				return m.resumeSessionFromList()
+			}
 			m.modal = nil
+			m.reflow()
+			if m.session.ID != uuid.Nil && m.sessionCancel == nil {
+				return m.startSessionObserver(m.session.ID)
+			}
 		}
 	case "enter":
 		return m.activateModal(m.modal.selected)
@@ -785,6 +946,15 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
+func (m *chatModel) resumeSessionFromList() tea.Cmd {
+	m.modal = nil
+	m.reflow()
+	if m.session.ID != uuid.Nil {
+		return m.startSessionObserver(m.session.ID)
+	}
+	return nil
+}
+
 func (m *chatModel) activateModal(index int) tea.Cmd {
 	if m.modal == nil || index < 0 || index >= len(m.modal.options) {
 		return nil
@@ -795,6 +965,9 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 		if option.session == uuid.Nil {
 			m.modal = loadingModal("Loading models")
 			return listProvidersCmd(m.ctx, m.client, false)
+		}
+		if option.session == m.session.ID {
+			return m.resumeSessionFromList()
 		}
 		m.modal = loadingModal("Opening session")
 		return loadSessionCmd(m.ctx, m.client, option.session)
@@ -813,6 +986,10 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 		}
 	case modalNotice:
 		m.modal = nil
+		m.reflow()
+		if m.session.ID != uuid.Nil && m.sessionCancel == nil {
+			return m.startSessionObserver(m.session.ID)
+		}
 	}
 	return nil
 }
@@ -835,6 +1012,11 @@ func (m *chatModel) submit() tea.Cmd {
 		m.commandMenu = false
 		m.reflow()
 		return m.runCommand(prompt)
+	}
+	if m.session.AgentKind == contracts.SidecarLoopAgent {
+		m.appendError(errors.New("sidecar sessions do not accept chat messages; open the caller session to continue"))
+		m.refreshTranscript(true)
+		return nil
 	}
 	if m.session.ID == uuid.Nil {
 		// Keep the draft and attachments so the user can retry once a session
@@ -879,6 +1061,76 @@ func cancelTurnCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
 	}
 }
 
+func (m *chatModel) moveRelatedSessionSelection(delta int) bool {
+	ids := make([]uuid.UUID, 0, len(m.sidecars)+1)
+	if m.session.ParentID != uuid.Nil {
+		ids = append(ids, m.session.ParentID)
+	}
+	for _, sidecar := range m.sidecars {
+		if sidecar.ID != uuid.Nil && sidecar.ID != m.session.ID {
+			ids = append(ids, sidecar.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return false
+	}
+	selected := -1
+	for i, id := range ids {
+		if id == m.relatedSessionSelection {
+			selected = i
+			break
+		}
+	}
+	if selected == -1 {
+		if delta < 0 {
+			selected = len(ids) - 1
+		} else {
+			selected = 0
+		}
+	} else {
+		selected = (selected + delta + len(ids)) % len(ids)
+	}
+	m.relatedSessionSelection = ids[selected]
+	return true
+}
+
+func (m *chatModel) openRelatedSession(id uuid.UUID) tea.Cmd {
+	if id == uuid.Nil || id == m.session.ID {
+		return nil
+	}
+	if m.sessionCancel != nil {
+		m.sessionCancel()
+		m.sessionCancel = nil
+	}
+	m.sessionObserverID++
+	m.sessionStream = nil
+	if m.cancelArmed {
+		m.workStatus = m.cancelStatus
+	}
+	m.cancelArmed = false
+	m.cancelStatus = ""
+	m.relatedSessionSelection = uuid.Nil
+	m.modal = loadingModal("Opening session")
+	m.reflow()
+	return loadSessionCmd(m.ctx, m.client, id)
+}
+
+func (m *chatModel) openSessionList() {
+	if m.sessionCancel != nil {
+		m.sessionCancel()
+		m.sessionCancel = nil
+	}
+	m.sessionObserverID++
+	m.sessionStream = nil
+	if m.cancelArmed {
+		m.workStatus = m.cancelStatus
+	}
+	m.cancelArmed = false
+	m.cancelStatus = ""
+	m.modal = loadingModal("Loading sessions")
+	m.reflow()
+}
+
 func (m *chatModel) startSessionObserver(sessionID uuid.UUID) tea.Cmd {
 	if m.sessionCancel != nil {
 		m.sessionCancel()
@@ -908,6 +1160,10 @@ func (m *chatModel) startSessionObserver(sessionID uuid.UUID) tea.Cmd {
 }
 
 func (m *chatModel) applySessionView(view glue.SessionView) {
+	if m.sidecarsSession != view.Meta.ID {
+		m.sidecars = nil
+		m.sidecarsSession = view.Meta.ID
+	}
 	m.session = view.Meta
 	m.blocks = blocksFromMessages(view.History)
 	m.checklist = view.Checklist
@@ -947,6 +1203,15 @@ func (m *chatModel) applySessionStatus(status contracts.SessionStatus) {
 }
 
 func (m *chatModel) applySessionEvent(event contracts.EventStream) {
+	// Only a message's own tokens keep it in flight. Everything else — the
+	// usage that closes a generate call, a tool call, a status change — ends
+	// it, so the block stops being drawn as plain text and renders its
+	// markdown. Leaving this to the individual cases meant an answer stayed
+	// raw from its tool call until the next step's first token, which for a
+	// long-running tool is the whole tool's lifetime.
+	if !isContentDelta(event.Kind) {
+		m.stopStreaming()
+	}
 	content := ""
 	if event.Content != nil {
 		content = *event.Content
@@ -968,12 +1233,13 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 	case contracts.EventToolCall:
 		if event.ToolCall != nil {
 			name := string(event.ToolCall.Function.Name)
-			m.toolCallNames[event.ToolCall.ID] = name
+			block := -1
 			if isSkillTool(name) {
 				m.skillNames[event.ToolCall.ID] = skillNameFromCall(*event.ToolCall)
-				break
+			} else {
+				block = m.appendToolEvent("call", contracts.ToolCallDisplay(*event.ToolCall))
 			}
-			m.appendToolEvent("call", contracts.ToolCallDisplay(*event.ToolCall))
+			m.toolCallBlocks[event.ToolCall.ID] = block
 		} else {
 			m.appendToolEvent("call", content)
 		}
@@ -985,13 +1251,7 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 		if isSkillTool(string(event.ToolResult.CallName)) {
 			break
 		}
-		result := string(event.ToolResult.CallName) + " [" + string(event.ToolResult.Status) + "]"
-		if event.ToolResult.Error != "" {
-			result += ": " + event.ToolResult.Error
-		} else if event.ToolResult.Output != "" {
-			result += "\n" + event.ToolResult.Output
-		}
-		m.appendToolEvent("result", result)
+		m.applyToolResult(event.ToolResult.CallID, string(event.ToolResult.CallName), string(event.ToolResult.Status), event.ToolResult.Output, event.ToolResult.Error)
 	case contracts.EventToolTaskCheckList:
 		if event.ToolResult != nil {
 			if state, err := decodeTaskChecklist(event.ToolResult.Output); err == nil {
@@ -999,6 +1259,10 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 			}
 		} else if state, err := decodeTaskChecklist(content); err == nil {
 			m.checklist = state
+		}
+	case contracts.EventSidecarStatus:
+		if event.Sidecar != nil {
+			m.upsertSidecar(*event.Sidecar)
 		}
 	case contracts.EventSkillLoad:
 		name := string(contracts.ReadSkillTool)
@@ -1014,6 +1278,19 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 		}
 	case contracts.EventApprovalResolved:
 		m.handleApprovalUpdate(ApprovalUpdate{Type: string(event.Kind), Approval: approvalFromRequest(event.HITLCall)})
+	case contracts.EventCompactionExecuted:
+		if event.Compaction == nil {
+			break
+		}
+		switch {
+		case event.Compaction.Err != "" && event.Compaction.Automatic:
+			// A manual failure is reported by the /compact result it answers; an
+			// automatic one has no caller, so this event is the only report.
+			m.stopStreaming()
+			m.appendError(errors.New("compaction failed: " + event.Compaction.Err))
+		case event.Compaction.Summary != "":
+			m.appendDelta(event.Kind, event.Compaction.Summary)
+		}
 	case contracts.NotifyAgentUsage:
 		var usage contracts.TokenUsage
 		if json.Unmarshal([]byte(content), &usage) == nil {
@@ -1192,15 +1469,23 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 	}
 	switch command {
 	case "/model":
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			m.showNotice("Sidecar is read-only", "Switch models from the caller session.", false)
+			return nil
+		}
 		m.modal = loadingModal("Loading models")
 		return listProvidersCmd(m.ctx, m.client, true)
 	case "/sessions":
-		m.modal = loadingModal("Loading sessions")
+		m.openSessionList()
 		return listSessionsCmd(m.ctx, m.client)
 	case "/new":
 		m.modal = loadingModal("Loading models")
 		return listProvidersCmd(m.ctx, m.client, false)
 	case "/compact":
+		if m.session.AgentKind == contracts.SidecarLoopAgent {
+			m.showNotice("Sidecar is read-only", "Manual compaction is unavailable for sidecar sessions.", false)
+			return nil
+		}
 		if m.session.ID == uuid.Nil {
 			m.appendError(errors.New("no active session"))
 			m.refreshTranscript(true)
@@ -1231,37 +1516,36 @@ func (m *chatModel) View() tea.View {
 	if m.width <= 0 || m.height <= 0 {
 		return tea.NewView("")
 	}
-	header := m.headerView()
-	status := m.statusView()
-	sessionRow := m.sessionRowView()
-	checklist := m.checklistView()
-	hitl := m.hitlView()
-	commands := m.commandMenuView()
-	files := renderFilePicker(m.filePicker, m.width, m.styles)
-	attachments := m.attachmentsView()
-	composer := m.composerView()
-	parts := []string{header, m.viewport.View(), hitl, checklist, sessionRow, commands, files, attachments, composer, status}
-	if len(m.areas) == len(parts) {
-		parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
-		for i := range parts {
-			parts[i] = fitArea(m.areas[i], parts[i])
-		}
-	}
-	visibleParts := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part != "" {
-			visibleParts = append(visibleParts, part)
-		}
-	}
-	base := lipgloss.JoinVertical(lipgloss.Left, visibleParts...)
-	if m.modal != nil && m.modal.kind != modalTimeline {
+	var base string
+	if m.modal != nil {
+		// A modal is a screen of its own: the chat behind it is not built at
+		// all, so a keystroke on a 4k-event branch timeline costs the rows it
+		// shows and nothing else.
 		base = renderSelectionScreen(m.modal, m.width, m.height, m.styles)
-	} else if m.modal != nil {
-		dialog := renderModal(m.modal, m.width, m.height, m.styles)
-		base = lipgloss.NewCompositor(
-			lipgloss.NewLayer(base),
-			centeredLayer(dialog, m.width, m.height).Z(1),
-		).Render()
+	} else {
+		header := m.headerView()
+		status := m.statusView()
+		sessionRow := m.sessionRowView()
+		checklist := m.checklistView()
+		hitl := m.hitlView()
+		commands := m.commandMenuView()
+		files := renderFilePicker(m.filePicker, m.width, m.styles)
+		attachments := m.attachmentsView()
+		composer := m.composerView()
+		parts := []string{header, m.viewport.View(), hitl, checklist, sessionRow, commands, files, attachments, composer, status}
+		if len(m.areas) == len(parts) {
+			parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
+			for i := range parts {
+				parts[i] = fitArea(m.areas[i], parts[i])
+			}
+		}
+		visibleParts := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if part != "" {
+				visibleParts = append(visibleParts, part)
+			}
+		}
+		base = lipgloss.JoinVertical(lipgloss.Left, visibleParts...)
 	}
 	v := tea.NewView(base)
 	v.AltScreen = true
@@ -1425,7 +1709,141 @@ func (m *chatModel) sessionRowView() string {
 	gap := strings.Repeat(" ", max(inner-lipgloss.Width(name)-lipgloss.Width(marks), 0))
 	// The blank row above is what separates the session row from the transcript;
 	// the bottom line sits flush against the composer.
-	return m.styles.statusRow.PaddingTop(1).Render(" " + name + gap + marks + " ")
+	line := " " + name + gap + marks + " "
+	if parent := m.parentRowView(); parent != "" {
+		line += "\n" + parent
+	}
+	if children := m.sidecarRowsView(); children != "" {
+		line += "\n" + children
+	}
+	return m.styles.statusRow.PaddingTop(1).Render(line)
+}
+
+// parentRowView identifies the caller directly beneath a child session. The
+// upward-left arrow keeps the relationship distinct from an agent-kind mark.
+func (m *chatModel) parentRowView() string {
+	if m.session.ParentID == uuid.Nil {
+		return ""
+	}
+	inner := max(m.width-2, 1)
+	treePrefix := "↖ "
+	if inner <= lipgloss.Width(treePrefix) {
+		return " " + sessionTree(truncateLine(treePrefix, inner), m.styles.statusRow.PaddingRight(0)) + " "
+	}
+	kindGlyph, kindStyle := agentKindMark(m.parentAgentKind, m.styles)
+	kindPrefix := ""
+	if kindGlyph != "" {
+		kindPrefix = kindGlyph + " "
+	}
+	if lipgloss.Width(treePrefix)+lipgloss.Width(kindPrefix) > inner {
+		kindPrefix = ""
+	}
+	name := strings.TrimSpace(m.parentName)
+	if name == "" {
+		name = "Untitled session"
+	}
+	name = truncateLine(name, inner-lipgloss.Width(treePrefix)-lipgloss.Width(kindPrefix))
+	gap := strings.Repeat(" ", max(inner-lipgloss.Width(treePrefix)-lipgloss.Width(kindPrefix)-lipgloss.Width(name), 0))
+	if m.relatedSessionSelection == m.session.ParentID {
+		return " " + m.styles.screenSel.Width(inner).Render(treePrefix+kindPrefix+name+gap) + " "
+	}
+	return " " +
+		sessionTree(treePrefix, m.styles.statusRow.PaddingRight(0)) +
+		kindStyle.Render(kindPrefix) +
+		m.styles.sessionName.Render(name) +
+		gap +
+		" "
+}
+
+// upsertSidecar folds one report into the row for the session that sent it. A
+// session that has not reported yet gets a row; one that has is updated in
+// place, so a child keeps one row for its whole run. A report seen while
+// watching a different session than the rows belong to replaces them, the same
+// way a view of that session would.
+func (m *chatModel) upsertSidecar(status contracts.SidecarStatus) {
+	if m.sidecarsSession != m.session.ID {
+		m.sidecars = nil
+		m.sidecarsSession = m.session.ID
+	}
+	for i := range m.sidecars {
+		if m.sidecars[i].ID == status.ID {
+			// A child that has finished keeps the status it finished on. A
+			// report can land after the one that ended it — a refresh racing
+			// the close that superseded it — and letting it through would put
+			// the row back on a status the child has left for good, with no
+			// later report coming to correct it.
+			if contracts.IsInConcludedState(m.sidecars[i].AgentKind, m.sidecars[i].Status) {
+				return
+			}
+			m.sidecars[i] = status
+			return
+		}
+	}
+	m.sidecars = append(m.sidecars, status)
+}
+
+// sidecarRowsView lists the sessions this one delegated to, so a caller blocked
+// on a sidecar still shows what that sidecar is doing. Each child gets one row
+// wearing the marks the session list gives it, so a sidecar reads the same on
+// both screens. A row is state like the session's own name and status: it stays
+// until the session is left, and each report the child sends updates it in
+// place, whether or not the caller's own turn is still running.
+func (m *chatModel) sidecarRowsView() string {
+	if len(m.sidecars) == 0 {
+		return ""
+	}
+	inner := max(m.width-2, 1)
+	rows := make([]string, 0, len(m.sidecars))
+	// The row style carries a right pad for the single-line session row; the
+	// tree is painted through it, so it must not add a column of its own.
+	treeRow := m.styles.statusRow.PaddingRight(0)
+	for i := range m.sidecars {
+		child := m.sidecars[i]
+		tree := "├─ "
+		if i == len(m.sidecars)-1 {
+			tree = "└─ "
+		}
+		kindGlyph, kindStyle := agentKindMark(child.AgentKind, m.styles)
+		status := describeSessionStatus(child.Status, m.styles)
+		kindPrefix := ""
+		if kindGlyph != "" {
+			kindPrefix = kindGlyph + " "
+		}
+
+		name := strings.TrimSpace(child.Name)
+		if name == "" {
+			name = "sidecar"
+		}
+		tail := status.glyph + " " + status.label
+		if inner-lipgloss.Width(tree)-lipgloss.Width(kindPrefix)-lipgloss.Width(tail) < 2 {
+			// The words are the first thing to go: the glyph still carries the
+			// status, exactly as the session row drops its words first.
+			tail = status.glyph
+		}
+		nameRoom := max(inner-lipgloss.Width(tree)-lipgloss.Width(kindPrefix)-lipgloss.Width(tail)-1, 0)
+		switch {
+		case nameRoom < 2:
+			// truncateLine keeps the value below two columns, so a name with
+			// less room than that is dropped rather than allowed to overflow.
+			name = ""
+		default:
+			name = truncateLine(name, nameRoom)
+		}
+		gap := strings.Repeat(" ", max(inner-lipgloss.Width(tree)-lipgloss.Width(kindPrefix)-lipgloss.Width(name)-lipgloss.Width(tail), 1))
+		if m.relatedSessionSelection == child.ID {
+			rows = append(rows, " "+m.styles.screenSel.Width(inner).Render(tree+kindPrefix+name+gap+tail)+" ")
+			continue
+		}
+
+		rows = append(rows, " "+
+			sessionTree(tree, treeRow)+
+			kindStyle.Render(kindPrefix)+
+			m.styles.sessionName.Render(name)+
+			gap+
+			status.style.Render(tail)+
+			" ")
+	}
+	return strings.Join(rows, "\n")
 }
 
 // sessionRowGap is the space kept between the session name and the marks, and
@@ -1495,22 +1913,27 @@ func (m *chatModel) taskChecklistView(width int) string {
 			completed++
 		}
 	}
-	lines := []string{m.styles.system.Bold(true).Render(fmt.Sprintf("Task Checklist %d/%d complete", completed, len(m.checklist.Items)))}
+	lines := []string{m.styles.muted.Bold(true).Render(fmt.Sprintf("Task Checklist %d/%d complete", completed, len(m.checklist.Items)))}
 	visible := min(len(m.checklist.Items), 4)
 	for _, item := range m.checklist.Items[:visible] {
 		marker := "○"
-		style := m.styles.inactive
+		markerStyle := m.styles.inactive
 		switch item.Status {
 		case contracts.TaskInProgress:
-			marker, style = "◐", m.styles.statusBusy
+			marker, markerStyle = "◐", lipgloss.NewStyle().Foreground(everforest.Yellow)
 		case contracts.TaskCompleted:
-			marker, style = "✓", m.styles.active
+			marker, markerStyle = "✓", lipgloss.NewStyle().Foreground(everforest.Green)
 		}
-		line := marker + " " + item.Title
+		text := item.Title
 		if item.Description != "" {
-			line += "  ·  " + item.Description
+			text += " — " + item.Description
 		}
-		lines = append(lines, style.Render(truncateLine(line, width)))
+		if width <= lipgloss.Width(marker)+1 {
+			lines = append(lines, markerStyle.Render(truncateLine(marker, width)))
+			continue
+		}
+		text = truncateLine(text, width-lipgloss.Width(marker)-1)
+		lines = append(lines, markerStyle.Render(marker)+" "+m.styles.muted.Render(text))
 	}
 	if len(m.checklist.Items) > visible {
 		lines = append(lines, m.styles.muted.Render(fmt.Sprintf("… %d more", len(m.checklist.Items)-visible)))
@@ -1584,8 +2007,10 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 		content = renderChatMarker("◌", m.styles.muted, lipgloss.NewStyle(), text, width)
 	case "error":
 		content = m.styles.error.Width(width).Render("ERROR  " + entry.text)
-	case "system", "status":
+	case "system":
 		content = m.styles.system.Width(width).Render("· " + entry.text)
+	case "event", "status":
+		content = m.styles.event.Width(width).Render("◆ " + entry.text)
 	case "compaction":
 		content = m.styles.thinking.Width(width).Render("CONTEXT COMPACTED")
 		if body := strings.Trim(m.renderThinkingMarkdown(entry.text, width), "\n"); body != "" {
@@ -1594,25 +2019,125 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	case "skill":
 		content = renderChatMarker("✦", m.styles.skill, m.styles.skill, entry.text, width)
 	case "tool":
-		marker := "▲"
-		markerStyle := m.styles.system
-		if entry.toolKind == "result" {
-			marker = "▼"
-			markerStyle = m.styles.active
-			if entry.toolStatus != "success" {
-				markerStyle = m.styles.error
-			}
-		}
-		switch {
-		case entry.toolKind == "call" && entry.toolName == string(contracts.EditTool) && entry.toolArgs != "":
-			content = renderEditDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
-		case entry.toolKind == "call" && entry.toolName == string(contracts.WriteTool) && entry.toolArgs != "":
-			content = renderWriteDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
-		default:
-			content = renderToolMarker(marker, markerStyle, m.styles.tool, entry.toolName, entry.text, width)
-		}
+		content = m.renderToolBlock(entry, width)
 	}
 	return content
+}
+
+// renderToolBlock draws one tool call: the call's own preview, then whatever its
+// result adds beneath it. The transcript keeps a single block per call — the
+// marker carries the outcome, so a result never gets a block of its own.
+func (m *chatModel) renderToolBlock(entry *block, width int) string {
+	marker, markerStyle := m.toolMarker(entry)
+	var content string
+	switch {
+	case entry.toolKind == "call" && entry.toolName == string(contracts.EditTool) && entry.toolArgs != "":
+		content = renderEditDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
+	case entry.toolKind == "call" && entry.toolName == string(contracts.WriteTool) && entry.toolArgs != "":
+		content = renderWriteDiffBlock(marker, markerStyle, m.styles, entry.toolArgs, width)
+	case entry.toolKind == "call" && entry.toolName == string(contracts.BashTool) && entry.toolArgs != "":
+		content = renderBashCall(marker, markerStyle, m.styles, entry.toolArgs, width)
+	default:
+		content = renderToolMarker(marker, markerStyle, m.styles.tool, entry.toolName, entry.text, width)
+	}
+	return content + m.renderToolResult(entry, width)
+}
+
+// renderToolResult draws what a call produced, directly under it: the call is the
+// request and its output follows. A call that failed writes its result in the
+// failure colour, so a failure reads as one without a second pyramid saying so.
+func (m *chatModel) renderToolResult(entry *block, width int) string {
+	detail := strings.TrimRight(entry.toolDetail, "\n")
+	if detail == "" {
+		return ""
+	}
+	marker, _ := m.toolMarker(entry)
+	indent := lipgloss.Width(marker) + 1
+	style := m.styles.tool
+	if entry.toolStatus != "" && entry.toolStatus != string(contracts.ToolExecutionSuccess) {
+		style = m.styles.error
+	}
+	lines := strings.Split(lipgloss.Wrap(detail, max(width-indent, 1), ""), "\n")
+	for i := range lines {
+		lines[i] = strings.Repeat(" ", indent) + style.Render(lines[i])
+	}
+	return "\n" + strings.Join(lines, "\n")
+}
+
+// renderBashCall draws a bash call as the command it runs: the working directory
+// and timeout it was given, then the script itself with the shell's prompt, lit
+// by the bash lexer. The command is bash; the output is not — it is whatever the
+// command printed — so the output stays plain text.
+func renderBashCall(marker string, markerStyle lipgloss.Style, styles harnessStyles, args string, width int) string {
+	var input struct {
+		Command string `json:"command"`
+		Workdir string `json:"workdir"`
+		Timeout *int   `json:"timeout"`
+	}
+	if err := json.Unmarshal([]byte(args), &input); err != nil || input.Command == "" {
+		return renderToolMarker(marker, markerStyle, styles.tool, string(contracts.BashTool), prettyToolArguments(args), width)
+	}
+	const prompt = "$ "
+	indent := lipgloss.Width(marker) + 1
+	head := markerStyle.Render(marker) + " " + markerStyle.Bold(true).Render(string(contracts.BashTool))
+	if input.Workdir != "" {
+		head += styles.muted.Render("  cwd " + input.Workdir)
+	}
+	if input.Timeout != nil {
+		head += styles.muted.Render(fmt.Sprintf("  timeout %ds", *input.Timeout))
+	}
+	// The script is wrapped short of the prompt it is drawn behind.
+	return head + "\n" + indentBlock(bashCallScript(input.Command, max(width-indent-lipgloss.Width(prompt), 1), styles), indent)
+}
+
+// bashCallScript renders a command the way the approval pane renders it, with a
+// prompt on the first line: the same script has to read the same wherever it is
+// shown.
+func bashCallScript(command string, width int, styles harnessStyles) string {
+	prompt := styles.muted.Render("$ ")
+	lines := strings.Split(renderApprovalScript(command, width, styles), "\n")
+	lines[0] = prompt + lines[0]
+	for i := 1; i < len(lines); i++ {
+		lines[i] = strings.Repeat(" ", lipgloss.Width(prompt)) + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// indentBlock shifts every line of a rendered block right, so it hangs under the
+// marker it belongs to.
+func indentBlock(text string, indent int) string {
+	pad := strings.Repeat(" ", indent)
+	lines := strings.Split(text, "\n")
+	for i := range lines {
+		lines[i] = pad + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// toolMarker is the pyramid a tool block carries. Its shape says which tool ran;
+// its colour says how the call ended — green for one that worked, red for one
+// that failed, neutral while it is still running.
+func (m *chatModel) toolMarker(entry *block) (string, lipgloss.Style) {
+	if isSidecarTool(entry.toolName) {
+		// A sidecar keeps its own colour: which child this was stays readable
+		// apart from which tool ran. A failure is still a failure.
+		if entry.toolStatus != "" && entry.toolStatus != string(contracts.ToolExecutionSuccess) {
+			return "↗", m.styles.error
+		}
+		return "↗", m.styles.agentSidecar
+	}
+	switch entry.toolStatus {
+	case string(contracts.ToolExecutionSuccess):
+		return "▲", m.styles.active
+	case "":
+		return "▲", m.styles.system
+	default:
+		return "▲", m.styles.error
+	}
+}
+
+func isSidecarTool(name string) bool {
+	return name == string(contracts.SpawnSidecarLoopTool) || name == string(contracts.SpawnBackgroundSidecarLoopTool)
 }
 
 func renderChatMarker(marker string, markerStyle, bodyStyle lipgloss.Style, text string, width int) string {
@@ -1630,6 +2155,9 @@ func renderChatMarker(marker string, markerStyle, bodyStyle lipgloss.Style, text
 	return strings.Join(lines, "\n")
 }
 
+// renderToolMarker draws a marker, the name of what it marks when there is one,
+// and the body under it: the body's first line rides the marker's line, and the
+// rest are indented beneath it, wrapped to the width.
 func renderToolMarker(marker string, markerStyle, bodyStyle lipgloss.Style, name, text string, width int) string {
 	detail := strings.TrimSpace(text)
 	if name != "" && (detail == name || strings.HasPrefix(detail, name+" ") || strings.HasPrefix(detail, name+"\n")) {
@@ -1723,8 +2251,7 @@ func renderWriteDiffBlock(marker string, markerStyle lipgloss.Style, styles harn
 func renderDiffBlock(header, marker string, rows []diffRow, width int, styles harnessStyles) string {
 	indent := lipgloss.Width(marker) + 1
 	oldWidth, newWidth := diffGutterWidths(rows)
-	gutterWidth := oldWidth + newWidth + 4 // "old new marker " + trailing space
-	codeWidth := max(width-indent-gutterWidth, 1)
+	codeWidth := max(width-indent-diffGutterWidth(oldWidth, newWidth), 1)
 
 	lines := []string{header}
 	for _, row := range rows {
@@ -1772,7 +2299,25 @@ func editDiffRows(path, oldText, newText string) []diffRow {
 	rows := parseUnifiedRows(stripDiffNoNewline(udiff.Unified("a/"+path, "b/"+path, oldText, newText)))
 	emphasizeDiffRows(rows)
 	applyDiffSyntax(rows, path, oldText, newText)
-	return rows
+	return withoutPositions(rows)
+}
+
+// withoutPositions drops the hunk headers and the line numbers of a diff that
+// was built from a snippet. The snippet is all the client has: the file it came
+// from is on the server, so the numbers a snippet diff produces point at the
+// snippet rather than at the file. A row without a position draws no gutter,
+// because a wrong line number is worse than none. The syntax colours have
+// already been taken from the numbered rows.
+func withoutPositions(rows []diffRow) []diffRow {
+	kept := make([]diffRow, 0, len(rows))
+	for _, row := range rows {
+		if row.marker == '@' {
+			continue
+		}
+		row.oldNum, row.newNum = 0, 0
+		kept = append(kept, row)
+	}
+	return kept
 }
 
 func writeDiffRows(path, content string) []diffRow {
@@ -1944,8 +2489,11 @@ func parseHunkRange(field string) int {
 	return n
 }
 
+// diffGutterWidths returns the width of each line-number column. Both are zero
+// when no row carries a position, which is what tells the renderer to draw no
+// gutter at all.
 func diffGutterWidths(rows []diffRow) (int, int) {
-	oldWidth, newWidth := 1, 1
+	oldWidth, newWidth := 0, 0
 	for _, row := range rows {
 		if row.oldNum > 0 {
 			oldWidth = max(oldWidth, len(strconv.Itoa(row.oldNum)))
@@ -1955,6 +2503,16 @@ func diffGutterWidths(rows []diffRow) (int, int) {
 		}
 	}
 	return oldWidth, newWidth
+}
+
+// diffGutterWidth is how much of a row the gutter costs: two columns of numbers,
+// the marker and the spaces between them, or just the marker and its space when
+// no row carries a position.
+func diffGutterWidth(oldWidth, newWidth int) int {
+	if oldWidth == 0 && newWidth == 0 {
+		return 2
+	}
+	return oldWidth + newWidth + 4
 }
 
 func emphasizeDiffRows(rows []diffRow) {
@@ -2003,21 +2561,9 @@ func wordDiffSegments(oldLine, newLine string) ([]diffSegment, []diffSegment) {
 
 // renderDiffRow returns one rendered visual line per wrapped segment. Long
 // source lines are wrapped to codeWidth so every visual line is exactly the
-// same width; the gutter is only printed on the first visual line.
+// same width; the gutter is only printed on the first visual line, and a row
+// with no position in any file draws the marker alone.
 func renderDiffRow(row diffRow, oldWidth, newWidth, codeWidth int, styles harnessStyles) []string {
-	gutterWidth := oldWidth + newWidth + 4
-	if row.marker == '@' {
-		return []string{lipgloss.NewStyle().Foreground(everforest.Blue).Width(gutterWidth + codeWidth).Render(row.text)}
-	}
-	oldStr, newStr := "", ""
-	if row.oldNum > 0 {
-		oldStr = strconv.Itoa(row.oldNum)
-	}
-	if row.newNum > 0 {
-		newStr = strconv.Itoa(row.newNum)
-	}
-	gutter := fmt.Sprintf("%*s %*s %c ", oldWidth, oldStr, newWidth, newStr, row.marker)
-
 	bg := everforest.Background
 	emphFg := everforest.Text
 	switch row.marker {
@@ -2027,10 +2573,30 @@ func renderDiffRow(row diffRow, oldWidth, newWidth, codeWidth int, styles harnes
 		bg, emphFg = everforest.DiffInsertBg, everforest.Green
 	}
 	gutterStyle := lipgloss.NewStyle().Foreground(everforest.Muted).Background(bg)
-	blankGutter := gutterStyle.Render(strings.Repeat(" ", gutterWidth))
-
 	visual := wrapDiffSegments(row, codeWidth)
 	lines := make([]string, 0, len(visual))
+
+	if oldWidth == 0 && newWidth == 0 {
+		for i, segments := range visual {
+			marker := string(row.marker)
+			if i > 0 {
+				marker = " "
+			}
+			lines = append(lines, gutterStyle.Render(marker+" ")+renderDiffSegments(segments, everforest.Text, emphFg, bg, codeWidth))
+		}
+		return lines
+	}
+
+	oldStr, newStr := "", ""
+	if row.oldNum > 0 {
+		oldStr = strconv.Itoa(row.oldNum)
+	}
+	if row.newNum > 0 {
+		newStr = strconv.Itoa(row.newNum)
+	}
+	gutter := fmt.Sprintf("%*s %*s %c ", oldWidth, oldStr, newWidth, newStr, row.marker)
+	blankGutter := gutterStyle.Render(strings.Repeat(" ", diffGutterWidth(oldWidth, newWidth)))
+
 	for i, segments := range visual {
 		g := gutter
 		if i > 0 {
@@ -2183,6 +2749,11 @@ func (m *chatModel) applySessionAction(msg sessionActionedMsg) {
 	}
 
 	if msg.action == "close" {
+		if msg.id == m.session.ID {
+			m.session = store.SessionMeta{}
+			m.client.SetSession(uuid.Nil)
+			m.reflow()
+		}
 		if !sessionConcluded(m.modal.options[index].sessionStatus) {
 			m.modal.options[index].sessionStatus = contracts.SessionTombstone
 		}
@@ -2194,6 +2765,7 @@ func (m *chatModel) applySessionAction(msg sessionActionedMsg) {
 	if msg.id == m.session.ID {
 		m.session = store.SessionMeta{}
 		m.client.SetSession(uuid.Nil)
+		m.reflow()
 	}
 	m.modal.options = append(m.modal.options[:index], m.modal.options[index+1:]...)
 	numberSessionOptions(m.modal.options)
@@ -2218,28 +2790,55 @@ func sessionConcluded(status contracts.SessionStatus) bool {
 
 func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required bool) {
 	options := []modalOption{{label: "Start a new session", shortcut: 'n'}}
+	byID := make(map[uuid.UUID]struct{}, len(sessions))
+	children := make(map[uuid.UUID][]contracts.SessionSummary)
 	for _, session := range sessions {
-		status := session.Status
-		if status == "" {
-			status = contracts.SessionIdle
+		byID[session.ID] = struct{}{}
+		children[session.ParentID] = append(children[session.ParentID], session)
+	}
+	seen := make(map[uuid.UUID]struct{}, len(sessions))
+	var addChildren func(uuid.UUID, string)
+	addChildren = func(parent uuid.UUID, indent string) {
+		for i, session := range children[parent] {
+			if _, exists := seen[session.ID]; exists {
+				continue
+			}
+			seen[session.ID] = struct{}{}
+			status := session.Status
+			if status == "" {
+				status = contracts.SessionIdle
+			}
+			name := session.Name
+			if name == "" {
+				name = "Untitled session"
+			}
+			parts := []string{orModel(session.Model), humanTime(session.UpdatedAt)}
+			if session.Cwd != "" {
+				parts = append(parts, session.Cwd)
+			}
+			tree, detailTree, nextIndent := "", "", indent
+			if parent != uuid.Nil {
+				tree = indent + "├─ "
+				detailTree = indent + "│  "
+				nextIndent = indent + "│  "
+				if i == len(children[parent])-1 {
+					tree = indent + "└─ "
+					detailTree = indent + "   "
+					nextIndent = indent + "   "
+				}
+			}
+			options = append(options, modalOption{
+				label: name, tree: tree, detailTree: detailTree, detailParts: parts,
+				session: session.ID, sessionStatus: status, sessionActive: session.Active, agentKind: session.AgentKind,
+			})
+			addChildren(session.ID, nextIndent)
 		}
-		name := session.Name
-		if name == "" {
-			name = "Untitled session"
+	}
+	addChildren(uuid.Nil, "")
+	for _, session := range sessions {
+		if _, found := byID[session.ParentID]; !found && session.ParentID != uuid.Nil {
+			addChildren(session.ParentID, "")
 		}
-		parts := []string{orModel(session.Model), humanTime(session.UpdatedAt)}
-		if session.Cwd != "" {
-			parts = append(parts, session.Cwd)
-		}
-		option := modalOption{
-			label:         name,
-			detailParts:   parts,
-			session:       session.ID,
-			sessionStatus: status,
-			sessionActive: session.Active,
-			agentKind:     session.AgentKind,
-		}
-		options = append(options, option)
 	}
 	numberSessionOptions(options)
 	m.modal = &modalModel{kind: modalSessions, options: options, required: required}
@@ -2315,6 +2914,19 @@ func stripDiffNoNewline(diff string) string {
 // text never repeats it. Unknown tools fall back to pretty-printed arguments.
 func toolCallPreview(name, arguments string) string {
 	switch contracts.ToolType(name) {
+	case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+		var args struct {
+			AgentName string `json:"agent_name"`
+			Task      string `json:"task"`
+			Cwd       string `json:"cwd"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return prettyToolArguments(arguments)
+		}
+		if args.Cwd != "" {
+			return args.AgentName + "\ncwd  " + args.Cwd + "\n" + args.Task
+		}
+		return args.AgentName + "\n" + args.Task
 	case contracts.ReadTool:
 		preview, ok := readToolCallPreview(arguments)
 		if !ok {
@@ -2414,11 +3026,12 @@ func readToolCallPreview(arguments string) (string, bool) {
 
 func (m *chatModel) showTimeline(view *TimelineView) {
 	rows := timelineTreeRows(view.Events)
+	toolNames := timelineToolNames(view.Events)
 	options := make([]modalOption, 0, len(rows))
 	selected := 0
 	for i := range rows {
 		event := rows[i].event
-		displays := timelineEventDisplays(event)
+		displays := timelineEventDisplays(event, toolNames)
 		for displayIndex, display := range displays {
 			isHeadRow := event.ID == view.Head && displayIndex == len(displays)-1
 			tree, fork := rows[i].prefix, rows[i].fork
@@ -2472,7 +3085,7 @@ func (m *chatModel) appendDelta(kind contracts.EventStreamKind, text string) {
 	case contracts.EventProviderEvent:
 		m.stopStreaming()
 		role, text = "status", statusLabel(text)
-	case contracts.CompactionSummary:
+	case contracts.EventCompactionExecuted:
 		m.stopStreaming()
 		role = "compaction"
 	case contracts.EventManualCompactionTriggered, contracts.EventAutoCompactionTriggered:
@@ -2530,31 +3143,54 @@ func (m *chatModel) stopStreaming() {
 	}
 }
 
-func (m *chatModel) appendToolEvent(kind, text string) {
+// appendToolEvent adds a tool block and reports where it landed, or -1 when the
+// event produced no block at all. A call is drawn from its arguments; a result
+// that arrived without its call is drawn on its own, from the text it carries.
+func (m *chatModel) appendToolEvent(kind, text string) int {
 	name := ""
 	if fields := strings.Fields(text); len(fields) > 0 {
 		name = fields[0]
 	}
 	if isChecklistTool(name) {
-		return
+		return -1
 	}
 	display, arguments := text, ""
 	if kind == "call" {
 		arguments = strings.TrimSpace(strings.TrimPrefix(text, name))
 		display = toolCallPreview(name, arguments)
 	}
-	status := ""
+	status, detail := "", ""
 	if kind == "result" {
+		display = ""
 		if parsedName, parsedStatus, output, resultErr, ok := parseToolResultEvent(text); ok {
 			name, status = parsedName, parsedStatus
-			if output != "" || resultErr != "" {
-				display = transcriptToolResultDisplay(name, status, output, resultErr)
-			}
+			detail = toolResultDetail(name, status, output, resultErr)
 		} else {
 			status = string(contracts.ToolExecutionError)
+			detail = text
 		}
 	}
-	m.blocks = append(m.blocks, block{role: "tool", text: display, toolKind: kind, toolStatus: status, toolName: name, toolArgs: arguments})
+	m.blocks = append(m.blocks, block{role: "tool", text: display, toolKind: kind, toolStatus: status, toolName: name, toolArgs: arguments, toolDetail: detail})
+	return len(m.blocks) - 1
+}
+
+// applyToolResult folds a tool result into the block of the call it answers. A
+// result whose call is not in the transcript — a timeline that does not reach
+// back to it — stands alone, because something did run.
+func (m *chatModel) applyToolResult(callID, name, status, output, resultErr string) {
+	detail := toolResultDetail(name, status, output, resultErr)
+	shown := displayStatus(name, status, output)
+	if at, ok := m.toolCallBlocks[callID]; ok && at >= 0 && at < len(m.blocks) {
+		entry := &m.blocks[at]
+		if name != "" {
+			entry.toolName = name
+		}
+		entry.toolStatus = shown
+		entry.toolDetail = detail
+		entry.renderedValid = false
+		return
+	}
+	m.blocks = append(m.blocks, block{role: "tool", toolKind: "result", toolName: name, toolStatus: shown, toolDetail: detail})
 }
 
 func parseToolResultEvent(text string) (name, status, output, resultErr string, ok bool) {
@@ -2590,7 +3226,15 @@ func loadSessionCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
 			return sessionLoadedMsg{err: err}
 		}
 		_, records, err := client.GetSession(ctx, id)
-		return sessionLoadedMsg{output: meta, records: records, err: err}
+		if err != nil {
+			return sessionLoadedMsg{err: err}
+		}
+		parentName := ""
+		var parentAgentKind contracts.AgentKind
+		if meta.ParentID != uuid.Nil {
+			parentName, parentAgentKind, err = client.GetSessionIdentity(ctx, meta.ParentID)
+		}
+		return sessionLoadedMsg{output: meta, parentName: parentName, parentAgentKind: parentAgentKind, records: records, err: err}
 	}
 }
 
@@ -2675,8 +3319,13 @@ func selectBranchCmd(ctx context.Context, client Client, sessionID uuid.UUID, ev
 	}
 }
 
+// blocksFromRecords rebuilds a transcript from a saved timeline. A result is
+// folded into the block of the call it answers, the same way the live stream
+// folds it, so a resumed session reads exactly like the session that produced
+// it.
 func blocksFromRecords(records []store.Record) []block {
 	var blocks []block
+	callBlocks := make(map[string]int)
 	skillCallIDs := make(map[string]struct{})
 	toolCallNames := make(map[string]string)
 	for _, record := range records {
@@ -2721,17 +3370,31 @@ func blocksFromRecords(records []store.Record) []block {
 					if isChecklistTool(toolName) {
 						continue
 					}
+					callBlocks[call.ID] = len(blocks)
 					blocks = append(blocks, block{role: "tool", text: toolCallPreview(toolName, call.Function.Arguments), toolKind: "call", toolName: toolName, toolArgs: call.Function.Arguments})
 				}
 			case "tool":
 				toolName := toolCallNames[message.ToolCallID]
-				if _, skill := skillCallIDs[message.ToolCallID]; !skill && !isChecklistTool(toolName) {
-					status := string(message.Status)
-					if status == "" {
-						status = string(contracts.ToolExecutionSuccess)
-					}
-					blocks = append(blocks, block{role: "tool", text: transcriptToolResultDisplay(toolName, status, message.Text(), ""), toolKind: "result", toolStatus: status, toolName: toolName})
+				if _, skill := skillCallIDs[message.ToolCallID]; skill || isChecklistTool(toolName) {
+					continue
 				}
+				status := string(message.Status)
+				if status == "" {
+					status = string(contracts.ToolExecutionSuccess)
+				}
+				result := block{
+					role:       "tool",
+					toolKind:   "result",
+					toolName:   toolName,
+					toolStatus: displayStatus(toolName, status, message.Text()),
+					toolDetail: toolResultDetail(toolName, status, message.Text(), ""),
+				}
+				if index, ok := callBlocks[message.ToolCallID]; ok {
+					blocks[index].toolStatus = result.toolStatus
+					blocks[index].toolDetail = result.toolDetail
+					continue
+				}
+				blocks = append(blocks, result)
 			}
 		}
 	}
@@ -2752,10 +3415,22 @@ func isSkillTool(name string) bool { return name == string(contracts.ReadSkillTo
 
 func isChecklistTool(name string) bool { return name == string(contracts.TaskChecklistTool) }
 
+// decodeTaskChecklist decodes a task checklist state. Unknown fields are
+// rejected: without that any tool result that happens to be a JSON object — a
+// bash result is the common case — unmarshals into an empty state and reads as
+// a checklist update.
 func decodeTaskChecklist(text string) (contracts.TaskChecklistState, error) {
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.DisallowUnknownFields()
 	var state contracts.TaskChecklistState
-	err := json.Unmarshal([]byte(text), &state)
-	return state, err
+	if err := decoder.Decode(&state); err != nil {
+		return contracts.TaskChecklistState{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return contracts.TaskChecklistState{}, errors.New("checklist state must contain one JSON object")
+	}
+	return state, nil
 }
 
 func taskChecklistFromRecords(records []store.Record) contracts.TaskChecklistState {
@@ -2796,53 +3471,69 @@ func toolCallDisplay(call contracts.ToolCall) string {
 	return string(call.Function.Name) + " " + call.Function.Arguments
 }
 
-func toolResultDisplay(status, output, resultErr string) string {
+// toolResultDetail is what a tool's result adds beneath its call. The marker
+// already says how the call ended, so the status is never repeated here.
+//
+// The tools whose result is the work show it: bash shows its exit code and
+// output, a sidecar shows what it answered. Everything else reports itself
+// through the marker alone — a file change is already drawn in the call's own
+// preview, and a search or a read has nothing to add to it. Anything that failed
+// says why, whatever it is.
+func toolResultDetail(name, status, output, resultErr string) string {
 	if resultErr != "" {
-		return status + ": " + resultErr
+		return resultErr
 	}
-	if output != "" {
-		return status + "\n" + output
+	if status != "" && status != string(contracts.ToolExecutionSuccess) {
+		return output
 	}
-	return status
+	switch contracts.ToolType(name) {
+	case contracts.BashTool:
+		return bashResultBody(output)
+	case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+		return strings.TrimRight(output, "\n")
+	}
+	return ""
 }
 
-func transcriptToolResultDisplay(name, status, output, resultErr string) string {
-	if name == string(contracts.BashTool) && resultErr == "" {
-		var result struct {
-			ExitCode  int    `json:"exit_code"`
-			Output    string `json:"output"`
-			Truncated bool   `json:"truncated"`
-			TimedOut  bool   `json:"timed_out"`
-		}
-		if json.Unmarshal([]byte(output), &result) == nil {
-			summary := fmt.Sprintf("%s · exit %d", status, result.ExitCode)
-			if result.TimedOut {
-				summary += " · timed out"
-			}
-			if result.Truncated {
-				summary += " · output truncated"
-			}
-			if result.Output != "" {
-				return summary + "\n" + result.Output
-			}
-			return summary
-		}
+// bashResultBody is a bash result without its status: the exit code, the flags
+// worth knowing, then the output itself.
+func bashResultBody(output string) string {
+	var result struct {
+		ExitCode  int    `json:"exit_code"`
+		Output    string `json:"output"`
+		Truncated bool   `json:"truncated"`
+		TimedOut  bool   `json:"timed_out"`
 	}
-	if name != string(contracts.ReadTool) || status != string(contracts.ToolExecutionSuccess) || resultErr != "" {
-		return toolResultDisplay(status, output, resultErr)
+	if json.Unmarshal([]byte(output), &result) != nil {
+		return strings.TrimRight(output, "\n")
 	}
-	lines := 0
-	if output != "" {
-		lines = strings.Count(output, "\n")
-		if !strings.HasSuffix(output, "\n") {
-			lines++
-		}
+	summary := fmt.Sprintf("exit %d", result.ExitCode)
+	if result.TimedOut {
+		summary += " · timed out"
 	}
-	lineLabel := "lines"
-	if lines == 1 {
-		lineLabel = "line"
+	if result.Truncated {
+		summary += " · output truncated"
 	}
-	return fmt.Sprintf("%s · %d %s, %d bytes", status, lines, lineLabel, len([]byte(output)))
+	if body := strings.TrimRight(result.Output, "\n"); body != "" {
+		return summary + "\n" + body
+	}
+	return summary
+}
+
+// displayStatus is the status the transcript colours a call by. A bash command
+// that exited nonzero is shown as failed even though the tool itself ran: the
+// exit code is the failure the reader is looking for.
+func displayStatus(name, status, output string) string {
+	if contracts.ToolType(name) != contracts.BashTool || status != string(contracts.ToolExecutionSuccess) {
+		return status
+	}
+	var result struct {
+		ExitCode int `json:"exit_code"`
+	}
+	if json.Unmarshal([]byte(output), &result) == nil && result.ExitCode != 0 {
+		return string(contracts.ToolExecutionError)
+	}
+	return status
 }
 
 type timelineTreeRow struct {
@@ -2936,27 +3627,45 @@ type timelineDisplay struct {
 	text string
 }
 
-func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
+// timelineToolNames maps a tool call id to the tool that made it, so a tool
+// result is classified by the call it answers rather than by its payload.
+func timelineToolNames(events []TimelineEvent) map[string]string {
+	names := make(map[string]string)
+	for _, event := range events {
+		if event.Record == nil || event.Record.Message == nil || event.Record.Message.Role != "assistant" {
+			continue
+		}
+		for _, call := range event.Record.Message.ToolCalls {
+			names[call.ID] = string(call.Function.Name)
+		}
+	}
+	return names
+}
+
+func timelineEventDisplays(event TimelineEvent, toolNames map[string]string) []timelineDisplay {
 	if event.Record == nil {
 		return previewDisplays(event.Preview)
 	}
 	if event.Record.Message != nil {
 		message := event.Record.Message
 		if message.Role == "user" {
-			return []timelineDisplay{{role: "user", text: singleLine(message.Text())}}
+			return []timelineDisplay{{role: "user", text: timelineLine(message.Text())}}
 		}
 		if message.Role == "tool" {
-			if _, err := decodeTaskChecklist(message.Text()); err == nil {
-				return []timelineDisplay{{role: "system", text: "task checklist updated"}}
+			if isChecklistTool(toolNames[message.ToolCallID]) {
+				if _, err := decodeTaskChecklist(message.Text()); err != nil {
+					return nil
+				}
+				return []timelineDisplay{{role: "event", text: "task checklist updated"}}
 			}
-			return []timelineDisplay{{role: "tool_result", text: singleLine(message.Text())}}
+			return []timelineDisplay{{role: "tool_result", text: timelineLine(message.Text())}}
 		}
 		displays := make([]timelineDisplay, 0, 2+len(message.ToolCalls))
 		if message.ReasoningContent != "" {
-			displays = append(displays, timelineDisplay{role: "thinking", text: singleLine(message.ReasoningContent)})
+			displays = append(displays, timelineDisplay{role: "thinking", text: timelineLine(message.ReasoningContent)})
 		}
 		if message.Text() != "" {
-			displays = append(displays, timelineDisplay{role: "assistant", text: singleLine(message.Text())})
+			displays = append(displays, timelineDisplay{role: "assistant", text: timelineLine(message.Text())})
 		}
 		for _, call := range message.ToolCalls {
 			toolName := string(call.Function.Name)
@@ -2967,7 +3676,7 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 			if isChecklistTool(toolName) {
 				continue
 			}
-			displays = append(displays, timelineDisplay{role: "tool_call", text: singleLine(toolCallDisplay(call))})
+			displays = append(displays, timelineDisplay{role: "tool_call", text: timelineLine(toolCallDisplay(call))})
 		}
 		if len(displays) == 0 {
 			displays = append(displays, timelineDisplay{role: "assistant", text: "empty response"})
@@ -2975,9 +3684,9 @@ func timelineEventDisplays(event TimelineEvent) []timelineDisplay {
 		return displays
 	}
 	if event.Record.Compaction != nil {
-		return []timelineDisplay{{role: "assistant", text: "context compacted: " + singleLine(event.Record.Compaction.Summary)}}
+		return []timelineDisplay{{role: "assistant", text: "context compacted: " + timelineLine(event.Record.Compaction.Summary)}}
 	}
-	text := singleLine(event.Record.Text)
+	text := timelineLine(event.Record.Text)
 	if text == "" {
 		text = strings.ReplaceAll(string(event.Kind), "_", " ")
 	}
@@ -3012,6 +3721,38 @@ func imageBadgeText(count int) string {
 
 func singleLine(value string) string {
 	return strings.Join(strings.Fields(value), " ")
+}
+
+// timelineTextLimit bounds one timeline display. A row is truncated to the
+// terminal width anyway, so a write or edit preview — which can carry a whole
+// file — never needs to become a multi-kilobyte label.
+const timelineTextLimit = 400
+
+// timelineLine collapses whitespace and stops after timelineTextLimit runes. It
+// stops as it scans, unlike singleLine, so a huge preview is never flattened in
+// full just to be cut down.
+func timelineLine(value string) string {
+	var b strings.Builder
+	space := false
+	count := 0
+	for _, r := range value {
+		if unicode.IsSpace(r) {
+			space = true
+			continue
+		}
+		if space && count > 0 {
+			b.WriteByte(' ')
+			count++
+		}
+		space = false
+		b.WriteRune(r)
+		count++
+		if count >= timelineTextLimit {
+			b.WriteString("…")
+			break
+		}
+	}
+	return b.String()
 }
 
 func branchSelectionLabel(event TimelineEvent) string {

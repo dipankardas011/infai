@@ -129,10 +129,14 @@ func (m *FileManager) Bash(ctx context.Context, command, workdir string, timeout
 	cmd.Env = os.Environ()
 	prepareCommand(cmd)
 
-	go func() {
-		<-runCtx.Done()
-		killProcessGroup(cmd)
-	}()
+	// exec runs Cancel from its own watcher, registered once the process is
+	// started, so cmd.Process is published before this reads it. A watcher of
+	// our own — one goroutine waiting on runCtx and killing — would read that
+	// field while Start is still writing it.
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	// A killed group can leave the command's stdout open in a survivor, which
+	// would otherwise hold CombinedOutput past the deadline.
+	cmd.WaitDelay = 5 * time.Second
 
 	output, err := cmd.CombinedOutput()
 	result := BashResult{Output: string(output)}

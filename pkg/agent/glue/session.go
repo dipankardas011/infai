@@ -43,6 +43,11 @@ type BranchRequest struct {
 	EventID uuid.UUID `json:"event_id"`
 }
 
+type SessionIdentityResponse struct {
+	Name      string              `json:"name"`
+	AgentKind contracts.AgentKind `json:"agent_kind"`
+}
+
 type SessionDetailResponse struct {
 	Meta    store.SessionMeta `json:"meta"`
 	Records []store.Record    `json:"records"`

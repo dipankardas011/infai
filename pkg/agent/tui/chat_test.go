@@ -372,6 +372,34 @@ func TestChecklistDeltaIsNotRenderedAsTranscriptText(t *testing.T) {
 	}
 }
 
+func TestChecklistUsesAQuietInset(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.width = 80
+	m.checklist = contracts.TaskChecklistState{Items: []contracts.TaskChecklistItem{
+		{Title: "Done", Description: "verified", Status: contracts.TaskCompleted},
+		{Title: "Working", Description: "in progress", Status: contracts.TaskInProgress},
+	}}
+
+	rendered := m.checklistView()
+	plain := ansi.Strip(rendered)
+	for _, want := range []string{"Task Checklist 1/2 complete", "✓ Done — verified", "◐ Working — in progress"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("checklist lacks %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "│") {
+		t.Fatalf("checklist retained a vertical border:\n%s", plain)
+	}
+	if !strings.Contains(rendered, m.styles.muted.Render("Done — verified")) {
+		t.Fatal("completed task text is not muted")
+	}
+	for i, line := range strings.Split(plain, "\n") {
+		if got := lipgloss.Width(line); got > m.width {
+			t.Fatalf("checklist row %d width=%d exceeds %d", i, got, m.width)
+		}
+	}
+}
+
 func TestEmptyCommandMenuDoesNotReserveARow(t *testing.T) {
 	areas := layoutRows(80, 12,
 		intrinsic("header"), fill(), intrinsic("status"), intrinsic(""), intrinsic("composer"),
@@ -469,6 +497,245 @@ func TestSessionRowCarriesNameKindAndStatus(t *testing.T) {
 	}
 }
 
+func TestSessionRowShowsParentBelowSidecarName(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.width = 100
+	m.session = store.SessionMeta{
+		ID: uuid.New(), ParentID: uuid.New(), Name: "Build worker", AgentKind: contracts.SidecarLoopAgent,
+	}
+	m.parentName = "Orchestrator"
+	m.parentAgentKind = contracts.InteractiveAgent
+
+	rows := strings.Split(ansi.Strip(m.sessionRowView()), "\n")
+	var sessionRow, parentRow int = -1, -1
+	for i, row := range rows {
+		if strings.Contains(row, "Build worker") {
+			sessionRow = i
+		}
+		if strings.Contains(row, "↖ ⬢ Orchestrator") {
+			parentRow = i
+		}
+	}
+	if sessionRow == -1 || parentRow != sessionRow+1 {
+		t.Fatalf("parent row is not directly below the sidecar row: %q", rows)
+	}
+}
+
+func TestArrowKeysNavigateRelatedSessionsAcrossHITL(t *testing.T) {
+	parentID, firstChild, secondChild := uuid.New(), uuid.New(), uuid.New()
+	client := &navigationChatClient{}
+	m := newChatModel(context.Background(), client, nil, RunOptions{})
+	m.modal = nil
+	m.width = 100
+	m.session = store.SessionMeta{ID: uuid.New(), ParentID: parentID, Name: "worker"}
+	m.parentName = "Orchestrator"
+	m.parentAgentKind = contracts.InteractiveAgent
+	m.sidecars = []contracts.SidecarStatus{{ID: firstChild, Name: "first"}, {ID: secondChild, Name: "second"}}
+	m.composer.SetValue("draft")
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	if m.relatedSessionSelection != uuid.Nil {
+		t.Fatal("relationship navigation stole an arrow from a non-empty composer")
+	}
+
+	m.approval = &Approval{}
+	m.composer.SetValue("draft preserved while approval is pending")
+
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	if m.relatedSessionSelection != parentID {
+		t.Fatalf("first down selected %s, want parent %s", m.relatedSessionSelection, parentID)
+	}
+	highlighted := m.parentRowView()
+	m.relatedSessionSelection = uuid.Nil
+	plain := m.parentRowView()
+	if highlighted == plain || ansi.Strip(highlighted) != ansi.Strip(plain) {
+		t.Fatal("selected parent row did not receive a presentation-only highlight")
+	}
+
+	m.relatedSessionSelection = parentID
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	if m.relatedSessionSelection != firstChild {
+		t.Fatalf("second down selected %s, want first child %s", m.relatedSessionSelection, firstChild)
+	}
+	highlighted = m.sidecarRowsView()
+	m.relatedSessionSelection = uuid.Nil
+	plain = m.sidecarRowsView()
+	if highlighted == plain || ansi.Strip(highlighted) != ansi.Strip(plain) {
+		t.Fatal("selected sidecar row did not receive a presentation-only highlight")
+	}
+	m.relatedSessionSelection = firstChild
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
+	if m.relatedSessionSelection != parentID {
+		t.Fatalf("up selected %s, want parent %s", m.relatedSessionSelection, parentID)
+	}
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	if m.relatedSessionSelection != uuid.Nil {
+		t.Fatalf("escape kept relationship selection %s", m.relatedSessionSelection)
+	}
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	if m.relatedSessionSelection != parentID {
+		t.Fatalf("down after escape selected %s, want parent %s", m.relatedSessionSelection, parentID)
+	}
+
+	_, cmd := m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd == nil {
+		t.Fatal("enter did not open the selected parent")
+	}
+	_ = cmd()
+	if client.opened != parentID {
+		t.Fatalf("opened session = %s, want parent %s", client.opened, parentID)
+	}
+}
+
+// A caller that delegated lists its children under its own row, each with the
+// marks the session list uses, so the caller shows what a sidecar is doing
+// without the reader joining it.
+func TestSessionRowListsSidecarsAndTheirStatus(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.width = 100
+	m.working = true
+	m.session = store.SessionMeta{ID: uuid.New(), Name: "Orchestrator", AgentKind: contracts.InteractiveAgent}
+	child := uuid.New()
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+		ID: child, Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionWaitingApproval,
+	}})
+
+	row := ansi.Strip(m.sessionRowView())
+	for _, want := range []string{"explorer", "⧉", "waiting for approval", "Orchestrator"} {
+		if !strings.Contains(row, want) {
+			t.Fatalf("session row lacks %q: %q", want, row)
+		}
+	}
+	if strings.Index(row, "explorer") < strings.Index(row, "Orchestrator") {
+		t.Fatalf("the child is not below the caller: %q", row)
+	}
+
+	// A later report for the same child updates its one row instead of adding a
+	// second, and the status follows.
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+		ID: child, Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionCompleted,
+	}})
+	row = ansi.Strip(m.sessionRowView())
+	if got := strings.Count(row, "explorer"); got != 1 {
+		t.Fatalf("child rows = %d, want 1: %q", got, row)
+	}
+	if !strings.Contains(row, "completed") || strings.Contains(row, "waiting for approval") {
+		t.Fatalf("the child's status did not follow its report: %q", row)
+	}
+}
+
+// A child's row is session state, not turn state: it stays put after the
+// caller's own turn ends, because a background sidecar keeps working long
+// after its caller has answered and gone idle.
+// A child that has finished keeps the status it finished on. A report can land
+// after the one that ended it — a refresh racing the close that superseded it —
+// and letting it through would put the row back on a status the child has left
+// for good, with no later report coming to correct it.
+func TestAFinishedSidecarRowIsNotWalkedBack(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status contracts.SessionStatus
+		label  string
+	}{
+		{"completed", contracts.SessionCompleted, "completed"},
+		{"exhausted", contracts.SessionMaxIterationExhausted, "max iterations reached"},
+		{"tombstone", contracts.SessionTombstone, "inactive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newChatModel(context.Background(), nil, nil, RunOptions{})
+			m.modal = nil
+			m.width = 100
+			m.session = store.SessionMeta{ID: uuid.New(), Name: "Orchestrator", AgentKind: contracts.InteractiveAgent}
+			child := uuid.New()
+			report := func(status contracts.SessionStatus) {
+				m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+					ID: child, Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: status,
+				}})
+			}
+
+			report(contracts.SessionBusy)
+			report(tc.status)
+			report(contracts.SessionBusy) // superseded: the child has already finished
+
+			row := ansi.Strip(m.sessionRowView())
+			if !strings.Contains(row, "explorer") {
+				t.Fatalf("the child left the row entirely: %q", row)
+			}
+			if !strings.Contains(row, tc.label) {
+				t.Fatalf("the row did not keep %q: %q", tc.label, row)
+			}
+			if strings.Contains(row, "busy") {
+				t.Fatalf("a finished child's row was walked back: %q", row)
+			}
+		})
+	}
+}
+
+func TestSidecarRowsPersistWhenTheCallerGoesIdle(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.width = 100
+	m.working = true
+	m.session = store.SessionMeta{ID: uuid.New(), Name: "Orchestrator", AgentKind: contracts.InteractiveAgent}
+	child := uuid.New()
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+		ID: child, Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionBusy,
+	}})
+
+	// The caller reports idle while the sidecar is still running.
+	m.applySessionStatus(contracts.SessionIdle)
+
+	row := ansi.Strip(m.sessionRowView())
+	if !strings.Contains(row, "explorer") || !strings.Contains(row, "busy") {
+		t.Fatalf("the child left the row when the caller went idle: %q", row)
+	}
+
+	// A later report updates that same row in place.
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+		ID: child, Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionWaitingApproval,
+	}})
+	row = ansi.Strip(m.sessionRowView())
+	if got := strings.Count(row, "explorer"); got != 1 {
+		t.Fatalf("child rows = %d, want 1: %q", got, row)
+	}
+	if !strings.Contains(row, "waiting for approval") || strings.Contains(row, "busy") {
+		t.Fatalf("the child's status did not follow its report: %q", row)
+	}
+}
+
+// A child row belongs to the session that spawned it. Rejoining that session —
+// the session list opening and closing, or a subscriber gap — leaves the rows
+// alone, and opening another session takes them away, because the switch loads
+// the new session's metadata before its view arrives.
+func TestSidecarRowsBelongToTheSessionThatSpawnedThem(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.modal = nil
+	m.width = 100
+	m.session = store.SessionMeta{ID: uuid.New(), Name: "Orchestrator", AgentKind: contracts.InteractiveAgent}
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+		ID: uuid.New(), Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionBusy,
+	}})
+
+	// Rejoining the same session keeps its children.
+	m.applySessionView(glue.SessionView{Meta: m.session, Status: contracts.SessionIdle})
+	if row := ansi.Strip(m.sessionRowView()); !strings.Contains(row, "explorer") {
+		t.Fatalf("rejoining the same session dropped its children: %q", row)
+	}
+
+	// Opening another session runs the load message first, which is where the
+	// session's metadata is replaced; the view for it follows.
+	other := store.SessionMeta{ID: uuid.New(), Name: "Elsewhere", AgentKind: contracts.InteractiveAgent}
+	if _, _ = m.Update(sessionLoadedMsg{output: &glue.SessionOutput{SessionMeta: other}}); false {
+		t.Fatal("unreachable")
+	}
+	m.applySessionView(glue.SessionView{Meta: other, Status: contracts.SessionIdle})
+
+	if row := ansi.Strip(m.sessionRowView()); strings.Contains(row, "explorer") {
+		t.Fatalf("another session inherited the last one's children: %q", row)
+	}
+}
+
 func TestTranscriptPreservesUnicodeAndMarkdown(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
@@ -538,6 +805,8 @@ func TestStreamingBlocksRenderMarkdownOnlyWhenComplete(t *testing.T) {
 	}
 
 	// The session reporting idle is what ends the turn on the live path.
+	m.session.ID = uuid.New()
+	m.sessionCancel = func() {}
 	idle := string(contracts.SessionIdle)
 	_, _ = m.Update(sessionEventMsg{
 		sessionID:  m.session.ID,
@@ -560,12 +829,43 @@ func observerEvent(m *chatModel, kind contracts.EventStreamKind, content string)
 	}
 }
 
+// A tool call ends the answer that asked for it. The block must stop streaming
+// there, so its markdown renders while the tool runs rather than staying raw
+// until the next step's first token.
+func TestToolCallFinalizesTheAnswerItFollows(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.session.ID = uuid.New()
+	m.sessionCancel = func() {}
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 20})
+
+	_, _ = m.Update(observerEvent(m, contracts.DeltaContent, "Audit **done**."))
+	call := contracts.ToolCall{
+		ID: "call-1", Type: "function",
+		Function: contracts.Function{Name: contracts.BashTool, Arguments: `{"command":"ls"}`},
+	}
+	_, _ = m.Update(sessionEventMsg{
+		sessionID:  m.session.ID,
+		observerID: m.sessionObserverID,
+		event:      contracts.EventStream{Kind: contracts.EventToolCall, ToolCall: &call},
+	})
+
+	content := ansi.Strip(m.viewport.View())
+	if strings.Contains(content, "**done**") {
+		t.Fatalf("the answer is still showing its raw source after its tool call: %q", content)
+	}
+	if !strings.Contains(content, "Audit done.") {
+		t.Fatalf("the answer is missing from the transcript: %q", content)
+	}
+}
+
 // A reader who scrolled up keeps their place while the turn keeps producing:
 // live output follows the newest line only when the view is already there.
 func TestStreamingLeavesAReaderWhoScrolledUpWhereTheyAre(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.session.ID = uuid.New()
+	m.sessionCancel = func() {}
 	for i := range 200 {
 		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
 	}
@@ -598,6 +898,7 @@ func TestStreamingFollowsTheNewestLine(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.session.ID = uuid.New()
+	m.sessionCancel = func() {}
 	for i := range 200 {
 		m.blocks = append(m.blocks, block{role: "assistant", text: fmt.Sprintf("## Block %d", i)})
 	}
@@ -633,6 +934,7 @@ func TestStreamingEventsRenderAsTheyArrive(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.session.ID = uuid.New()
+	m.sessionCancel = func() {}
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
 	for _, token := range []string{"first ", "second ", "third"} {
@@ -653,19 +955,20 @@ func TestTranscriptUsesCompactRoleMarkers(t *testing.T) {
 		{role: "user", text: "question"},
 		{role: "thinking", text: "reasoning"},
 		{role: "skill", text: "green-software"},
-		{role: "tool", toolKind: "call", toolName: "search", text: `search {"path":"."}`},
-		{role: "tool", toolKind: "result", toolStatus: "success", toolName: "search", text: "search success"},
+		{role: "tool", toolKind: "call", toolName: "search", text: `search {"path":"."}`, toolStatus: "success"},
 		{role: "assistant", text: "answer"},
 	}
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
 
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"● question", "◌ reasoning", "✦ green-software", `▲ search {"path":"."}`, "▼ search success", "● answer"} {
+	for _, want := range []string{"● question", "◌ reasoning", "✦ green-software", `▲ search {"path":"."}`, "● answer"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("chat transcript does not contain %q", want)
 		}
 	}
-	for _, unwanted := range []string{"YOU", "THINKING", "Skill loaded:", "tool call:", "tool result:"} {
+	// One block per call: the result rides under the call it answers, so no
+	// result of its own is drawn.
+	for _, unwanted := range []string{"YOU", "THINKING", "Skill loaded:", "tool call:", "tool result:", "▼"} {
 		if strings.Contains(content, unwanted) {
 			t.Fatalf("chat transcript still contains %q", unwanted)
 		}
@@ -772,13 +1075,22 @@ func TestWordDiffSegmentsEmphasizeChanges(t *testing.T) {
 	}
 }
 
-func TestRenderEditDiffBlockShowsGuttersAndEmphasis(t *testing.T) {
+// An edit preview is built from a snippet, so it knows where the text is inside
+// the snippet and nowhere else. It must not print line numbers: the client
+// cannot see the file they would have to come from, and a snippet's coordinates
+// shown as file lines read as a wrong location.
+func TestRenderEditDiffBlockDrawsNoFileLineNumbers(t *testing.T) {
 	styles := newHarnessStyles()
 	args := `{"path":"main.go","old_string":"return old","new_string":"return new"}`
 	rendered := ansi.Strip(renderEditDiffBlock("▲", styles.system, styles, args, 70))
-	for _, want := range []string{"edit  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new"} {
+	for _, want := range []string{"edit  main.go", "- return old", "+ return new"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("edit diff lacks %q:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{"@@", "1   -", "  1 +"} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("edit diff shows snippet coordinates %q:\n%s", unwanted, rendered)
 		}
 	}
 }
@@ -863,6 +1175,61 @@ func TestMouseWheelScrollsTranscript(t *testing.T) {
 	}
 	if m.atBottom() {
 		t.Fatal("wheel up left the view pinned to the newest output")
+	}
+}
+
+func TestSidecarChatIsReadOnly(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.session = store.SessionMeta{ID: uuid.New(), AgentKind: contracts.SidecarLoopAgent}
+	m.working = true
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
+	if m.composer.Value() != "" {
+		t.Fatalf("sidecar accepted composer input: %q", m.composer.Value())
+	}
+	m.composer.SetValue("try to send")
+	if cmd := m.submit(); cmd != nil {
+		t.Fatal("sidecar dispatched a chat message")
+	}
+	if cmd := m.runCommand("/compact"); cmd != nil {
+		t.Fatal("sidecar dispatched manual compaction")
+	}
+	if cmd := m.runCommand("/model"); cmd != nil {
+		t.Fatal("sidecar opened the model picker")
+	}
+}
+
+func TestSidecarHierarchyInSessionList(t *testing.T) {
+	parent, child := uuid.New(), uuid.New()
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{
+		{ID: child, ParentID: parent, Name: "Worker", AgentKind: contracts.SidecarLoopAgent},
+		{ID: parent, Name: "Caller", AgentKind: contracts.InteractiveAgent},
+	}, false)
+	if len(m.modal.options) != 3 || m.modal.options[1].session != parent || m.modal.options[2].session != child {
+		t.Fatalf("session order = %+v, want caller then sidecar", m.modal.options)
+	}
+	if m.modal.options[2].tree != "└─ " || m.modal.options[2].detailTree != "   " {
+		t.Fatalf("sidecar tree = (%q, %q), want child connector and aligned detail", m.modal.options[2].tree, m.modal.options[2].detailTree)
+	}
+}
+
+func TestSidecarApprovalShowsAcceptanceScript(t *testing.T) {
+	call := contracts.ToolCall{Function: contracts.Function{
+		Name:      contracts.SpawnSidecarLoopTool,
+		Arguments: `{"agent_name":"Worker","task":"Check the build","acceptance_script":"go build ./...\necho done","max_turns":3}`,
+	}}
+	body, script := formatApprovalToolCall(call)
+	for _, want := range []string{"SIDECAR  Worker", "TURN BUDGET  3", "TASK\nCheck the build", "ACCEPTANCE SCRIPT (must be read-only)"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("approval body lacks %q: %q", want, body)
+		}
+	}
+	if script != "go build ./...\necho done" {
+		t.Fatalf("script = %q, want unescaped Bash source", script)
+	}
+	if preview := approvalCompactPreview(call); !strings.Contains(preview, "Worker") || !strings.Contains(preview, "acceptance script") {
+		t.Fatalf("compact preview = %q", preview)
 	}
 }
 
@@ -1019,7 +1386,7 @@ func TestSessionListDeletesOnlyAfterASecondKey(t *testing.T) {
 		t.Fatalf("first d left pendingDelete=%v, want %v", m.modal.pendingDelete, id)
 	}
 	armed := ansi.Strip(m.View().Content)
-	for _, want := range []string{"delete?", "press d again to delete this session"} {
+	for _, want := range []string{"delete?", "press d again to permanently delete this session and its sidecars", "active work stops"} {
 		if !strings.Contains(armed, want) {
 			t.Fatalf("armed list lacks %q:\n%s", want, armed)
 		}
@@ -1069,6 +1436,36 @@ func TestSessionListAnyOtherKeyCancelsAnArmedDelete(t *testing.T) {
 	_, cmd = m.Update(tea.KeyPressMsg(tea.Key{Code: 'd', Text: "d"}))
 	if cmd != nil {
 		t.Fatal("an armed delete survived the close that answered it")
+	}
+}
+
+func TestDeleteRefreshesSessionsFromServer(t *testing.T) {
+	parent, child, other := uuid.New(), uuid.New(), uuid.New()
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{
+		{ID: parent, Name: "caller"},
+		{ID: child, ParentID: parent, Name: "sidecar"},
+		{ID: other, Name: "other"},
+	}, false)
+	_, cmd := m.Update(sessionActionedMsg{action: "delete", id: parent})
+	if cmd == nil {
+		t.Fatal("successful delete did not request refreshed sessions")
+	}
+	if _, ok := cmd().(sessionsListedMsg); !ok {
+		t.Fatal("delete did not call ListSessions")
+	}
+	_, _ = m.Update(sessionsListedMsg{sessions: []contracts.SessionSummary{{ID: other, Name: "other"}}})
+	if len(m.modal.options) != 2 || m.modal.options[1].session != other {
+		t.Fatalf("stale offspring remained in refreshed list: %+v", m.modal.options)
+	}
+}
+
+func TestFailedDeleteDoesNotRefreshSessions(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{{ID: uuid.New(), Name: "saved"}}, false)
+	_, cmd := m.Update(sessionActionedMsg{action: "delete", err: fmt.Errorf("failed")})
+	if cmd != nil || m.modal == nil || m.modal.kind != modalNotice {
+		t.Fatal("failed delete should show error without refreshing")
 	}
 }
 
@@ -1206,19 +1603,29 @@ func TestWorkingTurnQueuesInputWithoutReplacingStatus(t *testing.T) {
 	}
 }
 
-func TestWorkingTurnKeepsWorkspaceClosedAndCancelArmed(t *testing.T) {
-	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+func TestWorkingTurnOpensSessionsWithoutCancelingTurn(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
 	m.modal = nil
+	m.session.ID = uuid.New()
 	m.working = true
 	m.workStatus = "working"
+	m.status = contracts.SessionBusy
 
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
-	if m.modal != nil {
-		t.Fatal("working turn opened the session workspace")
+	if m.modal == nil || !m.working || m.status != contracts.SessionBusy {
+		t.Fatal("opening sessions changed the running turn")
+	}
+	if m.sessionCancel != nil {
+		t.Fatal("opening sessions left the observer attached")
+	}
+	_, _ = m.Update(sessionsListedMsg{})
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	if cmd == nil || m.modal != nil || m.sessionCancel == nil {
+		t.Fatal("dismissing sessions did not resume observation")
 	}
 
 	escape := tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
-	_, cmd := m.Update(escape)
+	_, cmd = m.Update(escape)
 	if cmd == nil || !m.cancelArmed {
 		t.Fatal("first escape did not arm cancellation timeout")
 	}
@@ -1263,41 +1670,24 @@ func TestNormalizeMarkdownMath(t *testing.T) {
 	}
 }
 
-func TestModalMeasuresContentWithinTerminal(t *testing.T) {
-	m := &modalModel{
-		title: "Models",
-		body:  "Choose one",
-		options: []modalOption{
-			{label: "small"},
-			{label: "a considerably longer model name"},
-		},
-	}
-	rendered := renderModal(m, 52, 12, newHarnessStyles())
-	if width := lipgloss.Width(rendered); width > 52 {
-		t.Fatalf("modal width=%d exceeds terminal width", width)
-	}
-	if height := lipgloss.Height(rendered); height > 12 {
-		t.Fatalf("modal height=%d exceeds terminal height", height)
-	}
-}
-
-func TestLongModalAndShortLayoutStayWithinTerminal(t *testing.T) {
+func TestSelectionScreenStaysWithinTerminal(t *testing.T) {
 	options := make([]modalOption, 30)
 	for i := range options {
 		options[i] = modalOption{label: strings.Repeat("long option ", 8)}
 	}
 	m := &modalModel{
+		kind:     modalModels,
 		title:    "Approval",
-		body:     strings.Repeat("long approval details ", 40),
+		body:     "Choose one",
 		options:  options,
 		selected: len(options) - 1,
 	}
-	rendered := renderModal(m, 40, 10, newHarnessStyles())
-	if width := lipgloss.Width(rendered); width > 40 {
-		t.Fatalf("modal width=%d exceeds terminal width", width)
+	rendered := renderSelectionScreen(m, 40, 10, newHarnessStyles())
+	if width := lipgloss.Width(rendered); width != 40 {
+		t.Fatalf("screen width=%d want 40", width)
 	}
-	if height := lipgloss.Height(rendered); height > 10 {
-		t.Fatalf("modal height=%d exceeds terminal height", height)
+	if height := lipgloss.Height(rendered); height != 10 {
+		t.Fatalf("screen height=%d want 10", height)
 	}
 
 	areas := layoutRows(20, 2, intrinsic("header"), fill(), intrinsic("status"), intrinsic("composer"))
@@ -1397,8 +1787,14 @@ func TestApprovalKeysAnswerTheDecision(t *testing.T) {
 		t.Fatal("approval still pending after a denial")
 	}
 	last := m.blocks[len(m.blocks)-1]
+	if last.role != "event" {
+		t.Fatalf("approval transcript role = %q, want event", last.role)
+	}
 	if !strings.Contains(last.text, "deny_with_reason") || !strings.Contains(last.text, "delete only inside build") {
 		t.Fatalf("transcript recorded %q", last.text)
+	}
+	if rendered, want := m.renderBlock(&last, 80, false), m.styles.event.Width(80).Render("◆ "+last.text); rendered != want {
+		t.Fatal("approval event is not rendered with the event color")
 	}
 }
 
@@ -1446,13 +1842,15 @@ func TestApprovalDetailRendersEditDiff(t *testing.T) {
 
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"Human In the Loop", "tool_call: edit", "TARGET  main.go", "@@ -1 +1 @@", "1   - return old", "  1 + return new", "[A]llow", "[D]eny"} {
+	for _, want := range []string{"Human In the Loop", "tool_call: edit", "TARGET  main.go", "- return old", "+ return new", "[A]llow", "[D]eny"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("edit approval detail lacks %q:\n%s", want, content)
 		}
 	}
-	if strings.Contains(content, "BEFORE") || strings.Contains(content, "AFTER") {
-		t.Fatalf("edit approval detail still shows BEFORE/AFTER:\n%s", content)
+	for _, unwanted := range []string{"BEFORE", "AFTER", "@@"} {
+		if strings.Contains(content, unwanted) {
+			t.Fatalf("edit approval detail still shows %q:\n%s", unwanted, content)
+		}
 	}
 }
 
@@ -1649,7 +2047,10 @@ func TestTimelineTreeRowsShowForkWithoutMessageStaircase(t *testing.T) {
 	}
 }
 
-func TestTimelinePopupKeepsTranscriptAndHidesEventIDs(t *testing.T) {
+// A branch timeline is a screen of its own, like the model picker: it replaces
+// the transcript rather than sitting over it, and every row reads as tree,
+// fork, role, and label.
+func TestTimelineScreenReplacesTranscriptAndHidesEventIDs(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
 	m.blocks = []block{{role: "system", text: "transcript remains visible"}}
@@ -1664,21 +2065,135 @@ func TestTimelinePopupKeepsTranscriptAndHidesEventIDs(t *testing.T) {
 	}}})
 
 	content := m.View().Content
-	for _, want := range []string{"transcript remains visible", "BRANCH TIMELINE", "* marks the current event", "user:", "explain this branch"} {
+	for _, want := range []string{"BRANCH TIMELINE", "* marks the current event", "user:", "explain this branch"} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("timeline popup does not contain %q", want)
+			t.Fatalf("timeline screen does not contain %q", want)
 		}
 	}
+	if strings.Contains(content, "transcript remains visible") {
+		t.Fatal("timeline screen still composites the transcript behind it")
+	}
 	if strings.Contains(content, eventID.String()) || strings.Contains(content, shortID(eventID)) {
-		t.Fatal("timeline popup exposes an event ID")
+		t.Fatal("timeline screen exposes an event ID")
 	}
 	if !m.modal.options[0].current {
 		t.Fatal("timeline head is not marked as the current event")
 	}
 }
 
+func timelineUserEvent(id, parent uuid.UUID, text string) TimelineEvent {
+	return TimelineEvent{ID: id, ParentID: parent, Kind: store.KindMessage, Record: &store.Record{
+		Kind:    store.KindMessage,
+		Message: &contracts.ChatMessage{Role: "user", Content: &text},
+	}}
+}
+
+func timelineSearchFixture(t *testing.T) *chatModel {
+	t.Helper()
+	first, second, third := uuid.New(), uuid.New(), uuid.New()
+	view := &TimelineView{Head: third, Events: []TimelineEvent{
+		timelineUserEvent(first, uuid.Nil, "alpha question"),
+		timelineUserEvent(second, first, "beta answer"),
+		timelineUserEvent(third, second, "beta again"),
+	}}
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.showTimeline(view)
+	return m
+}
+
+// A search in the branch timeline never filters it: the rows stay where they
+// are and the cursor lands on a hit, so the branch structure is still readable
+// while searching.
+func TestTimelineSearchMovesTheCursorWithoutFiltering(t *testing.T) {
+	m := timelineSearchFixture(t)
+	rows := len(m.modal.options)
+	if rows != 3 {
+		t.Fatalf("timeline rows=%d want 3", rows)
+	}
+
+	m.modal.search("beta")
+	if len(m.modal.options) != rows {
+		t.Fatalf("search left %d rows, want all %d", len(m.modal.options), rows)
+	}
+	if len(m.modal.matches) != 2 {
+		t.Fatalf("matches=%v want two", m.modal.matches)
+	}
+	if m.modal.selected != 1 {
+		t.Fatalf("first hit selected=%d want 1", m.modal.selected)
+	}
+	m.modal.nextMatch(1)
+	if m.modal.selected != 2 {
+		t.Fatalf("second hit selected=%d want 2", m.modal.selected)
+	}
+	m.modal.nextMatch(1)
+	if m.modal.selected != 1 {
+		t.Fatalf("hits do not wrap: selected=%d want 1", m.modal.selected)
+	}
+	m.modal.nextMatch(-1)
+	if m.modal.selected != 2 {
+		t.Fatalf("previous hit selected=%d want 2", m.modal.selected)
+	}
+	// A query with no hit leaves the cursor where it was.
+	m.modal.search("nothing here")
+	if len(m.modal.matches) != 0 || m.modal.selected != 2 {
+		t.Fatalf("miss matches=%v selected=%d want none and 2", m.modal.matches, m.modal.selected)
+	}
+}
+
+// "/" opens the prompt, typing searches as it goes, and "n" walks the hits.
+// Nothing is branched: the timeline stays open until enter is pressed on a row.
+func TestTimelineSearchKeys(t *testing.T) {
+	m := timelineSearchFixture(t)
+	press := func(keys ...tea.KeyPressMsg) {
+		for _, key := range keys {
+			_, _ = m.Update(key)
+		}
+	}
+
+	press(tea.KeyPressMsg(tea.Key{Code: '/', Text: "/"}))
+	if !m.modal.searching {
+		t.Fatal("slash did not open the search prompt")
+	}
+	for _, r := range "beta" {
+		press(tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)}))
+	}
+	if m.modal.query != "beta" || m.modal.selected != 1 {
+		t.Fatalf("query=%q selected=%d want beta and 1", m.modal.query, m.modal.selected)
+	}
+	if content := m.View().Content; !strings.Contains(content, "1/2 matches") {
+		t.Fatalf("timeline does not show the hit count:\n%s", content)
+	}
+
+	press(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if m.modal.searching {
+		t.Fatal("enter did not close the search prompt")
+	}
+	if m.modal == nil {
+		t.Fatal("enter on the search prompt branched instead of closing it")
+	}
+	press(tea.KeyPressMsg(tea.Key{Code: 'n', Text: "n"}))
+	if m.modal.selected != 2 {
+		t.Fatalf("n did not walk to the next hit: selected=%d want 2", m.modal.selected)
+	}
+	press(tea.KeyPressMsg(tea.Key{Code: 'N', Text: "N"}))
+	if m.modal.selected != 1 {
+		t.Fatalf("N did not walk back to the previous hit: selected=%d want 1", m.modal.selected)
+	}
+
+	// A miss reads as no matches rather than an empty timeline.
+	press(tea.KeyPressMsg(tea.Key{Code: '/', Text: "/"}))
+	for _, r := range "zzz" {
+		press(tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)}))
+	}
+	if content := m.View().Content; !strings.Contains(content, "no matches") {
+		t.Fatalf("timeline does not report a miss:\n%s", content)
+	}
+}
+
 func TestTimelineBranchUsesColoredUnicodeGlyph(t *testing.T) {
-	rendered := renderTimelineOption(modalOption{
+	rendered := renderTimelineRow(modalOption{
 		label: "alternate prompt", role: "user", tree: "├─ ", fork: "branch",
 	}, false, 50, newHarnessStyles())
 	if !strings.Contains(rendered, "⎇") {
@@ -1690,11 +2205,61 @@ func TestTimelineBranchUsesColoredUnicodeGlyph(t *testing.T) {
 }
 
 func TestTimelineOriginalHasNoTextLabel(t *testing.T) {
-	rendered := renderTimelineOption(modalOption{
+	rendered := renderTimelineRow(modalOption{
 		label: "existing prompt", role: "user", tree: "└─ ", fork: "original",
 	}, false, 50, newHarnessStyles())
 	if strings.Contains(rendered, "original") {
 		t.Fatal("timeline original path still contains a text label")
+	}
+}
+
+// The tree is structure, not content: its guides and connectors recede to the
+// faintest colour, while the row they connect keeps its role colour.
+func TestTimelineTreeRecedesBehindTheRow(t *testing.T) {
+	styles := newHarnessStyles()
+	rendered := renderTimelineRow(modalOption{
+		label: "hello", role: "user", tree: "│  ├─ ",
+	}, false, 60, styles)
+	if want := styles.screenRow.Foreground(everforest.Faint).Render("│  ├─ "); !strings.Contains(rendered, want) {
+		t.Fatalf("timeline tree is not painted in the faint colour: %q", rendered)
+	}
+	if want := styles.screenRow.Foreground(everforest.Blue).Render("user: "); !strings.Contains(rendered, want) {
+		t.Fatalf("timeline row lost its role colour: %q", rendered)
+	}
+}
+
+// The session list's sidecar hierarchy is structure too: its tree recedes to
+// the faintest colour while the session row keeps its own, selected or not.
+func TestSessionListTreeRecedesBehindTheRow(t *testing.T) {
+	styles := newHarnessStyles()
+	option := modalOption{
+		label: "sidecar child", tree: "├─ ", detailTree: "│  ", detailParts: []string{"model"},
+		sessionStatus: contracts.SessionBusy, agentKind: contracts.SidecarLoopAgent,
+	}
+	for _, selected := range []bool{false, true} {
+		rows := sessionEntryRows(option, selected, false, 80, styles)
+		if len(rows) == 0 {
+			t.Fatalf("selected=%v produced no row", selected)
+		}
+		rowStyle := styles.screenRow
+		if selected {
+			rowStyle = styles.screenSel
+		}
+		if want := rowStyle.Foreground(everforest.Faint).Render("├─ "); !strings.Contains(rows[0], want) {
+			t.Fatalf("selected=%v session tree is not faint: %q", selected, rows[0])
+		}
+		detailStyle := styles.inactive
+		if selected {
+			detailStyle = detailStyle.Background(everforest.SelectionBg)
+		}
+		if want := detailStyle.Foreground(everforest.Faint).Render("│  "); !strings.Contains(rows[1], want) {
+			t.Fatalf("selected=%v detail row breaks the tree guide: %q", selected, rows[1])
+		}
+		for i, row := range rows {
+			if got := lipgloss.Width(ansi.Strip(row)); got != 80 {
+				t.Fatalf("selected=%v row %d width=%d want 80", selected, i, got)
+			}
+		}
 	}
 }
 
@@ -1703,9 +2268,10 @@ func TestTimelineRoleColors(t *testing.T) {
 		"user":        everforest.Blue,
 		"assistant":   everforest.Green,
 		"thinking":    everforest.Muted,
+		"event":       everforest.Orange,
 		"system":      everforest.Purple,
-		"tool_call":   everforest.Text,
-		"tool_result": everforest.Muted,
+		"tool_call":   everforest.Purple,
+		"tool_result": everforest.Orange,
 		"skill":       everforest.Aqua,
 	}
 	for role, want := range tests {
@@ -1720,9 +2286,44 @@ func TestTimelineEventDisplayUsesSupportedRoles(t *testing.T) {
 	call := contracts.ToolCall{Function: contracts.Function{Name: contracts.ReadSkillTool, Arguments: `{"name":"code-review"}`}}
 	displays := timelineEventDisplays(TimelineEvent{Record: &store.Record{
 		Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}},
-	}})
+	}}, nil)
 	if len(displays) != 1 || displays[0].role != "skill" || displays[0].text != "code-review" {
 		t.Fatalf("timeline displays=%#v want one code-review skill", displays)
+	}
+}
+
+// A tool result that happens to be a JSON object is not a checklist update.
+// Only the result of a task_checklist call is, so a bash result carrying an
+// object is tool output, and a checklist call that failed leaves no row at all.
+func TestTimelineEventDisplaysClassifiesToolResultsByCall(t *testing.T) {
+	bashCall := contracts.ToolCall{ID: "bash-1", Function: contracts.Function{Name: contracts.BashTool}}
+	checkCall := contracts.ToolCall{ID: "check-1", Function: contracts.Function{Name: contracts.TaskChecklistTool}}
+	caller := TimelineEvent{Record: &store.Record{
+		Kind:    store.KindMessage,
+		Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{bashCall, checkCall}},
+	}}
+	toolNames := timelineToolNames([]TimelineEvent{caller})
+
+	result := func(callID, text string) TimelineEvent {
+		return TimelineEvent{Record: &store.Record{
+			Kind:    store.KindMessage,
+			Message: &contracts.ChatMessage{Role: "tool", ToolCallID: callID, Content: &text},
+		}}
+	}
+	// A bash result that is empty JSON: it decodes as a checklist state, so the
+	// call it answers is the only thing that can place it.
+	if displays := timelineEventDisplays(result("bash-1", "{}"), toolNames); len(displays) != 1 || displays[0].role != "tool_result" {
+		t.Fatalf("bash result displays=%#v want one tool_result", displays)
+	}
+	// A bash result with fields the checklist state does not have.
+	if displays := timelineEventDisplays(result("bash-1", `{"exit_code":0,"output":"hi"}`), toolNames); len(displays) != 1 || displays[0].role != "tool_result" {
+		t.Fatalf("bash exit status displays=%#v want one tool_result", displays)
+	}
+	if displays := timelineEventDisplays(result("check-1", "{}"), toolNames); len(displays) != 1 || displays[0].role != "event" {
+		t.Fatalf("checklist result displays=%#v want one event row", displays)
+	}
+	if displays := timelineEventDisplays(result("check-1", "task_checklist add requires a title"), toolNames); displays != nil {
+		t.Fatalf("failed checklist result displays=%#v want none", displays)
 	}
 }
 
@@ -1733,7 +2334,7 @@ func TestTimelineEventDisplaysThinkingAndAnswer(t *testing.T) {
 			Role: "assistant", Content: &answer, ReasoningContent: "Reasoning process",
 		},
 	}}
-	displays := timelineEventDisplays(event)
+	displays := timelineEventDisplays(event, nil)
 	if len(displays) != 2 || displays[0].role != "thinking" || displays[1].role != "assistant" {
 		t.Fatalf("timeline displays=%#v want thinking then assistant", displays)
 	}
@@ -1775,58 +2376,238 @@ func TestBlocksFromRecordsShowsToolCallsAndResults(t *testing.T) {
 	}
 
 	blocks := blocksFromRecords(records)
-	if len(blocks) != 2 {
-		t.Fatalf("blocks=%d want 2: %#v", len(blocks), blocks)
+	if len(blocks) != 1 {
+		t.Fatalf("blocks=%d want 1: %#v", len(blocks), blocks)
 	}
 	if blocks[0].role != "tool" || blocks[0].text != "README.md" {
 		t.Fatalf("tool call block=%#v", blocks[0])
 	}
-	if blocks[1].role != "tool" || blocks[1].text != "success · 1 line, 19 bytes" {
-		t.Fatalf("tool result block=%#v", blocks[1])
+	if blocks[0].toolName != "read" || blocks[0].toolStatus != string(contracts.ToolExecutionSuccess) {
+		t.Fatalf("folded result=%#v, want a successful read", blocks[0])
 	}
-	if blocks[1].toolName != "read" {
-		t.Fatalf("tool result name=%q want read", blocks[1].toolName)
+	if blocks[0].toolDetail != "" {
+		t.Fatalf("a read that worked adds %q, want nothing", blocks[0].toolDetail)
 	}
 }
 
-func TestReadToolResultSummaryPreservesErrors(t *testing.T) {
-	if got := transcriptToolResultDisplay("read", "success", "one\ntwo\n", ""); got != "success · 2 lines, 8 bytes" {
-		t.Fatalf("successful read summary=%q", got)
+// A bash call reads as the command and then its output, under one pyramid: the
+// command is the request, and what follows it is what came back.
+func TestToolBlockPutsTheOutputUnderTheCommand(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	entry := &block{
+		role:       "tool",
+		toolKind:   "call",
+		toolName:   string(contracts.BashTool),
+		toolArgs:   `{"command":"go test ./...","workdir":"scripts","timeout":30}`,
+		toolStatus: string(contracts.ToolExecutionSuccess),
+		toolDetail: "exit 1\n--- FAIL: TestThing",
 	}
-	if got := transcriptToolResultDisplay("read", "error", "", "permission denied"); got != "error: permission denied" {
-		t.Fatalf("read error=%q want full error", got)
+
+	plain := ansi.Strip(m.renderToolBlock(entry, 80))
+	for _, want := range []string{"▲ bash  cwd scripts  timeout 30s", "$ go test ./...", "exit 1", "--- FAIL: TestThing"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("bash block lacks %q:\n%s", want, plain)
+		}
 	}
+	if strings.Index(plain, "$ go test ./...") > strings.Index(plain, "exit 1") {
+		t.Fatalf("the output is drawn before the command it came from:\n%s", plain)
+	}
+	// One pyramid per call, carrying the outcome: a second marker on the output
+	// was the noise this replaced.
+	if strings.Contains(plain, "▼") || strings.Contains(plain, "↙") {
+		t.Fatalf("the output carries a pyramid of its own:\n%s", plain)
+	}
+}
+
+// A failure is written in the failure colour, so a failed call reads as one
+// without a marker saying so.
+func TestToolBlockWritesAFailedResultInRed(t *testing.T) {
+	// '#e67e80' and '#859289' as the truecolor sequences the formatter writes.
+	const red, muted = "38;2;230;126;128", "38;2;133;146;137"
+
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	failed := &block{
+		role: "tool", toolKind: "call", toolName: string(contracts.BashTool),
+		toolArgs: `{"command":"go test ./..."}`, toolStatus: string(contracts.ToolExecutionError),
+		toolDetail: "exit 1\n--- FAIL: TestThing",
+	}
+	if line := rawToolLine(m.renderToolBlock(failed, 80), "FAIL"); !strings.Contains(line, red) {
+		t.Fatalf("a failed result is not red: %q", line)
+	}
+
+	worked := &block{
+		role: "tool", toolKind: "call", toolName: string(contracts.BashTool),
+		toolArgs: `{"command":"go test ./..."}`, toolStatus: string(contracts.ToolExecutionSuccess),
+		toolDetail: "exit 0\nok",
+	}
+	if line := rawToolLine(m.renderToolBlock(worked, 80), "ok"); !strings.Contains(line, muted) {
+		t.Fatalf("a result that worked is not in the body colour: %q", line)
+	}
+}
+
+// A call that has not answered yet shows the command alone: nothing follows it,
+// and the pyramid says the call is still running by staying neutral.
+func TestToolBlockShowsNothingAfterARunningCall(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	entry := &block{
+		role: "tool", toolKind: "call", toolName: string(contracts.BashTool),
+		toolArgs: `{"command":"sleep 60"}`,
+	}
+	plain := ansi.Strip(m.renderToolBlock(entry, 80))
+	if !strings.Contains(plain, "$ sleep 60") {
+		t.Fatalf("running bash call lacks its command:\n%s", plain)
+	}
+	if strings.Contains(plain, "exit ") {
+		t.Fatalf("running bash call shows a result:\n%s", plain)
+	}
+}
+
+// The command is bash, so it is lit by the bash lexer the approval pane uses. The
+// output is whatever the command printed — not bash — so it stays plain.
+func TestToolBlockHighlightsTheBashCommandOnly(t *testing.T) {
+	// '#a7c080', the colour a bash string literal gets, and '#83c092', the one a
+	// builtin gets, as the truecolor sequences the formatter writes.
+	const stringColor, builtinColor = "38;2;167;192;128", "38;2;131;192;146"
+
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	entry := &block{
+		role: "tool", toolKind: "call", toolName: string(contracts.BashTool),
+		toolArgs:   `{"command":"echo \"hi\" && ls -la"}`,
+		toolStatus: string(contracts.ToolExecutionSuccess),
+		toolDetail: "exit 0\ndone",
+	}
+
+	raw := m.renderToolBlock(entry, 80)
+	script, output := rawToolLine(raw, "ls -la"), rawToolLine(raw, "done")
+	if !strings.Contains(script, stringColor) || !strings.Contains(script, builtinColor) {
+		t.Fatalf("the command is not lit by the bash lexer: %q", script)
+	}
+	if strings.Contains(output, stringColor) || strings.Contains(output, builtinColor) {
+		t.Fatalf("the output is lit as bash: %q", output)
+	}
+}
+
+// rawToolLine is the first rendered line containing needle, with its escapes
+// intact: what a colour assertion needs.
+func rawToolLine(rendered, needle string) string {
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	return ""
+}
+
+// A result is folded under the call it answers, so what it contributes is a
+// body beside the marker rather than a block of its own. The marker carries the
+// status, so the body never repeats it.
+func TestToolResultDetailShowsWhatTheToolDid(t *testing.T) {
 	bashOutput := `{"exit_code":7,"output":"full output\n","truncated":true}`
-	if got := transcriptToolResultDisplay("bash", "success", bashOutput, ""); got != "success · exit 7 · output truncated\nfull output\n" {
-		t.Fatalf("bash result=%q", got)
+	tests := []struct {
+		name      string
+		tool      contracts.ToolType
+		status    contracts.ToolExecutionStatus
+		output    string
+		resultErr string
+		want      string
+	}{
+		{
+			name: "bash shows its exit code and output", tool: contracts.BashTool, status: contracts.ToolExecutionSuccess,
+			output: bashOutput, want: "exit 7 · output truncated\nfull output",
+		},
+		{
+			name: "bash without a structured result keeps its text", tool: contracts.BashTool, status: contracts.ToolExecutionSuccess,
+			output: "legacy output", want: "legacy output",
+		},
+		{
+			name: "a read that worked adds nothing", tool: contracts.ReadTool, status: contracts.ToolExecutionSuccess,
+			output: "one\ntwo\n", want: "",
+		},
+		{
+			name: "a search that worked adds nothing", tool: contracts.SearchTool, status: contracts.ToolExecutionSuccess,
+			output: `[{"path":"main.go","line":3}]`, want: "",
+		},
+		{
+			name: "an edit that worked adds nothing", tool: contracts.EditTool, status: contracts.ToolExecutionSuccess,
+			output: `{"replacements":1}`, want: "",
+		},
+		{
+			name: "a write that worked adds nothing", tool: contracts.WriteTool, status: contracts.ToolExecutionSuccess,
+			output: `{"status":"written"}`, want: "",
+		},
+		{
+			name: "an edit that failed says why", tool: contracts.EditTool, status: contracts.ToolExecutionError,
+			resultErr: "old_string matched 2 times; use replace_all", want: "old_string matched 2 times; use replace_all",
+		},
+		{
+			name: "a read that failed says why", tool: contracts.ReadTool, status: contracts.ToolExecutionError,
+			resultErr: "permission denied", want: "permission denied",
+		},
+		{
+			name: "a denied call says so", tool: contracts.BashTool, status: contracts.ToolExecutionDenied,
+			resultErr: "tool execution was denied by session policy", want: "tool execution was denied by session policy",
+		},
 	}
-	if got := transcriptToolResultDisplay("bash", "success", "legacy output", ""); got != "success\nlegacy output" {
-		t.Fatalf("legacy bash result=%q", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := toolResultDetail(string(tt.tool), string(tt.status), tt.output, tt.resultErr); got != tt.want {
+				t.Fatalf("detail = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
+// A command that exited nonzero failed, whatever the tool's own status was: the
+// green pyramid has to mean the thing the reader ran worked.
+func TestDisplayStatusMarksNonzeroBashExitAsFailure(t *testing.T) {
+	if got := displayStatus(string(contracts.BashTool), string(contracts.ToolExecutionSuccess), `{"exit_code":1}`); got != string(contracts.ToolExecutionError) {
+		t.Fatalf("status = %q, want %q", got, contracts.ToolExecutionError)
+	}
+	if got := displayStatus(string(contracts.BashTool), string(contracts.ToolExecutionSuccess), `{"exit_code":0}`); got != string(contracts.ToolExecutionSuccess) {
+		t.Fatalf("status = %q, want %q", got, contracts.ToolExecutionSuccess)
+	}
+	if got := displayStatus(string(contracts.EditTool), string(contracts.ToolExecutionSuccess), `{"replacements":1}`); got != string(contracts.ToolExecutionSuccess) {
+		t.Fatalf("status = %q, want %q", got, contracts.ToolExecutionSuccess)
+	}
+}
+
+// A session that is live and the same session rebuilt from its timeline have to
+// read alike: the result is folded into the call in both.
 func TestLiveAndResumedBashResultsMatch(t *testing.T) {
 	payload := `{"exit_code":7,"output":"full output\n","truncated":true}`
+	call := contracts.ToolCall{ID: "call-1", Type: "function", Function: contracts.Function{
+		Name: contracts.BashTool, Arguments: `{"command":"make test"}`,
+	}}
+
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
-	m.appendDelta(contracts.EventToolResult, "bash [success]\n"+payload)
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventToolCall, ToolCall: &call})
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventToolResult, ToolResult: &contracts.ToolExecutionResult{
+		Status: contracts.ToolExecutionSuccess, CallID: call.ID, CallName: contracts.BashTool, Output: payload,
+	}})
 	if len(m.blocks) != 1 {
-		t.Fatalf("live blocks=%d", len(m.blocks))
+		t.Fatalf("live blocks=%d want 1", len(m.blocks))
 	}
 
-	call := contracts.ToolCall{ID: "call-1", Type: "function", Function: contracts.Function{Name: contracts.BashTool}}
 	toolMessage := contracts.NewToolMessage(call.ID, payload, contracts.ToolExecutionSuccess)
 	resumed := blocksFromRecords([]store.Record{
 		{Kind: store.KindMessage, Message: &contracts.ChatMessage{Role: "assistant", ToolCalls: []contracts.ToolCall{call}}},
 		{Kind: store.KindMessage, Message: &toolMessage},
 	})
-	if len(resumed) != 2 {
-		t.Fatalf("resumed blocks=%d", len(resumed))
+	if len(resumed) != 1 {
+		t.Fatalf("resumed blocks=%d want 1", len(resumed))
 	}
-	if m.blocks[0].text != resumed[1].text {
-		t.Fatalf("live result %q != resumed result %q", m.blocks[0].text, resumed[1].text)
+
+	if m.blocks[0].toolDetail != resumed[0].toolDetail {
+		t.Fatalf("live detail %q != resumed detail %q", m.blocks[0].toolDetail, resumed[0].toolDetail)
 	}
-	if !strings.Contains(m.blocks[0].text, "full output") {
-		t.Fatalf("live result omits bash output: %q", m.blocks[0].text)
+	if m.blocks[0].toolStatus != resumed[0].toolStatus {
+		t.Fatalf("live status %q != resumed status %q", m.blocks[0].toolStatus, resumed[0].toolStatus)
+	}
+	if !strings.Contains(m.blocks[0].toolDetail, "exit 7") || !strings.Contains(m.blocks[0].toolDetail, "full output") {
+		t.Fatalf("bash detail = %q, want the exit code and the output", m.blocks[0].toolDetail)
+	}
+	if m.blocks[0].toolStatus != string(contracts.ToolExecutionError) {
+		t.Fatalf("status = %q, want a failed command to read as failed", m.blocks[0].toolStatus)
 	}
 }
 
@@ -1908,6 +2689,109 @@ func TestModelSwitchClearsPendingAttachments(t *testing.T) {
 	}
 }
 
+func TestSessionListCancelsObserverAndDropsQueuedEvents(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		open func(*chatModel) tea.Cmd
+	}{
+		{"slash", func(m *chatModel) tea.Cmd { return m.runCommand("/sessions") }},
+		{"ctrl+o", func(m *chatModel) tea.Cmd {
+			_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
+			return cmd
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+			m.modal = nil
+			m.session.ID = uuid.New()
+			m.used = 19
+			m.contextWindow = 100
+			observerCtx, canceled := context.WithCancel(context.Background())
+			m.sessionCancel = canceled
+			defer canceled()
+			oldID := m.sessionObserverID
+			if cmd := tc.open(m); cmd == nil {
+				t.Fatal("session list command missing")
+			}
+			if m.sessionCancel != nil || m.sessionStream != nil || m.sessionObserverID == oldID || observerCtx.Err() != context.Canceled {
+				t.Fatal("old observer remained attached")
+			}
+			usage := `{"total_tokens":99}`
+			_, _ = m.Update(sessionEventMsg{sessionID: m.session.ID, observerID: oldID, event: contracts.EventStream{Kind: contracts.NotifyAgentUsage, Content: &usage}})
+			_, _ = m.Update(sessionJoinDoneMsg{sessionID: m.session.ID, observerID: oldID, err: fmt.Errorf("old join")})
+			if m.used != 19 || len(m.blocks) != 0 {
+				t.Fatalf("queued observer messages changed state: used=%d blocks=%d", m.used, len(m.blocks))
+			}
+		})
+	}
+}
+
+func TestSessionLoadResetsStatusAndIgnoresOldObserver(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.modal = nil
+	oldID := uuid.New()
+	m.session = store.SessionMeta{ID: oldID, Provider: "old", Model: "old-model", Cwd: "/old"}
+	m.used, m.contextWindow, m.thinking = 87, 100, contracts.ThinkingLow
+	m.status, m.working, m.workStatus = contracts.SessionBusy, true, "old work"
+	_ = m.startSessionObserver(oldID)
+	oldObserver := m.sessionObserverID
+	m.openSessionList()
+	newID := uuid.New()
+	_, _ = m.Update(sessionLoadedMsg{output: &glue.SessionOutput{
+		SessionMeta:   store.SessionMeta{ID: newID, Provider: "new", Model: "new-model", Cwd: "/new"},
+		ContextWindow: 200, Thinking: contracts.ThinkingHigh,
+	}})
+	status := ansi.Strip(m.statusView())
+	for _, want := range []string{"new-model (new)", "/new", "thinking high", "0% 0/200"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("status lacks %q: %q", want, status)
+		}
+	}
+	if strings.Contains(status, "old-model") || m.working || m.workStatus != "" {
+		t.Fatalf("old turn survived load: status=%q work=%q", status, m.workStatus)
+	}
+	usage := `{"total_tokens":98}`
+	_, _ = m.Update(sessionEventMsg{sessionID: oldID, observerID: oldObserver, event: contracts.EventStream{Kind: contracts.NotifyAgentUsage, Content: &usage}})
+	if m.used != 0 {
+		t.Fatal("old observer changed new session usage")
+	}
+}
+
+func TestFailedSessionLoadResumesOldObserver(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.session.ID = uuid.New()
+	m.modal = nil
+	_ = m.startSessionObserver(m.session.ID)
+	m.openSessionList()
+	_, _ = m.Update(sessionLoadedMsg{err: fmt.Errorf("not found")})
+	if m.modal == nil || m.sessionCancel != nil {
+		t.Fatal("failed load should show notice while detached")
+	}
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd == nil || m.modal != nil || m.sessionCancel == nil {
+		t.Fatal("acknowledgment did not resume old observer")
+	}
+}
+
+func TestSessionLoadFetchesParentIdentity(t *testing.T) {
+	parentID := uuid.New()
+	client := &parentIdentityChatClient{parentID: parentID}
+
+	msg, ok := loadSessionCmd(context.Background(), client, uuid.New())().(sessionLoadedMsg)
+	if !ok {
+		t.Fatal("load command did not return sessionLoadedMsg")
+	}
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	if client.requestedParent != parentID {
+		t.Fatalf("requested parent = %s, want %s", client.requestedParent, parentID)
+	}
+	if msg.parentName != "Orchestrator" || msg.parentAgentKind != contracts.InteractiveAgent {
+		t.Fatalf("parent identity = (%q, %q), want (Orchestrator, interactive)", msg.parentName, msg.parentAgentKind)
+	}
+}
+
 func TestSessionLoadClearsPendingAttachments(t *testing.T) {
 	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
 	m.modal = nil
@@ -1919,6 +2803,31 @@ func TestSessionLoadClearsPendingAttachments(t *testing.T) {
 	if m.pending != nil {
 		t.Fatalf("pending survived session load: %+v", m.pending)
 	}
+}
+
+type navigationChatClient struct {
+	stubChatClient
+	opened uuid.UUID
+}
+
+func (c *navigationChatClient) LoadSession(_ context.Context, id uuid.UUID) (*glue.SessionOutput, error) {
+	c.opened = id
+	return &glue.SessionOutput{SessionMeta: store.SessionMeta{ID: id}}, nil
+}
+
+type parentIdentityChatClient struct {
+	stubChatClient
+	parentID        uuid.UUID
+	requestedParent uuid.UUID
+}
+
+func (c *parentIdentityChatClient) LoadSession(context.Context, uuid.UUID) (*glue.SessionOutput, error) {
+	return &glue.SessionOutput{SessionMeta: store.SessionMeta{ID: uuid.New(), ParentID: c.parentID}}, nil
+}
+
+func (c *parentIdentityChatClient) GetSessionIdentity(_ context.Context, id uuid.UUID) (string, contracts.AgentKind, error) {
+	c.requestedParent = id
+	return "Orchestrator", contracts.InteractiveAgent, nil
 }
 
 type stubChatClient struct{}
@@ -1943,6 +2852,9 @@ func (stubChatClient) LoadSession(context.Context, uuid.UUID) (*glue.SessionOutp
 }
 func (stubChatClient) GetSession(context.Context, uuid.UUID) (*store.SessionMeta, []store.Record, error) {
 	return nil, nil, nil
+}
+func (stubChatClient) GetSessionIdentity(context.Context, uuid.UUID) (string, contracts.AgentKind, error) {
+	return "", "", nil
 }
 func (stubChatClient) DeleteSession(context.Context, uuid.UUID) error { return nil }
 func (stubChatClient) CloseSession(context.Context, uuid.UUID) error  { return nil }

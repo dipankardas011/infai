@@ -75,6 +75,9 @@ func (m *FileManager) edit(path, oldString, newString string, replaceAll bool) (
 	if err := validateText(newString, contracts.ResponsibilityAgent); err != nil {
 		return 0, err
 	}
+	if oldString == newString {
+		return 0, filesystemErr("unchanged_edit", "old_string and new_string must differ", contracts.ResponsibilityAgent, nil)
+	}
 
 	resolved, err := m.resolve(path, true)
 	if err != nil {

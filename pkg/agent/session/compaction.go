@@ -63,31 +63,45 @@ type compactionCommit struct {
 	History       []contracts.ChatMessage
 }
 
+func (s *InfaiAgentSession) modelClient() contracts.InfaiModelAdaptor {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.model
+}
+
 func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
-	if usage == nil || s.model.GetModelSpecs().Model().MaxContextLength == 0 {
+	if usage == nil {
+		return false
+	}
+	window := s.modelClient().GetModelSpecs().Model().MaxContextLength
+	if window == 0 {
 		return false
 	}
 	used := usage.TotalTokens
 	if used == 0 {
 		used = usage.PromptTokens + usage.CompletionTokens
 	}
-	threshold := float64(s.model.GetModelSpecs().Model().MaxContextLength) * 0.8
-	return float64(used) >= threshold
+	return float64(used) >= float64(window)*0.8
 }
 
 // CompactChat runs a manual compaction. The agent loop is parked while the
 // session is idle, so the replacement history is installed and acknowledged
 // before the session becomes runnable again.
-func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
+func (s *InfaiAgentSession) ManualCompactChat(ctx context.Context) error {
 	s.mu.Lock()
 	if s.status != contracts.SessionIdle {
 		s.mu.Unlock()
 		return fmt.Errorf("session must be in idle state")
 	}
-	if !s.agent.MailboxEmpty() {
+	if !s.agentMailbox.IsEmpty() {
 		s.mu.Unlock()
 		return errors.New("session has queued messages")
 	}
+	if s.meta.AgentKind == contracts.SidecarLoopAgent || s.meta.AgentKind == contracts.SingleLoopAgent {
+		s.mu.Unlock()
+		return errors.New("not supported for sidecar loop and loop kind agents.")
+	}
+	s.agentMailbox.PreventDraining()
 	s.mu.Unlock()
 
 	trigger := "user triggered compaction"
@@ -95,21 +109,40 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 
 	replacement, summary, err := s.compactChat(ctx, false)
 	if err != nil {
-		if ctx.Err() == nil {
-			reason := fmt.Sprintf("manual compaction: %s", err)
-			s.publish(contracts.EventStream{Kind: contracts.EventSessionFatal, Timestamp: time.Now().UTC(), Content: &reason})
-		}
+		s.finishManualCompaction("", err)
 		return err
 	}
 	if err := s.agent.ReplaceHistory(s.ctx, replacement); err != nil {
+		s.l.ErrorContext(s.ctx, "session: failed to install compaction history", "error", err)
+		s.finishManualCompaction("", err)
 		return err
 	}
 	// Published after the install so the session is never reported runnable
 	// while a stale history is still installed.
-	if summary != "" {
-		s.publish(contracts.EventStream{Kind: contracts.CompactionSummary, Timestamp: time.Now().UTC(), Content: &summary})
-	}
+	s.finishManualCompaction(summary, nil)
 	return nil
+}
+
+func (s *InfaiAgentSession) finishManualCompaction(summary string, compactionErr error) {
+	s.agentMailbox.AllowDraining()
+	s.publishCompactionResult(false, summary, compactionErr)
+}
+
+// publishCompactionResult reports how a compaction ended. Every compaction
+// publishes exactly one of these: a summary, an empty result for a history with
+// nothing to fold, or the error that stopped it. Without it the session would
+// stay in SessionCompacting forever, because the hub is the only writer of the
+// status and this event is the only thing that moves it back.
+func (s *InfaiAgentSession) publishCompactionResult(automatic bool, summary string, compactionErr error) {
+	result := contracts.CompactionResult{Summary: summary, Automatic: automatic}
+	if compactionErr != nil {
+		result.Err = compactionErr.Error()
+	}
+	s.publish(contracts.EventStream{
+		Kind:       contracts.EventCompactionExecuted,
+		Timestamp:  time.Now().UTC(),
+		Compaction: &result,
+	})
 }
 
 // autoCompact is the agent loop's mid-turn compaction callback. The loop owns
@@ -118,15 +151,13 @@ func (s *InfaiAgentSession) CompactChat(ctx context.Context) error {
 func (s *InfaiAgentSession) autoCompact(ctx context.Context) ([]contracts.ChatMessage, error) {
 	replacement, summary, err := s.compactChat(ctx, true)
 	if err != nil {
-		if ctx.Err() == nil {
-			reason := fmt.Sprintf("automatic compaction: %s", err)
-			s.publish(contracts.EventStream{Kind: contracts.EventSessionFatal, Timestamp: time.Now().UTC(), Content: &reason})
-		}
+		// The history is unchanged and the loop keeps running, so the session
+		// is runnable again rather than concluded: a compaction can fail on a
+		// provider that is simply down.
+		s.publishCompactionResult(true, "", err)
 		return nil, err
 	}
-	if summary != "" {
-		s.publish(contracts.EventStream{Kind: contracts.CompactionSummary, Timestamp: time.Now().UTC(), Content: &summary})
-	}
+	s.publishCompactionResult(true, summary, nil)
 	return replacement, nil
 }
 
@@ -196,8 +227,8 @@ func (s *InfaiAgentSession) summarize(ctx context.Context, systemPrompt string, 
 	messages := make([]contracts.ChatMessage, 0, len(history)+1)
 	messages = append(messages, contracts.NewSystemMessage(systemPrompt))
 	messages = append(messages, history...)
-	// TODO: ask whether we need usage metrics from the compaction model?
-	reply, _, err := s.model.Generate(ctx, messages, nil, &contracts.GenerateOptions{})
+
+	reply, _, err := s.modelClient().Generate(ctx, messages, nil, &contracts.GenerateOptions{})
 	if err != nil {
 		return "", err
 	}

@@ -45,3 +45,10 @@ func NewUserMessageWithInput(input UserInput) ChatMessage {
 func NewAssistantMessage(content string) ChatMessage {
 	return ChatMessage{Role: "assistant", Content: &content}
 }
+
+// Need this for the agent taking the response.
+// NewSidecarAgentResponse is a message from a sidecar to its caller: the answer
+// text, attributed to the sidecar by name.
+func NewSidecarAgentResponse(content string, attributedTo string) ChatMessage {
+	return ChatMessage{Role: "user", Content: &content, Name: &attributedTo}
+}

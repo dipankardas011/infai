@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -16,7 +18,9 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/auditor"
 	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/dipankardas011/infai/pkg/agent/delegate"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
+	"github.com/dipankardas011/infai/pkg/agent/evals"
 	"github.com/dipankardas011/infai/pkg/agent/memory"
 	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/prompts"
@@ -57,13 +61,17 @@ type InfaiAgentSession struct {
 	// Decisions the session is waiting on: a user cancellation, a tool
 	// approval from the user, or the agent adopting a branch point on its next
 	// write. The agent is the sole receiver of userCancellation.
-	userCancellation    chan struct{}
-	pendingApproval     *pendingApproval
-	pendingBranchParent uuid.UUID
+	userCancellation             chan struct{}
+	pendingApproval              *pendingApproval
+	pendingBranchParent          uuid.UUID
+	pendingBackgroundSidecarLoop map[uuid.UUID]string
 
 	// The principal agent and the model it runs on.
 	agent *agent.Agent
 	model contracts.InfaiModelAdaptor
+
+	// MessageBroker for AgentMessage as Inputs from external sys
+	agentMailbox *contracts.AgentMailbox
 
 	// Capabilities the agent runs with.
 	auditorPolicy   *auditor.AuditorPolicy
@@ -91,7 +99,12 @@ const userCanceledApprovalReason = "user canceled"
 func NewSession(
 	engineCtx context.Context,
 	id uuid.UUID,
+	parentId uuid.UUID,
+	name string,
 	l *slog.Logger,
+	userPrompt *string,
+	evalBashScript *string,
+	LimitAgentMaxTurns *uint64,
 	chosenModel contracts.ProvisionedModel,
 	cwd string,
 	ss *store.SessionStore,
@@ -103,15 +116,42 @@ func NewSession(
 		return nil, err
 	}
 
+	agentMailbox := contracts.NewAgentMailboxForSession()
+	agentMailbox.AllowFilling()
+	agentMailbox.AllowDraining()
+
+	var evalFunc func(context.Context) error
+
+	switch sessionAgentKind {
+	case contracts.SidecarLoopAgent, contracts.SingleLoopAgent:
+		if userPrompt == nil || *userPrompt == "" {
+			return nil, fmt.Errorf("user prompt is needed for the %s", sessionAgentKind)
+		}
+		if err := agentMailbox.SendMessage(engineCtx, contracts.NewUserMessage(*userPrompt)); err != nil {
+			return nil, err
+		}
+		agentMailbox.PreventFilling()
+
+		if evalBashScript == nil || *evalBashScript == "" {
+			return nil, fmt.Errorf("eval bash script is needed for the agentKind: %s", sessionAgentKind)
+		}
+
+		evalFunc = evals.NewEvalScriptHandler(cwd, *evalBashScript)
+	}
+
 	now := time.Now().UTC()
 	meta := store.SessionMeta{
-		ID:        id,
-		Provider:  model.GetModelSpecs().ProviderName(),
-		Model:     model.GetModelSpecs().Model().Id,
-		Cwd:       cwd,
-		CreatedAt: now,
-		UpdatedAt: now,
-		AgentKind: sessionAgentKind,
+		ID:             id,
+		ParentID:       parentId,
+		Name:           name,
+		Provider:       model.GetModelSpecs().ProviderName(),
+		Model:          model.GetModelSpecs().Model().Id,
+		Cwd:            cwd,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		AgentKind:      sessionAgentKind,
+		EvalBashScript: evalBashScript,
+		MaxTurns:       LimitAgentMaxTurns,
 	}
 	if err := ss.SaveMeta(meta); err != nil {
 		return nil, err
@@ -121,7 +161,7 @@ func NewSession(
 		return nil, err
 	}
 
-	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, aeComms)
+	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc)
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -143,7 +183,22 @@ func NewResumedSession(
 	if err != nil {
 		return nil, err
 	}
-	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, aeComms)
+	agentMailbox := contracts.NewAgentMailboxForSession()
+	agentMailbox.AllowFilling()
+	agentMailbox.AllowDraining()
+
+	var evalFunc func(context.Context) error
+
+	switch meta.AgentKind {
+	case contracts.SidecarLoopAgent, contracts.SingleLoopAgent:
+		agentMailbox.PreventFilling()
+
+		if meta.EvalBashScript != nil {
+			evalFunc = evals.NewEvalScriptHandler(meta.Cwd, *meta.EvalBashScript)
+		}
+	}
+
+	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc)
 }
 
 func newRuntimeSession(
@@ -154,29 +209,41 @@ func newRuntimeSession(
 	history []contracts.ChatMessage,
 	timeline *store.Timeline,
 	sessionStore *store.SessionStore,
+	am *contracts.AgentMailbox,
 	aeComms *comms.ISACChannel,
+	evalFunc func(context.Context) error,
 ) (*InfaiAgentSession, error) {
 	if engineCtx == nil {
 		return nil, errors.New("session: engine context is required")
 	}
+
+	status := contracts.SessionIdle
+	concluded := false
+	if meta.Conclusion != nil && contracts.IsInConcludedState(meta.AgentKind, meta.Conclusion.Status) {
+		status = meta.Conclusion.Status
+		concluded = true
+	}
+
 	ctx, cancel := context.WithCancelCause(engineCtx)
 	s := &InfaiAgentSession{
-		l:                l,
-		ctx:              ctx,
-		cancel:           cancel,
-		closeDone:        make(chan struct{}),
-		userCancellation: make(chan struct{}, 1),
-		meta:             meta,
-		status:           contracts.SessionIdle,
-		model:            model,
-		timeline:         timeline,
-		store:            sessionStore,
-		auditorPolicy:    auditor.NewAuditorPolicy(),
-		taskChecklist:    memory.NewTaskChecklist(),
-		activeTimeline:   append([]contracts.ChatMessage(nil), history...),
-		eventBus:         make(chan contracts.EventStream, 256),
-		subscribers:      make(map[*subscriber]struct{}),
-		aeComms:          aeComms,
+		l:                            l,
+		ctx:                          ctx,
+		cancel:                       cancel,
+		closeDone:                    make(chan struct{}),
+		userCancellation:             make(chan struct{}, 1),
+		pendingBackgroundSidecarLoop: make(map[uuid.UUID]string),
+		meta:                         meta,
+		status:                       status,
+		model:                        model,
+		timeline:                     timeline,
+		store:                        sessionStore,
+		auditorPolicy:                auditor.NewAuditorPolicy(),
+		taskChecklist:                memory.NewTaskChecklist(),
+		activeTimeline:               append([]contracts.ChatMessage(nil), history...),
+		eventBus:                     make(chan contracts.EventStream, 256),
+		subscribers:                  make(map[*subscriber]struct{}),
+		aeComms:                      aeComms,
+		agentMailbox:                 am,
 	}
 
 	var err error
@@ -199,23 +266,42 @@ func newRuntimeSession(
 	}
 	s.configureMemoryTools()
 
+	if s.meta.AgentKind == contracts.InteractiveAgent {
+		s.configureDelegationTools()
+	}
+
 	systemPrompt, err := prompts.GetBasicSystemPrompt(s.availableTools, s.availableSkills, s.meta.Cwd)
 	if err != nil {
 		cancel(err)
 		return nil, err
 	}
 
+	maxTurns := uint64(math.MaxUint32)
+	if meta.MaxTurns != nil {
+		maxTurns = *meta.MaxTurns
+	}
+	opts := append(
+		[]agent.AgentOptions(nil),
+		agent.WithAutoCompaction(s.shouldCompact, s.autoCompact),
+		agent.WithMaxTurns(maxTurns),
+	)
+	if len(s.availableTools) > 0 {
+		opts = append(opts, agent.WithTools(s.availableTools...))
+	}
+	if evalFunc != nil {
+		opts = append(opts, agent.WithEval(evalFunc))
+	}
+
 	s.agent, err = agent.NewAgent(
 		s.model,
 		s.meta.AgentKind,
+		s.agentMailbox,
 		s.commitMessages,
 		s.eventBus,
 		s.userCancellation,
 		s.GenToolCallDispatchHandler(),
 		systemPrompt,
-		agent.WithMaxTurns(1000),
-		agent.WithTools(s.availableTools...),
-		agent.WithAutoCompaction(s.shouldCompact, s.autoCompact),
+		opts...,
 	)
 	if err != nil {
 		cancel(err)
@@ -235,9 +321,17 @@ func newRuntimeSession(
 	s.wg.Go(func() {
 		s.handlerForSessionEvents(s.ctx)
 	})
-	s.wg.Go(func() {
-		s.agent.StartLoop(s.ctx, s.activeTimeline)
-	})
+	if !concluded {
+		s.wg.Go(func() {
+			s.agent.StartLoop(s.ctx, s.activeTimeline)
+		})
+	}
+	switch s.meta.AgentKind {
+	case contracts.InteractiveAgent:
+		s.wg.Go(func() {
+			s.subscribeForAgentMessages()
+		})
+	}
 
 	s.wg.Go(func() {
 		<-s.ctx.Done()
@@ -250,7 +344,22 @@ func newRuntimeSession(
 func (s *InfaiAgentSession) Meta() store.SessionMeta {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.meta
+	meta := s.meta
+	meta.Offsprings = append([]uuid.UUID(nil), meta.Offsprings...)
+	return meta
+}
+
+func (s *InfaiAgentSession) AddOffspring(id uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.meta.Offsprings = append(s.meta.Offsprings, id)
+}
+
+func (s *InfaiAgentSession) TrackBackgroundSidecar(id uuid.UUID, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingBackgroundSidecarLoop[id] = name
 }
 
 func (s *InfaiAgentSession) Status() contracts.SessionStatus {
@@ -272,11 +381,15 @@ func (s *InfaiAgentSession) ViewTimeline() ([]store.Event, uuid.UUID, error) {
 
 func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) (contracts.TaskChecklistState, error) {
 	s.mu.Lock()
+	if s.meta.AgentKind == contracts.SidecarLoopAgent {
+		s.mu.Unlock()
+		return contracts.TaskChecklistState{}, errors.New("sidecar_loop sessions cannot select a branch")
+	}
 	if s.status != contracts.SessionIdle {
 		s.mu.Unlock()
 		return contracts.TaskChecklistState{}, fmt.Errorf("session must be idle before selecting a branch")
 	}
-	if !s.agent.MailboxEmpty() {
+	if !s.agentMailbox.IsEmpty() {
 		s.mu.Unlock()
 		return contracts.TaskChecklistState{}, errors.New("session has queued messages")
 	}
@@ -318,7 +431,7 @@ func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) (contracts.TaskCheck
 	}
 
 	s.mu.Lock()
-	if !s.agent.MailboxEmpty() {
+	if !s.agentMailbox.IsEmpty() {
 		s.mu.Unlock()
 		return contracts.TaskChecklistState{}, errors.New("session received a queued message while switching branches")
 	}
@@ -367,6 +480,14 @@ func (s *InfaiAgentSession) EnqueueUserMessage(ctx context.Context, input contra
 	input.Images = images
 
 	s.mu.Lock()
+	switch s.meta.AgentKind {
+	case contracts.SidecarLoopAgent:
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %s", harnessErr.ErrInvalidInput, "sidecar_loop agent does not support enqueue user messages")
+	case contracts.SingleLoopAgent:
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %s", harnessErr.ErrInvalidInput, "single_loop agent does not support enqueue user messages")
+	}
 
 	switch s.status {
 	case contracts.SessionCompacting:
@@ -411,7 +532,7 @@ func (s *InfaiAgentSession) EnqueueUserMessage(ctx context.Context, input contra
 		s.l.Error("persist session metadata", "session_id", meta.ID, "error", err)
 	}
 
-	if err := s.agent.Enqueue(ctx, contracts.NewUserMessageWithInput(input)); err != nil {
+	if err := s.agentMailbox.SendMessage(ctx, contracts.NewUserMessageWithInput(input)); err != nil {
 		return err
 	}
 	return nil
@@ -455,9 +576,6 @@ func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision contracts.App
 	s.mu.Lock()
 
 	switch s.status {
-	case contracts.SessionCompacting:
-		s.mu.Unlock()
-		return errors.New("session is compacting")
 	case contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone:
 		fatalErr := s.fatalErr
 		s.mu.Unlock()
@@ -496,6 +614,77 @@ func (s *InfaiAgentSession) ResolveApproval(id uuid.UUID, decision contracts.App
 	return nil
 }
 
+func (s *InfaiAgentSession) summaryMessageFromSidecarLoop() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, message := range slices.Backward(s.activeTimeline) {
+		if message.Role == "assistant" && strings.TrimSpace(message.Text()) != "" {
+			return message.Text()
+		}
+	}
+	return ""
+}
+
+// moveStatusLocked is how an event moves the session's status. It is the only
+// writer while the session is live, so the rule lives in contracts.IsInConcludedState
+// rather than in each reader: a status a session has concluded on is final, and
+// an event still unwinding during teardown must not revive the session it just
+// concluded. That is what keeps a delegated session's row off a status it has
+// already left.
+//
+// NOTE: The caller must hold s.mu.
+func (s *InfaiAgentSession) moveStatusLocked(status contracts.SessionStatus) {
+	if contracts.IsInConcludedState(s.meta.AgentKind, s.status) {
+		return
+	}
+	s.status = status
+}
+
+// reportStatusToParent tells the session that delegated this one what it is
+// doing. A session the engine created for itself has no parent to tell. The
+// report carries the session's own identity and status, so the caller can show
+// the child without joining it: the parent fans each report out to its clients.
+func (s *InfaiAgentSession) reportStatusToParent(status contracts.SessionStatus) {
+	s.mu.Lock()
+	parentID, id, name, kind := s.meta.ParentID, s.meta.ID, s.meta.Name, s.meta.AgentKind
+	s.mu.Unlock()
+
+	if parentID == uuid.Nil || kind != contracts.SidecarLoopAgent {
+		return
+	}
+
+	payload, err := json.Marshal(contracts.SidecarStatus{ID: id, Name: name, AgentKind: kind, Status: status})
+	if err != nil {
+		s.l.Error("encode sidecar status", "session_id", id, "error", err)
+		return
+	}
+	if err := s.aeComms.Send(s.ctx, &comms.AgentComm{
+		From:    id,
+		To:      parentID,
+		Kind:    comms.AgentCommKindSidecarStatus,
+		Payload: payload,
+	}); err != nil {
+		s.l.Warn("report sidecar status", "session_id", id, "parent", parentID, "error", err)
+	}
+}
+
+func (s *InfaiAgentSession) sendSidecarLoopResult(ctx context.Context, response comms.DelegatedTaskResponse) {
+	if response.Name == "" {
+		s.mu.Lock()
+		response.Name = s.meta.Name
+		s.mu.Unlock()
+	}
+	payload, err := json.Marshal(response)
+	if err != nil {
+		s.l.ErrorContext(ctx, "encode sidecar result", "session_id", s.meta.ID, "error", err)
+		return
+	}
+	if err := s.aeComms.Send(ctx, &comms.AgentComm{From: s.meta.ID, To: s.meta.ParentID, Kind: comms.AgentCommKindResultSidecar, Payload: payload}); err != nil {
+		s.l.ErrorContext(ctx, "send sidecar result", "session_id", s.meta.ID, "error", err)
+	}
+}
+
 func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 	for {
 		var event contracts.EventStream
@@ -515,6 +704,7 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			contracts.EventToolTaskCheckList,
 			contracts.EventSkillLoad,
 			contracts.EventMessageFromAgentInbox,
+			contracts.EventSidecarStatus,
 			contracts.NotifyAgentUsage:
 			s.mu.Lock()
 			s.inFlight = append(s.inFlight, event)
@@ -531,19 +721,34 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			s.mu.Lock()
 			if eventStatus == contracts.SessionIdle || eventStatus == contracts.SessionBusy {
 				if s.status == contracts.SessionIdle || s.status == contracts.SessionBusy {
-					s.status = eventStatus
+					s.moveStatusLocked(eventStatus)
 				}
 			} else {
-				s.status = eventStatus
+				s.moveStatusLocked(eventStatus)
 			}
+			current := s.status
 			s.inFlight = append(s.inFlight, event)
 			s.notifySubscribers(event)
 			s.mu.Unlock()
+
+			s.reportStatusToParent(current)
 
 			// The loop is not coming back from here, so this is how the session
 			// ended. The status says why on its own, so no reason is recorded.
 			if eventStatus == contracts.SessionCompleted || eventStatus == contracts.SessionMaxIterationExhausted {
 				s.recordSessionConclusion(eventStatus, "")
+				if s.meta.AgentKind == contracts.SidecarLoopAgent {
+					response := comms.DelegatedTaskResponse{From: s.meta.ID, Status: eventStatus}
+					if eventStatus == contracts.SessionMaxIterationExhausted {
+						response.Error = "sidecar exhausted its turn budget"
+					} else {
+						response.Summary = s.summaryMessageFromSidecarLoop()
+						if response.Summary == "" {
+							response.Error = "sidecar completed without an answer"
+						}
+					}
+					s.sendSidecarLoopResult(ctx, response)
+				}
 			}
 
 		case contracts.EventManualCompactionTriggered,
@@ -555,25 +760,32 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			compactingEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &compacting}
 
 			s.mu.Lock()
-			s.status = contracts.SessionCompacting
+			s.moveStatusLocked(contracts.SessionCompacting)
+			status := s.status
 			s.inFlight = append(s.inFlight, event, compactingEvent)
 			s.notifySubscribers(event)
 			s.notifySubscribers(compactingEvent)
 			s.mu.Unlock()
 
-		case contracts.CompactionSummary:
-			// A compaction is over and its continuation is installed, so the
-			// session is runnable again. An automatic compaction is followed by
-			// the agent's next busy report, which is what resumes that turn.
+			s.reportStatusToParent(status)
+
+		case contracts.EventCompactionExecuted:
+			// A compaction is over, so the session is runnable again whether it
+			// produced a summary or failed; this is the only event that clears
+			// SessionCompacting. An automatic compaction is followed by the
+			// agent's next busy report, which is what resumes that turn.
 			idle := string(contracts.SessionIdle)
 			idleEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &idle}
 
 			s.mu.Lock()
-			s.status = contracts.SessionIdle
+			s.moveStatusLocked(contracts.SessionIdle)
+			status := s.status
 			s.inFlight = append(s.inFlight, event, idleEvent)
 			s.notifySubscribers(event)
 			s.notifySubscribers(idleEvent)
 			s.mu.Unlock()
+
+			s.reportStatusToParent(status)
 
 		case contracts.EventApprovalRequested:
 			// The approval request itself is in the joined view; the status says
@@ -582,11 +794,14 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			waitingEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &waiting}
 
 			s.mu.Lock()
-			s.status = contracts.SessionWaitingApproval
+			s.moveStatusLocked(contracts.SessionWaitingApproval)
+			status := s.status
 			s.inFlight = append(s.inFlight, event, waitingEvent)
 			s.notifySubscribers(event)
 			s.notifySubscribers(waitingEvent)
 			s.mu.Unlock()
+
+			s.reportStatusToParent(status)
 
 		case contracts.EventApprovalResolved:
 			// Resolving an approval only releases the waiting tool call. The
@@ -596,11 +811,14 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			busyEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &busy}
 
 			s.mu.Lock()
-			s.status = contracts.SessionBusy
+			s.moveStatusLocked(contracts.SessionBusy)
+			status := s.status
 			s.inFlight = append(s.inFlight, event, busyEvent)
 			s.notifySubscribers(event)
 			s.notifySubscribers(busyEvent)
 			s.mu.Unlock()
+
+			s.reportStatusToParent(status)
 
 		case contracts.EventSessionFatal:
 			reason := "session concluded"
@@ -613,13 +831,20 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			// the cancellation is what ends this loop.
 			s.mu.Lock()
 			s.fatalErr = cause
-			s.status = contracts.SessionTombstone
+			s.moveStatusLocked(contracts.SessionTombstone)
+			status := s.status
 			s.inFlight = append(s.inFlight, event)
 			s.notifySubscribers(event)
 			s.mu.Unlock()
+			if s.meta.AgentKind == contracts.SidecarLoopAgent {
+				s.sendSidecarLoopResult(ctx, comms.DelegatedTaskResponse{From: s.meta.ID, Status: contracts.SessionTombstone, Error: reason})
+			}
+			// Before the cancel: a report sent after it has no live session to
+			// carry it.
+			s.reportStatusToParent(status)
 			s.cancel(cause)
 
-			s.recordSessionConclusion(contracts.SessionTombstone, reason)
+			s.recordSessionConclusion(status, reason)
 
 		default:
 			s.l.Warn("session received an event no case handles so dropping it", "session_id", s.meta.ID, "kind", event.Kind)
@@ -703,6 +928,80 @@ func (s *InfaiAgentSession) commitCompaction(commit compactionCommit) error {
 	return nil
 }
 
+func (s *InfaiAgentSession) subscribeForAgentMessages() {
+	unsubscribe, err := s.aeComms.Subscribe(comms.AgentCommKindResultSidecarBackground, func(ac *comms.AgentComm) {
+		var response comms.DelegatedTaskResponse
+		if err := json.Unmarshal(ac.Payload, &response); err != nil {
+			s.l.WarnContext(s.ctx, "dropping undecodable sidecar answer", "session_id", s.meta.ID, "error", err)
+			return
+		}
+		if response.From != ac.From {
+			s.l.WarnContext(s.ctx, "missmatch if response from and acfrom", "response.from", response.From, "ac.From", ac.From)
+			return
+		}
+		s.mu.Lock()
+		_, pending := s.pendingBackgroundSidecarLoop[response.From]
+		if !pending {
+			s.mu.Unlock()
+			return
+		}
+		if err := s.agentMailbox.SendMessage(s.ctx, contracts.NewSidecarAgentResponse(
+			delegate.AnswerText(response),
+			delegate.SidecarAttribution(response.Name, response.From),
+		)); err != nil {
+			s.mu.Unlock()
+			s.l.ErrorContext(s.ctx, "could not deliver a sidecar answer", "session_id", s.meta.ID, "agent_id", response.From, "error", err)
+			return
+		}
+		delete(s.pendingBackgroundSidecarLoop, response.From)
+		s.mu.Unlock()
+	})
+	if err != nil {
+		s.l.ErrorContext(s.ctx, "a session that cannot hear its sidecars cannot delegate",
+			"session_id", s.meta.ID, "error", err)
+		return
+	}
+
+	unsubscribeStatus, err := s.aeComms.Subscribe(comms.AgentCommKindSidecarStatus, func(ac *comms.AgentComm) {
+		var status contracts.SidecarStatus
+		if err := json.Unmarshal(ac.Payload, &status); err != nil {
+			s.l.WarnContext(s.ctx, "dropping undecodable sidecar status", "session_id", s.meta.ID, "error", err)
+			return
+		}
+		event := contracts.EventStream{Kind: contracts.EventSidecarStatus, Timestamp: time.Now().UTC(), Sidecar: &status}
+		s.publish(event)
+	})
+	if err != nil {
+		s.l.ErrorContext(s.ctx, "a session that cannot hear its sidecars cannot show them",
+			"session_id", s.meta.ID, "error", err)
+		<-s.ctx.Done()
+		unsubscribe()
+		return
+	}
+
+	<-s.ctx.Done()
+	unsubscribeStatus()
+	unsubscribe()
+}
+
+func (s *InfaiAgentSession) settleBackgroundSidecars() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for id, name := range s.pendingBackgroundSidecarLoop {
+		message := contracts.NewSidecarAgentResponse(
+			delegate.AnswerText(comms.DelegatedTaskResponse{From: id, Name: name, Status: contracts.SessionTombstone, Error: "session closed"}),
+			delegate.SidecarAttribution(name, id),
+		)
+		if _, err := s.timeline.AppendToHead(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &message}); err != nil {
+			s.l.Error("persist closed sidecar answer", "session_id", s.meta.ID, "sidecar_id", id, "error", err)
+			continue
+		}
+		s.activeTimeline = append(s.activeTimeline, message)
+		delete(s.pendingBackgroundSidecarLoop, id)
+	}
+}
+
 // releaseSubscribers ends every attached client's stream, so a client's
 // read loop returns instead of waiting on a session that is gone.
 func (s *InfaiAgentSession) releaseSubscribers() {
@@ -716,18 +1015,32 @@ func (s *InfaiAgentSession) releaseSubscribers() {
 }
 
 func (s *InfaiAgentSession) Close() {
+	s.CloseWithReason("session closed")
+}
+
+func (s *InfaiAgentSession) CloseWithReason(reason string) {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		// Teardown leaves the concluded status readable, so a client that asks
 		// after the session is gone still learns it is gone. The hub is already
 		// stopping, so this is the one status the hub does not write.
+		concluded := s.status == contracts.SessionCompleted ||
+			s.status == contracts.SessionMaxIterationExhausted ||
+			s.status == contracts.SessionTombstone
 		s.status = contracts.SessionTombstone
 		s.mu.Unlock()
+		// A delegated session that was still running goes out with a tombstone:
+		// its caller's row would otherwise sit on whatever it was doing last.
+		// Cancelling ends the session the report is sent on, so it goes first.
+		if !concluded {
+			s.reportStatusToParent(contracts.SessionTombstone)
+		}
 		// A session that already concluded keeps the conclusion it recorded;
 		// one that is only being closed records that, which is what happened.
-		s.recordSessionConclusion(contracts.SessionTombstone, "session closed")
+		s.recordSessionConclusion(contracts.SessionTombstone, reason)
 		s.cancel(harnessErr.ErrSessionClosed)
 		s.wg.Wait()
+		s.settleBackgroundSidecars()
 
 		s.releaseSubscribers()
 		if s.timeline != nil {

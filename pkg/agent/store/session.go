@@ -15,15 +15,20 @@ import (
 
 // SessionMeta is the runtime session metadata.
 type SessionMeta struct {
-	ID        uuid.UUID `json:"id"`
-	Name      string    `json:"name,omitempty"`
-	Provider  string    `json:"provider"`
-	Model     string    `json:"model"`
-	Cwd       string    `json:"cwd,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID         uuid.UUID   `json:"id"`
+	ParentID   uuid.UUID   `json:"parent_id"` // uuid.Nil Default value is this only
+	Offsprings []uuid.UUID `json:"offsprings,omitempty"`
+	Name       string      `json:"name,omitempty"`
+	Provider   string      `json:"provider"`
+	Model      string      `json:"model"`
+	Cwd        string      `json:"cwd,omitempty"`
+	CreatedAt  time.Time   `json:"created_at"`
+	UpdatedAt  time.Time   `json:"updated_at"`
 
 	AgentKind contracts.AgentKind `json:"agent_kind"`
+
+	EvalBashScript *string `json:"eval_bash_script"`
+	MaxTurns       *uint64 `json:"max_turns,omitempty"`
 
 	// Conclusion records how the session ended, written once when it does and
 	// never rewritten. Nil while the session has not ended.
@@ -37,14 +42,18 @@ type SessionConclusion struct {
 }
 
 type sessionFile struct {
-	ID           uuid.UUID           `json:"id"`
-	Name         string              `json:"name,omitempty"`
-	Cwd          string              `json:"cwd,omitempty"`
-	CurrentModel currentModel        `json:"current_model"`
-	CreatedAt    time.Time           `json:"created_at"`
-	UpdatedAt    time.Time           `json:"updated_at"`
-	Conclusion   *SessionConclusion  `json:"conclusion,omitempty"`
-	AgentKind    contracts.AgentKind `json:"agent_kind"`
+	ID             uuid.UUID           `json:"id"`
+	ParentID       uuid.UUID           `json:"parent_id"`
+	Offsprings     []uuid.UUID         `json:"offsprings,omitempty"`
+	Name           string              `json:"name,omitempty"`
+	Cwd            string              `json:"cwd,omitempty"`
+	CurrentModel   currentModel        `json:"current_model"`
+	CreatedAt      time.Time           `json:"created_at"`
+	UpdatedAt      time.Time           `json:"updated_at"`
+	Conclusion     *SessionConclusion  `json:"conclusion,omitempty"`
+	AgentKind      contracts.AgentKind `json:"agent_kind"`
+	EvalBashScript *string             `json:"eval_bash_script"`
+	MaxTurns       *uint64             `json:"max_turns,omitempty"`
 }
 
 // this helps when we resume we can use this to get the client connection up.
@@ -55,16 +64,20 @@ type currentModel struct {
 
 func newSessionFile(meta SessionMeta) sessionFile {
 	file := sessionFile{
-		ID:   meta.ID,
-		Name: meta.Name,
-		Cwd:  meta.Cwd,
+		ID:         meta.ID,
+		ParentID:   meta.ParentID,
+		Offsprings: append([]uuid.UUID(nil), meta.Offsprings...),
+		Name:       meta.Name,
+		Cwd:        meta.Cwd,
 		CurrentModel: currentModel{
 			Provider: meta.Provider,
 			Model:    meta.Model,
 		},
-		CreatedAt: meta.CreatedAt,
-		UpdatedAt: meta.UpdatedAt,
-		AgentKind: meta.AgentKind,
+		CreatedAt:      meta.CreatedAt,
+		UpdatedAt:      meta.UpdatedAt,
+		AgentKind:      meta.AgentKind,
+		EvalBashScript: meta.EvalBashScript,
+		MaxTurns:       meta.MaxTurns,
 	}
 	if meta.Conclusion != nil {
 		conclusion := *meta.Conclusion
@@ -83,14 +96,18 @@ func (f sessionFile) meta() SessionMeta {
 	}
 
 	meta := SessionMeta{
-		ID:        f.ID,
-		Name:      f.Name,
-		Provider:  f.CurrentModel.Provider,
-		Model:     f.CurrentModel.Model,
-		Cwd:       f.Cwd,
-		CreatedAt: f.CreatedAt,
-		UpdatedAt: f.UpdatedAt,
-		AgentKind: agentKind,
+		ID:             f.ID,
+		ParentID:       f.ParentID,
+		Offsprings:     append([]uuid.UUID(nil), f.Offsprings...),
+		Name:           f.Name,
+		Provider:       f.CurrentModel.Provider,
+		Model:          f.CurrentModel.Model,
+		Cwd:            f.Cwd,
+		CreatedAt:      f.CreatedAt,
+		UpdatedAt:      f.UpdatedAt,
+		AgentKind:      agentKind,
+		EvalBashScript: f.EvalBashScript,
+		MaxTurns:       f.MaxTurns,
 	}
 	if f.Conclusion != nil {
 		conclusion := *f.Conclusion
@@ -103,9 +120,10 @@ func (f sessionFile) meta() SessionMeta {
 type RecordKind string
 
 const (
-	KindMessage    RecordKind = "message"
-	KindDelta      RecordKind = "delta"
-	KindCompaction RecordKind = "compaction"
+	KindMessage             RecordKind = "message"
+	KindDelta               RecordKind = "delta"
+	KindCompaction          RecordKind = "compaction"
+	KindSidecarLoopResponse RecordKind = "sidecar_loop"
 )
 
 // CompactionRecord marks a point where the active model context was replaced

@@ -37,6 +37,9 @@ func NewAuditorPolicy() *AuditorPolicy {
 			contracts.BashTool:          HumanPolicy,
 			contracts.ReadSkillTool:     AllowPolicy,
 			contracts.TaskChecklistTool: AllowPolicy,
+
+			contracts.SpawnBackgroundSidecarLoopTool: HumanPolicy,
+			contracts.SpawnSidecarLoopTool:           HumanPolicy,
 		},
 	}
 }

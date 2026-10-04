@@ -6,4 +6,4 @@ import "os/exec"
 
 func prepareCommand(*exec.Cmd) {}
 
-func killProcessGroup(*exec.Cmd) {}
+func killProcessGroup(*exec.Cmd) error { return nil }

@@ -3,6 +3,8 @@ package contracts
 import (
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type EventStreamKind string
@@ -12,10 +14,6 @@ const (
 	DeltaContent EventStreamKind = "content"
 	// DeltaReasoning is the model's reasoning text (shown separately).
 	DeltaReasoning EventStreamKind = "reasoning"
-	// CompactionSummary is the summary a compaction produced. It is published
-	// once the compacted history is installed, so it marks the session as
-	// runnable again rather than mid-compaction.
-	CompactionSummary EventStreamKind = "compaction_summary"
 
 	// EventProviderEvent is the model provider speaking for itself: a retry
 	// notice, a failed request, an endpoint-level message.
@@ -37,6 +35,11 @@ const (
 	EventToolCall   EventStreamKind = "tool_call"
 	EventToolResult EventStreamKind = "tool_result"
 
+	// SidecarStatus
+	// It reaches a client watching the caller, so a delegated session is
+	// visible without the client joining it.
+	EventSidecarStatus EventStreamKind = "sidecar_status"
+
 	/// TaskChecklist
 	EventToolTaskCheckList EventStreamKind = "task_checklist_result"
 	// SkillLoaded
@@ -52,6 +55,9 @@ const (
 	/// HITL
 	EventApprovalRequested EventStreamKind = "approval_requested"
 	EventApprovalResolved  EventStreamKind = "approval_resolved"
+
+	/// Compaction Result
+	EventCompactionExecuted EventStreamKind = "compaction_executed"
 )
 
 type EventStream struct {
@@ -63,6 +69,21 @@ type EventStream struct {
 	HITLCall    *ApprovalRequest     `json:"hitl_call"`
 	HITLResult  *ApprovalConclusion  `json:"hitl_result"`
 	Attachments *EventAttachments    `json:"attachments,omitempty"`
+	Compaction  *CompactionResult    `json:"compaction,omitempty"`
+	Sidecar     *SidecarStatus       `json:"sidecar,omitempty"`
+}
+
+type SidecarStatus struct {
+	ID        uuid.UUID     `json:"id"`
+	Name      string        `json:"name,omitempty"`
+	AgentKind AgentKind     `json:"agent_kind,omitempty"`
+	Status    SessionStatus `json:"status,omitempty"`
+}
+
+type CompactionResult struct {
+	Summary   string `json:"summary,omitempty"`
+	Err       string `json:"err,omitempty"`
+	Automatic bool   `json:"automatic,omitempty"`
 }
 
 type EventAttachments struct {
