@@ -437,8 +437,10 @@ func sessionEntryRows(option modalOption, selected, armed bool, width int, style
 		// row it applies to are read together.
 		status = sessionStatusDescriptor{"!", "delete?", styles.error}
 	}
+	rowStyle := styles.screenRow
 	prefix := "  "
 	if selected {
+		rowStyle = styles.screenSel
 		prefix = "› "
 	}
 
@@ -475,20 +477,35 @@ func sessionEntryRows(option modalOption, selected, armed bool, width int, style
 	if wanted <= nameWidth(rich.plain) {
 		tail = rich
 	}
-	name := option.tree + ansi.Truncate(option.label, max(nameWidth(tail.plain), 1), "…")
-	gap := strings.Repeat(" ", max(width-lipgloss.Width(prefix)-lipgloss.Width(name)-lipgloss.Width(tail.plain), 1))
-	detail := "    " + sessionDetailLine(option.detailParts, max(width-4, 1))
-
+	label := ansi.Truncate(option.label, max(nameWidth(tail.plain), 1), "…")
+	gap := strings.Repeat(" ", max(width-lipgloss.Width(prefix)-lipgloss.Width(option.tree)-lipgloss.Width(label)-lipgloss.Width(tail.plain), 1))
+	tailWidth := max(width-lipgloss.Width(prefix)-lipgloss.Width(option.tree)-lipgloss.Width(label)-lipgloss.Width(gap), 1)
+	tailSegment := lipgloss.NewStyle().Width(tailWidth).Render(ansi.Truncate(tail.styled, tailWidth, "…"))
 	if selected {
-		return []string{
-			sessionRow(styles.screenSel, prefix+name+gap+tail.plain, width),
-			sessionRow(styles.inactive.Background(everforest.SelectionBg), detail, width),
-		}
+		// The chosen row keeps one colour for its text and its trailing run, so
+		// the highlight stays unbroken; only the tree steps out of it.
+		tailSegment = rowStyle.Width(tailWidth).Render(ansi.Truncate(tail.plain, tailWidth, "…"))
 	}
-	return []string{
-		sessionRow(styles.screenRow, prefix+name+gap+tail.styled, width),
-		sessionRow(styles.inactive, detail, width),
+	// The tree is structure, not content: it recedes to the faintest colour,
+	// and the row style is re-opened after it so the reset that ends it does not
+	// take the rest of the row with it.
+	line := rowStyle.Render(prefix) + sessionTree(option.tree, rowStyle) + rowStyle.Render(label+gap) + tailSegment
+	detailStyle := styles.inactive
+	if selected {
+		detailStyle = detailStyle.Background(everforest.SelectionBg)
 	}
+	detail := "    " + sessionDetailLine(option.detailParts, max(width-4, 1))
+	return []string{sessionRow(rowStyle, line, width), sessionRow(detailStyle, detail, width)}
+}
+
+// sessionTree renders a session row's hierarchy prefix. The tree is structure,
+// not content, so it recedes to the faintest colour, the same way the branch
+// timeline's does.
+func sessionTree(tree string, rowStyle lipgloss.Style) string {
+	if tree == "" {
+		return ""
+	}
+	return rowStyle.Foreground(everforest.Faint).Render(tree)
 }
 
 // maxSessionNameWidth caps the name so a long one cannot squeeze the marks off

@@ -1925,6 +1925,32 @@ func TestTimelineTreeRecedesBehindTheRow(t *testing.T) {
 	}
 }
 
+// The session list's sidecar hierarchy is structure too: its tree recedes to
+// the faintest colour while the session row keeps its own, selected or not.
+func TestSessionListTreeRecedesBehindTheRow(t *testing.T) {
+	styles := newHarnessStyles()
+	option := modalOption{
+		label: "sidecar child", tree: "└─ ",
+		sessionStatus: contracts.SessionBusy, agentKind: contracts.SidecarLoopAgent,
+	}
+	for _, selected := range []bool{false, true} {
+		rows := sessionEntryRows(option, selected, false, 80, styles)
+		if len(rows) == 0 {
+			t.Fatalf("selected=%v produced no row", selected)
+		}
+		rowStyle := styles.screenRow
+		if selected {
+			rowStyle = styles.screenSel
+		}
+		if want := rowStyle.Foreground(everforest.Faint).Render("└─ "); !strings.Contains(rows[0], want) {
+			t.Fatalf("selected=%v session tree is not faint: %q", selected, rows[0])
+		}
+		if got := lipgloss.Width(ansi.Strip(rows[0])); got != 80 {
+			t.Fatalf("selected=%v session row width=%d want 80", selected, got)
+		}
+	}
+}
+
 func TestTimelineRoleColors(t *testing.T) {
 	tests := map[string]color.Color{
 		"user":        everforest.Blue,
