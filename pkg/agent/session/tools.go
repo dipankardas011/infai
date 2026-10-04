@@ -414,7 +414,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					ToolResult: &result,
 				})
 			case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
-				sidecarID, err := delegate.RequestSidecar(s.ctx, caller, tc)
+				sidecarID, agentName, err := delegate.RequestSidecar(s.ctx, caller, tc)
 				if err != nil {
 					status = contracts.ToolExecutionError
 					content = err.Error()
@@ -426,8 +426,8 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					foregroundCalls = append(foregroundCalls, tc)
 					continue
 				} else {
-					s.TrackBackgroundSidecar(sidecarID)
-					content = delegate.GraftedMessageForBackgroundSidecarLoop(sidecarID)
+					s.TrackBackgroundSidecar(sidecarID, agentName)
+					content = delegate.GraftedMessageForBackgroundSidecarLoop(agentName, sidecarID)
 				}
 
 				result := contracts.ToolExecutionResult{

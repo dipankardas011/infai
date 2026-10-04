@@ -64,7 +64,7 @@ type InfaiAgentSession struct {
 	userCancellation             chan struct{}
 	pendingApproval              *pendingApproval
 	pendingBranchParent          uuid.UUID
-	pendingBackgroundSidecarLoop map[uuid.UUID]struct{}
+	pendingBackgroundSidecarLoop map[uuid.UUID]string
 
 	// The principal agent and the model it runs on.
 	agent *agent.Agent
@@ -231,7 +231,7 @@ func newRuntimeSession(
 		cancel:                       cancel,
 		closeDone:                    make(chan struct{}),
 		userCancellation:             make(chan struct{}, 1),
-		pendingBackgroundSidecarLoop: make(map[uuid.UUID]struct{}),
+		pendingBackgroundSidecarLoop: make(map[uuid.UUID]string),
 		meta:                         meta,
 		status:                       status,
 		model:                        model,
@@ -356,10 +356,10 @@ func (s *InfaiAgentSession) AddOffspring(id uuid.UUID) {
 	s.meta.Offsprings = append(s.meta.Offsprings, id)
 }
 
-func (s *InfaiAgentSession) TrackBackgroundSidecar(id uuid.UUID) {
+func (s *InfaiAgentSession) TrackBackgroundSidecar(id uuid.UUID, name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.pendingBackgroundSidecarLoop[id] = struct{}{}
+	s.pendingBackgroundSidecarLoop[id] = name
 }
 
 func (s *InfaiAgentSession) Status() contracts.SessionStatus {
@@ -670,6 +670,11 @@ func (s *InfaiAgentSession) reportStatusToParent(status contracts.SessionStatus)
 }
 
 func (s *InfaiAgentSession) sendSidecarLoopResult(ctx context.Context, response comms.DelegatedTaskResponse) {
+	if response.Name == "" {
+		s.mu.Lock()
+		response.Name = s.meta.Name
+		s.mu.Unlock()
+	}
 	payload, err := json.Marshal(response)
 	if err != nil {
 		s.l.ErrorContext(ctx, "encode sidecar result", "session_id", s.meta.ID, "error", err)
@@ -940,7 +945,10 @@ func (s *InfaiAgentSession) subscribeForAgentMessages() {
 			s.mu.Unlock()
 			return
 		}
-		if err := s.agentMailbox.SendMessage(s.ctx, contracts.NewSidecarAgentResponse(delegate.AnswerText(response), response.From.String())); err != nil {
+		if err := s.agentMailbox.SendMessage(s.ctx, contracts.NewSidecarAgentResponse(
+			delegate.AnswerText(response),
+			delegate.SidecarAttribution(response.Name, response.From),
+		)); err != nil {
 			s.mu.Unlock()
 			s.l.ErrorContext(s.ctx, "could not deliver a sidecar answer", "session_id", s.meta.ID, "agent_id", response.From, "error", err)
 			return
@@ -980,10 +988,10 @@ func (s *InfaiAgentSession) settleBackgroundSidecars() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for id := range s.pendingBackgroundSidecarLoop {
+	for id, name := range s.pendingBackgroundSidecarLoop {
 		message := contracts.NewSidecarAgentResponse(
-			delegate.AnswerText(comms.DelegatedTaskResponse{From: id, Status: contracts.SessionTombstone, Error: "session closed"}),
-			id.String(),
+			delegate.AnswerText(comms.DelegatedTaskResponse{From: id, Name: name, Status: contracts.SessionTombstone, Error: "session closed"}),
+			delegate.SidecarAttribution(name, id),
 		)
 		if _, err := s.timeline.AppendToHead(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &message}); err != nil {
 			s.l.Error("persist closed sidecar answer", "session_id", s.meta.ID, "sidecar_id", id, "error", err)

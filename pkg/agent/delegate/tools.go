@@ -22,24 +22,24 @@ func SpawnSidecarLoopTool() contracts.Tool {
 			Properties: map[string]any{
 				"agent_name": map[string]any{
 					"type":        "string",
-					"description": "Short name for the sidecar (at most 70 characters).",
+					"description": "Short name for the sidecar you will need to remember it (at most 70 characters).",
 				},
 				"cwd": map[string]any{
 					"type":        "string",
-					"description": "working directory for the sidecar loop/agent",
+					"description": "working directory for the sidecar; defaults to this session's when left empty",
 				},
 				"task": map[string]any{
 					"type":        "string",
-					"description": "The complete instruction for the sidecar. It sees nothing else and cannot ask you questions, so include everything it needs.",
+					"description": "The complete instruction for the sidecar: the goal, the files or areas to work on, the definition of done, and the command that must pass. It sees nothing else, cannot ask questions and does not see this conversation, so include everything it needs.",
 				},
 				"acceptance_script": map[string]any{
 					"type":        "string",
-					"description": "Bash script that must exit 0 for the work to count as done. Acts as a Eval function for the task and MUST BE READONLY it can perform build but no code writing or anything it just checks.",
+					"description": "Read-only bash script that must exit 0 for the work to count as done; it may build and inspect, never write. Echo why it failed — the sidecar is shown what it prints, not just the exit status.",
 				},
 				"max_turns": map[string]any{
 					"type":        "integer",
 					"enum":        []int{20, 40, 100},
-					"description": "Maximum model generations for the sidecar. A tool call uses one generation; another is needed to inspect its result.",
+					"description": "Maximum model generations for the sidecar: a tool call uses one generation, and another is needed to inspect its result. 20 for a lookup or two, 40 for a multi-step task, 100 for a tree-wide change.",
 				},
 			},
 			RequiredFields:       []string{"agent_name", "task", "acceptance_script", "max_turns"},
@@ -57,24 +57,24 @@ func SpawnBackgroundSidecarLoopTool() contracts.Tool {
 			Properties: map[string]any{
 				"agent_name": map[string]any{
 					"type":        "string",
-					"description": "Short name for the sidecar (at most 70 characters).",
+					"description": "Short name for the sidecar you will need to remember it (at most 70 characters).",
 				},
 				"cwd": map[string]any{
 					"type":        "string",
-					"description": "working directory for the sidecar loop/agent",
+					"description": "working directory for the sidecar; defaults to this session's when left empty",
 				},
 				"task": map[string]any{
 					"type":        "string",
-					"description": "The complete instruction for the sidecar. It sees nothing else and cannot ask you questions, so include everything it needs.",
+					"description": "The complete instruction for the sidecar: the goal, the files or areas to work on, the definition of done, and the command that must pass. It sees nothing else, cannot ask questions and does not see this conversation, so include everything it needs.",
 				},
 				"acceptance_script": map[string]any{
 					"type":        "string",
-					"description": "Bash script that must exit 0 for the work to count as done. Acts as a Eval function for the task and MUST BE READONLY it can perform build but no code writing or anything it just checks.",
+					"description": "Read-only bash script that must exit 0 for the work to count as done; it may build and inspect, never write. Echo why it failed — the sidecar is shown what it prints, not just the exit status.",
 				},
 				"max_turns": map[string]any{
 					"type":        "integer",
 					"enum":        []int{20, 40, 100},
-					"description": "Maximum model generations for the sidecar. A tool call uses one generation; another is needed to inspect its result.",
+					"description": "Maximum model generations for the sidecar: a tool call uses one generation, and another is needed to inspect its result. 20 for a lookup or two, 40 for a multi-step task, 100 for a tree-wide change.",
 				},
 			},
 			RequiredFields:       []string{"agent_name", "task", "acceptance_script", "max_turns"},
@@ -89,10 +89,10 @@ type Caller struct {
 	Cancelled <-chan struct{}
 }
 
-func RequestSidecar(ctx context.Context, caller Caller, call contracts.ToolCall) (uuid.UUID, error) {
+func RequestSidecar(ctx context.Context, caller Caller, call contracts.ToolCall) (uuid.UUID, string, error) {
 	args, err := parseArgs(call)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 
 	decisions := make(chan comms.DelegationConformation, 1)
@@ -110,7 +110,7 @@ func RequestSidecar(ctx context.Context, caller Caller, call contracts.ToolCall)
 		},
 	)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("listen for the engine's decision: %w", err)
+		return uuid.Nil, "", fmt.Errorf("listen for the engine's decision: %w", err)
 	}
 	defer unsubscribeDecision()
 
@@ -123,7 +123,7 @@ func RequestSidecar(ctx context.Context, caller Caller, call contracts.ToolCall)
 		MaxTurns:         args.MaxTurns,
 	})
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("encode delegation: %w", err)
+		return uuid.Nil, "", fmt.Errorf("encode delegation: %w", err)
 	}
 
 	var requestKind comms.AgentCommKind
@@ -139,18 +139,18 @@ func RequestSidecar(ctx context.Context, caller Caller, call contracts.ToolCall)
 		Kind:    requestKind,
 		Payload: request,
 	}); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 
 	decision, err := awaitDecision(ctx, caller.Cancelled, decisions)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 	if decision.Err != "" {
-		return uuid.Nil, fmt.Errorf("engine refused the delegation: %s", decision.Err)
+		return uuid.Nil, "", fmt.Errorf("engine refused the delegation: %s", decision.Err)
 	}
 
-	return decision.DelegatedTo, nil
+	return decision.DelegatedTo, args.AgentName, nil
 }
 
 func awaitDecision(ctx context.Context, cancelled <-chan struct{}, decisions chan comms.DelegationConformation) (comms.DelegationConformation, error) {
@@ -164,8 +164,8 @@ func awaitDecision(ctx context.Context, cancelled <-chan struct{}, decisions cha
 	}
 }
 
-func GraftedMessageForBackgroundSidecarLoop(sidecarID uuid.UUID) string {
-	return fmt.Sprintf("sidecar agent `%s` started; its answer will arrive as a message from that agent", sidecarID)
+func GraftedMessageForBackgroundSidecarLoop(name string, sidecarID uuid.UUID) string {
+	return fmt.Sprintf("sidecar agent %q (%s) started; its answer will arrive as a message from that agent", name, sidecarID)
 }
 
 func WaitForSidecars(ctx context.Context, caller Caller, sidecars []uuid.UUID, onAnswer func(comms.DelegatedTaskResponse)) (map[uuid.UUID]comms.DelegatedTaskResponse, error) {
@@ -216,26 +216,35 @@ func WaitForSidecars(ctx context.Context, caller Caller, sidecars []uuid.UUID, o
 	return answers, nil
 }
 
+func SidecarAttribution(name string, id uuid.UUID) string {
+	if strings.TrimSpace(name) == "" {
+		return id.String()
+	}
+	return fmt.Sprintf("%s (%s)", name, id)
+}
+
 // Answer is what a foreground call returns to the model.
 func Answer(response comms.DelegatedTaskResponse) (string, error) {
+	label := SidecarAttribution(response.Name, response.From)
 	if strings.TrimSpace(response.Error) != "" {
-		return "", fmt.Errorf("sidecar %s ended %s: %s", response.From, response.Status, response.Error)
+		return "", fmt.Errorf("sidecar_loop %s ended %s: %s", label, response.Status, response.Error)
 	}
 	summary := strings.TrimSpace(response.Summary)
 	if summary == "" {
-		return "", fmt.Errorf("sidecar %s ended %s without an answer", response.From, response.Status)
+		return "", fmt.Errorf("sidecar_loop %s ended %s without an answer", label, response.Status)
 	}
-	return summary, nil
+	return fmt.Sprintf("[sidecar_loop %s]\n%s", label, summary), nil
 }
 
 func AnswerText(response comms.DelegatedTaskResponse) string {
+	label := SidecarAttribution(response.Name, response.From)
 	switch {
 	case strings.TrimSpace(response.Error) != "":
-		return fmt.Sprintf("[sidecar %s %s] %s", response.From, response.Status, response.Error)
+		return fmt.Sprintf("[sidecar_loop %s %s] %s", label, response.Status, response.Error)
 	case strings.TrimSpace(response.Summary) == "":
-		return fmt.Sprintf("[sidecar %s %s] no answer", response.From, response.Status)
+		return fmt.Sprintf("[sidecar_loop %s %s] no answer", label, response.Status)
 	default:
-		return fmt.Sprintf("[sidecar %s %s]\n%s", response.From, response.Status, strings.TrimSpace(response.Summary))
+		return fmt.Sprintf("[sidecar_loop %s %s]\n%s", label, response.Status, strings.TrimSpace(response.Summary))
 	}
 }
 

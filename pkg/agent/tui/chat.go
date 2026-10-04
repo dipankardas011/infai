@@ -1640,6 +1640,14 @@ func (m *chatModel) upsertSidecar(status contracts.SidecarStatus) {
 	}
 	for i := range m.sidecars {
 		if m.sidecars[i].ID == status.ID {
+			// A child that has finished keeps the status it finished on. A
+			// report can land after the one that ended it — a refresh racing
+			// the close that superseded it — and letting it through would put
+			// the row back on a status the child has left for good, with no
+			// later report coming to correct it.
+			if contracts.IsInConcludedState(m.sidecars[i].AgentKind, m.sidecars[i].Status) {
+				return
+			}
 			m.sidecars[i] = status
 			return
 		}

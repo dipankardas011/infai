@@ -23,6 +23,7 @@ type DelegationConformation struct {
 
 type DelegatedTaskResponse struct {
 	From uuid.UUID `json:"from"`
+	Name string    `json:"name,omitempty"`
 
 	Status  contracts.SessionStatus `json:"status,omitempty"`
 	Summary string                  `json:"summary,omitempty"`

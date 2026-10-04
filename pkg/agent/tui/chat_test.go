@@ -510,6 +510,50 @@ func TestSessionRowListsSidecarsAndTheirStatus(t *testing.T) {
 // A child's row is session state, not turn state: it stays put after the
 // caller's own turn ends, because a background sidecar keeps working long
 // after its caller has answered and gone idle.
+// A child that has finished keeps the status it finished on. A report can land
+// after the one that ended it — a refresh racing the close that superseded it —
+// and letting it through would put the row back on a status the child has left
+// for good, with no later report coming to correct it.
+func TestAFinishedSidecarRowIsNotWalkedBack(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status contracts.SessionStatus
+		label  string
+	}{
+		{"completed", contracts.SessionCompleted, "completed"},
+		{"exhausted", contracts.SessionMaxIterationExhausted, "max iterations reached"},
+		{"tombstone", contracts.SessionTombstone, "inactive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newChatModel(context.Background(), nil, nil, RunOptions{})
+			m.modal = nil
+			m.width = 100
+			m.session = store.SessionMeta{ID: uuid.New(), Name: "Orchestrator", AgentKind: contracts.InteractiveAgent}
+			child := uuid.New()
+			report := func(status contracts.SessionStatus) {
+				m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+					ID: child, Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: status,
+				}})
+			}
+
+			report(contracts.SessionBusy)
+			report(tc.status)
+			report(contracts.SessionBusy) // superseded: the child has already finished
+
+			row := ansi.Strip(m.sessionRowView())
+			if !strings.Contains(row, "explorer") {
+				t.Fatalf("the child left the row entirely: %q", row)
+			}
+			if !strings.Contains(row, tc.label) {
+				t.Fatalf("the row did not keep %q: %q", tc.label, row)
+			}
+			if strings.Contains(row, "busy") {
+				t.Fatalf("a finished child's row was walked back: %q", row)
+			}
+		})
+	}
+}
+
 func TestSidecarRowsPersistWhenTheCallerGoesIdle(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil

@@ -47,6 +47,8 @@ func NewAssistantMessage(content string) ChatMessage {
 }
 
 // Need this for the agent taking the response.
-func NewSidecarAgentResponse(content string, agentId string) ChatMessage {
-	return ChatMessage{Role: "user", Content: &content, Name: &agentId}
+// NewSidecarAgentResponse is a message from a sidecar to its caller: the answer
+// text, attributed to the sidecar by name.
+func NewSidecarAgentResponse(content string, attributedTo string) ChatMessage {
+	return ChatMessage{Role: "user", Content: &content, Name: &attributedTo}
 }
