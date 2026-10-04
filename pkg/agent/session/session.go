@@ -612,6 +612,61 @@ func (s *InfaiAgentSession) summaryMessageFromSidecarLoop() string {
 	return ""
 }
 
+// moveStatusLocked is how an event moves the session's status. It is the only
+// writer while the session is live, so the rule lives here instead of in every
+// reader: a status a session has concluded on is final, and an event still
+// unwinding during teardown must not revive the session it just concluded.
+//
+// A delegated session is done on any of the concluding statuses, not only the
+// tombstone: once it reports completed or exhausted, its caller has the result
+// and must not watch the row flip back off it.
+//
+// NOTE: The caller must hold s.mu.
+func (s *InfaiAgentSession) moveStatusLocked(status contracts.SessionStatus) {
+	switch s.meta.AgentKind {
+	case contracts.SingleLoopAgent, contracts.SidecarLoopAgent:
+		switch s.status {
+		case contracts.SessionCompleted, contracts.SessionMaxIterationExhausted, contracts.SessionTombstone:
+			return
+		default:
+		}
+	default:
+	}
+	s.status = status
+}
+
+// reportStatusToParent tells the session that delegated this one what it is
+// doing. A session the engine created for itself has no parent to tell. The
+// report carries the session's own identity and status, so the caller can show
+// the child without joining it: the parent fans each report out to its clients.
+//
+// A session that has been torn down makes no further reports: the tombstone it
+// went out with is the last word, and an event unwinding behind the close must
+// not walk it back.
+func (s *InfaiAgentSession) reportStatusToParent(status contracts.SessionStatus) {
+	s.mu.Lock()
+	parentID, id, name, kind := s.meta.ParentID, s.meta.ID, s.meta.Name, s.meta.AgentKind
+	s.mu.Unlock()
+
+	if parentID == uuid.Nil || kind != contracts.SidecarLoopAgent {
+		return
+	}
+
+	payload, err := json.Marshal(contracts.SidecarStatus{ID: id, Name: name, AgentKind: kind, Status: status})
+	if err != nil {
+		s.l.Error("encode sidecar status", "session_id", id, "error", err)
+		return
+	}
+	if err := s.aeComms.Send(s.ctx, &comms.AgentComm{
+		From:    id,
+		To:      parentID,
+		Kind:    comms.AgentCommKindSidecarStatus,
+		Payload: payload,
+	}); err != nil {
+		s.l.Warn("report sidecar status", "session_id", id, "parent", parentID, "error", err)
+	}
+}
+
 func (s *InfaiAgentSession) sendSidecarLoopResult(ctx context.Context, response comms.DelegatedTaskResponse) {
 	payload, err := json.Marshal(response)
 	if err != nil {
@@ -642,6 +697,7 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			contracts.EventToolTaskCheckList,
 			contracts.EventSkillLoad,
 			contracts.EventMessageFromAgentInbox,
+			contracts.EventSidecarStatus,
 			contracts.NotifyAgentUsage:
 			s.mu.Lock()
 			s.inFlight = append(s.inFlight, event)
@@ -658,14 +714,17 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			s.mu.Lock()
 			if eventStatus == contracts.SessionIdle || eventStatus == contracts.SessionBusy {
 				if s.status == contracts.SessionIdle || s.status == contracts.SessionBusy {
-					s.status = eventStatus
+					s.moveStatusLocked(eventStatus)
 				}
 			} else {
-				s.status = eventStatus
+				s.moveStatusLocked(eventStatus)
 			}
+			current := s.status
 			s.inFlight = append(s.inFlight, event)
 			s.notifySubscribers(event)
 			s.mu.Unlock()
+
+			s.reportStatusToParent(current)
 
 			// The loop is not coming back from here, so this is how the session
 			// ended. The status says why on its own, so no reason is recorded.
@@ -694,11 +753,14 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			compactingEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &compacting}
 
 			s.mu.Lock()
-			s.status = contracts.SessionCompacting
+			s.moveStatusLocked(contracts.SessionCompacting)
+			status := s.status
 			s.inFlight = append(s.inFlight, event, compactingEvent)
 			s.notifySubscribers(event)
 			s.notifySubscribers(compactingEvent)
 			s.mu.Unlock()
+
+			s.reportStatusToParent(status)
 
 		case contracts.EventCompactionExecuted:
 			// A compaction is over, so the session is runnable again whether it
@@ -709,11 +771,14 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			idleEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &idle}
 
 			s.mu.Lock()
-			s.status = contracts.SessionIdle
+			s.moveStatusLocked(contracts.SessionIdle)
+			status := s.status
 			s.inFlight = append(s.inFlight, event, idleEvent)
 			s.notifySubscribers(event)
 			s.notifySubscribers(idleEvent)
 			s.mu.Unlock()
+
+			s.reportStatusToParent(status)
 
 		case contracts.EventApprovalRequested:
 			// The approval request itself is in the joined view; the status says
@@ -722,11 +787,14 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			waitingEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &waiting}
 
 			s.mu.Lock()
-			s.status = contracts.SessionWaitingApproval
+			s.moveStatusLocked(contracts.SessionWaitingApproval)
+			status := s.status
 			s.inFlight = append(s.inFlight, event, waitingEvent)
 			s.notifySubscribers(event)
 			s.notifySubscribers(waitingEvent)
 			s.mu.Unlock()
+
+			s.reportStatusToParent(status)
 
 		case contracts.EventApprovalResolved:
 			// Resolving an approval only releases the waiting tool call. The
@@ -736,11 +804,14 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			busyEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &busy}
 
 			s.mu.Lock()
-			s.status = contracts.SessionBusy
+			s.moveStatusLocked(contracts.SessionBusy)
+			status := s.status
 			s.inFlight = append(s.inFlight, event, busyEvent)
 			s.notifySubscribers(event)
 			s.notifySubscribers(busyEvent)
 			s.mu.Unlock()
+
+			s.reportStatusToParent(status)
 
 		case contracts.EventSessionFatal:
 			reason := "session concluded"
@@ -753,13 +824,17 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			// the cancellation is what ends this loop.
 			s.mu.Lock()
 			s.fatalErr = cause
-			s.status = contracts.SessionTombstone
+			s.moveStatusLocked(contracts.SessionTombstone)
+			status := s.status
 			s.inFlight = append(s.inFlight, event)
 			s.notifySubscribers(event)
 			s.mu.Unlock()
 			if s.meta.AgentKind == contracts.SidecarLoopAgent {
 				s.sendSidecarLoopResult(ctx, comms.DelegatedTaskResponse{From: s.meta.ID, Status: contracts.SessionTombstone, Error: reason})
 			}
+			// Before the cancel: a report sent after it has no live session to
+			// carry it.
+			s.reportStatusToParent(contracts.SessionTombstone)
 			s.cancel(cause)
 
 			s.recordSessionConclusion(contracts.SessionTombstone, reason)
@@ -877,7 +952,25 @@ func (s *InfaiAgentSession) subscribeForAgentMessages() {
 		return
 	}
 
+	unsubscribeStatus, err := s.aeComms.Subscribe(comms.AgentCommKindSidecarStatus, func(ac *comms.AgentComm) {
+		var status contracts.SidecarStatus
+		if err := json.Unmarshal(ac.Payload, &status); err != nil {
+			s.l.WarnContext(s.ctx, "dropping undecodable sidecar status", "session_id", s.meta.ID, "error", err)
+			return
+		}
+		event := contracts.EventStream{Kind: contracts.EventSidecarStatus, Timestamp: time.Now().UTC(), Sidecar: &status}
+		s.publish(event)
+	})
+	if err != nil {
+		s.l.ErrorContext(s.ctx, "a session that cannot hear its sidecars cannot show them",
+			"session_id", s.meta.ID, "error", err)
+		<-s.ctx.Done()
+		unsubscribe()
+		return
+	}
+
 	<-s.ctx.Done()
+	unsubscribeStatus()
 	unsubscribe()
 }
 
@@ -921,8 +1014,17 @@ func (s *InfaiAgentSession) CloseWithReason(reason string) {
 		// Teardown leaves the concluded status readable, so a client that asks
 		// after the session is gone still learns it is gone. The hub is already
 		// stopping, so this is the one status the hub does not write.
+		concluded := s.status == contracts.SessionCompleted ||
+			s.status == contracts.SessionMaxIterationExhausted ||
+			s.status == contracts.SessionTombstone
 		s.status = contracts.SessionTombstone
 		s.mu.Unlock()
+		// A delegated session that was still running goes out with a tombstone:
+		// its caller's row would otherwise sit on whatever it was doing last.
+		// Cancelling ends the session the report is sent on, so it goes first.
+		if !concluded {
+			s.reportStatusToParent(contracts.SessionTombstone)
+		}
 		// A session that already concluded keeps the conclusion it recorded;
 		// one that is only being closed records that, which is what happened.
 		s.recordSessionConclusion(contracts.SessionTombstone, reason)

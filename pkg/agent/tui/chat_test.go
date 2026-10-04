@@ -469,6 +469,111 @@ func TestSessionRowCarriesNameKindAndStatus(t *testing.T) {
 	}
 }
 
+// A caller that delegated lists its children under its own row, each with the
+// marks the session list uses, so the caller shows what a sidecar is doing
+// without the reader joining it.
+func TestSessionRowListsSidecarsAndTheirStatus(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.width = 100
+	m.working = true
+	m.session = store.SessionMeta{ID: uuid.New(), Name: "Orchestrator", AgentKind: contracts.InteractiveAgent}
+	child := uuid.New()
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+		ID: child, Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionWaitingApproval,
+	}})
+
+	row := ansi.Strip(m.sessionRowView())
+	for _, want := range []string{"explorer", "⧉", "waiting for approval", "Orchestrator"} {
+		if !strings.Contains(row, want) {
+			t.Fatalf("session row lacks %q: %q", want, row)
+		}
+	}
+	if strings.Index(row, "explorer") < strings.Index(row, "Orchestrator") {
+		t.Fatalf("the child is not below the caller: %q", row)
+	}
+
+	// A later report for the same child updates its one row instead of adding a
+	// second, and the status follows.
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+		ID: child, Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionCompleted,
+	}})
+	row = ansi.Strip(m.sessionRowView())
+	if got := strings.Count(row, "explorer"); got != 1 {
+		t.Fatalf("child rows = %d, want 1: %q", got, row)
+	}
+	if !strings.Contains(row, "completed") || strings.Contains(row, "waiting for approval") {
+		t.Fatalf("the child's status did not follow its report: %q", row)
+	}
+}
+
+// A child's row is session state, not turn state: it stays put after the
+// caller's own turn ends, because a background sidecar keeps working long
+// after its caller has answered and gone idle.
+func TestSidecarRowsPersistWhenTheCallerGoesIdle(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.width = 100
+	m.working = true
+	m.session = store.SessionMeta{ID: uuid.New(), Name: "Orchestrator", AgentKind: contracts.InteractiveAgent}
+	child := uuid.New()
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+		ID: child, Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionBusy,
+	}})
+
+	// The caller reports idle while the sidecar is still running.
+	m.applySessionStatus(contracts.SessionIdle)
+
+	row := ansi.Strip(m.sessionRowView())
+	if !strings.Contains(row, "explorer") || !strings.Contains(row, "busy") {
+		t.Fatalf("the child left the row when the caller went idle: %q", row)
+	}
+
+	// A later report updates that same row in place.
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+		ID: child, Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionWaitingApproval,
+	}})
+	row = ansi.Strip(m.sessionRowView())
+	if got := strings.Count(row, "explorer"); got != 1 {
+		t.Fatalf("child rows = %d, want 1: %q", got, row)
+	}
+	if !strings.Contains(row, "waiting for approval") || strings.Contains(row, "busy") {
+		t.Fatalf("the child's status did not follow its report: %q", row)
+	}
+}
+
+// A child row belongs to the session that spawned it. Rejoining that session —
+// the session list opening and closing, or a subscriber gap — leaves the rows
+// alone, and opening another session takes them away, because the switch loads
+// the new session's metadata before its view arrives.
+func TestSidecarRowsBelongToTheSessionThatSpawnedThem(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.modal = nil
+	m.width = 100
+	m.session = store.SessionMeta{ID: uuid.New(), Name: "Orchestrator", AgentKind: contracts.InteractiveAgent}
+	m.applySessionEvent(contracts.EventStream{Kind: contracts.EventSidecarStatus, Sidecar: &contracts.SidecarStatus{
+		ID: uuid.New(), Name: "explorer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionBusy,
+	}})
+
+	// Rejoining the same session keeps its children.
+	m.applySessionView(glue.SessionView{Meta: m.session, Status: contracts.SessionIdle})
+	if row := ansi.Strip(m.sessionRowView()); !strings.Contains(row, "explorer") {
+		t.Fatalf("rejoining the same session dropped its children: %q", row)
+	}
+
+	// Opening another session runs the load message first, which is where the
+	// session's metadata is replaced; the view for it follows.
+	other := store.SessionMeta{ID: uuid.New(), Name: "Elsewhere", AgentKind: contracts.InteractiveAgent}
+	if _, _ = m.Update(sessionLoadedMsg{output: &glue.SessionOutput{SessionMeta: other}}); false {
+		t.Fatal("unreachable")
+	}
+	m.applySessionView(glue.SessionView{Meta: other, Status: contracts.SessionIdle})
+
+	if row := ansi.Strip(m.sessionRowView()); strings.Contains(row, "explorer") {
+		t.Fatalf("another session inherited the last one's children: %q", row)
+	}
+}
+
 func TestTranscriptPreservesUnicodeAndMarkdown(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil

@@ -19,6 +19,10 @@ const (
 	AgentCommKindResultSidecar           AgentCommKind = "result_sidecar_loop"
 	AgentCommKindResultSidecarBackground AgentCommKind = "result_sidecar_loop_background"
 
+	// AgentCommKindSidecarStatus is a delegated session reporting what it is
+	// doing. It is fire-and-forget: the caller fans it out to its own clients.
+	AgentCommKindSidecarStatus AgentCommKind = "sidecar_loop_status"
+
 	AgentCommKindSwarm AgentCommKind = "swarm"
 )
 
@@ -28,6 +32,7 @@ var allKinds = []AgentCommKind{
 	AgentCommKindSpawnSidecarBackground,
 	AgentCommKindResultSidecar,
 	AgentCommKindResultSidecarBackground,
+	AgentCommKindSidecarStatus,
 	AgentCommKindSwarm,
 }
 

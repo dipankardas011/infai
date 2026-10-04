@@ -3,6 +3,8 @@ package contracts
 import (
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type EventStreamKind string
@@ -32,6 +34,11 @@ const (
 	/// ToolCall
 	EventToolCall   EventStreamKind = "tool_call"
 	EventToolResult EventStreamKind = "tool_result"
+
+	// SidecarStatus
+	// It reaches a client watching the caller, so a delegated session is
+	// visible without the client joining it.
+	EventSidecarStatus EventStreamKind = "sidecar_status"
 
 	/// TaskChecklist
 	EventToolTaskCheckList EventStreamKind = "task_checklist_result"
@@ -63,6 +70,14 @@ type EventStream struct {
 	HITLResult  *ApprovalConclusion  `json:"hitl_result"`
 	Attachments *EventAttachments    `json:"attachments,omitempty"`
 	Compaction  *CompactionResult    `json:"compaction,omitempty"`
+	Sidecar     *SidecarStatus       `json:"sidecar,omitempty"`
+}
+
+type SidecarStatus struct {
+	ID        uuid.UUID     `json:"id"`
+	Name      string        `json:"name,omitempty"`
+	AgentKind AgentKind     `json:"agent_kind,omitempty"`
+	Status    SessionStatus `json:"status,omitempty"`
 }
 
 type CompactionResult struct {

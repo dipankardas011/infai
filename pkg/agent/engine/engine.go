@@ -106,6 +106,8 @@ func (e *InfaiAgentEngine) listenForAgentComms() {
 			go e.spawnSidecar(msg)
 		case comms.AgentCommKindResultSidecar:
 			e.relaySidecarResult(msg)
+		case comms.AgentCommKindSidecarStatus:
+			e.relaySidecarStatus(msg)
 		default:
 			e.bgLogger.Warn("unhandled agent comm", "kind", msg.Kind, "from", msg.From)
 		}
@@ -263,6 +265,31 @@ func (e *InfaiAgentEngine) relaySidecarResult(msg *comms.AgentComm) {
 		},
 	); err != nil {
 		e.bgLogger.Warn("deliver sidecar result", "parent", msg.To, "child", msg.From, "error", err)
+	}
+}
+
+func (e *InfaiAgentEngine) relaySidecarStatus(msg *comms.AgentComm) {
+	e.mu.Lock()
+	_, isParentOnline := e.activeSessionAgents[msg.To]
+	_, isChildOnline := e.children[msg.To][msg.From]
+	e.mu.Unlock()
+
+	if !isParentOnline || !isChildOnline {
+		e.bgLogger.Warn("dropping sidecar status without active parent", "parent", msg.To, "child", msg.From)
+		return
+	}
+
+	if err := e.aseComms.SendToSessionAgent(
+		e.ctx,
+		msg.To,
+		&comms.AgentComm{
+			From:    msg.From,
+			To:      msg.To,
+			Kind:    comms.AgentCommKindSidecarStatus,
+			Payload: msg.Payload,
+		},
+	); err != nil {
+		e.bgLogger.Warn("deliver sidecar status", "parent", msg.To, "child", msg.From, "error", err)
 	}
 }
 

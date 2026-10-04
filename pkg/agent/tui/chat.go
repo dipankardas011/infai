@@ -64,14 +64,17 @@ type chatModel struct {
 	used              uint64
 	blocks            []block
 
-	width            int
-	height           int
-	areas            []rowArea
-	viewport         viewport.Model
-	anchor           transcriptAnchor
-	composer         textarea.Model
-	checklist        contracts.TaskChecklistState
-	status           contracts.SessionStatus
+	width     int
+	height    int
+	areas     []rowArea
+	viewport  viewport.Model
+	anchor    transcriptAnchor
+	composer  textarea.Model
+	checklist contracts.TaskChecklistState
+	status    contracts.SessionStatus
+	// sidecars is the latest status reported by each session this one
+	sidecars         []contracts.SidecarStatus
+	sidecarsSession  uuid.UUID
 	approval         *Approval
 	approvalShown    bool
 	composerWaiting  bool
@@ -1069,6 +1072,10 @@ func (m *chatModel) startSessionObserver(sessionID uuid.UUID) tea.Cmd {
 }
 
 func (m *chatModel) applySessionView(view glue.SessionView) {
+	if m.sidecarsSession != view.Meta.ID {
+		m.sidecars = nil
+		m.sidecarsSession = view.Meta.ID
+	}
 	m.session = view.Meta
 	m.blocks = blocksFromMessages(view.History)
 	m.checklist = view.Checklist
@@ -1164,6 +1171,10 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 			}
 		} else if state, err := decodeTaskChecklist(content); err == nil {
 			m.checklist = state
+		}
+	case contracts.EventSidecarStatus:
+		if event.Sidecar != nil {
+			m.upsertSidecar(*event.Sidecar)
 		}
 	case contracts.EventSkillLoad:
 		name := string(contracts.ReadSkillTool)
@@ -1610,7 +1621,90 @@ func (m *chatModel) sessionRowView() string {
 	gap := strings.Repeat(" ", max(inner-lipgloss.Width(name)-lipgloss.Width(marks), 0))
 	// The blank row above is what separates the session row from the transcript;
 	// the bottom line sits flush against the composer.
-	return m.styles.statusRow.PaddingTop(1).Render(" " + name + gap + marks + " ")
+	line := " " + name + gap + marks + " "
+	if children := m.sidecarRowsView(); children != "" {
+		line = line + "\n" + children
+	}
+	return m.styles.statusRow.PaddingTop(1).Render(line)
+}
+
+// upsertSidecar folds one report into the row for the session that sent it. A
+// session that has not reported yet gets a row; one that has is updated in
+// place, so a child keeps one row for its whole run. A report seen while
+// watching a different session than the rows belong to replaces them, the same
+// way a view of that session would.
+func (m *chatModel) upsertSidecar(status contracts.SidecarStatus) {
+	if m.sidecarsSession != m.session.ID {
+		m.sidecars = nil
+		m.sidecarsSession = m.session.ID
+	}
+	for i := range m.sidecars {
+		if m.sidecars[i].ID == status.ID {
+			m.sidecars[i] = status
+			return
+		}
+	}
+	m.sidecars = append(m.sidecars, status)
+}
+
+// sidecarRowsView lists the sessions this one delegated to, so a caller blocked
+// on a sidecar still shows what that sidecar is doing. Each child gets one row
+// wearing the marks the session list gives it, so a sidecar reads the same on
+// both screens. A row is state like the session's own name and status: it stays
+// until the session is left, and each report the child sends updates it in
+// place, whether or not the caller's own turn is still running.
+func (m *chatModel) sidecarRowsView() string {
+	if len(m.sidecars) == 0 {
+		return ""
+	}
+	inner := max(m.width-2, 1)
+	rows := make([]string, 0, len(m.sidecars))
+	// The row style carries a right pad for the single-line session row; the
+	// tree is painted through it, so it must not add a column of its own.
+	treeRow := m.styles.statusRow.PaddingRight(0)
+	for i := range m.sidecars {
+		child := m.sidecars[i]
+		tree := "├─ "
+		if i == len(m.sidecars)-1 {
+			tree = "└─ "
+		}
+		kindGlyph, kindStyle := agentKindMark(child.AgentKind, m.styles)
+		status := describeSessionStatus(child.Status, m.styles)
+		kindPrefix := ""
+		if kindGlyph != "" {
+			kindPrefix = kindGlyph + " "
+		}
+
+		name := strings.TrimSpace(child.Name)
+		if name == "" {
+			name = "sidecar"
+		}
+		tail := status.glyph + " " + status.label
+		if inner-lipgloss.Width(tree)-lipgloss.Width(kindPrefix)-lipgloss.Width(tail) < 2 {
+			// The words are the first thing to go: the glyph still carries the
+			// status, exactly as the session row drops its words first.
+			tail = status.glyph
+		}
+		nameRoom := max(inner-lipgloss.Width(tree)-lipgloss.Width(kindPrefix)-lipgloss.Width(tail)-1, 0)
+		switch {
+		case nameRoom < 2:
+			// truncateLine keeps the value below two columns, so a name with
+			// less room than that is dropped rather than allowed to overflow.
+			name = ""
+		default:
+			name = truncateLine(name, nameRoom)
+		}
+		gap := strings.Repeat(" ", max(inner-lipgloss.Width(tree)-lipgloss.Width(kindPrefix)-lipgloss.Width(name)-lipgloss.Width(tail), 1))
+
+		rows = append(rows, " "+
+			sessionTree(tree, treeRow)+
+			kindStyle.Render(kindPrefix)+
+			m.styles.sessionName.Render(name)+
+			gap+
+			status.style.Render(tail)+
+			" ")
+	}
+	return strings.Join(rows, "\n")
 }
 
 // sessionRowGap is the space kept between the session name and the marks, and
