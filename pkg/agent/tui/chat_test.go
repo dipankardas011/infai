@@ -1778,6 +1778,117 @@ func TestTimelineScreenReplacesTranscriptAndHidesEventIDs(t *testing.T) {
 	}
 }
 
+func timelineUserEvent(id, parent uuid.UUID, text string) TimelineEvent {
+	return TimelineEvent{ID: id, ParentID: parent, Kind: store.KindMessage, Record: &store.Record{
+		Kind:    store.KindMessage,
+		Message: &contracts.ChatMessage{Role: "user", Content: &text},
+	}}
+}
+
+func timelineSearchFixture(t *testing.T) *chatModel {
+	t.Helper()
+	first, second, third := uuid.New(), uuid.New(), uuid.New()
+	view := &TimelineView{Head: third, Events: []TimelineEvent{
+		timelineUserEvent(first, uuid.Nil, "alpha question"),
+		timelineUserEvent(second, first, "beta answer"),
+		timelineUserEvent(third, second, "beta again"),
+	}}
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.showTimeline(view)
+	return m
+}
+
+// A search in the branch timeline never filters it: the rows stay where they
+// are and the cursor lands on a hit, so the branch structure is still readable
+// while searching.
+func TestTimelineSearchMovesTheCursorWithoutFiltering(t *testing.T) {
+	m := timelineSearchFixture(t)
+	rows := len(m.modal.options)
+	if rows != 3 {
+		t.Fatalf("timeline rows=%d want 3", rows)
+	}
+
+	m.modal.search("beta")
+	if len(m.modal.options) != rows {
+		t.Fatalf("search left %d rows, want all %d", len(m.modal.options), rows)
+	}
+	if len(m.modal.matches) != 2 {
+		t.Fatalf("matches=%v want two", m.modal.matches)
+	}
+	if m.modal.selected != 1 {
+		t.Fatalf("first hit selected=%d want 1", m.modal.selected)
+	}
+	m.modal.nextMatch(1)
+	if m.modal.selected != 2 {
+		t.Fatalf("second hit selected=%d want 2", m.modal.selected)
+	}
+	m.modal.nextMatch(1)
+	if m.modal.selected != 1 {
+		t.Fatalf("hits do not wrap: selected=%d want 1", m.modal.selected)
+	}
+	m.modal.nextMatch(-1)
+	if m.modal.selected != 2 {
+		t.Fatalf("previous hit selected=%d want 2", m.modal.selected)
+	}
+	// A query with no hit leaves the cursor where it was.
+	m.modal.search("nothing here")
+	if len(m.modal.matches) != 0 || m.modal.selected != 2 {
+		t.Fatalf("miss matches=%v selected=%d want none and 2", m.modal.matches, m.modal.selected)
+	}
+}
+
+// "/" opens the prompt, typing searches as it goes, and "n" walks the hits.
+// Nothing is branched: the timeline stays open until enter is pressed on a row.
+func TestTimelineSearchKeys(t *testing.T) {
+	m := timelineSearchFixture(t)
+	press := func(keys ...tea.KeyPressMsg) {
+		for _, key := range keys {
+			_, _ = m.Update(key)
+		}
+	}
+
+	press(tea.KeyPressMsg(tea.Key{Code: '/', Text: "/"}))
+	if !m.modal.searching {
+		t.Fatal("slash did not open the search prompt")
+	}
+	for _, r := range "beta" {
+		press(tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)}))
+	}
+	if m.modal.query != "beta" || m.modal.selected != 1 {
+		t.Fatalf("query=%q selected=%d want beta and 1", m.modal.query, m.modal.selected)
+	}
+	if content := m.View().Content; !strings.Contains(content, "1/2 matches") {
+		t.Fatalf("timeline does not show the hit count:\n%s", content)
+	}
+
+	press(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if m.modal.searching {
+		t.Fatal("enter did not close the search prompt")
+	}
+	if m.modal == nil {
+		t.Fatal("enter on the search prompt branched instead of closing it")
+	}
+	press(tea.KeyPressMsg(tea.Key{Code: 'n', Text: "n"}))
+	if m.modal.selected != 2 {
+		t.Fatalf("n did not walk to the next hit: selected=%d want 2", m.modal.selected)
+	}
+	press(tea.KeyPressMsg(tea.Key{Code: 'N', Text: "N"}))
+	if m.modal.selected != 1 {
+		t.Fatalf("N did not walk back to the previous hit: selected=%d want 1", m.modal.selected)
+	}
+
+	// A miss reads as no matches rather than an empty timeline.
+	press(tea.KeyPressMsg(tea.Key{Code: '/', Text: "/"}))
+	for _, r := range "zzz" {
+		press(tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)}))
+	}
+	if content := m.View().Content; !strings.Contains(content, "no matches") {
+		t.Fatalf("timeline does not report a miss:\n%s", content)
+	}
+}
+
 func TestTimelineBranchUsesColoredUnicodeGlyph(t *testing.T) {
 	rendered := renderTimelineRow(modalOption{
 		label: "alternate prompt", role: "user", tree: "├─ ", fork: "branch",

@@ -825,10 +825,54 @@ func (m *chatModel) handleSessionListKey(key string) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// handleTimelineSearchKey routes the branch timeline's search keys: opening the
+// prompt, typing a query, and cycling the hits it found. It reports whether it
+// consumed the key, so the list's own navigation only sees the rest.
+func (m *chatModel) handleTimelineSearchKey(msg tea.KeyPressMsg, key string) (tea.Cmd, bool) {
+	modal := m.modal
+	if modal.searching {
+		switch key {
+		case "esc":
+			modal.searching = false
+			modal.search("")
+		case "enter":
+			modal.searching = false
+		case "backspace":
+			if runes := []rune(modal.query); len(runes) > 0 {
+				modal.search(string(runes[:len(runes)-1]))
+			}
+		default:
+			if text := msg.Key().Text; text != "" {
+				modal.search(modal.query + text)
+			}
+		}
+		// A search in flight owns every key: the list must not move under a
+		// query being typed.
+		return nil, true
+	}
+	switch key {
+	case "/":
+		modal.search("")
+		modal.searching = true
+	case "n":
+		modal.nextMatch(1)
+	case "N":
+		modal.nextMatch(-1)
+	default:
+		return nil, false
+	}
+	return nil, true
+}
+
 func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
 	if m.modal.kind == modalSessions {
 		if cmd, handled := m.handleSessionListKey(key); handled {
+			return cmd
+		}
+	}
+	if m.modal.kind == modalTimeline {
+		if cmd, handled := m.handleTimelineSearchKey(msg, key); handled {
 			return cmd
 		}
 	}

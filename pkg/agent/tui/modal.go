@@ -48,6 +48,15 @@ type modalOption struct {
 	sessionActive bool
 }
 
+// searchHaystack is what a branch-timeline search matches: the role and the
+// row's own display text, without the tree that positions it.
+func (o modalOption) searchHaystack() string {
+	if o.role == "" {
+		return o.label
+	}
+	return o.role + ": " + o.label
+}
+
 type modalModel struct {
 	kind      modalKind
 	title     string
@@ -59,6 +68,42 @@ type modalModel struct {
 	// pendingDelete is the session a first "d" armed for deletion. The second
 	// "d" deletes it; anything else drops the arm.
 	pendingDelete uuid.UUID
+	// query, searching, matches and matchIndex are the branch timeline's
+	// search: the text typed so far, the rows it hit, and where the cursor sits
+	// among them. A hit moves the cursor; the list is never filtered, so the
+	// branch structure keeps its shape while searching.
+	query      string
+	searching  bool
+	matches    []int
+	matchIndex int
+}
+
+// search runs query over the timeline's rows and puts the cursor on the first
+// hit. A row is matched whole — role and label, not the tree that positions it.
+func (m *modalModel) search(query string) {
+	m.query = query
+	m.matches = m.matches[:0]
+	if needle := strings.ToLower(strings.TrimSpace(query)); needle != "" {
+		for i, option := range m.options {
+			if strings.Contains(strings.ToLower(option.searchHaystack()), needle) {
+				m.matches = append(m.matches, i)
+			}
+		}
+	}
+	if len(m.matches) > 0 {
+		m.matchIndex = 0
+		m.selected = m.matches[0]
+	}
+}
+
+// nextMatch moves the cursor to the next hit, or the previous one for a
+// negative delta, wrapping at each end.
+func (m *modalModel) nextMatch(delta int) {
+	if len(m.matches) == 0 {
+		return
+	}
+	m.matchIndex = (m.matchIndex + delta + len(m.matches)) % len(m.matches)
+	m.selected = m.matches[m.matchIndex]
 }
 
 func (m *modalModel) move(delta int) {
@@ -75,6 +120,24 @@ func (m *modalModel) optionForShortcut(key rune) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// timelineSearchLine is the branch timeline's search prompt: the query, a caret
+// while it is being typed, and how many rows it hit and which one the cursor is
+// on.
+func (m *modalModel) timelineSearchLine(styles harnessStyles) string {
+	line := styles.screenBody.Render("/") + styles.screenRow.Render(m.query)
+	if m.searching {
+		line += styles.active.Render("▏")
+	}
+	switch {
+	case m.query == "":
+	case len(m.matches) == 0:
+		line += "  " + styles.error.Render("no matches")
+	default:
+		line += "  " + styles.inactive.Render(fmt.Sprintf("%d/%d matches", m.matchIndex+1, len(m.matches)))
+	}
+	return line
 }
 
 // renderTimelineRow renders one branch-timeline row at exactly width cells: a
@@ -178,10 +241,21 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 	if m.body != "" {
 		header += "\n" + styles.screenBody.Width(contentWidth).Render(m.body)
 	}
+	if m.kind == modalTimeline && (m.searching || m.query != "") {
+		header += "\n" + m.timelineSearchLine(styles)
+	}
 	header += "\n"
-	footer := styles.inactive.Render("↑/↓ navigate  ·  enter select")
-	if !m.required {
-		footer += styles.inactive.Render("  ·  esc back")
+	var footer string
+	switch {
+	case m.kind == modalTimeline && m.searching:
+		footer = styles.inactive.Render("type to search  ·  enter done  ·  esc cancel")
+	case m.kind == modalTimeline:
+		footer = styles.inactive.Render("↑/↓ move  ·  / search  ·  n/N hits  ·  enter branch  ·  esc back")
+	default:
+		footer = styles.inactive.Render("↑/↓ navigate  ·  enter select")
+		if !m.required {
+			footer += styles.inactive.Render("  ·  esc back")
+		}
 	}
 	capacity := max(height-lipgloss.Height(header)-lipgloss.Height(footer)-2, 1)
 	start, end := visibleRange(len(m.options), m.selected, capacity)
