@@ -189,5 +189,29 @@
             "xhigh": "xhigh",
             "max": "max"
         }
+    },
+    "gpt-6.1-sol": {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api",
+        "api_type": "openai-codex-responses",
+        "id": "gpt-6.1-sol",
+        "name": "GPT-6.1 Sol",
+        "max_context_window": 272000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text",
+            "image"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": null,
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+        }
     }
 }
