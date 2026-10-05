@@ -265,6 +265,7 @@ func newRuntimeSession(
 		return nil, fmt.Errorf("load skill registry: %w", err)
 	}
 	s.configureMemoryTools()
+	s.configureWebTools()
 
 	if s.meta.AgentKind == contracts.InteractiveAgent {
 		s.configureDelegationTools()

@@ -38,6 +38,9 @@ func NewAuditorPolicy() *AuditorPolicy {
 			contracts.ReadSkillTool:     AllowPolicy,
 			contracts.TaskChecklistTool: AllowPolicy,
 
+			contracts.WebFetchTool:  HumanPolicy,
+			contracts.WebSearchTool: HumanPolicy,
+
 			contracts.SpawnBackgroundSidecarLoopTool: HumanPolicy,
 			contracts.SpawnSidecarLoopTool:           HumanPolicy,
 		},

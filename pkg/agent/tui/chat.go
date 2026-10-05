@@ -2126,13 +2126,22 @@ func (m *chatModel) toolMarker(entry *block) (string, lipgloss.Style) {
 		}
 		return "↗", m.styles.agentSidecar
 	}
+	// The glyph names the tool; the colour still says how the call ended, so a
+	// failed fetch stays red whatever its shape.
+	marker := "▲"
+	switch entry.toolName {
+	case string(contracts.WebSearchTool):
+		marker = "⌖"
+	case string(contracts.WebFetchTool):
+		marker = "⤓"
+	}
 	switch entry.toolStatus {
 	case string(contracts.ToolExecutionSuccess):
-		return "▲", m.styles.active
+		return marker, m.styles.active
 	case "":
-		return "▲", m.styles.system
+		return marker, m.styles.system
 	default:
-		return "▲", m.styles.error
+		return marker, m.styles.error
 	}
 }
 
@@ -2995,6 +3004,37 @@ func toolCallPreview(name, arguments string) string {
 		diff := udiff.Unified("a/"+args.Path, "b/"+args.Path, oldText, newText)
 		diff = stripDiffNoNewline(diff)
 		return fmt.Sprintf("diff --git a/%s b/%s%s\n%s", args.Path, args.Path, mode, strings.TrimRight(diff, "\n"))
+
+	case contracts.WebFetchTool:
+		var args struct {
+			URL      string `json:"url"`
+			MaxChars *int   `json:"max_chars"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return prettyToolArguments(arguments)
+		}
+		if args.MaxChars != nil {
+			return fmt.Sprintf("%s  (max %d chars)", args.URL, *args.MaxChars)
+		}
+		return args.URL
+
+	case contracts.WebSearchTool:
+		var args struct {
+			Query      string `json:"query"`
+			Objective  string `json:"objective"`
+			NumResults *int   `json:"num_results"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return prettyToolArguments(arguments)
+		}
+		lines := []string{args.Query}
+		if args.Objective != "" && args.Objective != args.Query {
+			lines = append(lines, "objective  "+args.Objective)
+		}
+		if args.NumResults != nil {
+			lines = append(lines, fmt.Sprintf("results  %d", *args.NumResults))
+		}
+		return strings.Join(lines, "\n")
 	}
 
 	return prettyToolArguments(arguments)

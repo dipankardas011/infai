@@ -975,6 +975,34 @@ func TestTranscriptUsesCompactRoleMarkers(t *testing.T) {
 	}
 }
 
+func TestToolMarkerGlyphsByName(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+
+	cases := []struct {
+		name   string
+		tool   contracts.ToolType
+		status string
+		want   string
+	}{
+		{name: "generic tool", tool: contracts.ReadTool, status: "success", want: "▲"},
+		{name: "generic tool running", tool: contracts.BashTool, status: "", want: "▲"},
+		{name: "generic tool failed", tool: contracts.BashTool, status: "error", want: "▲"},
+		{name: "websearch", tool: contracts.WebSearchTool, status: "success", want: "⌖"},
+		{name: "webfetch", tool: contracts.WebFetchTool, status: "success", want: "⤓"},
+		{name: "webfetch failed keeps its shape", tool: contracts.WebFetchTool, status: "error", want: "⤓"},
+		{name: "sidecar", tool: contracts.SpawnSidecarLoopTool, status: "success", want: "↗"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			marker, _ := m.toolMarker(&block{toolName: string(tt.tool), toolStatus: tt.status})
+			if marker != tt.want {
+				t.Fatalf("toolMarker(%s, %q) = %q, want %q", tt.tool, tt.status, marker, tt.want)
+			}
+		})
+	}
+}
+
 func TestToolCallPreviewFormatsKnownTools(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -992,6 +1020,53 @@ func TestToolCallPreviewFormatsKnownTools(t *testing.T) {
 		for _, want := range tt.want {
 			if !strings.Contains(body, want) {
 				t.Fatalf("tool preview for %q lacks %q: %q", tt.name, want, body)
+			}
+		}
+	}
+}
+
+func TestToolCallPreviewFormatsWebToolsWithoutJSON(t *testing.T) {
+	cases := []struct {
+		name      string
+		arguments string
+		want      []string
+		unwanted  []string
+	}{
+		{
+			name:      "webfetch",
+			arguments: `{"url":"https://infai.dipankar-das.com/v1/providers/deepseek.json"}`,
+			want:      []string{"https://infai.dipankar-das.com/v1/providers/deepseek.json"},
+			unwanted:  []string{"{", "}", `"url"`},
+		},
+		{
+			name:      "webfetch",
+			arguments: `{"url":"https://example.com","max_chars":4000}`,
+			want:      []string{"https://example.com", "max 4000 chars"},
+			unwanted:  []string{"{"},
+		},
+		{
+			name:      "websearch",
+			arguments: `{"query":"go net/http","num_results":3}`,
+			want:      []string{"go net/http", "results  3"},
+			unwanted:  []string{"{", `"query"`},
+		},
+		{
+			name:      "websearch",
+			arguments: `{"query":"go net/http","objective":"find the pkg.go.dev page"}`,
+			want:      []string{"go net/http", "objective  find the pkg.go.dev page"},
+			unwanted:  []string{"{"},
+		},
+	}
+	for _, tt := range cases {
+		body := ansi.Strip(toolCallPreview(tt.name, tt.arguments))
+		for _, want := range tt.want {
+			if !strings.Contains(body, want) {
+				t.Fatalf("preview for %q lacks %q: %q", tt.name, want, body)
+			}
+		}
+		for _, unwanted := range tt.unwanted {
+			if strings.Contains(body, unwanted) {
+				t.Fatalf("preview for %q still shows %q: %q", tt.name, unwanted, body)
 			}
 		}
 	}
