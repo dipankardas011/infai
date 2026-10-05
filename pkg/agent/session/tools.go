@@ -58,6 +58,13 @@ func (s *InfaiAgentSession) configureDelegationTools() {
 	s.availableTools = append(s.availableTools, delegate.SpawnSidecarLoopTool(), delegate.SpawnBackgroundSidecarLoopTool())
 }
 
+func (s *InfaiAgentSession) configureWebTools() {
+	if len(s.availableTools) == 0 {
+		s.availableTools = []contracts.Tool{}
+	}
+	s.availableTools = append(s.availableTools, actuators.WebFetchTool(), actuators.WebSearchTool())
+}
+
 func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCall) ([]contracts.ChatMessage, bool) {
 
 	checkIfAllowedToolCall := func(tc contracts.ToolCall) bool {
@@ -437,6 +444,52 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 
 				s.publish(contracts.EventStream{
 					Kind:       contracts.EventToolTaskCheckList,
+					Timestamp:  time.Now().UTC(),
+					ToolResult: &result,
+				})
+			case contracts.WebFetchTool:
+				output, err := s.fileManager.WebFetchExecution(s.ctx, tc)
+
+				result := contracts.ToolExecutionResult{
+					Status:   contracts.ToolExecutionSuccess,
+					CallID:   tc.ID,
+					Output:   output,
+					CallName: tc.Function.Name,
+				}
+				if err != nil {
+					status = contracts.ToolExecutionError
+					content = err.Error()
+					result.Status = contracts.ToolExecutionError
+					result.Error = content
+				} else {
+					content = output
+				}
+
+				s.publish(contracts.EventStream{
+					Kind:       contracts.EventToolResult,
+					Timestamp:  time.Now().UTC(),
+					ToolResult: &result,
+				})
+			case contracts.WebSearchTool:
+				output, err := s.fileManager.WebSearchExecution(s.ctx, tc)
+
+				result := contracts.ToolExecutionResult{
+					Status:   contracts.ToolExecutionSuccess,
+					CallID:   tc.ID,
+					Output:   output,
+					CallName: tc.Function.Name,
+				}
+				if err != nil {
+					status = contracts.ToolExecutionError
+					content = err.Error()
+					result.Status = contracts.ToolExecutionError
+					result.Error = content
+				} else {
+					content = output
+				}
+
+				s.publish(contracts.EventStream{
+					Kind:       contracts.EventToolResult,
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
 				})
