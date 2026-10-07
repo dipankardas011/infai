@@ -11,3 +11,7 @@ override_dh_auto_install:
 	  *) echo "Unsupported architecture: $(DEB_HOST_GNU_CPU)" >&2; exit 1 ;; \
 	esac; \
 	install -m 0755 "$$binary" debian/infaiw/usr/bin/infaiw
+	install -D -m 0644 infaiw.service debian/infaiw/usr/lib/systemd/user/infaiw.service
+
+override_dh_installsystemduser:
+	dh_installsystemduser --no-enable

@@ -8,5 +8,6 @@ Build-Depends: debhelper-compat (= 13)
 
 Package: infaiw
 Architecture: any
+Depends: ${misc:Depends}
 Description: Agent and workflow engine for infai
  Agent and workflow engine for infai.

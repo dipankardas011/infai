@@ -1,0 +1,13 @@
+[Unit]
+Description=infaiw server
+
+[Service]
+ExecStart=/usr/bin/infaiw server
+WorkingDirectory=%h
+EnvironmentFile=-%h/.config/infaiw/server.env
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=default.target
