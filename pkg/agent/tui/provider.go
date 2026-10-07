@@ -154,7 +154,7 @@ func RunProviderList(ctx context.Context, client ProviderManagementClient, out i
 		return err
 	}
 	styles := newHarnessStyles()
-	fmt.Fprintln(out, styles.screenTitle.Render("Provider models"))
+	fmt.Fprintln(out, styles.heading("Provider models", everforest.Background))
 	if len(models) == 0 {
 		fmt.Fprintln(out, styles.screenBody.Render("No provider models configured."))
 		return nil
@@ -198,7 +198,7 @@ func renderGenericProviderHelp(out io.Writer) error {
     }
   }
 }`
-	fmt.Fprintln(out, styles.screenTitle.Render("Custom OpenAI-compatible provider"))
+	fmt.Fprintln(out, styles.heading("Custom OpenAI-compatible provider", everforest.Background))
 	fmt.Fprintln(out, styles.screenBody.Render("Configure custom providers in:"))
 	fmt.Fprintln(out, styles.active.Render(filepath.Join(root, "models.json")))
 	fmt.Fprintln(out)
@@ -246,7 +246,7 @@ func (m *providerMenuModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *providerMenuModel) View() tea.View {
 	styles := newHarnessStyles()
-	lines := []string{styles.screenTitle.Render(m.title), styles.screenBody.Render(m.body), ""}
+	lines := []string{styles.heading(m.title, everforest.Surface), styles.screenBody.Render(m.body), ""}
 	for i, option := range m.options {
 		marker := "○ "
 		style := styles.menuRow
@@ -263,7 +263,7 @@ func (m *providerMenuModel) View() tea.View {
 	}
 	view := tea.NewView(content)
 	view.AltScreen = true
-	view.WindowTitle = "infai provider"
+	view.WindowTitle = appName + " · " + m.title
 	view.BackgroundColor = themeBackground()
 	view.ForegroundColor = themeForeground()
 	return view

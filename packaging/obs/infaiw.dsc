@@ -8,3 +8,4 @@ Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.6.2
 Debtransform-Release: 0
 Debtransform-Tar: infaiw-0.1.0.tar.gz
+Debtransform-Files: infaiw.service

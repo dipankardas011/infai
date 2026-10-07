@@ -61,6 +61,8 @@ var everforest = struct {
 	SelectionBg: lipgloss.Color("#425047"), // Everforest bg_green
 }
 
+const appName = "InfaiW"
+
 type harnessStyles struct {
 	app             lipgloss.Style
 	header          lipgloss.Style
@@ -111,6 +113,12 @@ type harnessStyles struct {
 	menu             lipgloss.Style
 	menuRow          lipgloss.Style
 	menuActive       lipgloss.Style
+}
+
+func (s harnessStyles) heading(section string, background color.Color) string {
+	return s.brand.Background(background).Render(appName) +
+		s.headerMeta.Background(background).Render(" · ") +
+		s.sessionName.Background(background).Render(section)
 }
 
 func newHarnessStyles() harnessStyles {

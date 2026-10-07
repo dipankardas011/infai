@@ -109,42 +109,73 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           path: homebrew-tap
 
-      - name: Update Homebrew cask
+      - name: Update Homebrew formula
         shell: bash
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
-          amd64_archive="dist/infaiw_${VERSION}_darwin_amd64.tar.gz"
-          arm64_archive="dist/infaiw_${VERSION}_darwin_arm64.tar.gz"
-          amd64_sha="$(sha256sum "$amd64_archive")"
-          amd64_sha="${amd64_sha%% *}"
-          arm64_sha="$(sha256sum "$arm64_archive")"
-          arm64_sha="${arm64_sha%% *}"
+          set -euo pipefail
+          for os in darwin linux; do
+            for arch in amd64 arm64; do
+              archive="dist/infaiw_${VERSION}_${os}_${arch}.tar.gz"
+              sha="$(sha256sum "$archive")"
+              printf -v "${os}_${arch}_sha" '%s' "${sha%% *}"
+            done
+          done
 
-          mkdir -p homebrew-tap/Casks
-          cat > homebrew-tap/Casks/infaiw.rb <<EOF
-          cask "infaiw" do
-            arch arm: "arm64", intel: "amd64"
-
-            version "$VERSION"
-            sha256 arm: "$arm64_sha", intel: "$amd64_sha"
-
-            url "https://github.com/dipankardas011/infai/releases/download/infaiw-v#{version}/infaiw_#{version}_darwin_#{arch}.tar.gz"
-            name "infaiw"
+          mkdir -p homebrew-tap/Formula
+          cat > homebrew-tap/Formula/infaiw.rb <<EOF
+          class Infaiw < Formula
             desc "Agent and workflow engine for infai"
             homepage "https://github.com/dipankardas011/infai"
+            version "$VERSION"
+            license "Apache-2.0"
 
-            binary "infaiw"
+            on_macos do
+              on_intel do
+                url "https://github.com/dipankardas011/infai/releases/download/infaiw-v#{version}/infaiw_#{version}_darwin_amd64.tar.gz"
+                sha256 "$darwin_amd64_sha"
+              end
+              on_arm do
+                url "https://github.com/dipankardas011/infai/releases/download/infaiw-v#{version}/infaiw_#{version}_darwin_arm64.tar.gz"
+                sha256 "$darwin_arm64_sha"
+              end
+            end
 
-            postflight do
-              system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/infaiw"]
+            on_linux do
+              on_intel do
+                url "https://github.com/dipankardas011/infai/releases/download/infaiw-v#{version}/infaiw_#{version}_linux_amd64.tar.gz"
+                sha256 "$linux_amd64_sha"
+              end
+              on_arm do
+                url "https://github.com/dipankardas011/infai/releases/download/infaiw-v#{version}/infaiw_#{version}_linux_arm64.tar.gz"
+                sha256 "$linux_arm64_sha"
+              end
+            end
+
+            def install
+              bin.install "infaiw"
+            end
+
+            service do
+              run [opt_bin/"infaiw", "server"]
+              keep_alive true
+              working_dir Dir.home
+              environment_variables PATH: std_service_path_env
+              log_path var/"log/infaiw.log"
+              error_log_path var/"log/infaiw.log"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/infaiw --version")
             end
           end
           EOF
 
+          git -C homebrew-tap rm --ignore-unmatch Casks/infaiw.rb
           git -C homebrew-tap config user.name "github-actions[bot]"
           git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C homebrew-tap add Casks/infaiw.rb
+          git -C homebrew-tap add Formula/infaiw.rb
           if git -C homebrew-tap diff --cached --quiet; then
             exit 0
           fi

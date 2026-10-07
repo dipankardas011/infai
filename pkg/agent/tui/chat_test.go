@@ -1323,7 +1323,7 @@ func TestSessionScreenAlwaysUsesTheWorkspace(t *testing.T) {
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"SESSION WORKSPACE", "NEW SESSION", "SESSIONS", "◐", "busy", "active-model"} {
+	for _, want := range []string{"Session workspace", "NEW SESSION", "SESSIONS", "◐", "busy", "active-model"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("session screen does not contain %q:\n%s", want, content)
 		}
@@ -1344,7 +1344,7 @@ func TestSessionWorkspaceShowsBrandAndSections(t *testing.T) {
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
 
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"INFAI HARNESS", "SESSION WORKSPACE", "NEW SESSION", "SESSIONS", "◐", "busy", "·", "inactive", "active-model", "saved-model"} {
+	for _, want := range []string{"InfaiW · Session workspace", "Session workspace", "NEW SESSION", "SESSIONS", "◐", "busy", "·", "inactive", "active-model", "saved-model"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("session workspace does not contain %q:\n%s", want, content)
 		}
@@ -1609,7 +1609,7 @@ func TestSessionListCloseOnlyAppliesToASessionTheEngineHolds(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("c dispatched a close for a session the engine is not holding")
 	}
-	if notice := ansi.Strip(m.View().Content); !strings.Contains(notice, "SESSION IS NOT OPEN") {
+	if notice := ansi.Strip(m.View().Content); !strings.Contains(notice, "Session is not open") {
 		t.Fatalf("closing a saved session did not explain itself:\n%s", notice)
 	}
 }
@@ -2140,7 +2140,7 @@ func TestTimelineScreenReplacesTranscriptAndHidesEventIDs(t *testing.T) {
 	}}})
 
 	content := m.View().Content
-	for _, want := range []string{"BRANCH TIMELINE", "* marks the current event", "user:", "explain this branch"} {
+	for _, want := range []string{"Branch timeline", "* marks the current event", "user:", "explain this branch"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("timeline screen does not contain %q", want)
 		}

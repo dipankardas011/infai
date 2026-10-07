@@ -23,6 +23,7 @@ import (
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/aymanbagabas/go-udiff"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
@@ -1550,7 +1551,14 @@ func (m *chatModel) View() tea.View {
 	v := tea.NewView(base)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
-	v.WindowTitle = "infai harness"
+	v.WindowTitle = appName + " · Chat"
+	if m.modal != nil {
+		section := m.modal.title
+		if m.modal.kind == modalSessions {
+			section = "Session workspace"
+		}
+		v.WindowTitle = appName + " · " + section
+	}
 	v.BackgroundColor = themeBackground()
 	v.ForegroundColor = themeForeground()
 	return v
@@ -1587,7 +1595,8 @@ func (m *chatModel) reflow() {
 }
 
 func (m *chatModel) headerView() string {
-	content := m.styles.brand.Render("INFAI") + " " + m.styles.headerMeta.Render("HARNESS")
+	content := m.styles.heading("Chat", everforest.Surface)
+	content = xansi.Truncate(content, contentWidth(m.styles.header, m.width), "…")
 	return fullWidth(m.styles.header, m.width, content)
 }
 

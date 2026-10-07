@@ -241,7 +241,7 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 		return renderSessionWorkspace(m, width, height, styles)
 	}
 	contentWidth := max(width-4, 1)
-	header := styles.screenTitle.Render(strings.ToUpper(m.title))
+	header := styles.heading(m.title, everforest.Background)
 	if m.body != "" {
 		header += "\n" + styles.screenBody.Width(contentWidth).Render(m.body)
 	}
@@ -303,8 +303,7 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 
 func renderSessionWorkspace(m *modalModel, width, height int, styles harnessStyles) string {
 	header := fullWidth(lipgloss.NewStyle().Padding(1, 2), width,
-		styles.brand.Render("INFAI")+" "+styles.headerMeta.Render("HARNESS")+"\n"+
-			styles.screenTitle.Render("SESSION WORKSPACE")+"\n"+
+		styles.heading("Session workspace", everforest.Background)+"\n"+
 			styles.screenBody.Render("Start fresh, inspect active work, or resume a saved session."))
 	footerText := "n new  ·  ↑/↓ navigate sessions  ·  enter open  ·  c close  ·  d delete"
 	if m.pendingDelete != uuid.Nil {

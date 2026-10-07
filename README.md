@@ -44,6 +44,86 @@ Install `infai` from the
 Repository setup instructions are available for Debian, Ubuntu, Fedora, and
 openSUSE.
 
+### infaiw background server
+
+`infaiw` is released separately from `infai`. Its services run `infaiw server`
+as your user and are not started automatically on installation. The default
+address is `localhost:6000`.
+
+#### Homebrew
+
+```bash
+brew install --formula dipankardas011/tap/infaiw
+brew services start dipankardas011/tap/infaiw
+```
+
+If you previously installed the cask, migrate once:
+
+```bash
+brew uninstall --cask infaiw
+brew update
+brew install --formula dipankardas011/tap/infaiw
+brew services start dipankardas011/tap/infaiw
+```
+
+The tap remains `dipankardas011/homebrew-tap`; releases now publish
+`Formula/infaiw.rb` instead of `Casks/infaiw.rb`. The executable moves from the
+Caskroom to the Cellar, with the usual `brew --prefix` bin symlink. Existing
+user data is not moved or removed by the release workflow. Do not use `sudo`
+for the user service. Logs are in `$(brew --prefix)/var/log/infaiw.log`.
+
+Use `brew services stop infaiw` or `brew services restart infaiw` to manage it.
+Homebrew manages launchd on macOS and systemd on Linux.
+
+#### Linux packages (OBS)
+
+Install `infaiw` from the
+[openSUSE Software portal](https://software.opensuse.org/download.html?project=home%3Adipankardas%3Ainfai&package=infaiw).
+
+The service is **opt-in**: installing the package does not start the server
+or enable automatic startup. Run the following commands as your normal user,
+without `sudo`:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now infaiw.service
+journalctl --user -u infaiw.service -f
+```
+
+- `--user` runs the service as your account, not root, with access to your
+  user files and credentials.
+- `enable` enables automatic startup on future logins.
+- `--now` also starts `infaiw server` immediately.
+- `journalctl` shows the service logs; press `Ctrl+C` to stop following logs
+  without stopping the server.
+
+Without lingering, the user service normally stops after your last login
+session ends. To keep it running after logout and start it at boot, enable
+lingering for your account (this may require administrator privileges):
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+For optional server configuration, create `~/.config/infaiw/server.env` with
+`INFAI_AGENT_*` assignments, for example `INFAI_AGENT_PORT=6000`. Protect it
+with `chmod 600` if it contains secrets. Apply changes with
+`systemctl --user restart infaiw.service`. Shell environment variables are
+not automatically inherited by background services.
+
+To stop the server and disable automatic startup on future logins:
+
+```bash
+systemctl --user disable --now infaiw.service
+```
+
+Disabling the service does not delete your user data or configuration.
+
+Packaging follows the [Homebrew service DSL](https://docs.brew.sh/Formula-Cookbook#service-files),
+[openSUSE unit location guidelines](https://en.opensuse.org/openSUSE:Systemd_packaging_guidelines),
+and Debian's [dh_installsystemduser](https://manpages.debian.org/bookworm/debhelper/dh_installsystemduser.1.en.html)
+with `--no-enable` for opt-in activation. § These are the packaging references.
+
 ### From source
 
 Requires Go 1.23+ and a C compiler (CGO is needed for SQLite).
