@@ -263,8 +263,8 @@ func TestWebToolsHaveDescriptiveSchemas(t *testing.T) {
 		if tool.Name == "" || tool.Description == "" {
 			t.Fatalf("tool = %+v, want name and description", tool)
 		}
-		if tool.Parameters.Type != "object" || tool.Parameters.AdditionalProperties {
-			t.Fatalf("%s parameters = %+v", tool.Name, tool.Parameters)
+		if !json.Valid(tool.Parameters) || !strings.HasPrefix(string(tool.Parameters), `{"type":"object"`) {
+			t.Fatalf("%s parameters = %s", tool.Name, tool.Parameters)
 		}
 	}
 }

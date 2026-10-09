@@ -39,29 +39,24 @@ func ReadTool() contracts.Tool {
 	return contracts.Tool{
 		Name:        "read",
 		Description: "Read a UTF-8 text file",
-		Parameters: contracts.ToolParameters{
-			Type: "object",
-			Properties: map[string]any{
-				"path": map[string]any{
-					"type":        "string",
-					"description": "Path relative to the workspace",
-				},
-				"offset": map[string]any{
-					"type":        "integer",
-					"description": "1-based starting line number",
-				},
-				"limit": map[string]any{
-					"type":        "integer",
-					"description": "Maximum number of lines to return",
-				},
-				"metadata": map[string]any{
-					"type":        "boolean",
-					"description": "Return file metadata instead of file contents",
-				},
+		Parameters: contracts.ToolParameterObjectSchema(map[string]any{
+			"path": map[string]any{
+				"type":        "string",
+				"description": "Path relative to the workspace",
 			},
-			RequiredFields:       []string{"path"},
-			AdditionalProperties: false,
-		},
+			"offset": map[string]any{
+				"type":        "integer",
+				"description": "1-based starting line number",
+			},
+			"limit": map[string]any{
+				"type":        "integer",
+				"description": "Maximum number of lines to return",
+			},
+			"metadata": map[string]any{
+				"type":        "boolean",
+				"description": "Return file metadata instead of file contents",
+			},
+		}, []string{"path"}),
 	}
 }
 

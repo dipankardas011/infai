@@ -28,19 +28,23 @@ func NewToolMessage(callID, content string, status ToolExecutionStatus) ChatMess
 	return ChatMessage{Role: "tool", ToolCallID: callID, Content: &content, Status: status}
 }
 
-// Tool is an executable action the model may call, described for the system
-// prompt.
 type Tool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  ToolParameters `json:"parameters"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
 }
 
-type ToolParameters struct {
-	Type                 string         `json:"type"`
-	Properties           map[string]any `json:"properties"`
-	RequiredFields       []string       `json:"required"`
-	AdditionalProperties bool           `json:"additionalProperties"`
+func ToolParameterObjectSchema(properties map[string]any, required []string) json.RawMessage {
+	schema, err := json.Marshal(struct {
+		Type                 string         `json:"type"`
+		Properties           map[string]any `json:"properties"`
+		Required             []string       `json:"required"`
+		AdditionalProperties bool           `json:"additionalProperties"`
+	}{"object", properties, required, false})
+	if err != nil {
+		panic(fmt.Sprintf("contracts: tool schema: %v", err))
+	}
+	return schema
 }
 
 type ToolType string
@@ -61,6 +65,14 @@ const (
 	SpawnSidecarLoopTool           ToolType = "spawn_sidecar_loop"
 	SpawnBackgroundSidecarLoopTool ToolType = "spawn_background_sidecar_loop"
 )
+
+// MCPToolPrefix marks a tool name that came from an MCP server, so every
+// consumer identifies such a tool from its name alone. § actuators.mcpToolName
+const MCPToolPrefix = "mcp_"
+
+func IsMCPTool(name string) bool {
+	return strings.HasPrefix(name, MCPToolPrefix)
+}
 
 func IsToolTypeSkill(t ToolType) bool {
 	switch t {

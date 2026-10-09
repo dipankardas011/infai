@@ -78,6 +78,7 @@ type InfaiAgentSession struct {
 	availableTools  []contracts.Tool
 	availableSkills []contracts.Skill
 	fileManager     *actuators.FileManager
+	mcpManager      *actuators.MCPManager
 	skillRegistry   *memory.SkillRegistry
 	taskChecklist   *memory.TaskChecklist
 
@@ -269,6 +270,10 @@ func newRuntimeSession(
 
 	if s.meta.AgentKind == contracts.InteractiveAgent {
 		s.configureDelegationTools()
+	}
+	if err := s.configureMCPTools(); err != nil {
+		cancel(err)
+		return nil, err
 	}
 
 	systemPrompt, err := prompts.GetBasicSystemPrompt(s.availableTools, s.availableSkills, s.meta.Cwd)
@@ -844,6 +849,9 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			// carry it.
 			s.reportStatusToParent(status)
 			s.cancel(cause)
+			// The context ending does not close MCP on its own, and
+			// CloseWithReason cannot be used here: it waits on this goroutine.
+			s.closeMCPManager()
 
 			s.recordSessionConclusion(status, reason)
 
@@ -1040,6 +1048,7 @@ func (s *InfaiAgentSession) CloseWithReason(reason string) {
 		// one that is only being closed records that, which is what happened.
 		s.recordSessionConclusion(contracts.SessionTombstone, reason)
 		s.cancel(harnessErr.ErrSessionClosed)
+		s.closeMCPManager()
 		s.wg.Wait()
 		s.settleBackgroundSidecars()
 

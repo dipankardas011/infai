@@ -2135,13 +2135,13 @@ func (m *chatModel) toolMarker(entry *block) (string, lipgloss.Style) {
 		}
 		return "↗", m.styles.agentSidecar
 	}
-	// The glyph names the tool; the colour still says how the call ended, so a
-	// failed fetch stays red whatever its shape.
 	marker := "▲"
-	switch entry.toolName {
-	case string(contracts.WebSearchTool):
+	switch {
+	case contracts.IsMCPTool(entry.toolName):
+		marker = "󰚥"
+	case entry.toolName == string(contracts.WebSearchTool):
 		marker = "⌖"
-	case string(contracts.WebFetchTool):
+	case entry.toolName == string(contracts.WebFetchTool):
 		marker = "⤓"
 	}
 	switch entry.toolStatus {
