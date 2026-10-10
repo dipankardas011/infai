@@ -79,6 +79,7 @@ type Client interface {
 	ListAllProviderModels(ctx context.Context) ([]glue.ListModelOutput, error)
 	SetSessionModel(ctx context.Context, provider, model string) (*glue.SessionOutput, error)
 	Compact(ctx context.Context) (*store.SessionMeta, error)
+	RenderMCPPrompt(ctx context.Context, id uuid.UUID, server, name string, arguments map[string]string) ([]contracts.ChatMessage, error)
 	GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error)
 	SelectBranch(ctx context.Context, id, eventID uuid.UUID) (contracts.TaskChecklistState, error)
 }

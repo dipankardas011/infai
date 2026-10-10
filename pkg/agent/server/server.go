@@ -58,6 +58,7 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("POST /v1/sessions/{id}/chat", s.handleChat)
 	mux.HandleFunc("POST /v1/sessions/{id}/cancel", s.handleCancelTurn)
 	mux.HandleFunc("POST /v1/sessions/{id}/approvals/{approvalID}", s.handleApproval)
+	mux.HandleFunc("POST /v1/sessions/{id}/prompts", s.handleRenderPrompt)
 	mux.HandleFunc("POST /v1/sessions/{id}/compact", s.handleCompact)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/close", s.handleCloseSession)
@@ -117,6 +118,33 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
+func (s *Server) handleRenderPrompt(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	var req glue.RenderPromptRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Server == "" || req.Name == "" {
+		s.writeError(w, http.StatusBadRequest, errors.New("server and name are required"))
+		return
+	}
+	messages, err := s.engine.RenderMCPPrompt(id, req.Server, req.Name, req.Arguments)
+	if err != nil {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusConflict, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, messages)
 }
 
 func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {

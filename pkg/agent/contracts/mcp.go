@@ -17,3 +17,17 @@ type MCPServerConfig struct {
 	BearerTokenEnv string            `json:"bearerTokenEnv,omitempty"`
 	TimeoutSeconds int               `json:"timeoutSeconds,omitempty"`
 }
+
+type MCPPromptArgument struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+type MCPPrompt struct {
+	Server      string              `json:"server"`
+	Name        string              `json:"name"`
+	Title       string              `json:"title,omitempty"`
+	Description string              `json:"description,omitempty"`
+	Arguments   []MCPPromptArgument `json:"arguments,omitempty"`
+}

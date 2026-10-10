@@ -76,6 +76,10 @@ func (s *InfaiAgentSession) closeMCPManager() {
 	}
 }
 
+func (s *InfaiAgentSession) RenderPrompt(server, name string, arguments map[string]string) ([]contracts.ChatMessage, error) {
+	return s.mcpManager.RenderPrompt(s.ctx, server, name, arguments)
+}
+
 func (s *InfaiAgentSession) configureMCPTools() error {
 	config, err := store.LoadToolConfig()
 	if err != nil {

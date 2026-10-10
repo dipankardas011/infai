@@ -579,6 +579,15 @@ func (c *RemoteClient) Compact(ctx context.Context) (*store.SessionMeta, error) 
 	return &meta, nil
 }
 
+func (c *RemoteClient) RenderMCPPrompt(ctx context.Context, id uuid.UUID, server, name string, arguments map[string]string) ([]contracts.ChatMessage, error) {
+	var messages []contracts.ChatMessage
+	err := c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/prompts", glue.RenderPromptRequest{Server: server, Name: name, Arguments: arguments}, http.StatusOK, &messages)
+	if err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
 func (c *RemoteClient) postJSON(ctx context.Context, path string, body any, wantCode int) error {
 	var out any
 	return c.postJSONInto(ctx, path, body, wantCode, &out)

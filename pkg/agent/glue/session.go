@@ -12,6 +12,7 @@ type SessionView struct {
 	Status          contracts.SessionStatus      `json:"status"`
 	InFlight        []contracts.EventStream      `json:"in_flight"`
 	Checklist       contracts.TaskChecklistState `json:"checklist"`
+	Prompts         []contracts.MCPPrompt        `json:"prompts,omitempty"`
 	PendingApproval *contracts.ApprovalRequest   `json:"pending_approval,omitempty"`
 }
 
@@ -37,6 +38,12 @@ type SetSessionModelRequest struct {
 
 type RenameSessionRequest struct {
 	Name string `json:"name"`
+}
+
+type RenderPromptRequest struct {
+	Server    string            `json:"server"`
+	Name      string            `json:"name"`
+	Arguments map[string]string `json:"arguments,omitempty"`
 }
 
 type BranchRequest struct {

@@ -32,21 +32,34 @@ type mcpToolBinding struct {
 	timeout time.Duration
 }
 
+type mcpPromptBinding struct {
+	session *mcp.ClientSession
+	name    string
+	timeout time.Duration
+}
+
 // MCPManager owns a session's connections and its initial tool discovery snapshot.
 type MCPManager struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	tools     []contracts.Tool
-	bindings  map[contracts.ToolType]mcpToolBinding
-	sessions  []*mcp.ClientSession
-	http      []*http.Transport
-	closeOnce sync.Once
-	closeErr  error
+	ctx            context.Context
+	cancel         context.CancelFunc
+	tools          []contracts.Tool
+	bindings       map[contracts.ToolType]mcpToolBinding
+	prompts        []contracts.MCPPrompt
+	promptBindings map[string]mcpPromptBinding
+	sessions       []*mcp.ClientSession
+	http           []*http.Transport
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers map[string]contracts.MCPServerConfig) (*MCPManager, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	manager := &MCPManager{ctx: ctx, cancel: cancel, bindings: make(map[contracts.ToolType]mcpToolBinding)}
+	manager := &MCPManager{
+		ctx:            ctx,
+		cancel:         cancel,
+		bindings:       make(map[contracts.ToolType]mcpToolBinding),
+		promptBindings: make(map[string]mcpPromptBinding),
+	}
 	// On failure the caller gets nil, so nothing downstream can ever close what
 	// the loop already connected. Close is also the only thing that stops a
 	// stdio server: the SDK ignores ctx cancellation for client connections.
@@ -82,6 +95,9 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 		}
 		manager.sessions = append(manager.sessions, session)
 		err = manager.discover(startupCtx, session, name, timeout)
+		if err == nil {
+			err = manager.discoverPrompts(startupCtx, session, name, timeout)
+		}
 		stop()
 		if err != nil {
 			return nil, fmt.Errorf("MCP server %q: %w", name, err)
@@ -201,7 +217,46 @@ func mcpToolName(server, tool string) string {
 	return contracts.MCPToolPrefix + server + "_" + tool
 }
 
+func (m *MCPManager) discoverPrompts(ctx context.Context, session *mcp.ClientSession, server string, timeout time.Duration) error {
+	cursor := ""
+	seen := make(map[string]bool)
+	for {
+		page, err := session.ListPrompts(ctx, &mcp.ListPromptsParams{Cursor: cursor})
+		if err != nil {
+			return errors.New("prompt discovery failed")
+		}
+		for _, prompt := range page.Prompts {
+			if prompt == nil || prompt.Name == "" {
+				return errors.New("server returned an invalid prompt")
+			}
+			key := server + ":" + prompt.Name
+			if _, exists := m.promptBindings[key]; exists {
+				return errors.New("server returned duplicate prompt names")
+			}
+			arguments := make([]contracts.MCPPromptArgument, 0, len(prompt.Arguments))
+			for _, argument := range prompt.Arguments {
+				if argument == nil {
+					continue
+				}
+				arguments = append(arguments, contracts.MCPPromptArgument{Name: argument.Name, Description: argument.Description, Required: argument.Required})
+			}
+			m.prompts = append(m.prompts, contracts.MCPPrompt{Server: server, Name: prompt.Name, Title: prompt.Title, Description: prompt.Description, Arguments: arguments})
+			m.promptBindings[key] = mcpPromptBinding{session: session, name: prompt.Name, timeout: timeout}
+		}
+		if page.NextCursor == "" {
+			return nil
+		}
+		if seen[page.NextCursor] {
+			return errors.New("server returned a repeated pagination cursor")
+		}
+		seen[page.NextCursor] = true
+		cursor = page.NextCursor
+	}
+}
+
 func (m *MCPManager) Tools() []contracts.Tool { return slices.Clone(m.tools) }
+
+func (m *MCPManager) Prompts() []contracts.MCPPrompt { return slices.Clone(m.prompts) }
 
 func (m *MCPManager) HasTool(name contracts.ToolType) bool {
 	_, ok := m.bindings[name]
@@ -251,6 +306,51 @@ func (m *MCPManager) Execute(ctx context.Context, call contracts.ToolCall) (stri
 		return text, contracts.NewToolExecutionError(call.Function.Name, "mcp_tool_error", text, contracts.ResponsibilityEnvironment, nil)
 	}
 	return text, nil
+}
+
+func (m *MCPManager) RenderPrompt(ctx context.Context, server, name string, arguments map[string]string) ([]contracts.ChatMessage, error) {
+	callName := contracts.ToolType(server + ":" + name)
+	binding, ok := m.promptBindings[server+":"+name]
+	if !ok {
+		return nil, contracts.NewToolExecutionError(callName, "unknown_prompt", "the MCP prompt is not registered", contracts.ResponsibilityAgent, nil)
+	}
+	ctx, cancel := context.WithTimeout(ctx, binding.timeout)
+	defer cancel()
+	stop := context.AfterFunc(m.ctx, cancel)
+	defer stop()
+	if m.ctx.Err() != nil {
+		return nil, m.ctx.Err()
+	}
+
+	result, err := binding.session.GetPrompt(ctx, &mcp.GetPromptParams{Name: binding.name, Arguments: arguments})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, contracts.NewToolExecutionError(callName, "execution_canceled", "the MCP prompt was canceled or exceeded its deadline", contracts.ResponsibilityEnvironment, ctx.Err())
+		}
+		return nil, contracts.NewToolExecutionError(callName, "mcp_prompt_failed", "the MCP server could not render the prompt", contracts.ResponsibilityEnvironment, nil)
+	}
+
+	messages := make([]contracts.ChatMessage, 0, len(result.Messages))
+	for _, message := range result.Messages {
+		if message == nil {
+			return nil, contracts.NewToolExecutionError(callName, "unsupported_content", "the MCP prompt returned content other than text", contracts.ResponsibilityEnvironment, nil)
+		}
+
+		content, ok := message.Content.(*mcp.TextContent)
+		if !ok {
+			return nil, contracts.NewToolExecutionError(callName, "unsupported_content", "the MCP prompt returned content other than text", contracts.ResponsibilityEnvironment, nil)
+		}
+
+		switch message.Role {
+		case mcp.Role("user"):
+			messages = append(messages, contracts.NewUserMessage(content.Text))
+		case mcp.Role("assistant"):
+			messages = append(messages, contracts.NewAssistantMessage(content.Text))
+		default:
+			return nil, contracts.NewToolExecutionError(callName, "unsupported_content", "the MCP prompt returned a message with an unsupported role", contracts.ResponsibilityEnvironment, nil)
+		}
+	}
+	return messages, nil
 }
 
 func (m *MCPManager) Close() error {

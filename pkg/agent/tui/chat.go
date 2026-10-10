@@ -91,6 +91,7 @@ type chatModel struct {
 	modal                   *modalModel
 	commandMenu             bool
 	commandSelection        int
+	mcpPrompts              []contracts.MCPPrompt
 	filePicker              *filePicker
 
 	working           bool
@@ -142,6 +143,11 @@ type clipboardImageMsg struct {
 }
 
 type editorDoneMsg struct {
+	text string
+	err  error
+}
+
+type mcpPromptRenderedMsg struct {
 	text string
 	err  error
 }
@@ -374,6 +380,21 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case editorDoneMsg:
 		if msg.err != nil {
 			m.appendError(fmt.Errorf("open editor: %w", msg.err))
+			m.refreshTranscript(true)
+			m.reflow()
+			return m, nil
+		}
+		m.composer.SetValue(msg.text)
+		m.composer.CursorEnd()
+		m.updateCommandMenu()
+		m.reflow()
+		return m, nil
+	case mcpPromptRenderedMsg:
+		// The form put up a loading modal on submit; dismiss it on both the
+		// success and the error path.
+		m.modal = nil
+		if msg.err != nil {
+			m.appendError(msg.err)
 			m.refreshTranscript(true)
 			m.reflow()
 			return m, nil
@@ -692,7 +713,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.commandMenu {
-		matches := matchingCommands(m.composer.Value())
+		matches := matchingCommands(m.composer.Value(), m.mcpPrompts)
 		switch key {
 		case "esc":
 			m.commandMenu = false
@@ -705,8 +726,17 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.commandSelection = (m.commandSelection + 1) % len(matches)
 			return m, nil
 		case "tab":
-			m.composer.SetValue(matches[m.commandSelection].name)
 			m.commandMenu = false
+			if prompt, ok := m.promptFor(matches[m.commandSelection].name); ok && promptArgsNeeded(prompt, nil) {
+				if m.session.ID == uuid.Nil {
+					m.appendError(errors.New("no active session"))
+					m.refreshTranscript(true)
+					m.reflow()
+					return m, nil
+				}
+				return m, m.openPromptArgsForm(prompt, nil)
+			}
+			m.composer.SetValue(matches[m.commandSelection].insertion())
 			m.reflow()
 			return m, nil
 		case "enter":
@@ -716,8 +746,17 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					return m, m.submit()
 				}
 			}
-			m.composer.SetValue(matches[m.commandSelection].name)
 			m.commandMenu = false
+			if prompt, ok := m.promptFor(matches[m.commandSelection].name); ok && promptArgsNeeded(prompt, nil) {
+				if m.session.ID == uuid.Nil {
+					m.appendError(errors.New("no active session"))
+					m.refreshTranscript(true)
+					m.reflow()
+					return m, nil
+				}
+				return m, m.openPromptArgsForm(prompt, nil)
+			}
+			m.composer.SetValue(matches[m.commandSelection].insertion())
 			m.reflow()
 			return m, nil
 		}
@@ -863,6 +902,54 @@ func (m *chatModel) handleSessionListKey(key string) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// handlePromptArgsKey routes the prompt-argument form's keys. It owns the
+// keyboard while the form is open, so the letters that navigate a list — j, k,
+// h, l — land in the focused field instead.
+func (m *chatModel) handlePromptArgsKey(msg tea.KeyPressMsg, key string) (tea.Cmd, bool) {
+	fields := m.modal.promptFields
+	if len(fields) == 0 {
+		if key == "esc" {
+			m.modal = nil
+			m.reflow()
+		}
+		return nil, true
+	}
+	focus := clamp(m.modal.promptFocus, 0, len(fields)-1)
+	m.modal.promptFocus = focus
+	switch key {
+	case "esc":
+		m.modal = nil
+		m.reflow()
+		return nil, true
+	case "enter":
+		for _, field := range fields {
+			if field.required && strings.TrimSpace(field.input.Value()) == "" {
+				return nil, true
+			}
+		}
+		return m.submitPromptArgs(), true
+	case "tab", "down":
+		m.focusPromptArg((focus + 1) % len(fields))
+		return nil, true
+	case "shift+tab", "up":
+		m.focusPromptArg((focus - 1 + len(fields)) % len(fields))
+		return nil, true
+	}
+	// Everything else belongs to the focused field: the textarea already owns
+	// the caret, the selection and the editing keys, so j/k/h/l type instead of
+	// navigating the form.
+	var cmd tea.Cmd
+	fields[focus].input, cmd = fields[focus].input.Update(msg)
+	return cmd, true
+}
+
+// focusPromptArg moves the form's focus and re-lays the fields out, so the box
+// holding the keyboard is the box the screen frames.
+func (m *chatModel) focusPromptArg(index int) {
+	m.modal.promptFocus = index
+	m.modal.layoutPromptArgs(m.width)
+}
+
 // handleTimelineSearchKey routes the branch timeline's search keys: opening the
 // prompt, typing a query, and cycling the hits it found. It reports whether it
 // consumed the key, so the list's own navigation only sees the rest.
@@ -911,6 +998,11 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	if m.modal.kind == modalTimeline {
 		if cmd, handled := m.handleTimelineSearchKey(msg, key); handled {
+			return cmd
+		}
+	}
+	if m.modal.kind == modalPromptArgs {
+		if cmd, handled := m.handlePromptArgsKey(msg, key); handled {
 			return cmd
 		}
 	}
@@ -1168,6 +1260,7 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 	m.session = view.Meta
 	m.blocks = blocksFromMessages(view.History)
 	m.checklist = view.Checklist
+	m.mcpPrompts = view.Prompts
 	// The in-flight log is replayed through the same handler the live stream
 	// uses, so a client that joins mid-generation renders the generation the
 	// same way it would have rendered it live.
@@ -1468,6 +1561,31 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		}
 		return renameSessionCmd(m.ctx, m.client, m.session.ID, name)
 	}
+	fields := strings.Fields(command)
+	for _, prompt := range m.mcpPrompts {
+		if len(fields) == 0 || fields[0] != "/"+prompt.Server+":"+prompt.Name {
+			continue
+		}
+		if m.session.ID == uuid.Nil {
+			m.appendError(errors.New("no active session"))
+			m.refreshTranscript(true)
+			return nil
+		}
+		arguments := make(map[string]string, len(fields)-1)
+		for _, field := range fields[1:] {
+			key, value, ok := strings.Cut(field, "=")
+			if !ok || key == "" {
+				m.appendError(fmt.Errorf("usage: /%s:%s [key=value ...]", prompt.Server, prompt.Name))
+				m.refreshTranscript(true)
+				return nil
+			}
+			arguments[key] = value
+		}
+		if promptArgsNeeded(prompt, arguments) {
+			return m.openPromptArgsForm(prompt, arguments)
+		}
+		return renderMCPPromptCmd(m.ctx, m.client, m.session.ID, prompt.Server, prompt.Name, arguments)
+	}
 	switch command {
 	case "/model":
 		if m.session.AgentKind == contracts.SidecarLoopAgent {
@@ -1502,6 +1620,7 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll · Ctrl+O sessions · Ctrl+N new · Ctrl+T thinking",
 			"Ctrl+V paste image · Ctrl+U clear images",
 			"/new · /sessions · /model · /compact · /timeline · /rename · /quit",
+			"MCP prompts: /server:prompt [key=value ...]",
 		}, "\n")})
 		m.refreshTranscript(true)
 	case "/quit", "/exit":
@@ -1511,6 +1630,108 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		m.refreshTranscript(true)
 	}
 	return nil
+}
+
+// promptFor returns the MCP prompt behind a "/server:name" command name.
+func (m *chatModel) promptFor(name string) (contracts.MCPPrompt, bool) {
+	for _, prompt := range m.mcpPrompts {
+		if "/"+prompt.Server+":"+prompt.Name == name {
+			return prompt, true
+		}
+	}
+	return contracts.MCPPrompt{}, false
+}
+
+// promptArgsNeeded is the rule that decides whether a prompt opens the argument
+// form: it declares arguments, and a required one has no value once the preset
+// is filled in. A prompt that fails it keeps the inline key=value path.
+func promptArgsNeeded(prompt contracts.MCPPrompt, preset map[string]string) bool {
+	if len(prompt.Arguments) == 0 {
+		return false
+	}
+	for _, argument := range prompt.Arguments {
+		if argument.Required && strings.TrimSpace(preset[argument.Name]) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// openPromptArgsForm opens the argument form, pre-filling values already typed.
+func (m *chatModel) openPromptArgsForm(prompt contracts.MCPPrompt, preset map[string]string) tea.Cmd {
+	fields := make([]promptField, 0, len(prompt.Arguments))
+	for _, argument := range prompt.Arguments {
+		if argument.Name == "" {
+			continue
+		}
+		fields = append(fields, promptField{
+			name:     argument.Name,
+			help:     argument.Description,
+			required: argument.Required,
+			input:    promptArgInput(argument.Description, preset[argument.Name]),
+		})
+	}
+	focus := -1
+	for i, field := range fields {
+		if field.required && strings.TrimSpace(field.input.Value()) == "" {
+			focus = i
+			break
+		}
+	}
+	if focus < 0 {
+		for i, field := range fields {
+			if strings.TrimSpace(field.input.Value()) == "" {
+				focus = i
+				break
+			}
+		}
+	}
+	if focus < 0 {
+		focus = len(fields) - 1
+	}
+	m.modal = &modalModel{
+		kind: modalPromptArgs, title: prompt.Server + ":" + prompt.Name, body: prompt.Description,
+		required: false, promptServer: prompt.Server, promptName: prompt.Name,
+		promptFields: fields, promptFocus: focus,
+	}
+	m.modal.layoutPromptArgs(m.width)
+	m.reflow()
+	return nil
+}
+
+// promptArgInput builds one argument's textarea: a single line carrying the
+// argument's description as its placeholder, styled like the composer so a
+// value is typed the way text is typed everywhere else.
+func promptArgInput(help, value string) textarea.Model {
+	input := textarea.New()
+	input.Placeholder = help
+	input.ShowLineNumbers = false
+	input.DynamicHeight = true
+	input.MinHeight = 1
+	input.MaxHeight = 1
+	// An argument is a value, not a document: no gutter, and enter renders the
+	// form instead of opening a new line.
+	input.SetPromptFunc(0, func(textarea.PromptInfo) string { return "" })
+	input.KeyMap.InsertNewline.SetKeys("ctrl+alt+enter")
+	styleTextarea(&input, false)
+	input.SetValue(strings.TrimSpace(value))
+	return input
+}
+
+// submitPromptArgs renders the prompt from the form's values. A blank value is
+// left out of the map, so the server sees its own default.
+func (m *chatModel) submitPromptArgs() tea.Cmd {
+	values := make(map[string]string, len(m.modal.promptFields))
+	for _, field := range m.modal.promptFields {
+		value := strings.TrimSpace(field.input.Value())
+		if value == "" {
+			continue
+		}
+		values[field.name] = value
+	}
+	server, name := m.modal.promptServer, m.modal.promptName
+	m.modal = loadingModal("Rendering " + server + ":" + name)
+	return renderMCPPromptCmd(m.ctx, m.client, m.session.ID, server, name, values)
 }
 
 func (m *chatModel) View() tea.View {
@@ -1965,11 +2186,11 @@ func (m *chatModel) commandMenuViewForHeight(height int) string {
 	if !m.commandMenu {
 		return ""
 	}
-	return renderCommandMenu(matchingCommands(m.composer.Value()), m.commandSelection, m.width, height, m.styles)
+	return renderCommandMenu(matchingCommands(m.composer.Value(), m.mcpPrompts), m.commandSelection, m.width, height, m.styles)
 }
 
 func (m *chatModel) updateCommandMenu() {
-	matches := matchingCommands(m.composer.Value())
+	matches := matchingCommands(m.composer.Value(), m.mcpPrompts)
 	m.commandMenu = len(matches) > 0
 	if m.commandSelection >= len(matches) {
 		m.commandSelection = max(len(matches)-1, 0)
@@ -3351,6 +3572,20 @@ func compactCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
 		}
 		_, records, err := client.GetSession(ctx, id)
 		return compactedMsg{meta: meta, records: records, err: err}
+	}
+}
+
+func renderMCPPromptCmd(ctx context.Context, client Client, id uuid.UUID, server, name string, arguments map[string]string) tea.Cmd {
+	return func() tea.Msg {
+		messages, err := client.RenderMCPPrompt(ctx, id, server, name, arguments)
+		if err != nil {
+			return mcpPromptRenderedMsg{err: err}
+		}
+		texts := make([]string, 0, len(messages))
+		for _, message := range messages {
+			texts = append(texts, message.Text())
+		}
+		return mcpPromptRenderedMsg{text: strings.Join(texts, "\n\n")}
 	}
 }
 

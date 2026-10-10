@@ -333,9 +333,9 @@ type codexResponsesRequest struct {
 }
 
 type codexTool struct {
-	Type        string                   `json:"type"`
-	Name        string                   `json:"name"`
-	Description string                   `json:"description,omitempty"`
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters"`
 }
 

@@ -2948,6 +2948,9 @@ func (stubChatClient) SetSessionModel(context.Context, string, string) (*glue.Se
 func (stubChatClient) Compact(context.Context) (*store.SessionMeta, error) {
 	return &store.SessionMeta{}, nil
 }
+func (stubChatClient) RenderMCPPrompt(context.Context, uuid.UUID, string, string, map[string]string) ([]contracts.ChatMessage, error) {
+	return nil, nil
+}
 func (stubChatClient) GetTimeline(context.Context, uuid.UUID) (*TimelineView, error) {
 	return &TimelineView{}, nil
 }

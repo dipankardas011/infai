@@ -43,6 +43,9 @@ func (s *InfaiAgentSession) JoinSessionEvents() (glue.SessionView, <-chan contra
 		InFlight:  append([]contracts.EventStream(nil), s.inFlight...),
 		Checklist: s.taskChecklist.Snapshot(),
 	}
+	if s.mcpManager != nil {
+		view.Prompts = s.mcpManager.Prompts()
+	}
 	if s.pendingApproval != nil {
 		request := s.pendingApproval.request
 		view.PendingApproval = &request
