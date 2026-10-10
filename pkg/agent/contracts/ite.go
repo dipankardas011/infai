@@ -35,10 +35,13 @@ type Tool struct {
 }
 
 func ToolParameterObjectSchema(properties map[string]any, required []string) json.RawMessage {
+	if properties == nil {
+		properties = map[string]any{}
+	}
 	schema, err := json.Marshal(struct {
 		Type                 string         `json:"type"`
 		Properties           map[string]any `json:"properties"`
-		Required             []string       `json:"required"`
+		Required             []string       `json:"required,omitempty"`
 		AdditionalProperties bool           `json:"additionalProperties"`
 	}{"object", properties, required, false})
 	if err != nil {

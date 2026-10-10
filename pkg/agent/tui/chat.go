@@ -93,7 +93,9 @@ type chatModel struct {
 	commandMenu             bool
 	commandSelection        int
 	mcpPrompts              []contracts.MCPPrompt
+	mcpResources            []contracts.MCPResource
 	filePicker              *filePicker
+	resourcePicker          *resourcePicker
 
 	working           bool
 	workBegan         time.Time
@@ -640,7 +642,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	// Relationship navigation stays available even while HITL owns the rest of
 	// the keyboard. Menus with their own arrow navigation retain precedence.
-	if m.modal == nil && !m.commandMenu && m.filePicker == nil &&
+	if m.modal == nil && !m.commandMenu && m.filePicker == nil && m.resourcePicker == nil &&
 		(strings.TrimSpace(m.composer.Value()) == "" || (m.approval != nil && !m.approvalReason)) {
 		switch key {
 		case "up":
@@ -662,7 +664,13 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if model, cmd, handled := m.handleApprovalKey(key); handled {
 		return model, cmd
 	}
-	if m.working && key == "esc" && m.session.AgentKind != contracts.SidecarLoopAgent && m.modal == nil {
+	// A modal can open before any turn exists — a resource read asks a question
+	// before the message is enqueued — so esc has to reach the modal instead of
+	// arming a cancel the session would refuse.
+	if m.modal != nil {
+		return m, m.handleModalKey(msg)
+	}
+	if m.working && key == "esc" && m.session.AgentKind != contracts.SidecarLoopAgent {
 		if !m.cancelArmed {
 			m.cancelArmed = true
 			m.cancelArmID++
@@ -677,9 +685,6 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.reflow()
 			return m, cancelTurnCmd(m.ctx, m.client, m.session.ID)
 		}
-	}
-	if m.modal != nil {
-		return m, m.handleModalKey(msg)
 	}
 	switch msg.Key().Keystroke() {
 	case "ctrl+x":
@@ -805,6 +810,17 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.reflow()
 			return m, nil
 		}
+		if m.resourcePicker != nil {
+			if len(m.resourcePicker.matches) > 0 {
+				resource := m.resourcePicker.matches[m.resourcePicker.selected]
+				value := m.composer.Value()
+				m.composer.SetValue(value[:m.resourcePicker.start] + "#" + resource.URI + value[m.resourcePicker.start+1+len(m.resourcePicker.query):])
+				m.composer.CursorEnd()
+			}
+			m.resourcePicker = nil
+			m.reflow()
+			return m, nil
+		}
 		return m, m.submit()
 	}
 
@@ -823,6 +839,21 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.resourcePicker != nil {
+		switch key {
+		case "esc":
+			m.resourcePicker = nil
+			m.reflow()
+			return m, nil
+		case "up":
+			m.resourcePicker.selected = (m.resourcePicker.selected - 1 + max(len(m.resourcePicker.matches), 1)) % max(len(m.resourcePicker.matches), 1)
+			return m, nil
+		case "down", "tab":
+			m.resourcePicker.selected = (m.resourcePicker.selected + 1) % max(len(m.resourcePicker.matches), 1)
+			return m, nil
+		}
+	}
+
 	var cmd tea.Cmd
 	before := m.composer.Value()
 	m.composer, cmd = m.composer.Update(msg)
@@ -836,6 +867,20 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	} else if value == before+"@" && m.session.Cwd != "" {
 		m.filePicker = &filePicker{files: scanWorkspaceFiles(m.session.Cwd), start: len(before)}
 		m.filePicker.filter("")
+	}
+	if m.resourcePicker != nil {
+		if len(value) < m.resourcePicker.start || !strings.HasPrefix(value[m.resourcePicker.start:], "#") || strings.ContainsAny(value[m.resourcePicker.start+1:], " \t\n") {
+			m.resourcePicker = nil
+		} else {
+			m.resourcePicker.filter(value[m.resourcePicker.start+1:])
+		}
+	} else if value == before+"#" && m.session.ID != uuid.Nil {
+		if len(m.mcpResources) == 0 {
+			m.showNotice("No MCP resources", "This session exposes no MCP resource to reference.", false)
+		} else {
+			m.resourcePicker = &resourcePicker{resources: m.mcpResources, start: len(before)}
+			m.resourcePicker.filter("")
+		}
 	}
 	m.updateCommandMenu()
 	m.reflow()
@@ -1355,6 +1400,7 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 	m.blocks = blocksFromMessages(view.History)
 	m.checklist = view.Checklist
 	m.mcpPrompts = view.Prompts
+	m.mcpResources = view.Resources
 	// The in-flight log is replayed through the same handler the live stream
 	// uses, so a client that joins mid-generation renders the generation the
 	// same way it would have rendered it live.
@@ -2132,10 +2178,13 @@ func (m *chatModel) View() tea.View {
 		checklist := m.checklistView()
 		hitl := m.hitlView()
 		commands := m.commandMenuView()
-		files := renderFilePicker(m.filePicker, m.width, m.styles)
+		picker := renderFilePicker(m.filePicker, m.width, m.styles)
+		if m.resourcePicker != nil {
+			picker = renderResourcePicker(m.resourcePicker, m.width, m.styles)
+		}
 		attachments := m.attachmentsView()
 		composer := m.composerView()
-		parts := []string{header, m.viewport.View(), hitl, checklist, sessionRow, commands, files, attachments, composer, status}
+		parts := []string{header, m.viewport.View(), hitl, checklist, sessionRow, commands, picker, attachments, composer, status}
 		if len(m.areas) == len(parts) {
 			parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
 			for i := range parts {
@@ -2184,10 +2233,13 @@ func (m *chatModel) reflow() {
 	checklist := m.checklistView()
 	hitl := m.hitlView()
 	commands := m.commandMenuView()
-	files := renderFilePicker(m.filePicker, m.width, m.styles)
+	picker := renderFilePicker(m.filePicker, m.width, m.styles)
+	if m.resourcePicker != nil {
+		picker = renderResourcePicker(m.resourcePicker, m.width, m.styles)
+	}
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(hitl), intrinsic(checklist), intrinsic(sessionRow), intrinsic(commands), intrinsic(files), intrinsic(attachments), intrinsic(composer), intrinsic(status))
+	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(hitl), intrinsic(checklist), intrinsic(sessionRow), intrinsic(commands), intrinsic(picker), intrinsic(attachments), intrinsic(composer), intrinsic(status))
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
@@ -2600,7 +2652,7 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	var content string
 	switch entry.role {
 	case "user":
-		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, renderFileReferences(entry.text), width)
+		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, renderResourceBlocks(renderFileReferences(entry.text)), width)
 		if badges := m.renderImageBadges(entry.imageCount); badges != "" {
 			content += "\n" + strings.Repeat(" ", lipgloss.Width("●")+1) + badges
 		}
@@ -3690,8 +3742,12 @@ func (m *chatModel) showTimeline(view *TimelineView) {
 				tree = rows[i].subprefix + strings.Repeat(" ", lipgloss.Width(timelineForkLabel(fork)))
 				fork = ""
 			}
+			label := display.text
+			if display.role == "user" {
+				label = renderResourceBlocks(label)
+			}
 			options = append(options, modalOption{
-				label:   display.text,
+				label:   label,
 				role:    display.role,
 				current: isHeadRow,
 				tree:    tree,
@@ -4320,7 +4376,10 @@ func timelineEventDisplays(event TimelineEvent, toolNames map[string]string) []t
 	if event.Record.Message != nil {
 		message := event.Record.Message
 		if message.Role == "user" {
-			return []timelineDisplay{{role: "user", text: timelineLine(message.Text())}}
+			// Decoded before timelineLine's cut: a resource body is usually
+			// longer than the limit, which would drop the close tag and leave
+			// the block as raw text in the row.
+			return []timelineDisplay{{role: "user", text: timelineLine(renderResourceBlocks(message.Text()))}}
 		}
 		if message.Role == "tool" {
 			if isChecklistTool(toolNames[message.ToolCallID]) {

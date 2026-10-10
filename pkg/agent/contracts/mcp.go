@@ -31,3 +31,20 @@ type MCPPrompt struct {
 	Description string              `json:"description,omitempty"`
 	Arguments   []MCPPromptArgument `json:"arguments,omitempty"`
 }
+
+type MCPResource struct {
+	Server      string `json:"server"`
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	MIMEType    string `json:"mimeType,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+}
+
+type MCPResourceRead struct {
+	Server   string `json:"server"`
+	URI      string `json:"uri"`
+	MIMEType string `json:"mimeType,omitempty"`
+	Text     string `json:"text"`
+}

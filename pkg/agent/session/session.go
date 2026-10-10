@@ -539,6 +539,12 @@ func (s *InfaiAgentSession) EnqueueUserMessage(ctx context.Context, input contra
 		s.l.Error("persist session metadata", "session_id", meta.ID, "error", err)
 	}
 
+	// Translate resource references before the message becomes a user message,
+	// so a resource that cannot be read never blocks the send.
+	if s.mcpManager != nil {
+		input.Text = s.expandResourceReferences(ctx, input.Text)
+	}
+
 	if err := s.agentMailbox.SendMessage(ctx, contracts.NewUserMessageWithInput(input)); err != nil {
 		return err
 	}

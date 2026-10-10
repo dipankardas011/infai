@@ -45,6 +45,7 @@ func (s *InfaiAgentSession) JoinSessionEvents() (glue.SessionView, <-chan contra
 	}
 	if s.mcpManager != nil {
 		view.Prompts = s.mcpManager.Prompts()
+		view.Resources = s.mcpManager.Resources()
 	}
 	if s.pendingApproval != nil {
 		request := s.pendingApproval.request

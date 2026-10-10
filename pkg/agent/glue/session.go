@@ -13,6 +13,7 @@ type SessionView struct {
 	InFlight           []contracts.EventStream       `json:"in_flight"`
 	Checklist          contracts.TaskChecklistState  `json:"checklist"`
 	Prompts            []contracts.MCPPrompt         `json:"prompts,omitempty"`
+	Resources          []contracts.MCPResource       `json:"resources,omitempty"`
 	PendingApproval    *contracts.ApprovalRequest    `json:"pending_approval,omitempty"`
 	PendingElicitation *contracts.ElicitationRequest `json:"pending_elicitation,omitempty"`
 }

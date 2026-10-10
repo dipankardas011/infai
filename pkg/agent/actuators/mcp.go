@@ -38,31 +38,39 @@ type mcpPromptBinding struct {
 	timeout time.Duration
 }
 
+type mcpResourceBinding struct {
+	session *mcp.ClientSession
+	timeout time.Duration
+}
+
 // ElicitFunc lets a server ask the user a question mid-call. It blocks until
 // the answer arrives; returning an error aborts the call.
 type ElicitFunc func(ctx context.Context, server string, params *mcp.ElicitParams) (*mcp.ElicitResult, error)
 
 // MCPManager owns a session's connections and its initial tool discovery snapshot.
 type MCPManager struct {
-	ctx            context.Context
-	cancel         context.CancelFunc
-	tools          []contracts.Tool
-	bindings       map[contracts.ToolType]mcpToolBinding
-	prompts        []contracts.MCPPrompt
-	promptBindings map[string]mcpPromptBinding
-	sessions       []*mcp.ClientSession
-	http           []*http.Transport
-	closeOnce      sync.Once
-	closeErr       error
+	ctx              context.Context
+	cancel           context.CancelFunc
+	tools            []contracts.Tool
+	bindings         map[contracts.ToolType]mcpToolBinding
+	prompts          []contracts.MCPPrompt
+	promptBindings   map[string]mcpPromptBinding
+	resources        []contracts.MCPResource
+	resourceBindings map[string]mcpResourceBinding
+	sessions         []*mcp.ClientSession
+	http             []*http.Transport
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers map[string]contracts.MCPServerConfig, elicit ElicitFunc) (*MCPManager, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	manager := &MCPManager{
-		ctx:            ctx,
-		cancel:         cancel,
-		bindings:       make(map[contracts.ToolType]mcpToolBinding),
-		promptBindings: make(map[string]mcpPromptBinding),
+		ctx:              ctx,
+		cancel:           cancel,
+		bindings:         make(map[contracts.ToolType]mcpToolBinding),
+		promptBindings:   make(map[string]mcpPromptBinding),
+		resourceBindings: make(map[string]mcpResourceBinding),
 	}
 	// On failure the caller gets nil, so nothing downstream can ever close what
 	// the loop already connected. Close is also the only thing that stops a
@@ -109,6 +117,9 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 		err = manager.discover(startupCtx, session, name, timeout)
 		if err == nil {
 			err = manager.discoverPrompts(startupCtx, session, name, timeout)
+		}
+		if err == nil {
+			err = manager.discoverResources(startupCtx, session, name, timeout)
 		}
 		stop()
 		if err != nil {
@@ -266,9 +277,137 @@ func (m *MCPManager) discoverPrompts(ctx context.Context, session *mcp.ClientSes
 	}
 }
 
+// discoverResources mirrors discoverPrompts, but a server that does not
+// advertise the resource capability is skipped so its absence cannot fail the
+// session.
+func (m *MCPManager) discoverResources(ctx context.Context, session *mcp.ClientSession, server string, timeout time.Duration) error {
+	if result := session.InitializeResult(); result != nil && result.Capabilities.Resources == nil {
+		return nil
+	}
+	cursor := ""
+	seen := make(map[string]bool)
+	// Both the duplicate guard and the binding map are server-qualified, so two
+	// servers advertising the same URI cannot collide.
+	seenURIs := make(map[string]bool)
+	for {
+		page, err := session.ListResources(ctx, &mcp.ListResourcesParams{Cursor: cursor})
+		if err != nil {
+			return errors.New("resource discovery failed")
+		}
+		for _, resource := range page.Resources {
+			if resource == nil || resource.URI == "" {
+				return errors.New("server returned an invalid resource")
+			}
+			key := server + ":" + resource.URI
+			if seenURIs[key] {
+				return errors.New("server returned duplicate resource URIs")
+			}
+			seenURIs[key] = true
+			m.resources = append(m.resources, contracts.MCPResource{Server: server, URI: resource.URI, Name: resource.Name, Title: resource.Title, Description: resource.Description, MIMEType: resource.MIMEType, Size: resource.Size})
+			m.resourceBindings[server+"|"+resource.URI] = mcpResourceBinding{session: session, timeout: timeout}
+		}
+		if page.NextCursor == "" {
+			return nil
+		}
+		if seen[page.NextCursor] {
+			return errors.New("server returned a repeated pagination cursor")
+		}
+		seen[page.NextCursor] = true
+		cursor = page.NextCursor
+	}
+}
+
 func (m *MCPManager) Tools() []contracts.Tool { return slices.Clone(m.tools) }
 
 func (m *MCPManager) Prompts() []contracts.MCPPrompt { return slices.Clone(m.prompts) }
+
+func (m *MCPManager) Resources() []contracts.MCPResource { return slices.Clone(m.resources) }
+
+// HasResource reports whether this session's catalogue can read a URI. The
+// catalogue is small and fixed after discovery, so a scan costs less than a
+// second index over the same data.
+func (m *MCPManager) HasResource(uri string) bool {
+	for _, resource := range m.resources {
+		if resource.URI == uri {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *MCPManager) ReadResource(ctx context.Context, uri string) (contracts.MCPResourceRead, error) {
+	server, binding, ok := m.resourceBinding(uri)
+	if !ok {
+		return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "unknown_resource", "the MCP resource is not registered", contracts.ResponsibilityAgent, nil)
+	}
+	ctx, cancel := context.WithTimeout(ctx, binding.timeout)
+	defer cancel()
+	stop := context.AfterFunc(m.ctx, cancel)
+	defer stop()
+	if m.ctx.Err() != nil {
+		return contracts.MCPResourceRead{}, m.ctx.Err()
+	}
+	result, err := binding.session.ReadResource(ctx, &mcp.ReadResourceParams{URI: uri})
+	if err != nil {
+		if ctx.Err() != nil {
+			return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "execution_canceled", "the MCP resource read was canceled or exceeded its deadline", contracts.ResponsibilityEnvironment, ctx.Err())
+		}
+		return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "mcp_resource_failed", "the MCP server could not read the resource", contracts.ResponsibilityEnvironment, nil)
+	}
+	if result.NeedsInput() {
+		return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "unsupported_input", "the MCP server requested an unsupported client capability", contracts.ResponsibilityEnvironment, nil)
+	}
+	parts := make([]string, 0, len(result.Contents))
+	mimeType := ""
+	for _, item := range result.Contents {
+		switch {
+		case item == nil:
+			return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "unsupported_content", "the MCP resource is not text", contracts.ResponsibilityEnvironment, nil)
+		// Blob holds the decoded bytes; the JSON layer handled the base64.
+		case len(item.Blob) > 0:
+			if !textResourceMIME(item.MIMEType) {
+				return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "unsupported_content", "the MCP resource is not text", contracts.ResponsibilityEnvironment, nil)
+			}
+			parts = append(parts, string(item.Blob))
+		default:
+			parts = append(parts, item.Text)
+		}
+		if mimeType == "" {
+			mimeType = item.MIMEType
+		}
+	}
+	return contracts.MCPResourceRead{Server: server, URI: uri, MIMEType: mimeType, Text: clipWebContent(strings.Join(parts, "\n"), webMaxBodyBytes)}, nil
+}
+
+// resourceBinding resolves a URI against the catalogue snapshot: an MCP
+// session belongs to one server, so the URI alone cannot say which
+// connection to read through.
+func (m *MCPManager) resourceBinding(uri string) (string, mcpResourceBinding, bool) {
+	for _, resource := range m.resources {
+		if resource.URI != uri {
+			continue
+		}
+		binding, ok := m.resourceBindings[resource.Server+"|"+uri]
+		if !ok {
+			return "", mcpResourceBinding{}, false
+		}
+		return resource.Server, binding, true
+	}
+	return "", mcpResourceBinding{}, false
+}
+
+// textResourceMIME reports whether a resource's declared MIME type can be
+// surfaced to the model as text.
+func textResourceMIME(mimeType string) bool {
+	if strings.HasPrefix(mimeType, "text/") {
+		return true
+	}
+	switch mimeType {
+	case "application/json", "application/xml", "application/yaml":
+		return true
+	}
+	return strings.HasSuffix(mimeType, "+json") || strings.HasSuffix(mimeType, "+xml") || strings.HasSuffix(mimeType, "+yaml")
+}
 
 func (m *MCPManager) HasTool(name contracts.ToolType) bool {
 	_, ok := m.bindings[name]

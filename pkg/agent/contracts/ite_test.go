@@ -14,8 +14,16 @@ func TestObjectSchemaIsCanonical(t *testing.T) {
 	if string(schema) != want {
 		t.Fatalf("schema = %s, want %s", schema, want)
 	}
-	if empty := ToolParameterObjectSchema(map[string]any{}, nil); string(empty) != `{"type":"object","properties":{},"required":null,"additionalProperties":false}` {
-		t.Fatalf("empty schema = %s", empty)
+	// A nil required list is omitted rather than serialised as a null value: a
+	// strict provider rejects a null where an array is expected, and the absent
+	// key is the valid spelling of "nothing is required".
+	// § deepseek-flash schema validation
+	const noRequired = `{"type":"object","properties":{},"additionalProperties":false}`
+	if empty := ToolParameterObjectSchema(map[string]any{}, nil); string(empty) != noRequired {
+		t.Fatalf("empty schema = %s, want %s", empty, noRequired)
+	}
+	if nilProperties := ToolParameterObjectSchema(nil, nil); string(nilProperties) != noRequired {
+		t.Fatalf("nil-properties schema = %s, want %s", nilProperties, noRequired)
 	}
 }
 
