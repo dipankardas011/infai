@@ -35,7 +35,7 @@ func TestMCPConnectsAndCallsTool(t *testing.T) {
 			Args:      []string{"-test.run=^TestMCPStdioSmoke$"},
 			Env:       map[string]string{"INFAI_MCP_SMOKE_HELPER": "1", "SMOKE_TOKEN": "connected"},
 		},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -191,6 +192,7 @@ type branchSelectedMsg struct {
 	err       error
 }
 type approvalResolvedMsg struct{ err error }
+type elicitResolvedMsg struct{ err error }
 type renamedMsg struct {
 	meta *store.SessionMeta
 	err  error
@@ -551,6 +553,15 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.appendError(msg.err)
 			m.refreshTranscript(true)
+		}
+		return m, nil
+	case elicitResolvedMsg:
+		// The form closed on submit, so a refusal has nowhere else to surface:
+		// it lands in the transcript and reflows like any other error.
+		if msg.err != nil {
+			m.appendError(msg.err)
+			m.refreshTranscript(true)
+			m.reflow()
 		}
 		return m, nil
 	case renamedMsg:
@@ -950,6 +961,84 @@ func (m *chatModel) focusPromptArg(index int) {
 	m.modal.layoutPromptArgs(m.width)
 }
 
+// handleElicitKey routes the elicitation form's keys. It owns the keyboard while
+// the form is open, so a letter that would navigate a list — j, k, h, l — lands
+// in the focused field instead.
+func (m *chatModel) handleElicitKey(msg tea.KeyPressMsg, key string) (tea.Cmd, bool) {
+	fields := m.modal.elicitFields
+	focus := -1
+	if len(fields) > 0 {
+		focus = clamp(m.modal.elicitFocus, 0, len(fields)-1)
+		m.modal.elicitFocus = focus
+	}
+	switch key {
+	case "esc":
+		return m.submitElicit(contracts.ElicitationCancel, nil), true
+	case "enter":
+		if m.elicitEnterFlips(fields, focus) {
+			fields[focus].boolValue = !fields[focus].boolValue
+			return nil, true
+		}
+		content, reason := elicitContent(fields)
+		if reason != "" {
+			// The footer already names the problem; enter simply does nothing
+			// until the rows can be accepted.
+			return nil, true
+		}
+		return m.submitElicit(contracts.ElicitationAccept, content), true
+	case "space":
+		if focus >= 0 && fields[focus].elicitKind == elicitBoolean {
+			fields[focus].boolValue = !fields[focus].boolValue
+			return nil, true
+		}
+		// A text row needs the space itself, so it falls through to the field
+		// below rather than being eaten here.
+	case "tab", "down":
+		if len(fields) > 0 {
+			m.focusElicitField((focus + 1) % len(fields))
+		}
+		return nil, true
+	case "shift+tab", "up":
+		if len(fields) > 0 {
+			m.focusElicitField((focus - 1 + len(fields)) % len(fields))
+		}
+		return nil, true
+	}
+	// Everything else belongs to the focused text field, so the textarea owns
+	// the caret and the editing keys. A boolean row has nothing to type into,
+	// so it swallows the key rather than let the list navigation behind the
+	// form act on it.
+	if focus < 0 || fields[focus].elicitKind == elicitBoolean {
+		return nil, true
+	}
+	var cmd tea.Cmd
+	fields[focus].input, cmd = fields[focus].input.Update(msg)
+	return cmd, true
+}
+
+// focusElicitField moves the form's focus and re-lays the fields out, so the box
+// holding the keyboard is the box the screen frames.
+func (m *chatModel) focusElicitField(index int) {
+	m.modal.elicitFocus = index
+	m.modal.layoutElicitFields(m.width)
+}
+
+// elicitEnterFlips decides whether enter flips the focused row instead of
+// submitting. A boolean row has no textarea to accept enter, so enter is its
+// activation key — but only while some other row can still submit, so an
+// all-boolean form keeps a way to accept rather than being stuck flipping.
+func (m *chatModel) elicitEnterFlips(fields []promptField, focus int) bool {
+	if focus < 0 || fields[focus].elicitKind != elicitBoolean {
+		return false
+	}
+	for i, field := range fields {
+		if i != focus && field.elicitKind != elicitBoolean {
+			return true
+		}
+	}
+	return false
+}
+
 // handleTimelineSearchKey routes the branch timeline's search keys: opening the
 // prompt, typing a query, and cycling the hits it found. It reports whether it
 // consumed the key, so the list's own navigation only sees the rest.
@@ -1003,6 +1092,11 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	if m.modal.kind == modalPromptArgs {
 		if cmd, handled := m.handlePromptArgsKey(msg, key); handled {
+			return cmd
+		}
+	}
+	if m.modal.kind == modalElicit {
+		if cmd, handled := m.handleElicitKey(msg, key); handled {
 			return cmd
 		}
 	}
@@ -1273,6 +1367,13 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 	} else {
 		m.clearApproval()
 	}
+	// A client that joins mid-question sees the form; a view without one means
+	// the question is no longer outstanding, so any form still up is stale.
+	if view.PendingElicitation != nil {
+		m.openElicitForm(*view.PendingElicitation)
+	} else {
+		m.closeElicitForm()
+	}
 }
 
 func (m *chatModel) applySessionStatus(status contracts.SessionStatus) {
@@ -1372,6 +1473,24 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 		}
 	case contracts.EventApprovalResolved:
 		m.handleApprovalUpdate(ApprovalUpdate{Type: string(event.Kind), Approval: approvalFromRequest(event.HITLCall)})
+	case contracts.EventElicitationRequested:
+		if event.Elicitation != nil {
+			// The form is transient, so the question is written to the
+			// transcript here or it is lost from the record entirely.
+			m.blocks = append(m.blocks, block{role: "event", text: event.Elicitation.Server + " asks: " + event.Elicitation.Message})
+			m.openElicitForm(*event.Elicitation)
+		}
+	case contracts.EventElicitationResolved:
+		if event.ElicitationResult != nil {
+			m.blocks = append(m.blocks, block{role: "event", text: "Elicitation " + event.ElicitationResult.Action + elicitContentNote(event.ElicitationResult.Content)})
+		}
+		// Answering here, answering elsewhere, and tearing the turn down all
+		// land as this event; the form the request belongs to must retract.
+		if m.modal != nil && m.modal.kind == modalElicit {
+			if event.ElicitationResult == nil || event.ElicitationResult.ReqID == m.modal.elicitReqID {
+				m.closeElicitForm()
+			}
+		}
 	case contracts.EventCompactionExecuted:
 		if event.Compaction == nil {
 			break
@@ -1732,6 +1851,268 @@ func (m *chatModel) submitPromptArgs() tea.Cmd {
 	server, name := m.modal.promptServer, m.modal.promptName
 	m.modal = loadingModal("Rendering " + server + ":" + name)
 	return renderMCPPromptCmd(m.ctx, m.client, m.session.ID, server, name, values)
+}
+
+// elicitSchema is the slice of JSON Schema an elicitation form reads: the
+// object's properties, the names it requires, and each property's own type and
+// value constraints. It is only ever read, never validated as JSON Schema.
+type elicitSchema struct {
+	Required   []string                  `json:"required"`
+	Properties map[string]elicitProperty `json:"properties"`
+}
+
+type elicitProperty struct {
+	Type        string            `json:"type"`
+	Title       string            `json:"title"`
+	Description string            `json:"description"`
+	Required    bool              `json:"required"`
+	Enum        []json.RawMessage `json:"enum"`
+	EnumNames   []string          `json:"enumNames"`
+}
+
+// openElicitForm shows an elicitation's question as a full-page form. The same
+// request already on screen is left alone; a different one replaces it.
+func (m *chatModel) openElicitForm(req contracts.ElicitationRequest) {
+	if m.modal != nil && m.modal.kind == modalElicit && m.modal.elicitReqID == req.ID {
+		return
+	}
+	fields := buildElicitFields(req.Schema)
+	focus := 0
+	for i, field := range fields {
+		if field.required && elicitRowProblem(field) != "" {
+			focus = i
+			break
+		}
+	}
+	server := req.Server
+	if server == "" {
+		server = "MCP server"
+	}
+	m.modal = &modalModel{
+		kind: modalElicit, title: server + " asks", body: req.Message,
+		required:    false,
+		elicitReqID: req.ID, elicitServer: req.Server, elicitMessage: req.Message,
+		elicitFields: fields, elicitFocus: focus,
+	}
+	m.modal.layoutElicitFields(m.width)
+	m.reflow()
+}
+
+// closeElicitForm retracts the elicitation form when the request it answers is
+// no longer outstanding: answered here, answered elsewhere, or torn down.
+func (m *chatModel) closeElicitForm() {
+	if m.modal != nil && m.modal.kind == modalElicit {
+		m.modal = nil
+		m.reflow()
+	}
+}
+
+// buildElicitFields turns a request's schema into form rows. Required
+// properties come first, in the schema's required order, then every other
+// property alphabetically: a Go map loses the schema's order, so it is restored
+// here. A schema that will not parse yields no rows, and the user can still
+// accept or cancel the question.
+func buildElicitFields(raw json.RawMessage) []promptField {
+	if len(raw) == 0 {
+		return nil
+	}
+	var schema elicitSchema
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return nil
+	}
+	names := elicitFieldOrder(schema)
+	fields := make([]promptField, 0, len(names))
+	for _, name := range names {
+		property := schema.Properties[name]
+		field := promptField{
+			name:       name,
+			label:      property.Title,
+			help:       property.Description,
+			required:   property.Required || slices.Contains(schema.Required, name),
+			elicitKind: elicitKindFor(property),
+		}
+		placeholder := property.Description
+		if field.elicitKind == elicitEnum {
+			field.enumValues = enumStrings(property.Enum)
+			placeholder = enumPlaceholder(field.enumValues, property.EnumNames)
+		}
+		field.input = promptArgInput(placeholder, "")
+		fields = append(fields, field)
+	}
+	return fields
+}
+
+// elicitFieldOrder lists the properties in the order the form shows them:
+// required first, in the required array's order, then the rest sorted. Names
+// that name no property, and repeats, are dropped.
+func elicitFieldOrder(schema elicitSchema) []string {
+	seen := make(map[string]bool, len(schema.Properties))
+	order := make([]string, 0, len(schema.Properties))
+	for _, name := range schema.Required {
+		if _, ok := schema.Properties[name]; !ok || seen[name] {
+			continue
+		}
+		seen[name] = true
+		order = append(order, name)
+	}
+	rest := make([]string, 0, len(schema.Properties))
+	for name := range schema.Properties {
+		if !seen[name] {
+			rest = append(rest, name)
+		}
+	}
+	sort.Strings(rest)
+	return append(order, rest...)
+}
+
+// elicitKindFor maps a property's JSON Schema type to the row that edits it. A
+// missing type is a string, and an unrecognised type falls back to text so an
+// unexpected schema still renders rather than crashes.
+func elicitKindFor(property elicitProperty) elicitFieldKind {
+	if len(property.Enum) > 0 {
+		return elicitEnum
+	}
+	switch property.Type {
+	case "number":
+		return elicitNumber
+	case "integer":
+		return elicitInteger
+	case "boolean":
+		return elicitBoolean
+	default:
+		return elicitText
+	}
+}
+
+// enumStrings renders an enum's members as the text a user types. A member that
+// is not a JSON string keeps its literal form.
+func enumStrings(enum []json.RawMessage) []string {
+	values := make([]string, 0, len(enum))
+	for _, raw := range enum {
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			values = append(values, text)
+			continue
+		}
+		values = append(values, strings.TrimSpace(string(raw)))
+	}
+	return values
+}
+
+// enumPlaceholder lists what an enum row accepts, preferring the schema's
+// enumNames as the readable name where it supplies them.
+func enumPlaceholder(values, names []string) string {
+	display := make([]string, len(values))
+	for i, value := range values {
+		if i < len(names) && names[i] != "" {
+			display[i] = names[i] + " (" + value + ")"
+			continue
+		}
+		display[i] = value
+	}
+	return "one of: " + strings.Join(display, ", ")
+}
+
+// elicitContent assembles the accepted content from the form's rows. A blank
+// optional row is left out, so the server sees its own default; a blank required
+// row, or a value that fails its row's type or enum check, blocks acceptance and
+// returns the reason. The SDK validates the accepted content against the schema
+// and fails the whole elicitation if it does not match.§(go-sdk mcp/client.go
+// elicit → resolved.Validate), so catching a mismatched value here saves the
+// tool call.
+func elicitContent(fields []promptField) (map[string]any, string) {
+	content := make(map[string]any, len(fields))
+	for _, field := range fields {
+		if problem := elicitRowProblem(field); problem != "" {
+			return nil, problem
+		}
+		if field.elicitKind == elicitBoolean {
+			// A boolean always has a value, so it is always sent.
+			content[field.name] = field.boolValue
+			continue
+		}
+		value := strings.TrimSpace(field.input.Value())
+		if value == "" {
+			continue
+		}
+		switch field.elicitKind {
+		case elicitNumber:
+			number, _ := strconv.ParseFloat(value, 64)
+			content[field.name] = number
+		case elicitInteger:
+			number, _ := strconv.ParseInt(value, 10, 64)
+			content[field.name] = number
+		default:
+			content[field.name] = value
+		}
+	}
+	return content, ""
+}
+
+// elicitContentNote renders an accepted answer for the transcript. The keys are
+// sorted so the same answer always reads the same way.
+func elicitContentNote(content map[string]any) string {
+	if len(content) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(content))
+	for key := range content {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", key, content[key]))
+	}
+	return ": " + strings.Join(parts, ", ")
+}
+
+// elicitRowProblem reports why a row blocks acceptance, or "" when it does not.
+func elicitRowProblem(field promptField) string {
+	if field.elicitKind == elicitBoolean {
+		return ""
+	}
+	value := strings.TrimSpace(field.input.Value())
+	if value == "" {
+		if field.required {
+			return "fill " + elicitLabel(field)
+		}
+		return ""
+	}
+	switch field.elicitKind {
+	case elicitNumber:
+		if _, err := strconv.ParseFloat(value, 64); err != nil {
+			return elicitLabel(field) + " must be a number"
+		}
+	case elicitInteger:
+		if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+			return elicitLabel(field) + " must be a whole number"
+		}
+	case elicitEnum:
+		if !slices.Contains(field.enumValues, value) {
+			return elicitLabel(field) + " must be one of " + strings.Join(field.enumValues, ", ")
+		}
+	}
+	return ""
+}
+
+// elicitBlocker reports the first row that blocks acceptance, or "".
+func elicitBlocker(fields []promptField) string {
+	for _, field := range fields {
+		if problem := elicitRowProblem(field); problem != "" {
+			return problem
+		}
+	}
+	return ""
+}
+
+// submitElicit answers the question and closes the form. The form is gone before
+// the request lands, so a refusal has to surface from the result.
+func (m *chatModel) submitElicit(action string, content map[string]any) tea.Cmd {
+	reqID := m.modal.elicitReqID
+	m.modal = nil
+	m.reflow()
+	return resolveElicitationCmd(m.ctx, m.client, m.session.ID, reqID, action, content)
 }
 
 func (m *chatModel) View() tea.View {
@@ -3586,6 +3967,12 @@ func renderMCPPromptCmd(ctx context.Context, client Client, id uuid.UUID, server
 			texts = append(texts, message.Text())
 		}
 		return mcpPromptRenderedMsg{text: strings.Join(texts, "\n\n")}
+	}
+}
+
+func resolveElicitationCmd(ctx context.Context, client Client, sessionID, reqID uuid.UUID, action string, content map[string]any) tea.Cmd {
+	return func() tea.Msg {
+		return elicitResolvedMsg{err: client.ResolveElicitation(ctx, sessionID, reqID, action, content)}
 	}
 }
 

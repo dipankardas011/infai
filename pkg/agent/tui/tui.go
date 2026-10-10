@@ -66,6 +66,7 @@ type Client interface {
 	SendMessage(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel) error
 	JoinSession(ctx context.Context, id uuid.UUID, onView func(glue.SessionView), onEvent func(contracts.EventStream)) error
 	ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error
+	ResolveElicitation(ctx context.Context, id uuid.UUID, reqID uuid.UUID, action string, content map[string]any) error
 	CancelTurn(ctx context.Context, id uuid.UUID) error
 	SetSession(id uuid.UUID)
 	CreateSession(ctx context.Context, opts SessionCreateOptions) (*glue.SessionOutput, error)

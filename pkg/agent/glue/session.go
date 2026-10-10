@@ -7,13 +7,14 @@ import (
 )
 
 type SessionView struct {
-	Meta            store.SessionMeta            `json:"meta"`
-	History         []contracts.ChatMessage      `json:"history"`
-	Status          contracts.SessionStatus      `json:"status"`
-	InFlight        []contracts.EventStream      `json:"in_flight"`
-	Checklist       contracts.TaskChecklistState `json:"checklist"`
-	Prompts         []contracts.MCPPrompt        `json:"prompts,omitempty"`
-	PendingApproval *contracts.ApprovalRequest   `json:"pending_approval,omitempty"`
+	Meta               store.SessionMeta             `json:"meta"`
+	History            []contracts.ChatMessage       `json:"history"`
+	Status             contracts.SessionStatus       `json:"status"`
+	InFlight           []contracts.EventStream       `json:"in_flight"`
+	Checklist          contracts.TaskChecklistState  `json:"checklist"`
+	Prompts            []contracts.MCPPrompt         `json:"prompts,omitempty"`
+	PendingApproval    *contracts.ApprovalRequest    `json:"pending_approval,omitempty"`
+	PendingElicitation *contracts.ElicitationRequest `json:"pending_elicitation,omitempty"`
 }
 
 // SessionOutput combines durable session metadata with runtime model capacity.
@@ -44,6 +45,11 @@ type RenderPromptRequest struct {
 	Server    string            `json:"server"`
 	Name      string            `json:"name"`
 	Arguments map[string]string `json:"arguments,omitempty"`
+}
+
+type ResolveElicitationRequest struct {
+	Action  string         `json:"action"`
+	Content map[string]any `json:"content,omitempty"`
 }
 
 type BranchRequest struct {

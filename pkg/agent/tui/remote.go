@@ -284,6 +284,13 @@ func (c *RemoteClient) ResolveApproval(ctx context.Context, approval Approval, d
 	return nil
 }
 
+func (c *RemoteClient) ResolveElicitation(ctx context.Context, id uuid.UUID, reqID uuid.UUID, action string, content map[string]any) error {
+	return c.postJSON(ctx,
+		"/v1/sessions/"+id.String()+"/elicitations/"+reqID.String(),
+		glue.ResolveElicitationRequest{Action: action, Content: content},
+		http.StatusAccepted)
+}
+
 // ---- providers ----
 
 func (c *RemoteClient) ListAllProviderModels(ctx context.Context) ([]glue.ListModelOutput, error) {

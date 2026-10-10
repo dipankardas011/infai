@@ -56,21 +56,33 @@ const (
 	EventApprovalRequested EventStreamKind = "approval_requested"
 	EventApprovalResolved  EventStreamKind = "approval_resolved"
 
+	/// MCP Elicitation
+	EventElicitationRequested EventStreamKind = "elicitation_requested"
+	EventElicitationResolved  EventStreamKind = "elicitation_resolved"
+
 	/// Compaction Result
 	EventCompactionExecuted EventStreamKind = "compaction_executed"
 )
 
 type EventStream struct {
-	Kind        EventStreamKind      `json:"delta_kind,omitempty"`
-	Timestamp   time.Time            `json:"ts"`
-	Content     *string              `json:"content"`
-	ToolCall    *ToolCall            `json:"tool_call"`
-	ToolResult  *ToolExecutionResult `json:"tool_result"`
-	HITLCall    *ApprovalRequest     `json:"hitl_call"`
-	HITLResult  *ApprovalConclusion  `json:"hitl_result"`
-	Attachments *EventAttachments    `json:"attachments,omitempty"`
-	Compaction  *CompactionResult    `json:"compaction,omitempty"`
-	Sidecar     *SidecarStatus       `json:"sidecar,omitempty"`
+	Kind      EventStreamKind `json:"delta_kind,omitempty"`
+	Timestamp time.Time       `json:"ts"`
+
+	Content     *string           `json:"content"`
+	Attachments *EventAttachments `json:"attachments,omitempty"`
+
+	ToolCall   *ToolCall            `json:"tool_call"`
+	ToolResult *ToolExecutionResult `json:"tool_result"`
+
+	HITLCall   *ApprovalRequest    `json:"hitl_call"`
+	HITLResult *ApprovalConclusion `json:"hitl_result"`
+
+	Compaction *CompactionResult `json:"compaction,omitempty"`
+
+	Sidecar *SidecarStatus `json:"sidecar,omitempty"`
+
+	Elicitation       *ElicitationRequest    `json:"elicitation"`
+	ElicitationResult *ElicitationConclusion `json:"elicitation_result"`
 }
 
 type SidecarStatus struct {

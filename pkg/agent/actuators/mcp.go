@@ -38,6 +38,10 @@ type mcpPromptBinding struct {
 	timeout time.Duration
 }
 
+// ElicitFunc lets a server ask the user a question mid-call. It blocks until
+// the answer arrives; returning an error aborts the call.
+type ElicitFunc func(ctx context.Context, server string, params *mcp.ElicitParams) (*mcp.ElicitResult, error)
+
 // MCPManager owns a session's connections and its initial tool discovery snapshot.
 type MCPManager struct {
 	ctx            context.Context
@@ -52,7 +56,7 @@ type MCPManager struct {
 	closeErr       error
 }
 
-func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers map[string]contracts.MCPServerConfig) (*MCPManager, error) {
+func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers map[string]contracts.MCPServerConfig, elicit ElicitFunc) (*MCPManager, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	manager := &MCPManager{
 		ctx:            ctx,
@@ -71,18 +75,26 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 		}
 	}()
 
-	client := mcp.NewClient(&mcp.Implementation{Name: mcpClientName, Version: config.Version()}, &mcp.ClientOptions{
-		Logger:         logger,
-		Capabilities:   &mcp.ClientCapabilities{},
-		MultiRoundTrip: &mcp.MultiRoundTripOptions{Disabled: true},
-	})
-
 	for name := range servers {
 		server := servers[name]
 		timeout := defaultMCPTimeout
 		if server.TimeoutSeconds > 0 {
 			timeout = time.Duration(server.TimeoutSeconds) * time.Second
 		}
+		// One client per server: the elicitation handler is installed on the
+		// client and has to report which server asked. § go-sdk client.go
+		// ClientOptions.ElicitationHandler / mrtr.go multi-round-trip middleware
+		serverName := name
+		client := mcp.NewClient(&mcp.Implementation{Name: mcpClientName, Version: config.Version()}, &mcp.ClientOptions{
+			Logger:       logger,
+			Capabilities: &mcp.ClientCapabilities{},
+			ElicitationHandler: func(ctx context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+				if elicit == nil {
+					return nil, errors.New("elicitation is not configured")
+				}
+				return elicit(ctx, serverName, req.Params)
+			},
+		})
 		transport, err := manager.transport(cwd, server, timeout)
 		if err != nil {
 			return nil, fmt.Errorf("MCP server %q: %w", name, err)

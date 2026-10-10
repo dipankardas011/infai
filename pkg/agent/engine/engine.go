@@ -600,6 +600,14 @@ func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, d
 	return sess.ResolveApproval(approvalID, decision)
 }
 
+func (e *InfaiAgentEngine) ResolveElicitation(id uuid.UUID, reqID uuid.UUID, conclusion contracts.ElicitationConclusion) error {
+	sess, ok := e.Session(id)
+	if !ok {
+		return harnessErr.ErrSessionNotFound
+	}
+	return sess.ResolveElicitation(reqID, conclusion)
+}
+
 func (e *InfaiAgentEngine) RenderMCPPrompt(id uuid.UUID, server, name string, arguments map[string]string) ([]contracts.ChatMessage, error) {
 	sess, ok := e.Session(id)
 	if !ok {

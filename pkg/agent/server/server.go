@@ -58,6 +58,7 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("POST /v1/sessions/{id}/chat", s.handleChat)
 	mux.HandleFunc("POST /v1/sessions/{id}/cancel", s.handleCancelTurn)
 	mux.HandleFunc("POST /v1/sessions/{id}/approvals/{approvalID}", s.handleApproval)
+	mux.HandleFunc("POST /v1/sessions/{id}/elicitations/{elicitationID}", s.handleResolveElicitation)
 	mux.HandleFunc("POST /v1/sessions/{id}/prompts", s.handleRenderPrompt)
 	mux.HandleFunc("POST /v1/sessions/{id}/compact", s.handleCompact)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
@@ -110,6 +111,38 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.engine.ResolveApproval(sessionID, approvalID, req); err != nil {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusConflict, err)
+		return
+	}
+	s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
+func (s *Server) handleResolveElicitation(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	elicitationID, err := uuid.Parse(r.PathValue("elicitationID"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid elicitation id"))
+		return
+	}
+	var req glue.ResolveElicitationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Action == "" {
+		s.writeError(w, http.StatusBadRequest, errors.New("action is required"))
+		return
+	}
+	conclusion := contracts.ElicitationConclusion{ReqID: elicitationID, Action: req.Action, Content: req.Content}
+	if err := s.engine.ResolveElicitation(sessionID, elicitationID, conclusion); err != nil {
 		if errors.Is(err, harnessErr.ErrSessionNotFound) {
 			s.writeError(w, http.StatusNotFound, err)
 			return

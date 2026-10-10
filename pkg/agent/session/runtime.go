@@ -50,6 +50,10 @@ func (s *InfaiAgentSession) JoinSessionEvents() (glue.SessionView, <-chan contra
 		request := s.pendingApproval.request
 		view.PendingApproval = &request
 	}
+	if s.pendingElicitation != nil {
+		request := s.pendingElicitation.request
+		view.PendingElicitation = &request
+	}
 	s.mu.Unlock()
 
 	var once sync.Once

@@ -85,7 +85,7 @@ func (s *InfaiAgentSession) configureMCPTools() error {
 	if err != nil {
 		return fmt.Errorf("load MCP config: %w", err)
 	}
-	mcpManager, err := actuators.NewMCPManager(s.ctx, s.meta.Cwd, s.l, config.MCPServers)
+	mcpManager, err := actuators.NewMCPManager(s.ctx, s.meta.Cwd, s.l, config.MCPServers, s.MCPElicit)
 	if err != nil {
 		return fmt.Errorf("configure MCP tools: %w", err)
 	}

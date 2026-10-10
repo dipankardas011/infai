@@ -63,6 +63,7 @@ type InfaiAgentSession struct {
 	// write. The agent is the sole receiver of userCancellation.
 	userCancellation             chan struct{}
 	pendingApproval              *pendingApproval
+	pendingElicitation           *pendingElicitation
 	pendingBranchParent          uuid.UUID
 	pendingBackgroundSidecarLoop map[uuid.UUID]string
 
@@ -558,6 +559,8 @@ func (s *InfaiAgentSession) CancelTurn() error {
 
 	pending := s.pendingApproval
 	s.pendingApproval = nil
+	pendingMCPElicit := s.pendingElicitation
+	s.pendingElicitation = nil
 	s.mu.Unlock()
 
 	if pending != nil {
@@ -574,6 +577,10 @@ func (s *InfaiAgentSession) CancelTurn() error {
 			HITLResult: &decision,
 		})
 		pending.decision <- decision
+	}
+
+	if pendingMCPElicit != nil {
+		pendingMCPElicit.conclusion <- contracts.ElicitationConclusion{ReqID: pendingMCPElicit.request.ID, Action: contracts.ElicitationCancel}
 	}
 	return nil
 }
@@ -813,6 +820,34 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			// Resolving an approval only releases the waiting tool call. The
 			// agent is the one that reports the session busy again, so that is
 			// the status the resolution moves to.
+			busy := string(contracts.SessionBusy)
+			busyEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &busy}
+
+			s.mu.Lock()
+			s.moveStatusLocked(contracts.SessionBusy)
+			status := s.status
+			s.inFlight = append(s.inFlight, event, busyEvent)
+			s.notifySubscribers(event)
+			s.notifySubscribers(busyEvent)
+			s.mu.Unlock()
+
+			s.reportStatusToParent(status)
+
+		case contracts.EventElicitationRequested:
+			waiting := string(contracts.SessionWaitingApproval)
+			waitingEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &waiting}
+
+			s.mu.Lock()
+			s.moveStatusLocked(contracts.SessionWaitingApproval)
+			status := s.status
+			s.inFlight = append(s.inFlight, event, waitingEvent)
+			s.notifySubscribers(event)
+			s.notifySubscribers(waitingEvent)
+			s.mu.Unlock()
+
+			s.reportStatusToParent(status)
+
+		case contracts.EventElicitationResolved:
 			busy := string(contracts.SessionBusy)
 			busyEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &busy}
 
