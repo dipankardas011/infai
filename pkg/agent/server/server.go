@@ -44,6 +44,14 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("POST /v1/providers/logout", s.handleProviderLogout)
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
 
+	// MCP server management
+	mux.HandleFunc("GET /v1/mcp/servers", s.handleListMCPServers)
+	mux.HandleFunc("POST /v1/mcp/servers", s.handleAddMCPServer)
+	mux.HandleFunc("PUT /v1/mcp/servers/{name}", s.handleEditMCPServer)
+	mux.HandleFunc("DELETE /v1/mcp/servers/{name}", s.handleRemoveMCPServer)
+	mux.HandleFunc("POST /v1/mcp/servers/{name}/probe", s.handleProbeMCPServer)
+	mux.HandleFunc("POST /v1/mcp/servers/{name}/login", s.handleLoginMCPServer)
+
 	// sessions
 	mux.HandleFunc("POST /v1/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /v1/sessions", s.handleListSessions)
@@ -212,8 +220,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
+	s.writeText(w, http.StatusOK, "ok")
 }
 
 // ---- providers ----
@@ -278,6 +285,137 @@ func (s *Server) handleProviderLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListModels(w http.ResponseWriter, _ *http.Request) {
 	s.writeJSON(w, http.StatusOK, s.engine.ListAllProviderModels())
+}
+
+func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
+	servers, err := s.engine.ListMCPServers(r.Context())
+	if err != nil {
+		s.writeMCPError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, servers)
+}
+
+func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
+	input, err := decodeMCPServerInput(w, r)
+	if err != nil {
+		s.writeMCPDecodeError(w, err)
+		return
+	}
+	view, err := s.engine.AddMCPServer(r.Context(), input)
+	if err != nil {
+		s.writeMCPError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusCreated, view)
+}
+
+func (s *Server) handleEditMCPServer(w http.ResponseWriter, r *http.Request) {
+	input, err := decodeMCPServerInput(w, r)
+	if err != nil {
+		s.writeMCPDecodeError(w, err)
+		return
+	}
+	name := r.PathValue("name")
+	if input.Name != name {
+		s.writeError(w, http.StatusBadRequest, errors.New("the server name comes from the path and must match the body"))
+		return
+	}
+	view, err := s.engine.EditMCPServer(r.Context(), input)
+	if err != nil {
+		s.writeMCPError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleRemoveMCPServer(w http.ResponseWriter, r *http.Request) {
+	if err := s.engine.RemoveMCPServer(r.Context(), r.PathValue("name")); err != nil {
+		s.writeMCPError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleProbeMCPServer(w http.ResponseWriter, r *http.Request) {
+	probe, err := s.engine.ProbeMCPServer(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.writeMCPError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, probe)
+}
+
+// handleLoginMCPServer streams one interactive authorization, shaped exactly
+// like handleProviderLogin: the URL the user must open arrives as an event, and
+// a failure that happens after the stream opened is a final failed event.
+func (s *Server) handleLoginMCPServer(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if _, ok := w.(http.Flusher); !ok {
+		s.writeError(w, http.StatusBadRequest, errors.New("streaming not supported"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	s.flush(w)
+
+	err := s.engine.LoginMCPServer(r.Context(), glue.MCPLoginInput{Server: name}, func(output glue.MCPLoginOutput) error {
+		if err := s.writeSSE(w, output); err != nil {
+			return err
+		}
+		s.flush(w)
+		return nil
+	})
+	if err == nil || r.Context().Err() != nil {
+		return
+	}
+	if writeErr := s.writeSSE(w, glue.MCPLoginOutput{Status: contracts.ProviderAuthFailed, Error: err.Error()}); writeErr != nil {
+		s.logger.Debug("MCP login stream error event failed", "server", name, "error", writeErr)
+	}
+	s.flush(w)
+}
+
+// writeMCPError maps the engine's MCP errors onto status codes: a mistake in
+// the request is the caller's, a missing server and a duplicate name are not,
+// and anything else is this server failing on its own storage.
+func (s *Server) writeMCPError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, engine.ErrMCPNotFound):
+		s.writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, engine.ErrMCPExists):
+		s.writeError(w, http.StatusConflict, err)
+	case errors.Is(err, engine.ErrMCPInvalid):
+		s.writeError(w, http.StatusBadRequest, err)
+	default:
+		s.writeError(w, http.StatusInternalServerError, err)
+	}
+}
+
+// maxMCPServerBodyBytes bounds a server management body: one tools.json entry is
+// small even with a token and a handful of headers.
+const maxMCPServerBodyBytes = 64 << 10
+
+// writeMCPDecodeError answers a management body that could not be read: over the
+// limit is 413, anything else is 400.
+func (s *Server) writeMCPDecodeError(w http.ResponseWriter, err error) {
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("request body exceeds the %d KB limit", maxMCPServerBodyBytes>>10))
+		return
+	}
+	s.writeError(w, http.StatusBadRequest, err)
+}
+
+// decodeMCPServerInput reads a bounded management body. The handler answers its
+// two failures differently, so the error is returned rather than written here.
+func decodeMCPServerInput(w http.ResponseWriter, r *http.Request) (glue.MCPServerInput, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxMCPServerBodyBytes)
+	var input glue.MCPServerInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		return glue.MCPServerInput{}, err
+	}
+	return input, nil
 }
 
 // ---- sessions ----
@@ -618,6 +756,17 @@ func (s *Server) writeJSON(w http.ResponseWriter, code int, v any) {
 
 func (s *Server) writeError(w http.ResponseWriter, code int, err error) {
 	s.writeJSON(w, code, glue.ErrorResponse{Error: err.Error()})
+}
+
+// writeText answers with a plain-text body. Like writeJSON, a failed write is
+// logged rather than acted on: the status is already sent, and the browser that
+// asked may simply have gone.
+func (s *Server) writeText(w http.ResponseWriter, code int, message string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(code)
+	if _, err := io.WriteString(w, message); err != nil {
+		s.logger.Error("write response", "status", code, "error", err)
+	}
 }
 
 // writeSSE emits one Server-Sent Event carrying a JSON payload. Returns the

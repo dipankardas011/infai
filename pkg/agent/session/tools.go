@@ -16,7 +16,6 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/delegate"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/memory"
-	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/dipankardas011/infai/pkg/ds"
 	"github.com/google/uuid"
 )
@@ -80,12 +79,8 @@ func (s *InfaiAgentSession) RenderPrompt(server, name string, arguments map[stri
 	return s.mcpManager.RenderPrompt(s.ctx, server, name, arguments)
 }
 
-func (s *InfaiAgentSession) configureMCPTools() error {
-	config, err := store.LoadToolConfig()
-	if err != nil {
-		return fmt.Errorf("load MCP config: %w", err)
-	}
-	mcpManager, err := actuators.NewMCPManager(s.ctx, s.meta.Cwd, s.l, config.MCPServers, s.MCPElicit)
+func (s *InfaiAgentSession) configureMCPTools(mcpServers map[string]contracts.MCPServerConfig) error {
+	mcpManager, err := actuators.NewMCPManager(s.ctx, s.meta.Cwd, s.l, mcpServers, s.MCPElicit)
 	if err != nil {
 		return fmt.Errorf("configure MCP tools: %w", err)
 	}

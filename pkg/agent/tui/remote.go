@@ -634,3 +634,130 @@ func readAPIError(resp *http.Response) error {
 	}
 	return fmt.Errorf("server: status %d: %s", resp.StatusCode, string(body))
 }
+
+func (c *RemoteClient) ListMCPServers(ctx context.Context) ([]glue.MCPServerView, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/mcp/servers", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+	var out []glue.MCPServerView
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *RemoteClient) AddMCPServer(ctx context.Context, input glue.MCPServerInput) (glue.MCPServerView, error) {
+	var out glue.MCPServerView
+	err := c.postJSONInto(ctx, "/v1/mcp/servers", input, http.StatusCreated, &out)
+	return out, err
+}
+
+func (c *RemoteClient) EditMCPServer(ctx context.Context, input glue.MCPServerInput) (glue.MCPServerView, error) {
+	var out glue.MCPServerView
+	err := c.putJSONInto(ctx, "/v1/mcp/servers/"+input.Name, input, http.StatusOK, &out)
+	return out, err
+}
+
+func (c *RemoteClient) RemoveMCPServer(ctx context.Context, name string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/mcp/servers/"+name, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return readAPIError(resp)
+	}
+	return nil
+}
+
+func (c *RemoteClient) ProbeMCPServer(ctx context.Context, name string) (glue.MCPProbeOutput, error) {
+	var out glue.MCPProbeOutput
+	err := c.postJSONInto(ctx, "/v1/mcp/servers/"+name+"/probe", struct{}{}, http.StatusOK, &out)
+	return out, err
+}
+
+// LoginMCPServer runs one interactive authorization and reports its progress.
+// The engine sends the authorization URL as a pending update and only then
+// blocks, so the URL has to be shown as soon as it arrives.
+func (c *RemoteClient) LoginMCPServer(ctx context.Context, name string, onUpdate func(glue.MCPLoginOutput)) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/mcp/servers/"+name+"/login", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return readAPIError(resp)
+	}
+
+	dec := models.NewDecoder(resp.Body)
+	for {
+		event, err := dec.Decode()
+		if err == io.EOF {
+			return io.ErrUnexpectedEOF
+		}
+		if err != nil {
+			return err
+		}
+		var output glue.MCPLoginOutput
+		if err := json.Unmarshal([]byte(event.Data), &output); err != nil {
+			return err
+		}
+		if onUpdate != nil {
+			onUpdate(output)
+		}
+		switch output.Status {
+		case contracts.ProviderAuthComplete:
+			return nil
+		case contracts.ProviderAuthFailed:
+			if output.Error == "" {
+				output.Error = "authorization failed"
+			}
+			return errors.New(output.Error)
+		case contracts.ProviderAuthPending:
+		default:
+			return fmt.Errorf("MCP authorization returned unknown status %q", output.Status)
+		}
+	}
+}
+
+func (c *RemoteClient) putJSONInto(ctx context.Context, path string, body any, wantCode int, out any) error {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+path, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantCode {
+		return readAPIError(resp)
+	}
+	if out != nil {
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+	return nil
+}

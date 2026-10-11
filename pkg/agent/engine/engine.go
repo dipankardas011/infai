@@ -32,6 +32,7 @@ type InfaiAgentEngine struct {
 	cancel    context.CancelCauseFunc
 
 	providerMu   sync.Mutex
+	mcpMu        sync.Mutex // serializes interactive MCP logins, one at a time
 	providers    contracts.LLMProviders
 	sessionStore *store.SessionStore
 
@@ -184,6 +185,11 @@ func (e *InfaiAgentEngine) createSidecarSession(parentID uuid.UUID, request comm
 		return uuid.Nil, fmt.Errorf("engine: model %q not configured for provider %q", parentMeta.Model, parentMeta.Provider)
 	}
 
+	toolConfig, err := store.LoadToolConfig()
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("load MCP config: %w", err)
+	}
+
 	id, err := uuid.NewV7()
 	if err != nil {
 		return uuid.Nil, err
@@ -217,6 +223,7 @@ func (e *InfaiAgentEngine) createSidecarSession(parentID uuid.UUID, request comm
 		e.sessionStore,
 		e.aseComms.NewSessionAgentComms(id),
 		contracts.SidecarLoopAgent,
+		toolConfig.MCPServers,
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(id)
@@ -330,6 +337,11 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	if !ok {
 		return nil, fmt.Errorf("engine: model %q not configured for provider %q", opts.Model, opts.Provider)
 	}
+	toolConfig, err := store.LoadToolConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load MCP config: %w", err)
+	}
+
 	sessID, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
@@ -359,6 +371,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		e.sessionStore,
 		e.aseComms.NewSessionAgentComms(sessID),
 		opts.AgentKind,
+		toolConfig.MCPServers,
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(sessID)
@@ -426,6 +439,12 @@ func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgent
 	if !ok {
 		return nil, fmt.Errorf("engine: model %q not configured for provider %q", meta.Model, meta.Provider)
 	}
+	toolConfig, err := store.LoadToolConfig()
+	if err != nil {
+		_ = timeline.Close()
+		return nil, fmt.Errorf("load MCP config: %w", err)
+	}
+
 	if err := e.aseComms.RegisterSessionAgent(sessionID); err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -444,6 +463,7 @@ func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgent
 		),
 		meta, history, timeline, e.sessionStore,
 		e.aseComms.NewSessionAgentComms(sessionID),
+		toolConfig.MCPServers,
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(sessionID)

@@ -112,6 +112,7 @@ func NewSession(
 	ss *store.SessionStore,
 	aeComms *comms.ISACChannel,
 	sessionAgentKind contracts.AgentKind,
+	mcpServers map[string]contracts.MCPServerConfig,
 ) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(chosenModel)
 	if err != nil {
@@ -163,7 +164,7 @@ func NewSession(
 		return nil, err
 	}
 
-	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc)
+	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc, mcpServers)
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -180,6 +181,7 @@ func NewResumedSession(
 	timeline *store.Timeline,
 	sessionStore *store.SessionStore,
 	aeComms *comms.ISACChannel,
+	mcpServers map[string]contracts.MCPServerConfig,
 ) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(chosenModel)
 	if err != nil {
@@ -200,7 +202,7 @@ func NewResumedSession(
 		}
 	}
 
-	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc)
+	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc, mcpServers)
 }
 
 func newRuntimeSession(
@@ -214,6 +216,7 @@ func newRuntimeSession(
 	am *contracts.AgentMailbox,
 	aeComms *comms.ISACChannel,
 	evalFunc func(context.Context) error,
+	mcpServers map[string]contracts.MCPServerConfig,
 ) (*InfaiAgentSession, error) {
 	if engineCtx == nil {
 		return nil, errors.New("session: engine context is required")
@@ -272,7 +275,7 @@ func newRuntimeSession(
 	if s.meta.AgentKind == contracts.InteractiveAgent {
 		s.configureDelegationTools()
 	}
-	if err := s.configureMCPTools(); err != nil {
+	if err := s.configureMCPTools(mcpServers); err != nil {
 		cancel(err)
 		return nil, err
 	}

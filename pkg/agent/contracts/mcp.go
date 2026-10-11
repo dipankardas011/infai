@@ -1,5 +1,7 @@
 package contracts
 
+import "time"
+
 // ToolsConfig is the harness's tool configuration, keyed by server name. The
 // name is what tool names and error messages use; it is never repeated inside
 // the server's own entry.
@@ -14,8 +16,34 @@ type MCPServerConfig struct {
 	Env            map[string]string `json:"env,omitempty"`
 	URL            string            `json:"url,omitempty"`
 	Headers        map[string]string `json:"headers,omitempty"`
-	BearerTokenEnv string            `json:"bearerTokenEnv,omitempty"`
+	BearerToken    string            `json:"bearerToken,omitempty"`
+	OAuth          *MCPOAuthConfig   `json:"oauth,omitempty"`
 	TimeoutSeconds int               `json:"timeoutSeconds,omitempty"`
+}
+
+// MCPAuthKind is how a configured MCP server authenticates. The values are the
+// names of the config fields they stand for, so a view can be read against the
+// entry it describes.
+type MCPAuthKind string
+
+const (
+	MCPAuthNone    MCPAuthKind = "none"
+	MCPAuthBearer  MCPAuthKind = "bearerToken"
+	MCPAuthHeaders MCPAuthKind = "headers"
+	MCPAuthOAuth   MCPAuthKind = "oauth"
+)
+
+// MCPOAuthConfig opts a streamable-http server into OAuth 2.1. An empty block
+// means dynamic client registration with PKCE and no preregistration; a
+// ClientID means the client is preregistered with the authorization server.
+type MCPOAuthConfig struct {
+	RedirectURL  string    `json:"redirectUrl,omitempty"`
+	ClientID     string    `json:"clientId,omitempty"`
+	ClientSecret string    `json:"clientSecret,omitempty"`
+	Issuer       string    `json:"issuer,omitempty"`
+	Scopes       []string  `json:"scopes,omitempty"`
+	AccessToken  string    `json:"accessToken,omitempty"`
+	Expiry       time.Time `json:"expiry,omitzero"`
 }
 
 type MCPPromptArgument struct {

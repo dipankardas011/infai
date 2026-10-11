@@ -18,6 +18,7 @@ import (
 	"github.com/dipankardas011/infai/internal/config"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -51,6 +52,7 @@ type ElicitFunc func(ctx context.Context, server string, params *mcp.ElicitParam
 type MCPManager struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
+	logger           *slog.Logger
 	tools            []contracts.Tool
 	bindings         map[contracts.ToolType]mcpToolBinding
 	prompts          []contracts.MCPPrompt
@@ -68,6 +70,7 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 	manager := &MCPManager{
 		ctx:              ctx,
 		cancel:           cancel,
+		logger:           logger,
 		bindings:         make(map[contracts.ToolType]mcpToolBinding),
 		promptBindings:   make(map[string]mcpPromptBinding),
 		resourceBindings: make(map[string]mcpResourceBinding),
@@ -83,8 +86,7 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 		}
 	}()
 
-	for name := range servers {
-		server := servers[name]
+	for name, server := range servers {
 		timeout := defaultMCPTimeout
 		if server.TimeoutSeconds > 0 {
 			timeout = time.Duration(server.TimeoutSeconds) * time.Second
@@ -103,15 +105,17 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 				return elicit(ctx, serverName, req.Params)
 			},
 		})
-		transport, err := manager.transport(cwd, server, timeout)
+		transport, err := manager.transport(cwd, name, server, timeout)
 		if err != nil {
-			return nil, fmt.Errorf("MCP server %q: %w", name, err)
+			manager.logUnavailable(name, err)
+			continue
 		}
 		startupCtx, stop := context.WithTimeout(ctx, timeout)
 		session, err := client.Connect(startupCtx, transport, nil)
 		if err != nil {
 			stop()
-			return nil, fmt.Errorf("MCP server %q: connection failed", name)
+			manager.logUnavailable(name, err)
+			continue
 		}
 		manager.sessions = append(manager.sessions, session)
 		err = manager.discover(startupCtx, session, name, timeout)
@@ -123,7 +127,8 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 		}
 		stop()
 		if err != nil {
-			return nil, fmt.Errorf("MCP server %q: %w", name, err)
+			manager.logUnavailable(name, err)
+			continue
 		}
 	}
 
@@ -135,7 +140,15 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 	return manager, nil
 }
 
-func (m *MCPManager) transport(cwd string, server contracts.MCPServerConfig, timeout time.Duration) (mcp.Transport, error) {
+func (m *MCPManager) logUnavailable(server string, err error) {
+	reason := "connection or discovery failed"
+	if errors.Is(err, ErrAuthRequired) {
+		reason = ErrAuthRequired.Error()
+	}
+	m.logger.WarnContext(m.ctx, "MCP server unavailable", "server", server, "reason", reason)
+}
+
+func (m *MCPManager) transport(cwd, name string, server contracts.MCPServerConfig, timeout time.Duration) (mcp.Transport, error) {
 	switch server.Transport {
 	case "stdio":
 		command := exec.Command(server.Command, server.Args...)
@@ -152,19 +165,12 @@ func (m *MCPManager) transport(cwd string, server contracts.MCPServerConfig, tim
 		for key, value := range server.Headers {
 			headers.Set(key, value)
 		}
-		if server.BearerTokenEnv != "" {
-			token, ok := os.LookupEnv(server.BearerTokenEnv)
-			if !ok || token == "" {
-				return nil, errors.New("a referenced environment credential is missing")
-			}
-			if strings.ContainsAny(token, "\r\n") {
-				return nil, errors.New("the referenced bearer credential is invalid")
-			}
-			headers.Set("Authorization", "Bearer "+token)
+		if server.BearerToken != "" {
+			headers.Set("Authorization", "Bearer "+server.BearerToken)
 		}
 		base := http.DefaultTransport.(*http.Transport).Clone()
 		m.http = append(m.http, base)
-		return &mcp.StreamableClientTransport{
+		transport := &mcp.StreamableClientTransport{
 			Endpoint: server.URL,
 			HTTPClient: &http.Client{
 				Timeout:   timeout,
@@ -175,7 +181,14 @@ func (m *MCPManager) transport(cwd string, server contracts.MCPServerConfig, tim
 			DisableStandaloneSSE: true,
 			MaxRetries:           -1,
 			MaxEventSize:         webMaxBodyBytes,
-		}, nil
+		}
+
+		handler := &mcpSessionAuth{}
+		if oauth := server.OAuth; oauth != nil {
+			handler.token = &oauth2.Token{AccessToken: oauth.AccessToken, Expiry: oauth.Expiry}
+		}
+		transport.OAuthHandler = handler
+		return transport, nil
 	default:
 		return nil, errors.New("unsupported transport")
 	}
@@ -208,7 +221,7 @@ func (m *MCPManager) discover(ctx context.Context, session *mcp.ClientSession, s
 	for {
 		page, err := session.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
 		if err != nil {
-			return errors.New("tool discovery failed")
+			return fmt.Errorf("tool discovery failed: %w", err)
 		}
 		for _, tool := range page.Tools {
 			if tool == nil || tool.Name == "" {
@@ -246,7 +259,7 @@ func (m *MCPManager) discoverPrompts(ctx context.Context, session *mcp.ClientSes
 	for {
 		page, err := session.ListPrompts(ctx, &mcp.ListPromptsParams{Cursor: cursor})
 		if err != nil {
-			return errors.New("prompt discovery failed")
+			return fmt.Errorf("prompt discovery failed: %w", err)
 		}
 		for _, prompt := range page.Prompts {
 			if prompt == nil || prompt.Name == "" {
@@ -292,7 +305,7 @@ func (m *MCPManager) discoverResources(ctx context.Context, session *mcp.ClientS
 	for {
 		page, err := session.ListResources(ctx, &mcp.ListResourcesParams{Cursor: cursor})
 		if err != nil {
-			return errors.New("resource discovery failed")
+			return fmt.Errorf("resource discovery failed: %w", err)
 		}
 		for _, resource := range page.Resources {
 			if resource == nil || resource.URI == "" {
@@ -351,6 +364,9 @@ func (m *MCPManager) ReadResource(ctx context.Context, uri string) (contracts.MC
 	if err != nil {
 		if ctx.Err() != nil {
 			return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "execution_canceled", "the MCP resource read was canceled or exceeded its deadline", contracts.ResponsibilityEnvironment, ctx.Err())
+		}
+		if errors.Is(err, ErrAuthRequired) {
+			return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "mcp_unauthorized", "the MCP server rejected the client as unauthorized; its credentials are missing, expired or insufficient and must be refreshed", contracts.ResponsibilityEnvironment, err)
 		}
 		return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "mcp_resource_failed", "the MCP server could not read the resource", contracts.ResponsibilityEnvironment, nil)
 	}
@@ -434,6 +450,9 @@ func (m *MCPManager) Execute(ctx context.Context, call contracts.ToolCall) (stri
 		if ctx.Err() != nil {
 			return "", contracts.NewToolExecutionError(call.Function.Name, "execution_canceled", "the MCP call was canceled or exceeded its deadline", contracts.ResponsibilityEnvironment, ctx.Err())
 		}
+		if errors.Is(err, ErrAuthRequired) {
+			return "", contracts.NewToolExecutionError(call.Function.Name, "mcp_unauthorized", "the MCP server rejected the client as unauthorized; its credentials are missing, expired or insufficient and must be refreshed", contracts.ResponsibilityEnvironment, err)
+		}
 		return "", contracts.NewToolExecutionError(call.Function.Name, "mcp_call_failed", "the MCP server could not complete the call", contracts.ResponsibilityEnvironment, nil)
 	}
 	if result.NeedsInput() {
@@ -477,6 +496,9 @@ func (m *MCPManager) RenderPrompt(ctx context.Context, server, name string, argu
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, contracts.NewToolExecutionError(callName, "execution_canceled", "the MCP prompt was canceled or exceeded its deadline", contracts.ResponsibilityEnvironment, ctx.Err())
+		}
+		if errors.Is(err, ErrAuthRequired) {
+			return nil, contracts.NewToolExecutionError(callName, "mcp_unauthorized", "the MCP server rejected the client as unauthorized; its credentials are missing, expired or insufficient and must be refreshed", contracts.ResponsibilityEnvironment, err)
 		}
 		return nil, contracts.NewToolExecutionError(callName, "mcp_prompt_failed", "the MCP server could not render the prompt", contracts.ResponsibilityEnvironment, nil)
 	}

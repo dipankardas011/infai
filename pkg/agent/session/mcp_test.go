@@ -52,7 +52,7 @@ func TestSessionMCPServerProcess(t *testing.T) {
 	os.Exit(0)
 }
 
-func configureSessionMCPTest(t *testing.T) {
+func configureSessionMCPTest(t *testing.T) map[string]contracts.MCPServerConfig {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	executable, err := os.Executable()
@@ -80,9 +80,10 @@ func configureSessionMCPTest(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "tools.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	return config.MCPServers
 }
 
-func newMCPRuntimeTestSession(t *testing.T, kind contracts.AgentKind) *InfaiAgentSession {
+func newMCPRuntimeTestSession(t *testing.T, kind contracts.AgentKind, mcpServers map[string]contracts.MCPServerConfig) *InfaiAgentSession {
 	t.Helper()
 	base := newBareRuntimeSession(t, nil, nil, nil)
 	base.cancel(nil)
@@ -93,7 +94,7 @@ func newMCPRuntimeTestSession(t *testing.T, kind contracts.AgentKind) *InfaiAgen
 	if err := hub.RegisterSessionAgent(base.meta.ID); err != nil {
 		t.Fatal(err)
 	}
-	s, err := newRuntimeSession(context.Background(), base.l, base.model, base.meta, nil, base.timeline, base.store, base.agentMailbox, hub.NewSessionAgentComms(base.meta.ID), nil)
+	s, err := newRuntimeSession(context.Background(), base.l, base.model, base.meta, nil, base.timeline, base.store, base.agentMailbox, hub.NewSessionAgentComms(base.meta.ID), nil, mcpServers)
 	if err != nil {
 		_ = base.timeline.Close()
 		t.Fatal(err)
@@ -171,10 +172,10 @@ func receiveSessionMCPDispatch(t *testing.T, done <-chan sessionMCPDispatchResul
 }
 
 func TestSessionMCPApprovalAndExecution(t *testing.T) {
-	configureSessionMCPTest(t)
+	mcpServers := configureSessionMCPTest(t)
 	for _, kind := range []contracts.AgentKind{contracts.InteractiveAgent, contracts.SingleLoopAgent, contracts.SidecarLoopAgent} {
 		t.Run(string(kind), func(t *testing.T) {
-			s := newMCPRuntimeTestSession(t, kind)
+			s := newMCPRuntimeTestSession(t, kind, mcpServers)
 			marker := filepath.Join(t.TempDir(), "executed")
 			call := sessionMCPTestCall(t, s, "denied", "", marker)
 			if kind != contracts.InteractiveAgent {
@@ -218,8 +219,8 @@ func TestSessionMCPApprovalAndExecution(t *testing.T) {
 }
 
 func TestSessionMCPCancellationDeniesQueuedCalls(t *testing.T) {
-	configureSessionMCPTest(t)
-	s := newMCPRuntimeTestSession(t, contracts.InteractiveAgent)
+	mcpServers := configureSessionMCPTest(t)
+	s := newMCPRuntimeTestSession(t, contracts.InteractiveAgent, mcpServers)
 	marker := filepath.Join(t.TempDir(), "started")
 	queuedMarker := filepath.Join(t.TempDir(), "queued")
 	first := sessionMCPTestCall(t, s, "running", "block", marker)
@@ -256,8 +257,8 @@ func TestSessionMCPCancellationDeniesQueuedCalls(t *testing.T) {
 }
 
 func TestSessionMCPExecutionError(t *testing.T) {
-	configureSessionMCPTest(t)
-	s := newMCPRuntimeTestSession(t, contracts.InteractiveAgent)
+	mcpServers := configureSessionMCPTest(t)
+	s := newMCPRuntimeTestSession(t, contracts.InteractiveAgent, mcpServers)
 	_, events, unsubscribe, err := s.JoinSessionEvents()
 	if err != nil {
 		t.Fatal(err)
@@ -282,9 +283,9 @@ func TestSessionMCPExecutionError(t *testing.T) {
 }
 
 func TestSessionMCPIndependentManagers(t *testing.T) {
-	configureSessionMCPTest(t)
-	first := newMCPRuntimeTestSession(t, contracts.InteractiveAgent)
-	second := newMCPRuntimeTestSession(t, contracts.InteractiveAgent)
+	mcpServers := configureSessionMCPTest(t)
+	first := newMCPRuntimeTestSession(t, contracts.InteractiveAgent, mcpServers)
+	second := newMCPRuntimeTestSession(t, contracts.InteractiveAgent, mcpServers)
 	if first.mcpManager == second.mcpManager {
 		t.Fatal("sessions share MCP manager")
 	}
