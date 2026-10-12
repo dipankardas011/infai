@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -126,6 +127,19 @@ type MCPManager struct {
 	closeErr   error
 }
 
+type mcpServerListing struct {
+	name             string
+	session          *mcp.ClientSession
+	transport        *http.Transport
+	tools            []contracts.Tool
+	toolBindings     map[contracts.ToolType]mcpToolBinding
+	prompts          []contracts.MCPPrompt
+	promptBindings   map[string]mcpPromptBinding
+	resources        []contracts.MCPResource
+	resourceBindings map[string]mcpResourceBinding
+	err              error
+}
+
 func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers map[string]contracts.MCPServerConfig, elicit ElicitFunc) (*MCPManager, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	manager := &MCPManager{
@@ -148,59 +162,134 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 		}
 	}()
 
-	for name, server := range servers {
-		manager.configured = append(manager.configured, name)
-		timeout := defaultMCPTimeout
-		if server.TimeoutSeconds > 0 {
-			timeout = time.Duration(server.TimeoutSeconds) * time.Second
-		}
-		// One client per server: the elicitation handler is installed on the
-		// client and has to report which server asked. § go-sdk client.go
-		// ClientOptions.ElicitationHandler / mrtr.go multi-round-trip middleware
-		serverName := name
-		client := mcp.NewClient(&mcp.Implementation{Name: mcpClientName, Version: config.Version()}, &mcp.ClientOptions{
-			Logger:       logger,
-			Capabilities: &mcp.ClientCapabilities{},
-			ElicitationHandler: func(ctx context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
-				if elicit == nil {
-					return nil, errors.New("elicitation is not configured")
-				}
-				return elicit(ctx, serverName, req.Params)
-			},
-		})
-		transport, err := manager.transport(cwd, server, timeout)
-		if err != nil {
-			manager.markUnavailable(name, err)
-			continue
-		}
-		startupCtx, stop := context.WithTimeout(ctx, timeout)
-		session, err := client.Connect(startupCtx, transport, nil)
-		if err != nil {
-			stop()
-			manager.markUnavailable(name, err)
-			continue
-		}
-		manager.sessions = append(manager.sessions, session)
-		err = manager.discover(startupCtx, session, name, timeout)
-		if err == nil {
-			err = manager.discoverPrompts(startupCtx, session, name, timeout)
-		}
-		if err == nil {
-			err = manager.discoverResources(startupCtx, session, name, timeout)
-		}
-		stop()
-		if err != nil {
-			manager.markUnavailable(name, err)
-			continue
-		}
+	names := make([]string, 0, len(servers))
+	for name := range servers {
+		names = append(names, name)
 	}
+	manager.configured = names
+	listings := make([]mcpServerListing, len(names))
+	var waiting sync.WaitGroup
+	for index, name := range names {
+		waiting.Go(func() {
+			listings[index] = manager.connect(ctx, cwd, name, servers[name], elicit)
+		})
+	}
+	waiting.Wait()
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
+	for index := range listings {
+		manager.merge(&listings[index])
+	}
+
 	allServersReady = true
 	return manager, nil
+}
+
+// connect builds one server's connection and everything it offers. It reads
+// nothing the manager shares except its context and logger, so it is safe to run
+// beside the other servers' connects.
+func (m *MCPManager) connect(ctx context.Context, cwd, name string, server contracts.MCPServerConfig, elicit ElicitFunc) mcpServerListing {
+	listing := mcpServerListing{
+		name:             name,
+		toolBindings:     make(map[contracts.ToolType]mcpToolBinding),
+		promptBindings:   make(map[string]mcpPromptBinding),
+		resourceBindings: make(map[string]mcpResourceBinding),
+	}
+	timeout := defaultMCPTimeout
+	if server.TimeoutSeconds > 0 {
+		timeout = time.Duration(server.TimeoutSeconds) * time.Second
+	}
+	// One client per server: the elicitation handler is installed on the client
+	// and has to report which server asked. § go-sdk client.go
+	// ClientOptions.ElicitationHandler / mrtr.go multi-round-trip middleware
+	client := mcp.NewClient(&mcp.Implementation{Name: mcpClientName, Version: config.Version()}, &mcp.ClientOptions{
+		Logger:       m.logger,
+		Capabilities: &mcp.ClientCapabilities{},
+		ElicitationHandler: func(ctx context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			if elicit == nil {
+				return nil, errors.New("elicitation is not configured")
+			}
+			return elicit(ctx, name, req.Params)
+		},
+	})
+	transport, httpTransport, err := m.transport(cwd, server, timeout)
+	if err != nil {
+		listing.err = err
+		return listing
+	}
+	listing.transport = httpTransport
+
+	startupCtx, stop := context.WithTimeout(ctx, timeout)
+	defer stop()
+	session, err := client.Connect(startupCtx, transport, nil)
+	if err != nil {
+		listing.err = err
+		return listing
+	}
+	listing.session = session
+
+	var listingWait sync.WaitGroup
+	listingWait.Go(func() {
+		listing.err = m.discoverTools(startupCtx, session, &listing, timeout)
+	})
+	listingWait.Go(func() {
+		if err := m.discoverPrompts(startupCtx, session, &listing, timeout); err != nil && listing.err == nil {
+			listing.err = err
+		}
+	})
+	listingWait.Go(func() {
+		if err := m.discoverResources(startupCtx, session, &listing, timeout); err != nil && listing.err == nil {
+			listing.err = err
+		}
+	})
+
+	listingWait.Wait()
+	return listing
+}
+
+// merge folds one server's contribution into the manager. It runs after every
+// server has been connected, so the manager's own state is only ever written
+// here, in one goroutine.
+func (m *MCPManager) merge(listing *mcpServerListing) {
+	if listing.err != nil {
+		m.markUnavailable(listing.name, listing.err)
+		if listing.session != nil {
+			// The session is dropped rather than kept: nothing in it is offered,
+			// and keeping it would hold the connection open for no reason.
+			_ = listing.session.Close()
+		}
+		return
+	}
+	// Two servers can produce the same tool name (a server named "a" with a tool
+	// "b_c" against a server "a_b" with a tool "c"), and the model cannot tell
+	// them apart: the server that arrives second is left out of the session.
+	for _, tool := range listing.tools {
+		if _, claimed := m.bindings[contracts.ToolType(tool.Name)]; claimed {
+			m.markUnavailableReason(listing.name, fmt.Sprintf("the tool name %q is already offered by another server", tool.Name))
+			if listing.session != nil {
+				_ = listing.session.Close()
+			}
+			return
+		}
+	}
+	if listing.session != nil {
+		m.sessions = append(m.sessions, listing.session)
+	}
+	if listing.transport != nil {
+		m.http = append(m.http, listing.transport)
+	}
+
+	m.tools = append(m.tools, listing.tools...)
+	maps.Copy(m.bindings, listing.toolBindings)
+
+	m.prompts = append(m.prompts, listing.prompts...)
+	maps.Copy(m.promptBindings, listing.promptBindings)
+
+	m.resources = append(m.resources, listing.resources...)
+	maps.Copy(m.resourceBindings, listing.resourceBindings)
 }
 
 func (m *MCPManager) markUnavailable(server string, err error) {
@@ -208,6 +297,10 @@ func (m *MCPManager) markUnavailable(server string, err error) {
 	if errors.Is(err, errAuthRequired) {
 		reason = errAuthRequired.Error()
 	}
+	m.markUnavailableReason(server, reason)
+}
+
+func (m *MCPManager) markUnavailableReason(server, reason string) {
 	m.unavailable[server] = reason
 	m.logger.WarnContext(m.ctx, "MCP server unavailable", "server", server, "reason", reason)
 }
@@ -227,7 +320,7 @@ func (m *MCPManager) Unavailable(server string) (string, bool) {
 	return reason, ok
 }
 
-func (m *MCPManager) transport(cwd string, server contracts.MCPServerConfig, timeout time.Duration) (mcp.Transport, error) {
+func (m *MCPManager) transport(cwd string, server contracts.MCPServerConfig, timeout time.Duration) (mcp.Transport, *http.Transport, error) {
 	switch server.Transport {
 	case contracts.MCPTransportStdio:
 		command := exec.Command(server.Command, server.Args...)
@@ -238,7 +331,7 @@ func (m *MCPManager) transport(cwd string, server contracts.MCPServerConfig, tim
 		for key, value := range server.Env {
 			command.Env = append(command.Env, key+"="+value)
 		}
-		return &mcp.CommandTransport{Command: command}, nil
+		return &mcp.CommandTransport{Command: command}, nil, nil
 	case contracts.MCPTransportStreamableHTTP:
 		headers := make(http.Header)
 		for key, value := range server.Headers {
@@ -248,7 +341,6 @@ func (m *MCPManager) transport(cwd string, server contracts.MCPServerConfig, tim
 			headers.Set("Authorization", "Bearer "+server.BearerToken)
 		}
 		base := http.DefaultTransport.(*http.Transport).Clone()
-		m.http = append(m.http, base)
 		transport := &mcp.StreamableClientTransport{
 			Endpoint: server.URL,
 			HTTPClient: &http.Client{
@@ -267,9 +359,9 @@ func (m *MCPManager) transport(cwd string, server contracts.MCPServerConfig, tim
 			handler.token = &oauth2.Token{AccessToken: oauth.AccessToken, Expiry: oauth.Expiry}
 		}
 		transport.OAuthHandler = handler
-		return transport, nil
+		return transport, base, nil
 	default:
-		return nil, errors.New("unsupported transport")
+		return nil, nil, errors.New("unsupported transport")
 	}
 }
 
@@ -321,7 +413,11 @@ func walkPages[T any](next func(cursor string) (items []T, nextCursor string, er
 	}
 }
 
-func (m *MCPManager) discover(ctx context.Context, session *mcp.ClientSession, server string, timeout time.Duration) error {
+// discoverTools reads one server's tools into its listing. Names are checked for
+// duplicates within the server here; a name another server also claims is caught
+// when the listings are merged.
+func (m *MCPManager) discoverTools(ctx context.Context, session *mcp.ClientSession, listing *mcpServerListing, timeout time.Duration) error {
+	server := listing.name
 	return walkPages(func(cursor string) ([]*mcp.Tool, string, error) {
 		page, err := session.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
 		if err != nil {
@@ -333,15 +429,15 @@ func (m *MCPManager) discover(ctx context.Context, session *mcp.ClientSession, s
 			return errors.New("server returned an invalid tool")
 		}
 		name := mcpToolName(server, tool.Name)
-		if _, exists := m.bindings[contracts.ToolType(name)]; exists {
+		if _, exists := listing.toolBindings[contracts.ToolType(name)]; exists {
 			return errors.New("server returned duplicate tool names")
 		}
 		schema, err := json.Marshal(tool.InputSchema)
 		if err != nil {
 			return fmt.Errorf("server returned an invalid input schema, err: %w", err)
 		}
-		m.tools = append(m.tools, contracts.Tool{Name: name, Description: tool.Description, Parameters: schema})
-		m.bindings[contracts.ToolType(name)] = mcpToolBinding{session: session, name: tool.Name, timeout: timeout}
+		listing.tools = append(listing.tools, contracts.Tool{Name: name, Description: tool.Description, Parameters: schema})
+		listing.toolBindings[contracts.ToolType(name)] = mcpToolBinding{session: session, name: tool.Name, timeout: timeout}
 		return nil
 	})
 }
@@ -352,7 +448,8 @@ func mcpToolName(server, tool string) string {
 func mcpPromptKey(server, name string) string  { return server + mcpPromptKeySeparator + name }
 func mcpResourceKey(server, uri string) string { return server + mcpResourceKeySeparator + uri }
 
-func (m *MCPManager) discoverPrompts(ctx context.Context, session *mcp.ClientSession, server string, timeout time.Duration) error {
+func (m *MCPManager) discoverPrompts(ctx context.Context, session *mcp.ClientSession, listing *mcpServerListing, timeout time.Duration) error {
+	server := listing.name
 	return walkPages(func(cursor string) ([]*mcp.Prompt, string, error) {
 		page, err := session.ListPrompts(ctx, &mcp.ListPromptsParams{Cursor: cursor})
 		if err != nil {
@@ -364,7 +461,7 @@ func (m *MCPManager) discoverPrompts(ctx context.Context, session *mcp.ClientSes
 			return errors.New("server returned an invalid prompt")
 		}
 		key := mcpPromptKey(server, prompt.Name)
-		if _, exists := m.promptBindings[key]; exists {
+		if _, exists := listing.promptBindings[key]; exists {
 			return errors.New("server returned duplicate prompt names")
 		}
 		arguments := make([]contracts.MCPPromptArgument, 0, len(prompt.Arguments))
@@ -374,8 +471,8 @@ func (m *MCPManager) discoverPrompts(ctx context.Context, session *mcp.ClientSes
 			}
 			arguments = append(arguments, contracts.MCPPromptArgument{Name: argument.Name, Description: argument.Description, Required: argument.Required})
 		}
-		m.prompts = append(m.prompts, contracts.MCPPrompt{Server: server, Name: prompt.Name, Title: prompt.Title, Description: prompt.Description, Arguments: arguments})
-		m.promptBindings[key] = mcpPromptBinding{session: session, name: prompt.Name, timeout: timeout}
+		listing.prompts = append(listing.prompts, contracts.MCPPrompt{Server: server, Name: prompt.Name, Title: prompt.Title, Description: prompt.Description, Arguments: arguments})
+		listing.promptBindings[key] = mcpPromptBinding{session: session, name: prompt.Name, timeout: timeout}
 		return nil
 	})
 }
@@ -383,7 +480,8 @@ func (m *MCPManager) discoverPrompts(ctx context.Context, session *mcp.ClientSes
 // discoverResources mirrors discoverPrompts, but a server that does not
 // advertise the resource capability is skipped so its absence cannot fail the
 // session.
-func (m *MCPManager) discoverResources(ctx context.Context, session *mcp.ClientSession, server string, timeout time.Duration) error {
+func (m *MCPManager) discoverResources(ctx context.Context, session *mcp.ClientSession, listing *mcpServerListing, timeout time.Duration) error {
+	server := listing.name
 	if result := session.InitializeResult(); result != nil && result.Capabilities.Resources == nil {
 		return nil
 	}
@@ -405,8 +503,8 @@ func (m *MCPManager) discoverResources(ctx context.Context, session *mcp.ClientS
 			return errors.New("server returned duplicate resource URIs")
 		}
 		seenURIs[key] = true
-		m.resources = append(m.resources, contracts.MCPResource{Server: server, URI: resource.URI, Name: resource.Name, Title: resource.Title, Description: resource.Description, MIMEType: resource.MIMEType, Size: resource.Size})
-		m.resourceBindings[key] = mcpResourceBinding{session: session, timeout: timeout}
+		listing.resources = append(listing.resources, contracts.MCPResource{Server: server, URI: resource.URI, Name: resource.Name, Title: resource.Title, Description: resource.Description, MIMEType: resource.MIMEType, Size: resource.Size})
+		listing.resourceBindings[key] = mcpResourceBinding{session: session, timeout: timeout}
 		return nil
 	})
 }

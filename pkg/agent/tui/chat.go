@@ -247,7 +247,7 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 		skillNames:     make(map[string]string),
 	}
 	if opts.SessionID != uuid.Nil {
-		m.modal = loadingModal("Opening session")
+		m.modal = loadingModal("Opening session", "the session, its transcripts, its MCP servers and the model it runs on")
 		m.initCmd = loadSessionCmd(ctx, client, opts.SessionID)
 	} else {
 		m.showSessions(sessions, true)
@@ -722,7 +722,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.session.AgentKind == contracts.SidecarLoopAgent {
 			return m, nil
 		}
-		m.modal = loadingModal("Loading models")
+		m.modal = loadingModal("Loading models", "the model providers and the models they offer")
 		return m, listProvidersCmd(m.ctx, m.client, true)
 	}
 	if key == "ctrl+t" {
@@ -1199,16 +1199,16 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 	switch modal.kind {
 	case modalSessions:
 		if option.session == uuid.Nil {
-			m.modal = loadingModal("Loading models")
+			m.modal = loadingModal("Loading models", "the model providers and the models they offer")
 			return listProvidersCmd(m.ctx, m.client, false)
 		}
 		if option.session == m.session.ID {
 			return m.resumeSessionFromList()
 		}
-		m.modal = loadingModal("Opening session")
+		m.modal = loadingModal("Opening session", "the session, its transcripts, its MCP servers and the model it runs on")
 		return loadSessionCmd(m.ctx, m.client, option.session)
 	case modalModels:
-		m.modal = loadingModal("Applying model")
+		m.modal = loadingModal("Applying model", "the session's new model capacity")
 		if modal.switching {
 			return setModelCmd(m.ctx, m.client, option.provider, option.model)
 		}
@@ -1217,7 +1217,7 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 		m.modal = nil
 	case modalTimeline:
 		if option.event != nil {
-			m.modal = loadingModal("Selecting branch")
+			m.modal = loadingModal("Selecting branch", "the branched transcript")
 			return selectBranchCmd(m.ctx, m.client, m.session.ID, *option.event)
 		}
 	case modalNotice:
@@ -1346,7 +1346,7 @@ func (m *chatModel) openRelatedSession(id uuid.UUID) tea.Cmd {
 	m.cancelArmed = false
 	m.cancelStatus = ""
 	m.relatedSessionSelection = uuid.Nil
-	m.modal = loadingModal("Opening session")
+	m.modal = loadingModal("Opening session", "the session, its transcripts, its MCP servers and the model it runs on")
 	m.reflow()
 	return loadSessionCmd(m.ctx, m.client, id)
 }
@@ -1363,7 +1363,7 @@ func (m *chatModel) openSessionList() {
 	}
 	m.cancelArmed = false
 	m.cancelStatus = ""
-	m.modal = loadingModal("Loading sessions")
+	m.modal = loadingModal("Loading sessions", "the saved sessions and where they ran")
 	m.reflow()
 }
 
@@ -1765,13 +1765,13 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 			m.showNotice("Sidecar is read-only", "Switch models from the caller session.", false)
 			return nil
 		}
-		m.modal = loadingModal("Loading models")
+		m.modal = loadingModal("Loading models", "the model providers and the models they offer")
 		return listProvidersCmd(m.ctx, m.client, true)
 	case "/sessions":
 		m.openSessionList()
 		return listSessionsCmd(m.ctx, m.client)
 	case "/new":
-		m.modal = loadingModal("Loading models")
+		m.modal = loadingModal("Loading models", "the model providers and the models they offer")
 		return listProvidersCmd(m.ctx, m.client, false)
 	case "/compact":
 		if m.session.AgentKind == contracts.SidecarLoopAgent {
@@ -1786,7 +1786,7 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		m.working, m.workBegan = true, time.Now()
 		return tea.Batch(compactCmd(m.ctx, m.client, m.session.ID), animationTickCmd())
 	case "/timeline":
-		m.modal = loadingModal("Loading timeline")
+		m.modal = loadingModal("Loading timeline", "the session transcripts")
 		return loadTimelineCmd(m.ctx, m.client, m.session.ID)
 	case "/help":
 		m.blocks = append(m.blocks, block{role: "system", text: strings.Join([]string{
@@ -1903,7 +1903,7 @@ func (m *chatModel) submitPromptArgs() tea.Cmd {
 		values[field.name] = value
 	}
 	server, name := m.modal.promptServer, m.modal.promptName
-	m.modal = loadingModal("Rendering " + server + ":" + name)
+	m.modal = loadingModal("Rendering "+server+":"+name, "the prompt and the messages it returns")
 	return renderMCPPromptCmd(m.ctx, m.client, m.session.ID, server, name, values)
 }
 
@@ -3782,8 +3782,11 @@ func (m *chatModel) showNotice(title, body string, required bool) {
 	m.modal = &modalModel{kind: modalNotice, title: title, body: body, required: required, options: []modalOption{{label: "OK", shortcut: 'o'}}}
 }
 
-func loadingModal(label string) *modalModel {
-	return &modalModel{kind: modalNotice, title: label, body: "Please wait...", required: true}
+func loadingModal(label, loading string) *modalModel {
+	if loading == "" {
+		loading = "Please wait..."
+	}
+	return &modalModel{kind: modalNotice, title: label, body: loading, required: true}
 }
 
 // isContentDelta reports whether an event carries a piece of the model's own
