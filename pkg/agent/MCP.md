@@ -90,11 +90,13 @@ edit the file the server process reads:
   uses OAuth, then probes it.
 - `infaiw mcp edit [name]` opens the same form on an existing server. The name,
   the transport and the OAuth choice are fixed, because a different one is a
-  different server; a credential left empty keeps its stored value, and that
-  includes the environment and the headers — entering none keeps the stored
-  entries, so clearing them means removing the server and adding it again. A
-  stdio server's stored arguments are kept verbatim unless the arguments row is
-  typed into, because one line cannot always hold a list.
+  different server; a credential left empty keeps its stored value. That includes
+  the environment and the headers: a list the operator does not open is kept, and
+  a list emptied on its own screen is cleared on save — the row says which of the
+  two it is, because the form cannot show what is stored (those entries are
+  credentials the client never reads back). A stdio server's stored arguments are
+  kept verbatim unless the arguments row is typed into, because one line cannot
+  always hold a list.
 - `infaiw mcp remove [name]` asks once and then deletes a server and its
   authorization.
 - `infaiw mcp refresh [name]` authorizes an OAuth server again, in the browser.

@@ -93,23 +93,22 @@ type mcpFormModel struct {
 	height   int
 	canceled bool
 
-	name   string
-	config contracts.MCPServerConfig
+	input glue.MCPServerInput
 }
 
 // runMCPForm collects one server. seed is the server an edit started from, and
 // nil for a new one; taken is the names an add cannot use.
-func runMCPForm(ctx context.Context, in io.Reader, out io.Writer, seed *glue.MCPServerView, taken map[string]bool) (string, contracts.MCPServerConfig, error) {
+func runMCPForm(ctx context.Context, in io.Reader, out io.Writer, seed *glue.MCPServerView, taken map[string]bool) (glue.MCPServerInput, error) {
 	model := newMCPFormModel(seed, taken)
 	result, err := tea.NewProgram(model, tea.WithContext(ctx), tea.WithInput(in), tea.WithOutput(out)).Run()
 	if err != nil {
-		return "", contracts.MCPServerConfig{}, err
+		return glue.MCPServerInput{}, err
 	}
 	form := result.(*mcpFormModel)
 	if form.canceled {
-		return "", contracts.MCPServerConfig{}, errMCPFormCanceled
+		return glue.MCPServerInput{}, errMCPFormCanceled
 	}
-	return form.name, form.config, nil
+	return form.input, nil
 }
 
 func newMCPFormModel(seed *glue.MCPServerView, taken map[string]bool) *mcpFormModel {
@@ -224,6 +223,13 @@ func newMCPFormInput(value, placeholder string, masked bool) textinput.Model {
 	styles.Cursor.Color = everforest.Green
 	input.SetStyles(styles)
 	return input
+}
+
+// listCleared reports whether a pair row was emptied by the operator, which is
+// what removes the stored entries rather than keeping them.
+func (m *mcpFormModel) listCleared(key string) bool {
+	field := m.field(key)
+	return field != nil && field.touched && len(mcpPairsNamed(field)) == 0
 }
 
 // args is the arguments row as a list. A row the form could not fill from the
@@ -445,11 +451,7 @@ func (m *mcpFormModel) row(field *mcpFormField, focused bool) string {
 	case field.kind == mcpFormChoice:
 		line += mcpChoiceRow(field)
 	case field.kind == mcpFormPairs:
-		if summary := mcpPairsSummary(field); summary != "" {
-			line += styles.screenRow.Render(summary)
-		} else {
-			line += styles.muted.Render(field.hint)
-		}
+		line += m.pairsRow(field)
 	case field.readonly:
 		line += styles.screenRow.Render(field.input.Value())
 	case focused:
@@ -494,6 +496,24 @@ func mcpScreen(lines []string, width, height int, title string, minWidth int) te
 	view.BackgroundColor = themeBackground()
 	view.ForegroundColor = themeForeground()
 	return view
+}
+
+// pairsRow is a pair row's value. The form cannot show what is stored — the
+// entries are credentials the client never reads back — so a list the operator
+// has not opened says that it is being kept instead of showing nothing.
+func (m *mcpFormModel) pairsRow(field *mcpFormField) string {
+	styles := mcpFormStyles()
+	if summary := mcpPairsSummary(field); summary != "" {
+		return styles.screenRow.Render(summary)
+	}
+	switch {
+	case m.editing && field.touched:
+		return styles.muted.Render("cleared when saved")
+	case m.editing:
+		return styles.muted.Render("stored " + strings.ToLower(field.label) + " kept — enter to replace or clear")
+	default:
+		return styles.muted.Render(field.hint)
+	}
 }
 
 // mcpPadLines pads every line to the same width, so a shorter screen still draws
@@ -657,7 +677,14 @@ func (m *mcpFormModel) submit() bool {
 		m.err = err.Error()
 		return false
 	}
-	m.name, m.config = name, config
+	m.input = glue.MCPServerInput{
+		Name:   name,
+		Config: config,
+		// An emptied list is a decision only the operator can make: the form
+		// cannot show what is stored, so it cannot infer it from what is typed.
+		ClearEnv:     m.listCleared(mcpFieldEnv),
+		ClearHeaders: m.listCleared(mcpFieldHeaders),
+	}
 	return true
 }
 

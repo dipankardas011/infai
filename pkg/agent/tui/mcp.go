@@ -86,7 +86,7 @@ func RunMCPAdd(ctx context.Context, client mcpManagementClient, in io.Reader, ou
 		taken[server.Name] = true
 	}
 
-	name, config, err := runMCPForm(ctx, in, out, nil, taken)
+	input, err := runMCPForm(ctx, in, out, nil, taken)
 	if err != nil {
 		if errors.Is(err, errMCPFormCanceled) {
 			fmt.Fprintln(out, newHarnessStyles().muted.Render("Nothing was saved."))
@@ -94,12 +94,13 @@ func RunMCPAdd(ctx context.Context, client mcpManagementClient, in io.Reader, ou
 		}
 		return err
 	}
-	if _, err := client.AddMCPServer(ctx, glue.MCPServerInput{Name: name, Config: config}); err != nil {
+	if _, err := client.AddMCPServer(ctx, input); err != nil {
 		return err
 	}
+	name := input.Name
 	fmt.Fprintln(out, newHarnessStyles().active.Render("Saved "+name))
 
-	if config.OAuth != nil {
+	if input.Config.OAuth != nil {
 		if err := authorizeMCP(ctx, client, out, name); err != nil {
 			return err
 		}
@@ -121,7 +122,7 @@ func RunMCPEdit(ctx context.Context, client mcpManagementClient, in io.Reader, o
 		return err
 	}
 
-	name, config, err := runMCPForm(ctx, in, out, &view, nil)
+	input, err := runMCPForm(ctx, in, out, &view, nil)
 	if err != nil {
 		if errors.Is(err, errMCPFormCanceled) {
 			fmt.Fprintln(out, newHarnessStyles().muted.Render("Nothing was saved."))
@@ -129,9 +130,10 @@ func RunMCPEdit(ctx context.Context, client mcpManagementClient, in io.Reader, o
 		}
 		return err
 	}
-	if _, err := client.EditMCPServer(ctx, glue.MCPServerInput{Name: name, Config: config}); err != nil {
+	if _, err := client.EditMCPServer(ctx, input); err != nil {
 		return err
 	}
+	name = input.Name
 	styles := newHarnessStyles()
 	fmt.Fprintln(out, styles.active.Render("Saved "+name))
 	if view.Auth == contracts.MCPAuthOAuth {

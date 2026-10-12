@@ -101,12 +101,14 @@ func (m *mcpPairsModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "a":
 		m.field.pairs = append(m.field.pairs, mcpPair{})
+		m.field.touched = true
 		m.setFocus(len(m.field.pairs) - 1)
 		m.startEdit()
 		return m, nil
 	case "d", "delete", "backspace":
 		if m.focus < len(m.field.pairs) {
 			m.field.pairs = append(m.field.pairs[:m.focus], m.field.pairs[m.focus+1:]...)
+			m.field.touched = true
 			m.setFocus(min(m.focus, len(m.field.pairs)))
 		}
 		return m, nil
@@ -129,7 +131,10 @@ func (m *mcpPairsModel) editKey(msg tea.KeyPressMsg, key string) (tea.Model, tea
 		// it: an entry with no name is not an entry.
 		if m.focus < len(m.field.pairs) && m.field.pairs[m.focus].empty() {
 			m.field.pairs = append(m.field.pairs[:m.focus], m.field.pairs[m.focus+1:]...)
-			m.moveFocus(0)
+			// The row that was just dropped was the last one, so the focus has
+			// to come back to the list: a focus past its end takes the next
+			// keystroke as "add" instead of acting on a row.
+			m.setFocus(min(m.focus, len(m.field.pairs)))
 		}
 		m.stopEdit()
 		return m, nil
@@ -140,6 +145,7 @@ func (m *mcpPairsModel) editKey(msg tea.KeyPressMsg, key string) (tea.Model, tea
 			return m, nil
 		}
 		m.field.pairs[m.focus] = pair
+		m.field.touched = true
 		m.stopEdit()
 		// The next entry opens where the last one ended, so a list is typed the
 		// way it is read: one line after another.

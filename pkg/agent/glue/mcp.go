@@ -12,9 +12,18 @@ type MCPLoginInput struct {
 }
 
 // MCPServerInput is one configured server, as the management commands send it.
+//
+// A credential the client cannot read back is kept by leaving it out, which is
+// also what an entry the operator never looked at looks like. Clearing a list is
+// therefore said outright rather than inferred from an empty map, which is the
+// same whether the list was emptied or never set.
 type MCPServerInput struct {
 	Name   string                    `json:"name"`
 	Config contracts.MCPServerConfig `json:"config"`
+	// ClearEnv and ClearHeaders remove the stored environment or headers, and
+	// are ignored by an add, where there is nothing stored to remove.
+	ClearEnv     bool `json:"clear_env,omitempty"`
+	ClearHeaders bool `json:"clear_headers,omitempty"`
 }
 
 // MCPServerView is one configured server as the management commands render it.

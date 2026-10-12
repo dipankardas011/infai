@@ -105,6 +105,14 @@ func (e *InfaiAgentEngine) EditMCPServer(ctx context.Context, input glue.MCPServ
 		return glue.MCPServerView{}, fmt.Errorf("%w: %q", ErrMCPNotFound, input.Name)
 	}
 	edited := mergeMCPCredentials(stored, input.Config)
+	// A credential the edit left empty keeps its stored value, so an operator who
+	// removed every entry says so: this is what tells the two apart.
+	if input.ClearEnv {
+		edited.Env = nil
+	}
+	if input.ClearHeaders {
+		edited.Headers = nil
+	}
 	if err := store.ValidateMCPServer(input.Name, edited); err != nil {
 		return glue.MCPServerView{}, fmt.Errorf("%w: %w", ErrMCPInvalid, err)
 	}
