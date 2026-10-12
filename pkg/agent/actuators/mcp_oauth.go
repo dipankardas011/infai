@@ -18,7 +18,14 @@ import (
 	"golang.org/x/oauth2"
 )
 
-var ErrAuthRequired = errors.New("MCP authorization is missing, expired or insufficient; run infaiw mcp refresh and reopen the session")
+// mcpOAuthCallbackPath is the path an authorization server redirects back to
+// when the configured redirect URL names a port but no path.
+const mcpOAuthCallbackPath = "/oauth/callback"
+
+// errAuthRequired is what a session reports when the credential it was handed is
+// missing, expired or insufficient. It never leaves this package: a caller sees
+// it as the "mcp_unauthorized" tool error.
+var errAuthRequired = errors.New("MCP authorization is missing, expired or insufficient; run infaiw mcp refresh and reopen the session")
 
 // mcpSessionAuth presents the credential a session was given and nothing else.
 // Only `infaiw mcp add` and `infaiw mcp refresh` authorize, so a session never
@@ -37,14 +44,14 @@ func (h *mcpSessionAuth) TokenSource(context.Context) (oauth2.TokenSource, error
 
 func (h *mcpSessionAuth) Token() (*oauth2.Token, error) {
 	if h.token.AccessToken == "" || (!h.token.Expiry.IsZero() && !time.Now().Before(h.token.Expiry)) {
-		return nil, ErrAuthRequired
+		return nil, errAuthRequired
 	}
 	return h.token, nil
 }
 
 func (*mcpSessionAuth) Authorize(_ context.Context, _ *http.Request, response *http.Response) error {
 	response.Body.Close()
-	return ErrAuthRequired
+	return errAuthRequired
 }
 
 // MCPAuthUpdate is one step of an MCP authorization: the loopback callback the
@@ -63,27 +70,46 @@ type MCPAuthNotify func(MCPAuthUpdate) error
 // the credentials to store; the engine owns their persistence. The call blocks
 // until the browser comes back, the flow fails, or the context ends.
 func AuthorizeMCPOAuth(ctx context.Context, server contracts.MCPServerConfig, logger *slog.Logger, notify MCPAuthNotify) (*contracts.MCPOAuthConfig, error) {
+	if server.OAuth == nil {
+		return nil, errors.New("MCP OAuth is not configured for this server")
+	}
 	config := *server.OAuth
+	if logger == nil || notify == nil {
+		return nil, errors.New("MCP authorization needs a logger and an update callback")
+	}
 	client := &http.Client{
 		Timeout:       30 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 
-	redirect := config.RedirectURL
-	if redirect == "" {
-		redirect = "http://127.0.0.1:0/oauth/callback"
-	}
-	redirectURL, err := url.Parse(redirect)
+	redirectURL, err := url.Parse(config.RedirectURL)
 	if err != nil {
 		return nil, errors.New("invalid MCP OAuth redirect URL")
 	}
+	if redirectURL.Scheme == "" {
+		redirectURL.Scheme = "http"
+	}
+	if redirectURL.Scheme != "http" {
+		return nil, errors.New("MCP OAuth redirect URL must be plain HTTP on a loopback address")
+	}
+	if host := redirectURL.Hostname(); host != "" && host != "127.0.0.1" && host != "::1" && host != "localhost" {
+		// The callback carries the authorization code, so it is only ever served
+		// on the loopback interface.
+		return nil, errors.New("MCP OAuth redirect URL must be a loopback address")
+	}
+	if redirectURL.Path == "" {
+		redirectURL.Path = mcpOAuthCallbackPath
+	}
+	if redirectURL.Host == "" {
+		redirectURL.Host = "127.0.0.1:0"
+	}
 	listener, err := net.Listen("tcp", redirectURL.Host)
 	if err != nil {
-		return nil, fmt.Errorf("MCP OAuth cannot listen on %s: %v", redirectURL.Host, err)
+		return nil, fmt.Errorf("MCP OAuth cannot listen on %s: %w", redirectURL.Host, err)
 	}
 	defer listener.Close()
-	redirectURL.Host = net.JoinHostPort(redirectURL.Hostname(), fmt.Sprint(listener.Addr().(*net.TCPAddr).Port))
-	redirect = redirectURL.String()
+	redirectURL.Host = net.JoinHostPort("127.0.0.1", fmt.Sprint(listener.Addr().(*net.TCPAddr).Port))
+	redirect := redirectURL.String()
 
 	var captured *contracts.MCPOAuthConfig
 	handlerConfig := &auth.AuthorizationCodeHandlerConfig{
@@ -95,12 +121,18 @@ func AuthorizeMCPOAuth(ctx context.Context, server contracts.MCPServerConfig, lo
 				return nil, errors.New("invalid MCP authorization URL")
 			}
 			state := authURL.Query().Get("state")
+			if state == "" {
+				// Without a state the callback cannot tell its own authorization
+				// from anyone else's, and waiting for it would only end in a
+				// timeout.
+				return nil, errors.New("MCP authorization URL carries no state")
+			}
 			results := make(chan *auth.AuthorizationResult, 1)
 			failures := make(chan error, 1)
 			mux := http.NewServeMux()
 			mux.HandleFunc(redirectURL.Path, func(w http.ResponseWriter, r *http.Request) {
 				query := r.URL.Query()
-				if r.Method != http.MethodGet || state == "" || query.Get("state") != state {
+				if r.Method != http.MethodGet || query.Get("state") != state {
 					http.Error(w, "No authorization is waiting for this response.", http.StatusBadRequest)
 					return
 				}
@@ -111,18 +143,22 @@ func AuthorizeMCPOAuth(ctx context.Context, server contracts.MCPServerConfig, lo
 					if description := query.Get("error_description"); description != "" {
 						reason += ": " + description
 					}
+					http.Error(w, "Authorization refused: "+reason, http.StatusBadRequest)
 					select {
 					case failures <- fmt.Errorf("MCP authorization was refused: %s", reason):
 					default:
 					}
-				} else if query.Get("code") != "" {
-					select {
-					case results <- &auth.AuthorizationResult{Code: query.Get("code"), State: query.Get("state"), Iss: query.Get("iss")}:
-					default:
-					}
-				} else {
+					// The browser must not be told the authorization succeeded:
+					// the terminal is about to report the refusal.
+					return
+				}
+				if query.Get("code") == "" {
 					http.Error(w, "Missing authorization code.", http.StatusBadRequest)
 					return
+				}
+				select {
+				case results <- &auth.AuthorizationResult{Code: query.Get("code"), State: query.Get("state"), Iss: query.Get("iss")}:
+				default:
 				}
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 				w.Header().Set("Cache-Control", "no-store")

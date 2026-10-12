@@ -21,6 +21,11 @@ type MCPServerConfig struct {
 	TimeoutSeconds int               `json:"timeoutSeconds,omitempty"`
 }
 
+const (
+	MCPTransportStdio          = "stdio"
+	MCPTransportStreamableHTTP = "streamable-http"
+)
+
 // MCPAuthKind is how a configured MCP server authenticates. The values are the
 // names of the config fields they stand for, so a view can be read against the
 // entry it describes.
@@ -44,6 +49,14 @@ type MCPOAuthConfig struct {
 	Scopes       []string  `json:"scopes,omitempty"`
 	AccessToken  string    `json:"accessToken,omitempty"`
 	Expiry       time.Time `json:"expiry,omitzero"`
+}
+
+// MCPServerStatus is a configured MCP server a session could not use, and the
+// reason. A session reports it so a client can explain a short tool list instead
+// of leaving the operator to compare logs.
+type MCPServerStatus struct {
+	Server string `json:"server"`
+	Reason string `json:"reason"`
 }
 
 type MCPPromptArgument struct {

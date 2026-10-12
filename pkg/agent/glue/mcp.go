@@ -34,12 +34,17 @@ type MCPServerView struct {
 	TokenExpiry *time.Time `json:"token_expiry,omitempty"`
 }
 
-// MCPProbeOutput is what connecting to one server found.
+// MCPProbeOutput is what connecting to one server found. The counts are zero
+// both for a server that was reached and offers nothing and for one that was
+// never reached, so Reason tells them apart.
 type MCPProbeOutput struct {
 	Server    string `json:"server"`
 	Tools     int    `json:"tools"`
 	Prompts   int    `json:"prompts"`
 	Resources int    `json:"resources"`
+	// Reason is why the server could not be used, in terms the operator can act
+	// on. It is empty when the connection was made.
+	Reason string `json:"reason,omitempty"`
 }
 
 // MCPLoginOutput is one update while an MCP authorization is in progress. It

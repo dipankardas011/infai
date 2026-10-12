@@ -12,6 +12,7 @@ type SessionView struct {
 	Status             contracts.SessionStatus       `json:"status"`
 	InFlight           []contracts.EventStream       `json:"in_flight"`
 	Checklist          contracts.TaskChecklistState  `json:"checklist"`
+	MCP                []contracts.MCPServerStatus   `json:"mcp,omitempty"`
 	Prompts            []contracts.MCPPrompt         `json:"prompts,omitempty"`
 	Resources          []contracts.MCPResource       `json:"resources,omitempty"`
 	PendingApproval    *contracts.ApprovalRequest    `json:"pending_approval,omitempty"`
@@ -25,6 +26,9 @@ type SessionOutput struct {
 	Thinking          contracts.InfaiThinkingLevel     `json:"thinking"`
 	AvailableThinking []contracts.InfaiThinkingLevel   `json:"available_thinking"`
 	Modalities        []contracts.LLMSupportedModality `json:"modalities"`
+	// MCP lists the configured MCP servers this session could not use, with the
+	// reason. It is empty when every configured server was reached.
+	MCP []contracts.MCPServerStatus `json:"mcp,omitempty"`
 }
 
 type CreateSessionRequest struct {

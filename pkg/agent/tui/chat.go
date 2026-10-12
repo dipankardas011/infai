@@ -503,6 +503,10 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.checklist = contracts.TaskChecklistState{}
 		m.used = 0
 		m.modal = nil
+		// The response carries the MCP status because this client has not joined
+		// the new session yet; the join view repeats it once it arrives, which
+		// costs one idempotent notice.
+		m.noticeMCPStatus(msg.output.MCP)
 		m.reflow()
 		m.refreshTranscript(true)
 		return m, m.startSessionObserver(msg.output.ID)
@@ -1401,6 +1405,10 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 	m.checklist = view.Checklist
 	m.mcpPrompts = view.Prompts
 	m.mcpResources = view.Resources
+	// A server that contributed no tools is only in the agent's log, which is on
+	// the other side of the API: say it here, where the operator is, with the
+	// reason the manager recorded.
+	m.noticeMCPStatus(view.MCP)
 	// The in-flight log is replayed through the same handler the live stream
 	// uses, so a client that joins mid-generation renders the generation the
 	// same way it would have rendered it live.

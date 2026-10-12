@@ -32,7 +32,7 @@ type InfaiAgentEngine struct {
 	cancel    context.CancelCauseFunc
 
 	providerMu   sync.Mutex
-	mcpMu        sync.Mutex // serializes interactive MCP logins, one at a time
+	mcpMu        sync.Mutex // serializes MCP registry read-modify-writes and interactive logins
 	providers    contracts.LLMProviders
 	sessionStore *store.SessionStore
 

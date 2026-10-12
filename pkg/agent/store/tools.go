@@ -22,12 +22,14 @@ func LoadToolConfig() (contracts.ToolsConfig, error) {
 	if err != nil {
 		return contracts.ToolsConfig{}, err
 	}
-	f, err := os.Open(filepath.Join(root, "tools.json"))
+	f, err := os.Open(filepath.Join(root, toolsFileName))
 	if os.IsNotExist(err) {
 		return contracts.ToolsConfig{}, nil
 	}
 	if err != nil {
-		return contracts.ToolsConfig{}, fmt.Errorf("store: read tools config failed")
+		// A missing file is MCP switched off; a file that cannot be read is a
+		// problem with the file, and the operator needs the reason.
+		return contracts.ToolsConfig{}, fmt.Errorf("store: read %s: %w", toolsFileName, err)
 	}
 	defer f.Close()
 
@@ -35,10 +37,13 @@ func LoadToolConfig() (contracts.ToolsConfig, error) {
 	decoder.DisallowUnknownFields()
 	var config *contracts.ToolsConfig
 	if err := decoder.Decode(&config); err != nil || config == nil {
-		return contracts.ToolsConfig{}, fmt.Errorf("store: invalid tools config JSON")
+		if err == nil {
+			err = errors.New("the file holds no object")
+		}
+		return contracts.ToolsConfig{}, fmt.Errorf("store: invalid %s JSON: %w", toolsFileName, err)
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
-		return contracts.ToolsConfig{}, fmt.Errorf("store: tools config contains trailing JSON or invalid data")
+		return contracts.ToolsConfig{}, fmt.Errorf("store: %s contains trailing JSON or invalid data", toolsFileName)
 	}
 
 	for name := range config.MCPServers {
@@ -62,7 +67,7 @@ func SaveToolConfig(config contracts.ToolsConfig) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(root, "tools.json")
+	path := filepath.Join(root, toolsFileName)
 	if err := EnsureDir(filepath.Dir(path)); err != nil {
 		return err
 	}
@@ -73,23 +78,21 @@ func SaveToolConfig(config contracts.ToolsConfig) error {
 	}
 	data = append(data, '\n')
 
-	return writeToolsFile(path, data)
-}
-
-// tools.json can carry bearer tokens and header values, so it is owner-only.
-func writeToolsFile(path string, data []byte) error {
+	// The file carries bearer tokens, header values and OAuth tokens, so it is
+	// owner-only.
 	if err := atomicWrite(path, data, 0o600); err != nil {
-		return fmt.Errorf("store: write tools config: %w", err)
+		return fmt.Errorf("store: write %s: %w", toolsFileName, err)
 	}
 	return nil
 }
 
 // The names allowed in tools.json. A server name becomes part of every tool
-// name the server exposes, an env name must survive as NAME=value, and a header
-// name is an HTTP field-name token (§ RFC 9110 §5.1).
+// name the server exposes, an env name has to survive as NAME=value in a child
+// process's environment, and a header name is an HTTP field-name token
+// (§ RFC 9110 §5.1).
 var (
 	serverName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
-	envVarName = regexp.MustCompile(`^[^=\x00]+$`)
+	envVarName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	headerName = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 )
 
@@ -121,14 +124,29 @@ func validateMCPServer(server contracts.MCPServerConfig) error {
 		return fmt.Errorf("timeoutSeconds must fit a nonnegative duration")
 	}
 	switch server.Transport {
-	case "stdio":
+	case contracts.MCPTransportStdio:
 		if strings.TrimSpace(server.Command) == "" {
 			return fmt.Errorf("stdio requires a command")
+		}
+		// A NUL cannot be passed to exec, and a server whose config holds one
+		// would fail at connect time, where the reason only reaches the log.
+		if strings.ContainsRune(server.Command, 0) {
+			return fmt.Errorf("stdio command must not contain a NUL")
+		}
+		for _, arg := range server.Args {
+			if strings.ContainsRune(arg, 0) {
+				return fmt.Errorf("stdio arguments must not contain a NUL")
+			}
+		}
+		for _, value := range server.Env {
+			if strings.ContainsRune(value, 0) {
+				return fmt.Errorf("environment values must not contain a NUL")
+			}
 		}
 		if server.URL != "" || len(server.Headers) != 0 || server.BearerToken != "" || server.OAuth != nil {
 			return fmt.Errorf("stdio must not specify HTTP fields")
 		}
-	case "streamable-http":
+	case contracts.MCPTransportStreamableHTTP:
 		if server.Command != "" || len(server.Args) != 0 || len(server.Env) != 0 {
 			return fmt.Errorf("streamable-http must not specify subprocess fields")
 		}
@@ -168,7 +186,7 @@ func validateMCPServer(server contracts.MCPServerConfig) error {
 			}
 		}
 	default:
-		return fmt.Errorf("type must be stdio or streamable-http")
+		return fmt.Errorf("type must be %s or %s", contracts.MCPTransportStdio, contracts.MCPTransportStreamableHTTP)
 	}
 	for key := range server.Env {
 		if !envVarName.MatchString(key) {

@@ -10,6 +10,9 @@ import (
 // per-session timelines.
 const harnessDir = "infai/harness"
 
+// toolsFileName is the MCP server registry inside harnessDir.
+const toolsFileName = "tools.json"
+
 func Root() (string, error) {
 	cfg, err := os.UserConfigDir()
 	if err != nil {

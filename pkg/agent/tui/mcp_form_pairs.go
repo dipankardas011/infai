@@ -8,14 +8,17 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+// mcpPairSeparator is how one entry is written in the editor: a name, the
+// separator, then the value. It is the editor's own syntax — what is stored is a
+// map, not this text — so it lives here, where it is typed and read back.
+const mcpPairSeparator = "="
+
 // mcpPair is one name/value entry: a variable of a stdio server's environment,
 // or a header of a streamable-http one.
 type mcpPair struct {
 	name  string
 	value string
 }
-
-func (p mcpPair) String() string { return p.name }
 
 // empty reports whether a row holds nothing: the editor's own shape, not an
 // entry of the server.
@@ -116,6 +119,11 @@ func (m *mcpPairsModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // the shape an environment variable is set in.
 func (m *mcpPairsModel) editKey(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd) {
 	switch key {
+	case "ctrl+c":
+		// Typing owns the keyboard, but not this: it is how the whole command is
+		// abandoned, and a text input has no binding for it.
+		m.cancelled = true
+		return m, tea.Quit
 	case "esc":
 		// What was being typed is dropped, and the row it was typed into with
 		// it: an entry with no name is not an entry.
@@ -224,13 +232,13 @@ func (p mcpPair) line() string {
 	if p.empty() {
 		return ""
 	}
-	return p.name + "=" + p.value
+	return p.name + mcpPairSeparator + p.value
 }
 
 // splitMCPPair reads back one line. The separator is required: a name on its own
 // is a typo, not a name with an empty value.
 func splitMCPPair(line, hint string) (mcpPair, error) {
-	name, value, found := strings.Cut(line, "=")
+	name, value, found := strings.Cut(line, mcpPairSeparator)
 	name, value = strings.TrimSpace(name), strings.TrimSpace(value)
 	switch {
 	case !found:
@@ -241,20 +249,31 @@ func splitMCPPair(line, hint string) (mcpPair, error) {
 	return mcpPair{name: name, value: value}, nil
 }
 
+// mcpPairsNamed is a pair row's entries that were given a name: the rows of the
+// editor are also how a list is started, so a nameless row is the shape of the
+// screen, not an entry of the server.
+func mcpPairsNamed(field *mcpFormField) []mcpPair {
+	if field == nil {
+		return nil
+	}
+	named := make([]mcpPair, 0, len(field.pairs))
+	for _, pair := range field.pairs {
+		if !pair.empty() {
+			named = append(named, pair)
+		}
+	}
+	return named
+}
+
 // mcpPairsMap is a pair row's entries as the configuration stores them.
 func mcpPairsMap(field *mcpFormField) map[string]string {
-	if field == nil || len(field.pairs) == 0 {
+	named := mcpPairsNamed(field)
+	if len(named) == 0 {
 		return nil
 	}
-	entries := make(map[string]string, len(field.pairs))
-	for _, pair := range field.pairs {
-		if pair.empty() {
-			continue
-		}
+	entries := make(map[string]string, len(named))
+	for _, pair := range named {
 		entries[pair.name] = pair.value
-	}
-	if len(entries) == 0 {
-		return nil
 	}
 	return entries
 }
@@ -262,18 +281,13 @@ func mcpPairsMap(field *mcpFormField) map[string]string {
 // mcpPairsSummary is a pair row's value in the form: how many entries it holds,
 // and which variables they are, so the row is readable without opening it.
 func mcpPairsSummary(field *mcpFormField) string {
-	if len(field.pairs) == 0 {
+	named := mcpPairsNamed(field)
+	if len(named) == 0 {
 		return ""
 	}
-	names := make([]string, 0, len(field.pairs))
-	for _, pair := range field.pairs {
-		if pair.empty() {
-			continue
-		}
+	names := make([]string, 0, len(named))
+	for _, pair := range named {
 		names = append(names, pair.name)
-	}
-	if len(names) == 0 {
-		return ""
 	}
 	if len(names) == 1 {
 		return "1 entry — " + names[0]

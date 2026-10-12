@@ -24,6 +24,28 @@ var ErrMCPExists = errors.New("MCP server already exists")
 
 var ErrMCPInvalid = errors.New("invalid MCP server configuration")
 
+// mcpLoginTimeout bounds one interactive authorization: the time an operator is
+// given to finish in a browser, during which the registry is held.
+const mcpLoginTimeout = 15 * time.Minute
+
+func (e *InfaiAgentEngine) MCPLoginTarget(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: a server name is required", ErrMCPInvalid)
+	}
+	config, err := store.LoadToolConfig()
+	if err != nil {
+		return err
+	}
+	server, ok := config.MCPServers[name]
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrMCPNotFound, name)
+	}
+	if server.OAuth == nil || server.Transport != contracts.MCPTransportStreamableHTTP {
+		return fmt.Errorf("%w: MCP server %q does not authorize over HTTP", ErrMCPInvalid, name)
+	}
+	return nil
+}
+
 // ListMCPServers reports every configured server, with its stored token state.
 func (e *InfaiAgentEngine) ListMCPServers(ctx context.Context) ([]glue.MCPServerView, error) {
 	config, err := store.LoadToolConfig()
@@ -32,7 +54,7 @@ func (e *InfaiAgentEngine) ListMCPServers(ctx context.Context) ([]glue.MCPServer
 	}
 	views := make([]glue.MCPServerView, 0, len(config.MCPServers))
 	for _, name := range slices.Sorted(maps.Keys(config.MCPServers)) {
-		views = append(views, e.mcpServerView(ctx, name, config.MCPServers[name]))
+		views = append(views, e.mcpServerView(name, config.MCPServers[name]))
 	}
 	return views, nil
 }
@@ -51,7 +73,7 @@ func (e *InfaiAgentEngine) AddMCPServer(ctx context.Context, input glue.MCPServe
 		return glue.MCPServerView{}, fmt.Errorf("%w: %q", ErrMCPExists, input.Name)
 	}
 	if err := store.ValidateMCPServer(input.Name, input.Config); err != nil {
-		return glue.MCPServerView{}, fmt.Errorf("%w: %v", ErrMCPInvalid, err)
+		return glue.MCPServerView{}, fmt.Errorf("%w: %w", ErrMCPInvalid, err)
 	}
 	if config.MCPServers == nil {
 		config.MCPServers = make(map[string]contracts.MCPServerConfig)
@@ -60,7 +82,7 @@ func (e *InfaiAgentEngine) AddMCPServer(ctx context.Context, input glue.MCPServe
 	if err := store.SaveToolConfig(config); err != nil {
 		return glue.MCPServerView{}, err
 	}
-	return e.mcpServerView(ctx, input.Name, input.Config), nil
+	return e.mcpServerView(input.Name, input.Config), nil
 }
 
 // EditMCPServer replaces an existing server. A missing name is ErrMCPNotFound.
@@ -84,13 +106,13 @@ func (e *InfaiAgentEngine) EditMCPServer(ctx context.Context, input glue.MCPServ
 	}
 	edited := mergeMCPCredentials(stored, input.Config)
 	if err := store.ValidateMCPServer(input.Name, edited); err != nil {
-		return glue.MCPServerView{}, fmt.Errorf("%w: %v", ErrMCPInvalid, err)
+		return glue.MCPServerView{}, fmt.Errorf("%w: %w", ErrMCPInvalid, err)
 	}
 	config.MCPServers[input.Name] = edited
 	if err := store.SaveToolConfig(config); err != nil {
 		return glue.MCPServerView{}, err
 	}
-	return e.mcpServerView(ctx, input.Name, edited), nil
+	return e.mcpServerView(input.Name, edited), nil
 }
 
 // mergeMCPCredentials keeps a stored credential that the edit left empty. An
@@ -107,7 +129,7 @@ func mergeMCPCredentials(stored, edited contracts.MCPServerConfig) contracts.MCP
 	case contracts.MCPAuthNone:
 		// A stdio server keeps its credentials in the environment of its own
 		// subprocess, and the client cannot read those back either.
-		if edited.Transport == "stdio" && len(edited.Env) == 0 {
+		if edited.Transport == contracts.MCPTransportStdio && len(edited.Env) == 0 {
 			edited.Env = stored.Env
 		}
 	case contracts.MCPAuthBearer:
@@ -197,24 +219,28 @@ func (e *InfaiAgentEngine) ProbeMCPServer(ctx context.Context, name string) (glu
 	}
 	defer manager.Close()
 
-	return glue.MCPProbeOutput{
+	probe := glue.MCPProbeOutput{
 		Server:    name,
 		Tools:     len(manager.Tools()),
 		Prompts:   len(manager.Prompts()),
 		Resources: len(manager.Resources()),
-	}, nil
+	}
+	if reason, ok := manager.Unavailable(name); ok {
+		probe.Reason = reason
+	}
+	return probe, nil
 }
 
 // mcpServerView renders one configured server, resolving its stored token
 // state. It never copies a credential into the view.
-func (e *InfaiAgentEngine) mcpServerView(_ context.Context, name string, cfg contracts.MCPServerConfig) glue.MCPServerView {
+func (e *InfaiAgentEngine) mcpServerView(name string, cfg contracts.MCPServerConfig) glue.MCPServerView {
 	view := glue.MCPServerView{
 		Name:           name,
 		Transport:      cfg.Transport,
 		Auth:           mcpAuth(cfg),
 		TimeoutSeconds: cfg.TimeoutSeconds,
 	}
-	if cfg.Transport == "stdio" {
+	if cfg.Transport == contracts.MCPTransportStdio {
 		view.Command = cfg.Command
 		view.Args = cfg.Args
 	} else {
@@ -249,17 +275,20 @@ func mcpAuth(cfg contracts.MCPServerConfig) contracts.MCPAuthKind {
 // open arrives through onUpdate; the call blocks until the browser comes back,
 // the flow fails, or the context ends.
 func (e *InfaiAgentEngine) LoginMCPServer(ctx context.Context, input glue.MCPLoginInput, onUpdate func(glue.MCPLoginOutput) error) error {
-	if input.Server == "" {
-		return errors.New("MCP server name is required")
-	}
 	if onUpdate == nil {
 		return errors.New("MCP login update callback is required")
+	}
+	if err := e.MCPLoginTarget(input.Server); err != nil {
+		return err
 	}
 	if !e.mcpMu.TryLock() {
 		return ErrMCPOperation
 	}
 	defer e.mcpMu.Unlock()
-	loginCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	// One interactive authorization holds the registry for as long as the
+	// operator may take to finish in a browser, which is why it is as short as
+	// an authorization realistically allows.
+	loginCtx, cancel := context.WithTimeout(ctx, mcpLoginTimeout)
 	defer cancel()
 	stop := context.AfterFunc(e.ctx, cancel)
 	defer stop()
@@ -276,13 +305,7 @@ func (e *InfaiAgentEngine) LoginMCPServer(ctx context.Context, input glue.MCPLog
 	}
 	server, ok := config.MCPServers[input.Server]
 	if !ok {
-		return fmt.Errorf("MCP server %q is not configured", input.Server)
-	}
-	if server.OAuth == nil {
-		return fmt.Errorf("MCP server %q has no oauth block to authorize", input.Server)
-	}
-	if server.Transport != "streamable-http" {
-		return fmt.Errorf("MCP server %q does not use OAuth over HTTP", input.Server)
+		return fmt.Errorf("%w: %q", ErrMCPNotFound, input.Server)
 	}
 
 	oauth, err := actuators.AuthorizeMCPOAuth(loginCtx, server, e.bgLogger, func(update actuators.MCPAuthUpdate) error {

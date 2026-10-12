@@ -269,6 +269,11 @@ func (m *providerMenuModel) View() tea.View {
 	return view
 }
 
+// errSelectionCanceled is what a menu returns when the operator leaves it with
+// esc. It is a decision, not a failure, so a caller can report "nothing was
+// chosen" rather than an error.
+var errSelectionCanceled = errors.New("selection canceled")
+
 func runProviderMenu(ctx context.Context, in io.Reader, out io.Writer, title, body string, options []string) (string, error) {
 	model := &providerMenuModel{title: title, body: body, options: options}
 	result, err := tea.NewProgram(model, tea.WithContext(ctx), tea.WithInput(in), tea.WithOutput(out)).Run()
@@ -277,7 +282,7 @@ func runProviderMenu(ctx context.Context, in io.Reader, out io.Writer, title, bo
 	}
 	selected := result.(*providerMenuModel)
 	if selected.canceled || selected.selected == "" {
-		return "", errors.New("provider selection canceled")
+		return "", errSelectionCanceled
 	}
 	return selected.selected, nil
 }

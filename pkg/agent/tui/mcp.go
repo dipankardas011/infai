@@ -5,19 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os/exec"
-	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
-	"github.com/dipankardas011/infai/pkg/agent/store"
 )
 
-// MCPManagementClient is the part of the agent client the mcp commands use.
-type MCPManagementClient interface {
+// mcpManagementClient is the part of the agent client the mcp commands use.
+type mcpManagementClient interface {
 	ListMCPServers(context.Context) ([]glue.MCPServerView, error)
 	AddMCPServer(context.Context, glue.MCPServerInput) (glue.MCPServerView, error)
 	EditMCPServer(context.Context, glue.MCPServerInput) (glue.MCPServerView, error)
@@ -30,12 +30,33 @@ type MCPManagementClient interface {
 // its connections and its token from the moment it was created.
 const mcpStaleSessionNote = "a session that was already using this server keeps its old credential — close and reopen it for the change to take effect"
 
+// noticeMCPStatus tells the operator which configured MCP servers this session
+// could not use. A session that is short of tools says so, with the reason and
+// the remedy the engine recorded, instead of leaving it to the agent's log.
+func (m *chatModel) noticeMCPStatus(status []contracts.MCPServerStatus) {
+	if notice := mcpUnavailableNotice(status); notice != "" {
+		m.showNotice("MCP servers unavailable", notice, false)
+	}
+}
+
+// mcpUnavailableNotice is the body of that notice, one line per server.
+func mcpUnavailableNotice(status []contracts.MCPServerStatus) string {
+	var lines []string
+	for _, server := range status {
+		if server.Reason == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s: %s", server.Server, server.Reason))
+	}
+	return strings.Join(lines, "\n")
+}
+
 // errMCPFormCanceled is what the form returns when the operator leaves it
 // without saving. Callers report it as "nothing was saved", not as a failure.
 var errMCPFormCanceled = errors.New("MCP server form canceled")
 
 // RunMCPList prints every configured server and the state of its authorization.
-func RunMCPList(ctx context.Context, client MCPManagementClient, out io.Writer) error {
+func RunMCPList(ctx context.Context, client mcpManagementClient, out io.Writer) error {
 	servers, err := client.ListMCPServers(ctx)
 	if err != nil {
 		return err
@@ -50,15 +71,12 @@ func RunMCPList(ctx context.Context, client MCPManagementClient, out io.Writer) 
 	for _, server := range servers {
 		fmt.Fprintln(out, styles.screenRow.Render(mcpRow(server, now)))
 	}
-	if root, err := store.Root(); err == nil {
-		fmt.Fprintln(out, styles.muted.Render("config: "+filepath.Join(root, "tools.json")))
-	}
 	return nil
 }
 
 // RunMCPAdd opens the form for one new server, stores it, authorizes it when the
 // operator chose OAuth, and reports what a connection finds.
-func RunMCPAdd(ctx context.Context, client MCPManagementClient, in io.Reader, out io.Writer) error {
+func RunMCPAdd(ctx context.Context, client mcpManagementClient, in io.Reader, out io.Writer) error {
 	servers, err := client.ListMCPServers(ctx)
 	if err != nil {
 		return err
@@ -93,7 +111,7 @@ func RunMCPAdd(ctx context.Context, client MCPManagementClient, in io.Reader, ou
 // transport and the authentication kind are fixed: a different kind is a
 // different server, so remove it and add it again. A credential left empty keeps
 // the stored one, which a client cannot read back.
-func RunMCPEdit(ctx context.Context, client MCPManagementClient, in io.Reader, out io.Writer, name string) error {
+func RunMCPEdit(ctx context.Context, client mcpManagementClient, in io.Reader, out io.Writer, name string) error {
 	servers, err := client.ListMCPServers(ctx)
 	if err != nil {
 		return err
@@ -124,7 +142,7 @@ func RunMCPEdit(ctx context.Context, client MCPManagementClient, in io.Reader, o
 
 // RunMCPRemove deletes a server and its stored authorization, after a
 // confirmation.
-func RunMCPRemove(ctx context.Context, client MCPManagementClient, in io.Reader, out io.Writer, name string) error {
+func RunMCPRemove(ctx context.Context, client mcpManagementClient, in io.Reader, out io.Writer, name string) error {
 	servers, err := client.ListMCPServers(ctx)
 	if err != nil {
 		return err
@@ -138,6 +156,10 @@ func RunMCPRemove(ctx context.Context, client MCPManagementClient, in io.Reader,
 	confirm := fmt.Sprintf("Remove %s and its stored authorization", view.Name)
 	choice, err := runProviderMenu(ctx, in, out, "MCP server removal", confirm, []string{"Keep it", "Remove it"})
 	if err != nil {
+		if errors.Is(err, errSelectionCanceled) {
+			fmt.Fprintln(out, styles.muted.Render("Nothing was removed."))
+			return nil
+		}
 		return err
 	}
 	if choice != "Remove it" {
@@ -152,7 +174,7 @@ func RunMCPRemove(ctx context.Context, client MCPManagementClient, in io.Reader,
 }
 
 // RunMCPRefresh re-runs the authorization for one OAuth server.
-func RunMCPRefresh(ctx context.Context, client MCPManagementClient, in io.Reader, out io.Writer, name string) error {
+func RunMCPRefresh(ctx context.Context, client mcpManagementClient, in io.Reader, out io.Writer, name string) error {
 	servers, err := client.ListMCPServers(ctx)
 	if err != nil {
 		return err
@@ -166,6 +188,9 @@ func RunMCPRefresh(ctx context.Context, client MCPManagementClient, in io.Reader
 	if len(oauthServers) == 0 {
 		return errors.New("no configured MCP server uses OAuth; set OAuth for one with `infaiw mcp edit`")
 	}
+	if name != "" && !slices.ContainsFunc(oauthServers, func(server glue.MCPServerView) bool { return server.Name == name }) {
+		return fmt.Errorf("MCP server %q does not use OAuth; set OAuth for it with `infaiw mcp edit`", name)
+	}
 	view, err := pickMCPServer(ctx, in, out, oauthServers, name, "MCP authorization", "Select the server to authorize")
 	if err != nil {
 		return err
@@ -174,23 +199,28 @@ func RunMCPRefresh(ctx context.Context, client MCPManagementClient, in io.Reader
 }
 
 // authorizeMCP runs one login and prints the URL the operator has to open.
-func authorizeMCP(ctx context.Context, client MCPManagementClient, out io.Writer, name string) error {
+func authorizeMCP(ctx context.Context, client mcpManagementClient, out io.Writer, name string) error {
 	styles := newHarnessStyles()
 
-	showedCallback := false
+	shown, opened := false, false
 	err := client.LoginMCPServer(ctx, name, func(update glue.MCPLoginOutput) {
-		if update.Callback != "" && !showedCallback {
-			showedCallback = true
+		if update.Callback != "" && !shown {
+			shown = true
 			// The authorization server refuses a request by naming the callback
 			// it was given, so the operator can read the two against each other.
 			fmt.Fprintln(out, styles.muted.Render("callback "+update.Callback))
 		}
-		if update.URL == "" {
+		if update.URL == "" || opened {
+			// The URL is printed and opened once: a client that reports it again
+			// would otherwise open a second tab per update.
 			return
 		}
+		opened = true
 		fmt.Fprintln(out, styles.screenBody.Render("Open this URL to authorize infaiw:"))
 		fmt.Fprintln(out, styles.active.Render(update.URL))
-		openBrowser(update.URL)
+		if err := openBrowser(update.URL); err != nil {
+			fmt.Fprintln(out, styles.muted.Render(err.Error()+" — open the URL above by hand"))
+		}
 	})
 	if err != nil {
 		return err
@@ -200,35 +230,54 @@ func authorizeMCP(ctx context.Context, client MCPManagementClient, out io.Writer
 	return nil
 }
 
-// openBrowser hands a URL to the desktop's own opener. It is best effort: the
-// URL is printed either way, because the agent server may be running where this
-// client cannot open a browser, and a machine without an opener is not a failure.
-func openBrowser(url string) {
-	var command *exec.Cmd
+// The desktop openers this client knows, by platform.
+const (
+	openerDarwin  = "open"
+	openerWindows = "rundll32"
+	openerLinux   = "xdg-open"
+	windowsOpen   = "url.dll,FileProtocolHandler"
+)
+
+// openBrowser hands an authorization URL to the desktop's own opener. It is best
+// effort and never fatal: the URL is printed either way, because the agent server
+// may be running where this client cannot open a browser. Only an http(s) URL is
+// opened, and it is passed as an argument, not as a flag the opener would read.
+func openBrowser(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return errors.New("the authorization URL is not a URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("refusing to open a %q URL", parsed.Scheme)
+	}
+	var argv []string
 	switch runtime.GOOS {
 	case "darwin":
-		command = exec.Command("open", url)
+		argv = []string{openerDarwin, rawURL}
 	case "windows":
-		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		argv = []string{openerWindows, windowsOpen, rawURL}
 	default:
-		command = exec.Command("xdg-open", url)
+		argv = []string{openerLinux, rawURL}
 	}
-	if command.Start() != nil {
-		return
+	command := exec.Command(argv[0], argv[1:]...)
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("no desktop opener is available")
 	}
-	_ = command.Process.Release()
+	return command.Process.Release()
 }
 
-// probeMCP reports what a connection to one server finds.
-func probeMCP(ctx context.Context, client MCPManagementClient, out io.Writer, name string) error {
+// probeMCP reports what a connection to one server finds. A server that could
+// not be reached is a failure of the command, not a server without tools.
+func probeMCP(ctx context.Context, client mcpManagementClient, out io.Writer, name string) error {
 	probe, err := client.ProbeMCPServer(ctx, name)
 	if err != nil {
 		return err
 	}
 	styles := newHarnessStyles()
+	if probe.Reason != "" {
+		return fmt.Errorf("%s could not be reached: %s", probe.Server, probe.Reason)
+	}
 	if probe.Tools+probe.Prompts+probe.Resources == 0 {
-		// Nothing came back. Why is in the server log: a server that cannot be
-		// reached is skipped and logged there, never here.
 		fmt.Fprintln(out, styles.muted.Render(probe.Server+" offered no tools, prompts or resources"))
 		return nil
 	}
@@ -276,7 +325,7 @@ func mcpRow(view glue.MCPServerView, now time.Time) string {
 // mcpTarget is what a row calls the server's endpoint: the URL of a
 // streamable-http server, or the command line of a stdio one.
 func mcpTarget(view glue.MCPServerView) string {
-	if view.Transport == "stdio" {
+	if view.Transport == contracts.MCPTransportStdio {
 		return strings.Join(append([]string{view.Command}, view.Args...), " ")
 	}
 	return view.URL

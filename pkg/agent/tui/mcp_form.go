@@ -13,7 +13,6 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
-	"github.com/dipankardas011/infai/pkg/agent/store"
 )
 
 // ---- the server form ----
@@ -63,8 +62,11 @@ type mcpFormField struct {
 	// choice is the one it holds.
 	choices []string
 	choice  int
-	// input is a text row's value and caret.
-	input textinput.Model
+	// input is a text row's value and caret, and touched records whether the
+	// operator has typed into it: a row the form could not fill exactly holds
+	// nothing until it is touched, so what is stored has to survive untouched.
+	input   textinput.Model
+	touched bool
 	// pairs is a pair row's entries: a name and a value, written as one
 	// "name=value" line in the row's own screen.
 	pairs []mcpPair
@@ -79,6 +81,9 @@ type mcpFormField struct {
 type mcpFormModel struct {
 	editing bool
 	fields  []mcpFormField
+	// stored holds what the form cannot render, so an edit that does not touch it
+	// keeps it: a stdio server's argv is a list, and its row is one line.
+	stored map[string]any
 	// pairs is the pair row being edited, when one is open in place of the form.
 	pairs    *mcpPairsModel
 	focus    int
@@ -109,7 +114,8 @@ func runMCPForm(ctx context.Context, in io.Reader, out io.Writer, seed *glue.MCP
 
 func newMCPFormModel(seed *glue.MCPServerView, taken map[string]bool) *mcpFormModel {
 	editing := seed != nil
-	transport := "streamable-http"
+	stored := map[string]any{}
+	transport := contracts.MCPTransportStreamableHTTP
 	oauth, credential := "no", string(contracts.MCPAuthNone)
 	timeout, target, command, args := "", "", "", ""
 	if editing {
@@ -122,8 +128,14 @@ func newMCPFormModel(seed *glue.MCPServerView, taken map[string]bool) *mcpFormMo
 		if seed.TimeoutSeconds > 0 {
 			timeout = strconv.Itoa(seed.TimeoutSeconds)
 		}
-		if transport == "stdio" {
-			command, args = seed.Command, strings.Join(seed.Args, " ")
+		if transport == contracts.MCPTransportStdio {
+			command = seed.Command
+			// The row is one line of space-separated arguments, which holds the
+			// stored list exactly only when no argument contains a space.
+			stored["args"] = seed.Args
+			if joined, ok := joinArgs(seed.Args); ok {
+				args = joined
+			}
 		} else {
 			target = seed.URL
 		}
@@ -134,10 +146,16 @@ func newMCPFormModel(seed *glue.MCPServerView, taken map[string]bool) *mcpFormMo
 	// arrives empty.
 	keep := ""
 	if editing {
+		// Every credential the client cannot read back is kept by leaving its
+		// row empty, including the two lists.
 		keep = "empty keeps stored"
 	}
+	envHint, headerHint := "NAME=value per row", "Name=Value per row"
+	if editing {
+		envHint, headerHint = envHint+", "+keep, headerHint+", "+keep
+	}
 	fields := []mcpFormField{
-		mcpChoiceField(mcpFieldTransport, "Transport", []string{"streamable-http", "stdio"}, transport, editing),
+		mcpChoiceField(mcpFieldTransport, "Transport", []string{contracts.MCPTransportStreamableHTTP, contracts.MCPTransportStdio}, transport, editing),
 		mcpTextField(mcpFieldName, "Name", "letters, digits, _ or -", seedName(seed), editing),
 		mcpTextField(mcpFieldURL, "URL", "https://host/mcp", target, false),
 		mcpChoiceField(mcpFieldOAuth, "OAuth", []string{"no", "yes"}, oauth, editing),
@@ -147,13 +165,13 @@ func newMCPFormModel(seed *glue.MCPServerView, taken map[string]bool) *mcpFormMo
 			string(contracts.MCPAuthHeaders),
 		}, credential, editing),
 		mcpSecretField(mcpFieldBearer, "Bearer token", keep),
-		mcpPairsField(mcpFieldHeaders, "Headers", "Name=Value", nil),
+		mcpPairsField(mcpFieldHeaders, "Headers", headerHint, nil),
 		mcpTextField(mcpFieldTimeout, "Timeout", "seconds, empty means 60", timeout, false),
 		mcpTextField(mcpFieldCommand, "Command", "the executable, without a shell", command, false),
 		mcpTextField(mcpFieldArgs, "Arguments", "space separated", args, false),
-		mcpPairsField(mcpFieldEnv, "Environment", "NAME=value", nil),
+		mcpPairsField(mcpFieldEnv, "Environment", envHint, nil),
 	}
-	model := &mcpFormModel{editing: editing, fields: fields, taken: taken}
+	model := &mcpFormModel{editing: editing, fields: fields, taken: taken, stored: stored}
 	model.setFocus(model.firstVisible())
 	return model
 }
@@ -206,6 +224,27 @@ func newMCPFormInput(value, placeholder string, masked bool) textinput.Model {
 	styles.Cursor.Color = everforest.Green
 	input.SetStyles(styles)
 	return input
+}
+
+// args is the arguments row as a list. A row the form could not fill from the
+// stored argv holds nothing until the operator types into it, and an untouched
+// row keeps the stored list exactly as it was written.
+func (m *mcpFormModel) args() []string {
+	if stored, ok := m.stored["args"].([]string); ok && !m.field(mcpFieldArgs).touched {
+		return stored
+	}
+	return strings.Fields(m.text(mcpFieldArgs))
+}
+
+// joinArgs renders a stored argument list as the one line the row shows, and
+// reports whether one line can hold it exactly.
+func joinArgs(args []string) (string, bool) {
+	for _, arg := range args {
+		if strings.ContainsAny(arg, " \t") {
+			return "", false
+		}
+	}
+	return strings.Join(args, " "), true
 }
 
 // clipMCPHint keeps a row's hint inside the field it stands in for: a longer
@@ -330,6 +369,7 @@ func (m *mcpFormModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Everything else belongs to the focused row: the text input owns the
 	// caret, the selection and the editing keys.
+	field.touched = true
 	var cmd tea.Cmd
 	field.input, cmd = field.input.Update(msg)
 	m.err = ""
@@ -363,10 +403,16 @@ func (m *mcpFormModel) lines() []string {
 	if m.err != "" {
 		lines = append(lines, "", styles.error.Render(m.err))
 	}
-	help := "tab/↑↓ move • ←/→ change • enter save • esc cancel"
-	if field := &m.fields[m.focus]; field.kind == mcpFormPairs && !field.readonly {
+	focused := &m.fields[m.focus]
+	var help string
+	switch {
+	case focused.readonly:
+		help = "tab/↑↓ move • enter save • esc cancel"
+	case focused.kind == mcpFormPairs:
 		// enter does not save here: this row opens what it holds.
 		help = "tab/↑↓ move • enter open entries • esc cancel"
+	default:
+		help = "tab/↑↓ move • ←/→ change • enter save • esc cancel"
 	}
 	return append(lines, "", styles.muted.Render(help))
 }
@@ -393,6 +439,9 @@ func (m *mcpFormModel) row(field *mcpFormField, focused bool) string {
 	// same column whether or not the row holds the keyboard.
 	line := label.Render(marker + fmt.Sprintf("%-13s", field.label))
 	switch {
+	case field.kind == mcpFormChoice && field.readonly:
+		// A fixed choice is a value: it is not drawn as something to cycle.
+		line += styles.screenRow.Render(mcpChoiceLabel(field.choices[field.choice]))
 	case field.kind == mcpFormChoice:
 		line += mcpChoiceRow(field)
 	case field.kind == mcpFormPairs:
@@ -482,10 +531,10 @@ func mcpChoiceRow(field *mcpFormField) string {
 
 func mcpChoiceLabel(value string) string {
 	switch value {
-	case "streamable-http":
-		return "streamable-http (remote URL)"
-	case "stdio":
-		return "stdio (local command)"
+	case contracts.MCPTransportStreamableHTTP:
+		return contracts.MCPTransportStreamableHTTP + " (remote URL)"
+	case contracts.MCPTransportStdio:
+		return contracts.MCPTransportStdio + " (local command)"
 	case "yes":
 		return "yes, browser login"
 	case "no":
@@ -502,7 +551,7 @@ func mcpChoiceLabel(value string) string {
 // Every row stays in the list, so a value survives the operator cycling past it
 // and back.
 func (m *mcpFormModel) visible(field *mcpFormField) bool {
-	remote := m.choice(mcpFieldTransport) == "streamable-http"
+	remote := m.choice(mcpFieldTransport) == contracts.MCPTransportStreamableHTTP
 	oauth := m.choice(mcpFieldOAuth) == "yes"
 	credential := m.choice(mcpFieldCredential)
 	switch field.key {
@@ -608,17 +657,13 @@ func (m *mcpFormModel) submit() bool {
 		m.err = err.Error()
 		return false
 	}
-	if err := store.ValidateMCPServer(name, config); err != nil {
-		m.err = err.Error()
-		return false
-	}
 	m.name, m.config = name, config
 	return true
 }
 
 func (m *mcpFormModel) build() (contracts.MCPServerConfig, error) {
 	config := contracts.MCPServerConfig{Transport: m.choice(mcpFieldTransport)}
-	if config.Transport == "streamable-http" {
+	if config.Transport == contracts.MCPTransportStreamableHTTP {
 		config.URL = strings.TrimSpace(m.text(mcpFieldURL))
 		if timeout := strings.TrimSpace(m.text(mcpFieldTimeout)); timeout != "" {
 			seconds, err := strconv.Atoi(timeout)
@@ -644,7 +689,7 @@ func (m *mcpFormModel) build() (contracts.MCPServerConfig, error) {
 	}
 
 	config.Command = strings.TrimSpace(m.text(mcpFieldCommand))
-	config.Args = strings.Fields(m.text(mcpFieldArgs))
+	config.Args = m.args()
 	config.Env = mcpPairsMap(m.field(mcpFieldEnv))
 	return config, nil
 }

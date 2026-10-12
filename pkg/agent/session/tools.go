@@ -21,9 +21,6 @@ import (
 )
 
 func (s *InfaiAgentSession) configureFileTools() {
-	if len(s.availableTools) == 0 {
-		s.availableTools = []contracts.Tool{}
-	}
 	s.availableTools = append(s.availableTools,
 		actuators.ReadTool(),
 		actuators.ListTool(),
@@ -36,10 +33,6 @@ func (s *InfaiAgentSession) configureFileTools() {
 }
 
 func (s *InfaiAgentSession) configureMemoryTools() {
-	if len(s.availableTools) == 0 {
-		s.availableTools = []contracts.Tool{}
-	}
-
 	memoryTools := []contracts.Tool{}
 	memoryTools = append(memoryTools, memory.ReadSkillTool(), memory.TaskChecklistTool())
 	if s.skillRegistry != nil {
@@ -53,16 +46,10 @@ func (s *InfaiAgentSession) configureDelegationTools() {
 	if s.meta.AgentKind != contracts.InteractiveAgent {
 		return
 	}
-	if len(s.availableTools) == 0 {
-		s.availableTools = []contracts.Tool{}
-	}
 	s.availableTools = append(s.availableTools, delegate.SpawnSidecarLoopTool(), delegate.SpawnBackgroundSidecarLoopTool())
 }
 
 func (s *InfaiAgentSession) configureWebTools() {
-	if len(s.availableTools) == 0 {
-		s.availableTools = []contracts.Tool{}
-	}
 	s.availableTools = append(s.availableTools, actuators.WebFetchTool(), actuators.WebSearchTool())
 }
 
@@ -92,9 +79,14 @@ func (s *InfaiAgentSession) configureMCPTools(mcpServers map[string]contracts.MC
 		toolCallNames.Add(tool.Name)
 	}
 
+	// The manager has already connected every server, and closing it is the only
+	// thing that stops them (§ go-sdk: ctx does not), so a rejected session has
+	// to close what it built before it returns.
 	for _, tool := range mcpToolCalls {
 		if toolCallNames.Exists(tool.Name) {
-			return fmt.Errorf("MCP tool name collides with an available tool tool_call: %s", tool.Name)
+			s.closeMCPManager()
+			s.mcpManager = nil
+			return fmt.Errorf("MCP tool %q is already offered by this session", tool.Name)
 		}
 		toolCallNames.Add(tool.Name)
 	}

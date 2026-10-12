@@ -16,6 +16,15 @@ const (
 	SUBSCRIBER_BUFFER = 64
 )
 
+// MCPStatus reports the configured MCP servers this session could not use. The
+// manager is set once, while the session is built, so it needs no lock.
+func (s *InfaiAgentSession) MCPStatus() []contracts.MCPServerStatus {
+	if s.mcpManager == nil {
+		return nil
+	}
+	return s.mcpManager.Status()
+}
+
 func (s *InfaiAgentSession) JoinSessionEvents() (glue.SessionView, <-chan contracts.EventStream, func(), error) {
 	s.mu.Lock()
 
@@ -44,6 +53,7 @@ func (s *InfaiAgentSession) JoinSessionEvents() (glue.SessionView, <-chan contra
 		Checklist: s.taskChecklist.Snapshot(),
 	}
 	if s.mcpManager != nil {
+		view.MCP = s.mcpManager.Status()
 		view.Prompts = s.mcpManager.Prompts()
 		view.Resources = s.mcpManager.Resources()
 	}

@@ -23,8 +23,24 @@ import (
 
 const (
 	defaultMCPTimeout = 60 * time.Second
+
+	// mcpToolNameSeparator joins a server name and a tool name into the name the
+	// model sees. A server name may itself contain it (§ the store allows
+	// letters, digits, underscore and hyphen), so two servers can still produce
+	// the same tool name: that is caught as a duplicate and the server that
+	// collided is left out of the session.
+	mcpToolNameSeparator = "_"
+	// mcpPromptKeySeparator and mcpResourceKeySeparator build this session's own
+	// lookup keys, not a name a model or a server ever sees. Neither character
+	// can appear in a server name, so one key names exactly one server's entry —
+	// which is why they are not the tool-name separator above.
+	mcpPromptKeySeparator   = ":"
+	mcpResourceKeySeparator = "|"
+
+	// mcpMaxEventBytes bounds one server-sent event of an MCP connection.
+	mcpMaxEventBytes = 2 << 20
 	// mcpClientName is the implementation name the harness reports to MCP servers.
-	mcpClientName = "infaiw"
+	mcpClientName = "infai"
 )
 
 type mcpToolBinding struct {
@@ -44,6 +60,44 @@ type mcpResourceBinding struct {
 	timeout time.Duration
 }
 
+// mcpUnauthorizedMessage is what a session reports when the server refuses the
+// credential it was given: the same words whichever kind of call it happened on.
+const mcpUnauthorizedMessage = "the MCP server rejected the client as unauthorized; its credentials are missing, expired or insufficient and must be refreshed"
+
+// mcpCallError is one kind of MCP call, so that every way it can fail is
+// reported the same way: a deadline, a refused credential, or anything else.
+type mcpCallError struct {
+	name     contracts.ToolType
+	canceled string
+	code     string
+	failed   string
+}
+
+func (c mcpCallError) from(ctx context.Context, err error) error {
+	if canceled := ctx.Err(); canceled != nil {
+		responsibility := contracts.ResponsibilityEnvironment
+		if errors.Is(canceled, context.Canceled) {
+			responsibility = contracts.ResponsibilitySession
+		}
+		return contracts.NewToolExecutionError(c.name, "execution_canceled", c.canceled, responsibility, canceled)
+	}
+	if errors.Is(err, errAuthRequired) {
+		return contracts.NewToolExecutionError(c.name, "mcp_unauthorized", mcpUnauthorizedMessage, contracts.ResponsibilityUser, err)
+	}
+	return contracts.NewToolExecutionError(c.name, c.code, c.failed, contracts.ResponsibilityEnvironment, nil)
+}
+
+// begin bounds one MCP call by the server's own deadline and by the session's
+// lifetime: the SDK does not watch the manager's context for these calls.
+func (m *MCPManager) begin(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	stop := context.AfterFunc(m.ctx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
 // ElicitFunc lets a server ask the user a question mid-call. It blocks until
 // the answer arrives; returning an error aborts the call.
 type ElicitFunc func(ctx context.Context, server string, params *mcp.ElicitParams) (*mcp.ElicitResult, error)
@@ -61,8 +115,15 @@ type MCPManager struct {
 	resourceBindings map[string]mcpResourceBinding
 	sessions         []*mcp.ClientSession
 	http             []*http.Transport
-	closeOnce        sync.Once
-	closeErr         error
+	// unavailable is why a configured server is not part of this session. The
+	// counts of what it offers cannot say it: a server that never connected and
+	// one that offered nothing both offer nothing.
+	unavailable map[string]string
+	// configured is the server names this manager was given, in the order it was
+	// given them: it is what a status report walks.
+	configured []string
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers map[string]contracts.MCPServerConfig, elicit ElicitFunc) (*MCPManager, error) {
@@ -74,6 +135,7 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 		bindings:         make(map[contracts.ToolType]mcpToolBinding),
 		promptBindings:   make(map[string]mcpPromptBinding),
 		resourceBindings: make(map[string]mcpResourceBinding),
+		unavailable:      make(map[string]string),
 	}
 	// On failure the caller gets nil, so nothing downstream can ever close what
 	// the loop already connected. Close is also the only thing that stops a
@@ -87,6 +149,7 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 	}()
 
 	for name, server := range servers {
+		manager.configured = append(manager.configured, name)
 		timeout := defaultMCPTimeout
 		if server.TimeoutSeconds > 0 {
 			timeout = time.Duration(server.TimeoutSeconds) * time.Second
@@ -105,16 +168,16 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 				return elicit(ctx, serverName, req.Params)
 			},
 		})
-		transport, err := manager.transport(cwd, name, server, timeout)
+		transport, err := manager.transport(cwd, server, timeout)
 		if err != nil {
-			manager.logUnavailable(name, err)
+			manager.markUnavailable(name, err)
 			continue
 		}
 		startupCtx, stop := context.WithTimeout(ctx, timeout)
 		session, err := client.Connect(startupCtx, transport, nil)
 		if err != nil {
 			stop()
-			manager.logUnavailable(name, err)
+			manager.markUnavailable(name, err)
 			continue
 		}
 		manager.sessions = append(manager.sessions, session)
@@ -127,7 +190,7 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 		}
 		stop()
 		if err != nil {
-			manager.logUnavailable(name, err)
+			manager.markUnavailable(name, err)
 			continue
 		}
 	}
@@ -140,17 +203,33 @@ func NewMCPManager(ctx context.Context, cwd string, logger *slog.Logger, servers
 	return manager, nil
 }
 
-func (m *MCPManager) logUnavailable(server string, err error) {
+func (m *MCPManager) markUnavailable(server string, err error) {
 	reason := "connection or discovery failed"
-	if errors.Is(err, ErrAuthRequired) {
-		reason = ErrAuthRequired.Error()
+	if errors.Is(err, errAuthRequired) {
+		reason = errAuthRequired.Error()
 	}
+	m.unavailable[server] = reason
 	m.logger.WarnContext(m.ctx, "MCP server unavailable", "server", server, "reason", reason)
 }
 
-func (m *MCPManager) transport(cwd, name string, server contracts.MCPServerConfig, timeout time.Duration) (mcp.Transport, error) {
+func (m *MCPManager) Status() []contracts.MCPServerStatus {
+	status := make([]contracts.MCPServerStatus, 0, len(m.unavailable))
+	for _, server := range m.configured {
+		if reason, ok := m.unavailable[server]; ok {
+			status = append(status, contracts.MCPServerStatus{Server: server, Reason: reason})
+		}
+	}
+	return status
+}
+
+func (m *MCPManager) Unavailable(server string) (string, bool) {
+	reason, ok := m.unavailable[server]
+	return reason, ok
+}
+
+func (m *MCPManager) transport(cwd string, server contracts.MCPServerConfig, timeout time.Duration) (mcp.Transport, error) {
 	switch server.Transport {
-	case "stdio":
+	case contracts.MCPTransportStdio:
 		command := exec.Command(server.Command, server.Args...)
 		command.Dir = cwd
 		command.Env = os.Environ()
@@ -160,7 +239,7 @@ func (m *MCPManager) transport(cwd, name string, server contracts.MCPServerConfi
 			command.Env = append(command.Env, key+"="+value)
 		}
 		return &mcp.CommandTransport{Command: command}, nil
-	case "streamable-http":
+	case contracts.MCPTransportStreamableHTTP:
 		headers := make(http.Header)
 		for key, value := range server.Headers {
 			headers.Set(key, value)
@@ -180,7 +259,7 @@ func (m *MCPManager) transport(cwd, name string, server contracts.MCPServerConfi
 			},
 			DisableStandaloneSSE: true,
 			MaxRetries:           -1,
-			MaxEventSize:         webMaxBodyBytes,
+			MaxEventSize:         mcpMaxEventBytes,
 		}
 
 		handler := &mcpSessionAuth{}
@@ -215,79 +294,90 @@ func (t *mcpHeaderTransport) RoundTrip(request *http.Request) (*http.Response, e
 	return response, nil
 }
 
-func (m *MCPManager) discover(ctx context.Context, session *mcp.ClientSession, server string, timeout time.Duration) error {
+// walkPages reads one paginated listing to its end. A cursor that repeats would
+// loop forever, so it is a failure. Every listing the manager reads goes through
+// here: three hand-written copies had to be kept in step by hand.
+func walkPages[T any](next func(cursor string) (items []T, nextCursor string, err error), visit func(T) error) error {
 	cursor := ""
 	seen := make(map[string]bool)
 	for {
-		page, err := session.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
+		items, nextCursor, err := next(cursor)
 		if err != nil {
-			return fmt.Errorf("tool discovery failed: %w", err)
+			return err
 		}
-		for _, tool := range page.Tools {
-			if tool == nil || tool.Name == "" {
-				return errors.New("server returned an invalid tool")
+		for _, item := range items {
+			if err := visit(item); err != nil {
+				return err
 			}
-			name := mcpToolName(server, tool.Name)
-			if _, exists := m.bindings[contracts.ToolType(name)]; exists {
-				return errors.New("server returned duplicate tool names")
-			}
-			schema, err := json.Marshal(tool.InputSchema)
-			if err != nil {
-				return fmt.Errorf("server returned an invalid input schema, err: %w", err)
-			}
-			m.tools = append(m.tools, contracts.Tool{Name: name, Description: tool.Description, Parameters: schema})
-			m.bindings[contracts.ToolType(name)] = mcpToolBinding{session: session, name: tool.Name, timeout: timeout}
 		}
-		if page.NextCursor == "" {
+		if nextCursor == "" {
 			return nil
 		}
-		if seen[page.NextCursor] {
+		if seen[nextCursor] {
 			return errors.New("server returned a repeated pagination cursor")
 		}
-		seen[page.NextCursor] = true
-		cursor = page.NextCursor
+		seen[nextCursor] = true
+		cursor = nextCursor
 	}
+}
+
+func (m *MCPManager) discover(ctx context.Context, session *mcp.ClientSession, server string, timeout time.Duration) error {
+	return walkPages(func(cursor string) ([]*mcp.Tool, string, error) {
+		page, err := session.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
+		if err != nil {
+			return nil, "", fmt.Errorf("tool discovery failed: %w", err)
+		}
+		return page.Tools, page.NextCursor, nil
+	}, func(tool *mcp.Tool) error {
+		if tool == nil || tool.Name == "" {
+			return errors.New("server returned an invalid tool")
+		}
+		name := mcpToolName(server, tool.Name)
+		if _, exists := m.bindings[contracts.ToolType(name)]; exists {
+			return errors.New("server returned duplicate tool names")
+		}
+		schema, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			return fmt.Errorf("server returned an invalid input schema, err: %w", err)
+		}
+		m.tools = append(m.tools, contracts.Tool{Name: name, Description: tool.Description, Parameters: schema})
+		m.bindings[contracts.ToolType(name)] = mcpToolBinding{session: session, name: tool.Name, timeout: timeout}
+		return nil
+	})
 }
 
 func mcpToolName(server, tool string) string {
-	return contracts.MCPToolPrefix + server + "_" + tool
+	return contracts.MCPToolPrefix + server + mcpToolNameSeparator + tool
 }
+func mcpPromptKey(server, name string) string  { return server + mcpPromptKeySeparator + name }
+func mcpResourceKey(server, uri string) string { return server + mcpResourceKeySeparator + uri }
 
 func (m *MCPManager) discoverPrompts(ctx context.Context, session *mcp.ClientSession, server string, timeout time.Duration) error {
-	cursor := ""
-	seen := make(map[string]bool)
-	for {
+	return walkPages(func(cursor string) ([]*mcp.Prompt, string, error) {
 		page, err := session.ListPrompts(ctx, &mcp.ListPromptsParams{Cursor: cursor})
 		if err != nil {
-			return fmt.Errorf("prompt discovery failed: %w", err)
+			return nil, "", fmt.Errorf("prompt discovery failed: %w", err)
 		}
-		for _, prompt := range page.Prompts {
-			if prompt == nil || prompt.Name == "" {
-				return errors.New("server returned an invalid prompt")
+		return page.Prompts, page.NextCursor, nil
+	}, func(prompt *mcp.Prompt) error {
+		if prompt == nil || prompt.Name == "" {
+			return errors.New("server returned an invalid prompt")
+		}
+		key := mcpPromptKey(server, prompt.Name)
+		if _, exists := m.promptBindings[key]; exists {
+			return errors.New("server returned duplicate prompt names")
+		}
+		arguments := make([]contracts.MCPPromptArgument, 0, len(prompt.Arguments))
+		for _, argument := range prompt.Arguments {
+			if argument == nil {
+				continue
 			}
-			key := server + ":" + prompt.Name
-			if _, exists := m.promptBindings[key]; exists {
-				return errors.New("server returned duplicate prompt names")
-			}
-			arguments := make([]contracts.MCPPromptArgument, 0, len(prompt.Arguments))
-			for _, argument := range prompt.Arguments {
-				if argument == nil {
-					continue
-				}
-				arguments = append(arguments, contracts.MCPPromptArgument{Name: argument.Name, Description: argument.Description, Required: argument.Required})
-			}
-			m.prompts = append(m.prompts, contracts.MCPPrompt{Server: server, Name: prompt.Name, Title: prompt.Title, Description: prompt.Description, Arguments: arguments})
-			m.promptBindings[key] = mcpPromptBinding{session: session, name: prompt.Name, timeout: timeout}
+			arguments = append(arguments, contracts.MCPPromptArgument{Name: argument.Name, Description: argument.Description, Required: argument.Required})
 		}
-		if page.NextCursor == "" {
-			return nil
-		}
-		if seen[page.NextCursor] {
-			return errors.New("server returned a repeated pagination cursor")
-		}
-		seen[page.NextCursor] = true
-		cursor = page.NextCursor
-	}
+		m.prompts = append(m.prompts, contracts.MCPPrompt{Server: server, Name: prompt.Name, Title: prompt.Title, Description: prompt.Description, Arguments: arguments})
+		m.promptBindings[key] = mcpPromptBinding{session: session, name: prompt.Name, timeout: timeout}
+		return nil
+	})
 }
 
 // discoverResources mirrors discoverPrompts, but a server that does not
@@ -297,37 +387,28 @@ func (m *MCPManager) discoverResources(ctx context.Context, session *mcp.ClientS
 	if result := session.InitializeResult(); result != nil && result.Capabilities.Resources == nil {
 		return nil
 	}
-	cursor := ""
-	seen := make(map[string]bool)
 	// Both the duplicate guard and the binding map are server-qualified, so two
 	// servers advertising the same URI cannot collide.
 	seenURIs := make(map[string]bool)
-	for {
+	return walkPages(func(cursor string) ([]*mcp.Resource, string, error) {
 		page, err := session.ListResources(ctx, &mcp.ListResourcesParams{Cursor: cursor})
 		if err != nil {
-			return fmt.Errorf("resource discovery failed: %w", err)
+			return nil, "", fmt.Errorf("resource discovery failed: %w", err)
 		}
-		for _, resource := range page.Resources {
-			if resource == nil || resource.URI == "" {
-				return errors.New("server returned an invalid resource")
-			}
-			key := server + ":" + resource.URI
-			if seenURIs[key] {
-				return errors.New("server returned duplicate resource URIs")
-			}
-			seenURIs[key] = true
-			m.resources = append(m.resources, contracts.MCPResource{Server: server, URI: resource.URI, Name: resource.Name, Title: resource.Title, Description: resource.Description, MIMEType: resource.MIMEType, Size: resource.Size})
-			m.resourceBindings[server+"|"+resource.URI] = mcpResourceBinding{session: session, timeout: timeout}
+		return page.Resources, page.NextCursor, nil
+	}, func(resource *mcp.Resource) error {
+		if resource == nil || resource.URI == "" {
+			return errors.New("server returned an invalid resource")
 		}
-		if page.NextCursor == "" {
-			return nil
+		key := mcpResourceKey(server, resource.URI)
+		if seenURIs[key] {
+			return errors.New("server returned duplicate resource URIs")
 		}
-		if seen[page.NextCursor] {
-			return errors.New("server returned a repeated pagination cursor")
-		}
-		seen[page.NextCursor] = true
-		cursor = page.NextCursor
-	}
+		seenURIs[key] = true
+		m.resources = append(m.resources, contracts.MCPResource{Server: server, URI: resource.URI, Name: resource.Name, Title: resource.Title, Description: resource.Description, MIMEType: resource.MIMEType, Size: resource.Size})
+		m.resourceBindings[key] = mcpResourceBinding{session: session, timeout: timeout}
+		return nil
+	})
 }
 
 func (m *MCPManager) Tools() []contracts.Tool { return slices.Clone(m.tools) }
@@ -340,12 +421,8 @@ func (m *MCPManager) Resources() []contracts.MCPResource { return slices.Clone(m
 // catalogue is small and fixed after discovery, so a scan costs less than a
 // second index over the same data.
 func (m *MCPManager) HasResource(uri string) bool {
-	for _, resource := range m.resources {
-		if resource.URI == uri {
-			return true
-		}
-	}
-	return false
+	_, _, ok := m.resourceBinding(uri)
+	return ok
 }
 
 func (m *MCPManager) ReadResource(ctx context.Context, uri string) (contracts.MCPResourceRead, error) {
@@ -353,22 +430,20 @@ func (m *MCPManager) ReadResource(ctx context.Context, uri string) (contracts.MC
 	if !ok {
 		return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "unknown_resource", "the MCP resource is not registered", contracts.ResponsibilityAgent, nil)
 	}
-	ctx, cancel := context.WithTimeout(ctx, binding.timeout)
+	failure := mcpCallError{
+		name:     contracts.ToolType(uri),
+		canceled: "the MCP resource read was canceled or exceeded its deadline",
+		code:     "mcp_resource_failed",
+		failed:   "the MCP server could not read the resource",
+	}
+	ctx, cancel := m.begin(ctx, binding.timeout)
 	defer cancel()
-	stop := context.AfterFunc(m.ctx, cancel)
-	defer stop()
 	if m.ctx.Err() != nil {
 		return contracts.MCPResourceRead{}, m.ctx.Err()
 	}
 	result, err := binding.session.ReadResource(ctx, &mcp.ReadResourceParams{URI: uri})
 	if err != nil {
-		if ctx.Err() != nil {
-			return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "execution_canceled", "the MCP resource read was canceled or exceeded its deadline", contracts.ResponsibilityEnvironment, ctx.Err())
-		}
-		if errors.Is(err, ErrAuthRequired) {
-			return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "mcp_unauthorized", "the MCP server rejected the client as unauthorized; its credentials are missing, expired or insufficient and must be refreshed", contracts.ResponsibilityEnvironment, err)
-		}
-		return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "mcp_resource_failed", "the MCP server could not read the resource", contracts.ResponsibilityEnvironment, nil)
+		return contracts.MCPResourceRead{}, failure.from(ctx, err)
 	}
 	if result.NeedsInput() {
 		return contracts.MCPResourceRead{}, contracts.NewToolExecutionError(contracts.ToolType(uri), "unsupported_input", "the MCP server requested an unsupported client capability", contracts.ResponsibilityEnvironment, nil)
@@ -392,7 +467,7 @@ func (m *MCPManager) ReadResource(ctx context.Context, uri string) (contracts.MC
 			mimeType = item.MIMEType
 		}
 	}
-	return contracts.MCPResourceRead{Server: server, URI: uri, MIMEType: mimeType, Text: clipWebContent(strings.Join(parts, "\n"), webMaxBodyBytes)}, nil
+	return contracts.MCPResourceRead{Server: server, URI: uri, MIMEType: mimeType, Text: clipWebContent(strings.Join(parts, "\n"), maxToolContentBytes)}, nil
 }
 
 // resourceBinding resolves a URI against the catalogue snapshot: an MCP
@@ -403,7 +478,7 @@ func (m *MCPManager) resourceBinding(uri string) (string, mcpResourceBinding, bo
 		if resource.URI != uri {
 			continue
 		}
-		binding, ok := m.resourceBindings[resource.Server+"|"+uri]
+		binding, ok := m.resourceBindings[mcpResourceKey(resource.Server, uri)]
 		if !ok {
 			return "", mcpResourceBinding{}, false
 		}
@@ -438,22 +513,20 @@ func (m *MCPManager) Execute(ctx context.Context, call contracts.ToolCall) (stri
 	if _, err := contracts.DecodeToolArguments[map[string]json.RawMessage](call.Function.Name, call); err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(ctx, binding.timeout)
+	failure := mcpCallError{
+		name:     call.Function.Name,
+		canceled: "the MCP call was canceled or exceeded its deadline",
+		code:     "mcp_call_failed",
+		failed:   "the MCP server could not complete the call",
+	}
+	ctx, cancel := m.begin(ctx, binding.timeout)
 	defer cancel()
-	stop := context.AfterFunc(m.ctx, cancel)
-	defer stop()
 	if m.ctx.Err() != nil {
 		return "", m.ctx.Err()
 	}
 	result, err := binding.session.CallTool(ctx, &mcp.CallToolParams{Name: binding.name, Arguments: json.RawMessage(call.Function.Arguments)})
 	if err != nil {
-		if ctx.Err() != nil {
-			return "", contracts.NewToolExecutionError(call.Function.Name, "execution_canceled", "the MCP call was canceled or exceeded its deadline", contracts.ResponsibilityEnvironment, ctx.Err())
-		}
-		if errors.Is(err, ErrAuthRequired) {
-			return "", contracts.NewToolExecutionError(call.Function.Name, "mcp_unauthorized", "the MCP server rejected the client as unauthorized; its credentials are missing, expired or insufficient and must be refreshed", contracts.ResponsibilityEnvironment, err)
-		}
-		return "", contracts.NewToolExecutionError(call.Function.Name, "mcp_call_failed", "the MCP server could not complete the call", contracts.ResponsibilityEnvironment, nil)
+		return "", failure.from(ctx, err)
 	}
 	if result.NeedsInput() {
 		return "", contracts.NewToolExecutionError(call.Function.Name, "unsupported_input", "the MCP server requested an unsupported client capability", contracts.ResponsibilityEnvironment, nil)
@@ -479,28 +552,26 @@ func (m *MCPManager) Execute(ctx context.Context, call contracts.ToolCall) (stri
 }
 
 func (m *MCPManager) RenderPrompt(ctx context.Context, server, name string, arguments map[string]string) ([]contracts.ChatMessage, error) {
-	callName := contracts.ToolType(server + ":" + name)
-	binding, ok := m.promptBindings[server+":"+name]
+	callName := contracts.ToolType(mcpPromptKey(server, name))
+	binding, ok := m.promptBindings[mcpPromptKey(server, name)]
 	if !ok {
 		return nil, contracts.NewToolExecutionError(callName, "unknown_prompt", "the MCP prompt is not registered", contracts.ResponsibilityAgent, nil)
 	}
-	ctx, cancel := context.WithTimeout(ctx, binding.timeout)
+	failure := mcpCallError{
+		name:     callName,
+		canceled: "the MCP prompt was canceled or exceeded its deadline",
+		code:     "mcp_prompt_failed",
+		failed:   "the MCP server could not render the prompt",
+	}
+	ctx, cancel := m.begin(ctx, binding.timeout)
 	defer cancel()
-	stop := context.AfterFunc(m.ctx, cancel)
-	defer stop()
 	if m.ctx.Err() != nil {
 		return nil, m.ctx.Err()
 	}
 
 	result, err := binding.session.GetPrompt(ctx, &mcp.GetPromptParams{Name: binding.name, Arguments: arguments})
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, contracts.NewToolExecutionError(callName, "execution_canceled", "the MCP prompt was canceled or exceeded its deadline", contracts.ResponsibilityEnvironment, ctx.Err())
-		}
-		if errors.Is(err, ErrAuthRequired) {
-			return nil, contracts.NewToolExecutionError(callName, "mcp_unauthorized", "the MCP server rejected the client as unauthorized; its credentials are missing, expired or insufficient and must be refreshed", contracts.ResponsibilityEnvironment, err)
-		}
-		return nil, contracts.NewToolExecutionError(callName, "mcp_prompt_failed", "the MCP server could not render the prompt", contracts.ResponsibilityEnvironment, nil)
+		return nil, failure.from(ctx, err)
 	}
 
 	messages := make([]contracts.ChatMessage, 0, len(result.Messages))
