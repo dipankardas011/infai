@@ -252,14 +252,22 @@ func runServer(cmd *cobra.Command, args []string) error {
 	sig := <-sigChan
 	wlog.DebugContext(ctx, "Received terminate signal", "signal", sig.String())
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
+	teardownCtx, teardownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer teardownCancel()
 
-	if err := eng.Shutdown(shutdownCtx); err != nil {
-		wlog.ErrorContext(shutdownCtx, "engine shutdown error", "error", err)
+	if err := eng.Shutdown(teardownCtx); err != nil {
+		if teardownCtx.Err() != nil {
+			wlog.WarnContext(teardownCtx, "engine teardown outlasted its budget", "error", err)
+		} else {
+			wlog.ErrorContext(teardownCtx, "engine teardown failed", "error", err)
+		}
 	}
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		wlog.ErrorContext(shutdownCtx, "server shutdown error", "error", err)
+	if err := srv.Shutdown(teardownCtx); err != nil {
+		if teardownCtx.Err() != nil {
+			wlog.WarnContext(teardownCtx, "server stop outlasted its budget", "error", err)
+		} else {
+			wlog.ErrorContext(teardownCtx, "server stop failed", "error", err)
+		}
 	}
 	wlog.InfoContext(ctx, "shutdown complete")
 	return nil

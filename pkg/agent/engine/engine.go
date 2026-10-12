@@ -99,6 +99,10 @@ func (e *InfaiAgentEngine) listenForAgentComms() {
 	for {
 		msg, err := e.aseComms.SubscribeForSessionAgentsEvents(e.ctx)
 		if err != nil {
+			if e.ctx.Err() != nil || errors.Is(err, comms.ErrAgentCommsClosed) {
+				e.bgLogger.Debug("agent comms loop stopped", "reason", err)
+				return
+			}
 			e.bgLogger.ErrorContext(e.ctx, "failure in subscribe for sessionagentEvents", "error", err)
 			return
 		}
@@ -882,15 +886,19 @@ func (e *InfaiAgentEngine) SelectBranch(id, eventID uuid.UUID) (contracts.TaskCh
 
 // Shutdown stops accepting sessions and closes every registered one.
 func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
-	e.bgLogger.DebugContext(ctx, "received shutdown request")
+	started := time.Now()
+	e.bgLogger.DebugContext(ctx, "received teardown request")
 
 	e.stopOnce.Do(func() {
 		close(e.stopCh)
 	})
+
 	e.mu.Lock()
+	closed := 0
 	for id, sess := range e.activeSessionAgents {
 		if sess.Meta().ParentID == uuid.Nil {
 			e.closeSessionTree(id)
+			closed++
 		}
 	}
 	e.mu.Unlock()
@@ -898,9 +906,12 @@ func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
 	e.aseComms.Close()
 
 	if err := ctx.Err(); err != nil {
+		e.bgLogger.WarnContext(ctx, "engine teardown outlasted its budget",
+			"error", err, "trees_closed", closed, "took", time.Since(started).Round(time.Millisecond))
 		return err
 	}
 
-	e.bgLogger.DebugContext(ctx, "engine shutdown complete")
+	e.bgLogger.DebugContext(ctx, "engine teardown complete",
+		"trees_closed", closed, "took", time.Since(started).Round(time.Millisecond))
 	return nil
 }
