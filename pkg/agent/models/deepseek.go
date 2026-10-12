@@ -122,16 +122,9 @@ type deepSeekTool struct {
 }
 
 type deepSeekToolFunction struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	Parameters  deepSeekToolParameters `json:"parameters"`
-}
-
-type deepSeekToolParameters struct {
-	Type                 string         `json:"type"`
-	Properties           map[string]any `json:"properties"`
-	Required             []string       `json:"required"`
-	AdditionalProperties bool           `json:"additionalProperties"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
 }
 
 type deepSeekChatResponse struct {
@@ -210,12 +203,7 @@ func (d *deepSeekAPI) buildRequest(messages []contracts.ChatMessage, tools []con
 			Function: deepSeekToolFunction{
 				Name:        tool.Name,
 				Description: tool.Description,
-				Parameters: deepSeekToolParameters{
-					Type:                 tool.Parameters.Type,
-					Properties:           tool.Parameters.Properties,
-					Required:             append([]string{}, tool.Parameters.RequiredFields...),
-					AdditionalProperties: tool.Parameters.AdditionalProperties,
-				},
+				Parameters:  tool.Parameters,
 			},
 		})
 	}

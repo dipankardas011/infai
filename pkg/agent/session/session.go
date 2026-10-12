@@ -63,6 +63,7 @@ type InfaiAgentSession struct {
 	// write. The agent is the sole receiver of userCancellation.
 	userCancellation             chan struct{}
 	pendingApproval              *pendingApproval
+	pendingElicitation           *pendingElicitation
 	pendingBranchParent          uuid.UUID
 	pendingBackgroundSidecarLoop map[uuid.UUID]string
 
@@ -78,6 +79,7 @@ type InfaiAgentSession struct {
 	availableTools  []contracts.Tool
 	availableSkills []contracts.Skill
 	fileManager     *actuators.FileManager
+	mcpManager      *actuators.MCPManager
 	skillRegistry   *memory.SkillRegistry
 	taskChecklist   *memory.TaskChecklist
 
@@ -110,6 +112,7 @@ func NewSession(
 	ss *store.SessionStore,
 	aeComms *comms.ISACChannel,
 	sessionAgentKind contracts.AgentKind,
+	mcpServers map[string]contracts.MCPServerConfig,
 ) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(chosenModel)
 	if err != nil {
@@ -161,7 +164,7 @@ func NewSession(
 		return nil, err
 	}
 
-	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc)
+	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc, mcpServers)
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -178,6 +181,7 @@ func NewResumedSession(
 	timeline *store.Timeline,
 	sessionStore *store.SessionStore,
 	aeComms *comms.ISACChannel,
+	mcpServers map[string]contracts.MCPServerConfig,
 ) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(chosenModel)
 	if err != nil {
@@ -198,7 +202,7 @@ func NewResumedSession(
 		}
 	}
 
-	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc)
+	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc, mcpServers)
 }
 
 func newRuntimeSession(
@@ -212,6 +216,7 @@ func newRuntimeSession(
 	am *contracts.AgentMailbox,
 	aeComms *comms.ISACChannel,
 	evalFunc func(context.Context) error,
+	mcpServers map[string]contracts.MCPServerConfig,
 ) (*InfaiAgentSession, error) {
 	if engineCtx == nil {
 		return nil, errors.New("session: engine context is required")
@@ -269,6 +274,10 @@ func newRuntimeSession(
 
 	if s.meta.AgentKind == contracts.InteractiveAgent {
 		s.configureDelegationTools()
+	}
+	if err := s.configureMCPTools(mcpServers); err != nil {
+		cancel(err)
+		return nil, err
 	}
 
 	systemPrompt, err := prompts.GetBasicSystemPrompt(s.availableTools, s.availableSkills, s.meta.Cwd)
@@ -533,6 +542,12 @@ func (s *InfaiAgentSession) EnqueueUserMessage(ctx context.Context, input contra
 		s.l.Error("persist session metadata", "session_id", meta.ID, "error", err)
 	}
 
+	// Translate resource references before the message becomes a user message,
+	// so a resource that cannot be read never blocks the send.
+	if s.mcpManager != nil {
+		input.Text = s.expandResourceReferences(ctx, input.Text)
+	}
+
 	if err := s.agentMailbox.SendMessage(ctx, contracts.NewUserMessageWithInput(input)); err != nil {
 		return err
 	}
@@ -553,6 +568,8 @@ func (s *InfaiAgentSession) CancelTurn() error {
 
 	pending := s.pendingApproval
 	s.pendingApproval = nil
+	pendingMCPElicit := s.pendingElicitation
+	s.pendingElicitation = nil
 	s.mu.Unlock()
 
 	if pending != nil {
@@ -569,6 +586,10 @@ func (s *InfaiAgentSession) CancelTurn() error {
 			HITLResult: &decision,
 		})
 		pending.decision <- decision
+	}
+
+	if pendingMCPElicit != nil {
+		pendingMCPElicit.conclusion <- contracts.ElicitationConclusion{ReqID: pendingMCPElicit.request.ID, Action: contracts.ElicitationCancel}
 	}
 	return nil
 }
@@ -821,6 +842,34 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 
 			s.reportStatusToParent(status)
 
+		case contracts.EventElicitationRequested:
+			waiting := string(contracts.SessionWaitingApproval)
+			waitingEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &waiting}
+
+			s.mu.Lock()
+			s.moveStatusLocked(contracts.SessionWaitingApproval)
+			status := s.status
+			s.inFlight = append(s.inFlight, event, waitingEvent)
+			s.notifySubscribers(event)
+			s.notifySubscribers(waitingEvent)
+			s.mu.Unlock()
+
+			s.reportStatusToParent(status)
+
+		case contracts.EventElicitationResolved:
+			busy := string(contracts.SessionBusy)
+			busyEvent := contracts.EventStream{Kind: contracts.EventSessionTransitionState, Timestamp: time.Now().UTC(), Content: &busy}
+
+			s.mu.Lock()
+			s.moveStatusLocked(contracts.SessionBusy)
+			status := s.status
+			s.inFlight = append(s.inFlight, event, busyEvent)
+			s.notifySubscribers(event)
+			s.notifySubscribers(busyEvent)
+			s.mu.Unlock()
+
+			s.reportStatusToParent(status)
+
 		case contracts.EventSessionFatal:
 			reason := "session concluded"
 			if event.Content != nil {
@@ -844,6 +893,9 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			// carry it.
 			s.reportStatusToParent(status)
 			s.cancel(cause)
+			// The context ending does not close MCP on its own, and
+			// CloseWithReason cannot be used here: it waits on this goroutine.
+			s.closeMCPManager()
 
 			s.recordSessionConclusion(status, reason)
 
@@ -1040,6 +1092,7 @@ func (s *InfaiAgentSession) CloseWithReason(reason string) {
 		// one that is only being closed records that, which is what happened.
 		s.recordSessionConclusion(contracts.SessionTombstone, reason)
 		s.cancel(harnessErr.ErrSessionClosed)
+		s.closeMCPManager()
 		s.wg.Wait()
 		s.settleBackgroundSidecars()
 

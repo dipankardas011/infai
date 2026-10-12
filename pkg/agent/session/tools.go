@@ -16,13 +16,11 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/delegate"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/memory"
+	"github.com/dipankardas011/infai/pkg/ds"
 	"github.com/google/uuid"
 )
 
 func (s *InfaiAgentSession) configureFileTools() {
-	if len(s.availableTools) == 0 {
-		s.availableTools = []contracts.Tool{}
-	}
 	s.availableTools = append(s.availableTools,
 		actuators.ReadTool(),
 		actuators.ListTool(),
@@ -35,10 +33,6 @@ func (s *InfaiAgentSession) configureFileTools() {
 }
 
 func (s *InfaiAgentSession) configureMemoryTools() {
-	if len(s.availableTools) == 0 {
-		s.availableTools = []contracts.Tool{}
-	}
-
 	memoryTools := []contracts.Tool{}
 	memoryTools = append(memoryTools, memory.ReadSkillTool(), memory.TaskChecklistTool())
 	if s.skillRegistry != nil {
@@ -52,17 +46,72 @@ func (s *InfaiAgentSession) configureDelegationTools() {
 	if s.meta.AgentKind != contracts.InteractiveAgent {
 		return
 	}
-	if len(s.availableTools) == 0 {
-		s.availableTools = []contracts.Tool{}
-	}
 	s.availableTools = append(s.availableTools, delegate.SpawnSidecarLoopTool(), delegate.SpawnBackgroundSidecarLoopTool())
 }
 
 func (s *InfaiAgentSession) configureWebTools() {
-	if len(s.availableTools) == 0 {
-		s.availableTools = []contracts.Tool{}
-	}
 	s.availableTools = append(s.availableTools, actuators.WebFetchTool(), actuators.WebSearchTool())
+}
+
+func (s *InfaiAgentSession) closeMCPManager() {
+	if s.mcpManager != nil {
+		err := s.mcpManager.Close()
+		if err != nil {
+			s.l.ErrorContext(s.ctx, "mcp manager close error", "error", err)
+		}
+	}
+}
+
+func (s *InfaiAgentSession) RenderPrompt(server, name string, arguments map[string]string) ([]contracts.ChatMessage, error) {
+	return s.mcpManager.RenderPrompt(s.ctx, server, name, arguments)
+}
+
+func (s *InfaiAgentSession) configureMCPTools(mcpServers map[string]contracts.MCPServerConfig) error {
+	mcpManager, err := actuators.NewMCPManager(s.ctx, s.meta.Cwd, s.l, mcpServers, s.MCPElicit)
+	if err != nil {
+		return fmt.Errorf("configure MCP tools: %w", err)
+	}
+	s.mcpManager = mcpManager
+
+	mcpToolCalls := mcpManager.Tools()
+	toolCallNames := ds.NewSet[string]()
+	for _, tool := range s.availableTools {
+		toolCallNames.Add(tool.Name)
+	}
+
+	// The manager has already connected every server, and closing it is the only
+	// thing that stops them (§ go-sdk: ctx does not), so a rejected session has
+	// to close what it built before it returns.
+	for _, tool := range mcpToolCalls {
+		if toolCallNames.Exists(tool.Name) {
+			s.closeMCPManager()
+			s.mcpManager = nil
+			return fmt.Errorf("MCP tool %q is already offered by this session", tool.Name)
+		}
+		toolCallNames.Add(tool.Name)
+	}
+
+	for _, tool := range mcpToolCalls {
+		s.availableTools = append(s.availableTools, tool)
+		s.auditorPolicy.SetPolicy(contracts.ToolType(tool.Name), auditor.HumanPolicy)
+	}
+	return nil
+}
+
+func (s *InfaiAgentSession) runTurnCancelable(ctx context.Context, run func(context.Context) error) (err error, canceled bool) {
+	toolCtx, cancel := context.WithCancelCause(ctx)
+	go func() {
+		select {
+		case <-s.userCancellation:
+			cancel(harnessErr.ErrTurnCanceled)
+		case <-toolCtx.Done():
+		}
+	}()
+
+	err = run(toolCtx)
+	canceled = errors.Is(context.Cause(toolCtx), harnessErr.ErrTurnCanceled)
+	cancel(nil)
+	return err, canceled
 }
 
 func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCall) ([]contracts.ChatMessage, bool) {
@@ -347,21 +396,12 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 				})
 
 			case contracts.BashTool:
-				bashCtx, cancelBash := context.WithCancelCause(s.ctx)
-				cancellationDone := make(chan struct{})
-				go func() {
-					defer close(cancellationDone)
-					select {
-					case <-s.userCancellation:
-						cancelBash(harnessErr.ErrTurnCanceled)
-					case <-bashCtx.Done():
-					}
-				}()
-
-				output, err := s.fileManager.BashExecution(bashCtx, tc)
-				cause := context.Cause(bashCtx)
-				cancelBash(nil)
-				<-cancellationDone
+				var output string
+				err, canceled := s.runTurnCancelable(s.ctx, func(ctx context.Context) error {
+					var runErr error
+					output, runErr = s.fileManager.BashExecution(ctx, tc)
+					return runErr
+				})
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
@@ -369,7 +409,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					Output:   output,
 					CallName: tc.Function.Name,
 				}
-				if errors.Is(cause, harnessErr.ErrTurnCanceled) {
+				if canceled {
 					turnCanceled = true
 					status = contracts.ToolExecutionDenied
 					content = contracts.NewToolExecutionError(
@@ -377,7 +417,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 						"turn_canceled",
 						"the turn was canceled by the user while the command was running",
 						contracts.ResponsibilityUser,
-						cause,
+						harnessErr.ErrTurnCanceled,
 					).Error()
 					result.Status = status
 					result.Output = ""
@@ -527,23 +567,56 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 				})
 
 			default:
-				status = contracts.ToolExecutionError
-				content = contracts.NewToolExecutionError(
-					tc.Function.Name,
-					"unknown_tool",
-					"the requested tool is not available in this session",
-					contracts.ResponsibilityAgent,
-					nil,
-				).Error()
+				result := contracts.ToolExecutionResult{
+					Status:   contracts.ToolExecutionSuccess,
+					CallID:   tc.ID,
+					CallName: tc.Function.Name,
+				}
+
+				if !s.mcpManager.HasTool(tc.Function.Name) {
+					status = contracts.ToolExecutionError
+					content = contracts.NewToolExecutionError(
+						tc.Function.Name,
+						"unknown_tool",
+						"the requested tool is not available in this session",
+						contracts.ResponsibilityAgent,
+						nil,
+					).Error()
+				} else {
+					var output string
+					err, canceled := s.runTurnCancelable(s.ctx, func(ctx context.Context) error {
+						var runErr error
+						output, runErr = s.mcpManager.Execute(ctx, tc)
+						return runErr
+					})
+
+					result.Output = output
+					if canceled {
+						turnCanceled = true
+						status = contracts.ToolExecutionDenied
+						content = contracts.NewToolExecutionError(
+							tc.Function.Name,
+							"turn_canceled",
+							"the turn was canceled by the user while the mcp_call was running",
+							contracts.ResponsibilityUser,
+							harnessErr.ErrTurnCanceled,
+						).Error()
+						result.Output = ""
+					} else if err != nil {
+						status = contracts.ToolExecutionError
+						content = err.Error()
+					} else {
+						content = output
+					}
+				}
+				result.Status = status
+				if status != contracts.ToolExecutionSuccess {
+					result.Error = content
+				}
 				s.publish(contracts.EventStream{
-					Kind:      contracts.EventToolResult,
-					Timestamp: time.Now().UTC(),
-					ToolResult: &contracts.ToolExecutionResult{
-						Status:   status,
-						CallID:   tc.ID,
-						CallName: tc.Function.Name,
-						Error:    content,
-					},
+					Kind:       contracts.EventToolResult,
+					Timestamp:  time.Now().UTC(),
+					ToolResult: &result,
 				})
 			}
 

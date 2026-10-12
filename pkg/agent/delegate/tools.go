@@ -17,34 +17,29 @@ func SpawnSidecarLoopTool() contracts.Tool {
 	return contracts.Tool{
 		Name:        string(contracts.SpawnSidecarLoopTool),
 		Description: "Start a self-contained task (no overlap among sidecars) for a sidecar agent and get its answer back as this call's result. The sidecar receives only one `task` you give it, cannot ask you questions and does not see this conversation. Use it when you need the answer before you can continue. Its a Foreground task handler.",
-		Parameters: contracts.ToolParameters{
-			Type: "object",
-			Properties: map[string]any{
-				"agent_name": map[string]any{
-					"type":        "string",
-					"description": "Short name for the sidecar you will need to remember it (at most 70 characters).",
-				},
-				"cwd": map[string]any{
-					"type":        "string",
-					"description": "working directory for the sidecar; defaults to this session's when left empty",
-				},
-				"task": map[string]any{
-					"type":        "string",
-					"description": "The complete instruction for the sidecar: the goal, the files or areas to work on, the definition of done, and the command that must pass. It sees nothing else, cannot ask questions and does not see this conversation, so include everything it needs.",
-				},
-				"acceptance_script": map[string]any{
-					"type":        "string",
-					"description": "Read-only bash script that must exit 0 for the work to count as done; it may build and inspect, never write. Echo why it failed — the sidecar is shown what it prints, not just the exit status.",
-				},
-				"max_turns": map[string]any{
-					"type":        "integer",
-					"enum":        []int{20, 40, 100},
-					"description": "Maximum model generations for the sidecar: a tool call uses one generation, and another is needed to inspect its result. 20 for a lookup or two, 40 for a multi-step task, 100 for a tree-wide change.",
-				},
+		Parameters: contracts.ToolParameterObjectSchema(map[string]any{
+			"agent_name": map[string]any{
+				"type":        "string",
+				"description": "Short name for the sidecar you will need to remember it (at most 70 characters).",
 			},
-			RequiredFields:       []string{"agent_name", "task", "acceptance_script", "max_turns"},
-			AdditionalProperties: false,
-		},
+			"cwd": map[string]any{
+				"type":        "string",
+				"description": "working directory for the sidecar; defaults to this session's when left empty",
+			},
+			"task": map[string]any{
+				"type":        "string",
+				"description": "The complete instruction for the sidecar: the goal, the files or areas to work on, the definition of done, and the command that must pass. It sees nothing else, cannot ask questions and does not see this conversation, so include everything it needs.",
+			},
+			"acceptance_script": map[string]any{
+				"type":        "string",
+				"description": "Read-only bash script that must exit 0 for the work to count as done; it may build and inspect, never write. Echo why it failed — the sidecar is shown what it prints, not just the exit status.",
+			},
+			"max_turns": map[string]any{
+				"type":        "integer",
+				"enum":        []int{20, 40, 100},
+				"description": "Maximum model generations for the sidecar: a tool call uses one generation, and another is needed to inspect its result. 20 for a lookup or two, 40 for a multi-step task, 100 for a tree-wide change.",
+			},
+		}, []string{"agent_name", "task", "acceptance_script", "max_turns"}),
 	}
 }
 
@@ -52,34 +47,29 @@ func SpawnBackgroundSidecarLoopTool() contracts.Tool {
 	return contracts.Tool{
 		Name:        string(contracts.SpawnBackgroundSidecarLoopTool),
 		Description: "Start a self-contained task (no overlap among sidecars) for a sidecar agent. Use it when you have other work to do while it runs. The sidecar receives only one `task` and cannot ask questions and does not see this conversation. Its a Background task delegation so sidecar will tell you when its done.",
-		Parameters: contracts.ToolParameters{
-			Type: "object",
-			Properties: map[string]any{
-				"agent_name": map[string]any{
-					"type":        "string",
-					"description": "Short name for the sidecar you will need to remember it (at most 70 characters).",
-				},
-				"cwd": map[string]any{
-					"type":        "string",
-					"description": "working directory for the sidecar; defaults to this session's when left empty",
-				},
-				"task": map[string]any{
-					"type":        "string",
-					"description": "The complete instruction for the sidecar: the goal, the files or areas to work on, the definition of done, and the command that must pass. It sees nothing else, cannot ask questions and does not see this conversation, so include everything it needs.",
-				},
-				"acceptance_script": map[string]any{
-					"type":        "string",
-					"description": "Read-only bash script that must exit 0 for the work to count as done; it may build and inspect, never write. Echo why it failed — the sidecar is shown what it prints, not just the exit status.",
-				},
-				"max_turns": map[string]any{
-					"type":        "integer",
-					"enum":        []int{20, 40, 100},
-					"description": "Maximum model generations for the sidecar: a tool call uses one generation, and another is needed to inspect its result. 20 for a lookup or two, 40 for a multi-step task, 100 for a tree-wide change.",
-				},
+		Parameters: contracts.ToolParameterObjectSchema(map[string]any{
+			"agent_name": map[string]any{
+				"type":        "string",
+				"description": "Short name for the sidecar you will need to remember it (at most 70 characters).",
 			},
-			RequiredFields:       []string{"agent_name", "task", "acceptance_script", "max_turns"},
-			AdditionalProperties: false,
-		},
+			"cwd": map[string]any{
+				"type":        "string",
+				"description": "working directory for the sidecar; defaults to this session's when left empty",
+			},
+			"task": map[string]any{
+				"type":        "string",
+				"description": "The complete instruction for the sidecar: the goal, the files or areas to work on, the definition of done, and the command that must pass. It sees nothing else, cannot ask questions and does not see this conversation, so include everything it needs.",
+			},
+			"acceptance_script": map[string]any{
+				"type":        "string",
+				"description": "Read-only bash script that must exit 0 for the work to count as done; it may build and inspect, never write. Echo why it failed — the sidecar is shown what it prints, not just the exit status.",
+			},
+			"max_turns": map[string]any{
+				"type":        "integer",
+				"enum":        []int{20, 40, 100},
+				"description": "Maximum model generations for the sidecar: a tool call uses one generation, and another is needed to inspect its result. 20 for a lookup or two, 40 for a multi-step task, 100 for a tree-wide change.",
+			},
+		}, []string{"agent_name", "task", "acceptance_script", "max_turns"}),
 	}
 }
 

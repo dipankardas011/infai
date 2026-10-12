@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -91,7 +92,10 @@ type chatModel struct {
 	modal                   *modalModel
 	commandMenu             bool
 	commandSelection        int
+	mcpPrompts              []contracts.MCPPrompt
+	mcpResources            []contracts.MCPResource
 	filePicker              *filePicker
+	resourcePicker          *resourcePicker
 
 	working           bool
 	workBegan         time.Time
@@ -146,6 +150,11 @@ type editorDoneMsg struct {
 	err  error
 }
 
+type mcpPromptRenderedMsg struct {
+	text string
+	err  error
+}
+
 type sessionLoadedMsg struct {
 	output          *glue.SessionOutput
 	parentName      string
@@ -185,6 +194,7 @@ type branchSelectedMsg struct {
 	err       error
 }
 type approvalResolvedMsg struct{ err error }
+type elicitResolvedMsg struct{ err error }
 type renamedMsg struct {
 	meta *store.SessionMeta
 	err  error
@@ -237,7 +247,7 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 		skillNames:     make(map[string]string),
 	}
 	if opts.SessionID != uuid.Nil {
-		m.modal = loadingModal("Opening session")
+		m.modal = loadingModal("Opening session", "the session, its transcripts, its MCP servers and the model it runs on")
 		m.initCmd = loadSessionCmd(ctx, client, opts.SessionID)
 	} else {
 		m.showSessions(sessions, true)
@@ -383,6 +393,21 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateCommandMenu()
 		m.reflow()
 		return m, nil
+	case mcpPromptRenderedMsg:
+		// The form put up a loading modal on submit; dismiss it on both the
+		// success and the error path.
+		m.modal = nil
+		if msg.err != nil {
+			m.appendError(msg.err)
+			m.refreshTranscript(true)
+			m.reflow()
+			return m, nil
+		}
+		m.composer.SetValue(msg.text)
+		m.composer.CursorEnd()
+		m.updateCommandMenu()
+		m.reflow()
+		return m, nil
 	case sessionLoadedMsg:
 		if msg.err != nil {
 			m.showNotice("Could not open session", msg.err.Error(), true)
@@ -478,6 +503,10 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.checklist = contracts.TaskChecklistState{}
 		m.used = 0
 		m.modal = nil
+		// The response carries the MCP status because this client has not joined
+		// the new session yet; the join view repeats it once it arrives, which
+		// costs one idempotent notice.
+		m.noticeMCPStatus(msg.output.MCP)
 		m.reflow()
 		m.refreshTranscript(true)
 		return m, m.startSessionObserver(msg.output.ID)
@@ -530,6 +559,15 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.appendError(msg.err)
 			m.refreshTranscript(true)
+		}
+		return m, nil
+	case elicitResolvedMsg:
+		// The form closed on submit, so a refusal has nowhere else to surface:
+		// it lands in the transcript and reflows like any other error.
+		if msg.err != nil {
+			m.appendError(msg.err)
+			m.refreshTranscript(true)
+			m.reflow()
 		}
 		return m, nil
 	case renamedMsg:
@@ -608,7 +646,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	// Relationship navigation stays available even while HITL owns the rest of
 	// the keyboard. Menus with their own arrow navigation retain precedence.
-	if m.modal == nil && !m.commandMenu && m.filePicker == nil &&
+	if m.modal == nil && !m.commandMenu && m.filePicker == nil && m.resourcePicker == nil &&
 		(strings.TrimSpace(m.composer.Value()) == "" || (m.approval != nil && !m.approvalReason)) {
 		switch key {
 		case "up":
@@ -630,7 +668,13 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if model, cmd, handled := m.handleApprovalKey(key); handled {
 		return model, cmd
 	}
-	if m.working && key == "esc" && m.session.AgentKind != contracts.SidecarLoopAgent && m.modal == nil {
+	// A modal can open before any turn exists — a resource read asks a question
+	// before the message is enqueued — so esc has to reach the modal instead of
+	// arming a cancel the session would refuse.
+	if m.modal != nil {
+		return m, m.handleModalKey(msg)
+	}
+	if m.working && key == "esc" && m.session.AgentKind != contracts.SidecarLoopAgent {
 		if !m.cancelArmed {
 			m.cancelArmed = true
 			m.cancelArmID++
@@ -645,9 +689,6 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.reflow()
 			return m, cancelTurnCmd(m.ctx, m.client, m.session.ID)
 		}
-	}
-	if m.modal != nil {
-		return m, m.handleModalKey(msg)
 	}
 	switch msg.Key().Keystroke() {
 	case "ctrl+x":
@@ -681,7 +722,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.session.AgentKind == contracts.SidecarLoopAgent {
 			return m, nil
 		}
-		m.modal = loadingModal("Loading models")
+		m.modal = loadingModal("Loading models", "the model providers and the models they offer")
 		return m, listProvidersCmd(m.ctx, m.client, true)
 	}
 	if key == "ctrl+t" {
@@ -692,7 +733,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.commandMenu {
-		matches := matchingCommands(m.composer.Value())
+		matches := matchingCommands(m.composer.Value(), m.mcpPrompts)
 		switch key {
 		case "esc":
 			m.commandMenu = false
@@ -705,8 +746,17 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.commandSelection = (m.commandSelection + 1) % len(matches)
 			return m, nil
 		case "tab":
-			m.composer.SetValue(matches[m.commandSelection].name)
 			m.commandMenu = false
+			if prompt, ok := m.promptFor(matches[m.commandSelection].name); ok && promptArgsNeeded(prompt, nil) {
+				if m.session.ID == uuid.Nil {
+					m.appendError(errors.New("no active session"))
+					m.refreshTranscript(true)
+					m.reflow()
+					return m, nil
+				}
+				return m, m.openPromptArgsForm(prompt, nil)
+			}
+			m.composer.SetValue(matches[m.commandSelection].insertion())
 			m.reflow()
 			return m, nil
 		case "enter":
@@ -716,8 +766,17 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					return m, m.submit()
 				}
 			}
-			m.composer.SetValue(matches[m.commandSelection].name)
 			m.commandMenu = false
+			if prompt, ok := m.promptFor(matches[m.commandSelection].name); ok && promptArgsNeeded(prompt, nil) {
+				if m.session.ID == uuid.Nil {
+					m.appendError(errors.New("no active session"))
+					m.refreshTranscript(true)
+					m.reflow()
+					return m, nil
+				}
+				return m, m.openPromptArgsForm(prompt, nil)
+			}
+			m.composer.SetValue(matches[m.commandSelection].insertion())
 			m.reflow()
 			return m, nil
 		}
@@ -755,6 +814,17 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.reflow()
 			return m, nil
 		}
+		if m.resourcePicker != nil {
+			if len(m.resourcePicker.matches) > 0 {
+				resource := m.resourcePicker.matches[m.resourcePicker.selected]
+				value := m.composer.Value()
+				m.composer.SetValue(value[:m.resourcePicker.start] + "#" + resource.URI + value[m.resourcePicker.start+1+len(m.resourcePicker.query):])
+				m.composer.CursorEnd()
+			}
+			m.resourcePicker = nil
+			m.reflow()
+			return m, nil
+		}
 		return m, m.submit()
 	}
 
@@ -773,6 +843,21 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.resourcePicker != nil {
+		switch key {
+		case "esc":
+			m.resourcePicker = nil
+			m.reflow()
+			return m, nil
+		case "up":
+			m.resourcePicker.selected = (m.resourcePicker.selected - 1 + max(len(m.resourcePicker.matches), 1)) % max(len(m.resourcePicker.matches), 1)
+			return m, nil
+		case "down", "tab":
+			m.resourcePicker.selected = (m.resourcePicker.selected + 1) % max(len(m.resourcePicker.matches), 1)
+			return m, nil
+		}
+	}
+
 	var cmd tea.Cmd
 	before := m.composer.Value()
 	m.composer, cmd = m.composer.Update(msg)
@@ -786,6 +871,20 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	} else if value == before+"@" && m.session.Cwd != "" {
 		m.filePicker = &filePicker{files: scanWorkspaceFiles(m.session.Cwd), start: len(before)}
 		m.filePicker.filter("")
+	}
+	if m.resourcePicker != nil {
+		if len(value) < m.resourcePicker.start || !strings.HasPrefix(value[m.resourcePicker.start:], "#") || strings.ContainsAny(value[m.resourcePicker.start+1:], " \t\n") {
+			m.resourcePicker = nil
+		} else {
+			m.resourcePicker.filter(value[m.resourcePicker.start+1:])
+		}
+	} else if value == before+"#" && m.session.ID != uuid.Nil {
+		if len(m.mcpResources) == 0 {
+			m.showNotice("No MCP resources", "This session exposes no MCP resource to reference.", false)
+		} else {
+			m.resourcePicker = &resourcePicker{resources: m.mcpResources, start: len(before)}
+			m.resourcePicker.filter("")
+		}
 	}
 	m.updateCommandMenu()
 	m.reflow()
@@ -863,6 +962,132 @@ func (m *chatModel) handleSessionListKey(key string) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// handlePromptArgsKey routes the prompt-argument form's keys. It owns the
+// keyboard while the form is open, so the letters that navigate a list — j, k,
+// h, l — land in the focused field instead.
+func (m *chatModel) handlePromptArgsKey(msg tea.KeyPressMsg, key string) (tea.Cmd, bool) {
+	fields := m.modal.promptFields
+	if len(fields) == 0 {
+		if key == "esc" {
+			m.modal = nil
+			m.reflow()
+		}
+		return nil, true
+	}
+	focus := clamp(m.modal.promptFocus, 0, len(fields)-1)
+	m.modal.promptFocus = focus
+	switch key {
+	case "esc":
+		m.modal = nil
+		m.reflow()
+		return nil, true
+	case "enter":
+		for _, field := range fields {
+			if field.required && strings.TrimSpace(field.input.Value()) == "" {
+				return nil, true
+			}
+		}
+		return m.submitPromptArgs(), true
+	case "tab", "down":
+		m.focusPromptArg((focus + 1) % len(fields))
+		return nil, true
+	case "shift+tab", "up":
+		m.focusPromptArg((focus - 1 + len(fields)) % len(fields))
+		return nil, true
+	}
+	// Everything else belongs to the focused field: the textarea already owns
+	// the caret, the selection and the editing keys, so j/k/h/l type instead of
+	// navigating the form.
+	var cmd tea.Cmd
+	fields[focus].input, cmd = fields[focus].input.Update(msg)
+	return cmd, true
+}
+
+// focusPromptArg moves the form's focus and re-lays the fields out, so the box
+// holding the keyboard is the box the screen frames.
+func (m *chatModel) focusPromptArg(index int) {
+	m.modal.promptFocus = index
+	m.modal.layoutPromptArgs(m.width)
+}
+
+// handleElicitKey routes the elicitation form's keys. It owns the keyboard while
+// the form is open, so a letter that would navigate a list — j, k, h, l — lands
+// in the focused field instead.
+func (m *chatModel) handleElicitKey(msg tea.KeyPressMsg, key string) (tea.Cmd, bool) {
+	fields := m.modal.elicitFields
+	focus := -1
+	if len(fields) > 0 {
+		focus = clamp(m.modal.elicitFocus, 0, len(fields)-1)
+		m.modal.elicitFocus = focus
+	}
+	switch key {
+	case "esc":
+		return m.submitElicit(contracts.ElicitationCancel, nil), true
+	case "enter":
+		if m.elicitEnterFlips(fields, focus) {
+			fields[focus].boolValue = !fields[focus].boolValue
+			return nil, true
+		}
+		content, reason := elicitContent(fields)
+		if reason != "" {
+			// The footer already names the problem; enter simply does nothing
+			// until the rows can be accepted.
+			return nil, true
+		}
+		return m.submitElicit(contracts.ElicitationAccept, content), true
+	case "space":
+		if focus >= 0 && fields[focus].elicitKind == elicitBoolean {
+			fields[focus].boolValue = !fields[focus].boolValue
+			return nil, true
+		}
+		// A text row needs the space itself, so it falls through to the field
+		// below rather than being eaten here.
+	case "tab", "down":
+		if len(fields) > 0 {
+			m.focusElicitField((focus + 1) % len(fields))
+		}
+		return nil, true
+	case "shift+tab", "up":
+		if len(fields) > 0 {
+			m.focusElicitField((focus - 1 + len(fields)) % len(fields))
+		}
+		return nil, true
+	}
+	// Everything else belongs to the focused text field, so the textarea owns
+	// the caret and the editing keys. A boolean row has nothing to type into,
+	// so it swallows the key rather than let the list navigation behind the
+	// form act on it.
+	if focus < 0 || fields[focus].elicitKind == elicitBoolean {
+		return nil, true
+	}
+	var cmd tea.Cmd
+	fields[focus].input, cmd = fields[focus].input.Update(msg)
+	return cmd, true
+}
+
+// focusElicitField moves the form's focus and re-lays the fields out, so the box
+// holding the keyboard is the box the screen frames.
+func (m *chatModel) focusElicitField(index int) {
+	m.modal.elicitFocus = index
+	m.modal.layoutElicitFields(m.width)
+}
+
+// elicitEnterFlips decides whether enter flips the focused row instead of
+// submitting. A boolean row has no textarea to accept enter, so enter is its
+// activation key — but only while some other row can still submit, so an
+// all-boolean form keeps a way to accept rather than being stuck flipping.
+func (m *chatModel) elicitEnterFlips(fields []promptField, focus int) bool {
+	if focus < 0 || fields[focus].elicitKind != elicitBoolean {
+		return false
+	}
+	for i, field := range fields {
+		if i != focus && field.elicitKind != elicitBoolean {
+			return true
+		}
+	}
+	return false
+}
+
 // handleTimelineSearchKey routes the branch timeline's search keys: opening the
 // prompt, typing a query, and cycling the hits it found. It reports whether it
 // consumed the key, so the list's own navigation only sees the rest.
@@ -911,6 +1136,16 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	if m.modal.kind == modalTimeline {
 		if cmd, handled := m.handleTimelineSearchKey(msg, key); handled {
+			return cmd
+		}
+	}
+	if m.modal.kind == modalPromptArgs {
+		if cmd, handled := m.handlePromptArgsKey(msg, key); handled {
+			return cmd
+		}
+	}
+	if m.modal.kind == modalElicit {
+		if cmd, handled := m.handleElicitKey(msg, key); handled {
 			return cmd
 		}
 	}
@@ -964,16 +1199,16 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 	switch modal.kind {
 	case modalSessions:
 		if option.session == uuid.Nil {
-			m.modal = loadingModal("Loading models")
+			m.modal = loadingModal("Loading models", "the model providers and the models they offer")
 			return listProvidersCmd(m.ctx, m.client, false)
 		}
 		if option.session == m.session.ID {
 			return m.resumeSessionFromList()
 		}
-		m.modal = loadingModal("Opening session")
+		m.modal = loadingModal("Opening session", "the session, its transcripts, its MCP servers and the model it runs on")
 		return loadSessionCmd(m.ctx, m.client, option.session)
 	case modalModels:
-		m.modal = loadingModal("Applying model")
+		m.modal = loadingModal("Applying model", "the session's new model capacity")
 		if modal.switching {
 			return setModelCmd(m.ctx, m.client, option.provider, option.model)
 		}
@@ -982,7 +1217,7 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 		m.modal = nil
 	case modalTimeline:
 		if option.event != nil {
-			m.modal = loadingModal("Selecting branch")
+			m.modal = loadingModal("Selecting branch", "the branched transcript")
 			return selectBranchCmd(m.ctx, m.client, m.session.ID, *option.event)
 		}
 	case modalNotice:
@@ -1111,7 +1346,7 @@ func (m *chatModel) openRelatedSession(id uuid.UUID) tea.Cmd {
 	m.cancelArmed = false
 	m.cancelStatus = ""
 	m.relatedSessionSelection = uuid.Nil
-	m.modal = loadingModal("Opening session")
+	m.modal = loadingModal("Opening session", "the session, its transcripts, its MCP servers and the model it runs on")
 	m.reflow()
 	return loadSessionCmd(m.ctx, m.client, id)
 }
@@ -1128,7 +1363,7 @@ func (m *chatModel) openSessionList() {
 	}
 	m.cancelArmed = false
 	m.cancelStatus = ""
-	m.modal = loadingModal("Loading sessions")
+	m.modal = loadingModal("Loading sessions", "the saved sessions and where they ran")
 	m.reflow()
 }
 
@@ -1168,6 +1403,12 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 	m.session = view.Meta
 	m.blocks = blocksFromMessages(view.History)
 	m.checklist = view.Checklist
+	m.mcpPrompts = view.Prompts
+	m.mcpResources = view.Resources
+	// A server that contributed no tools is only in the agent's log, which is on
+	// the other side of the API: say it here, where the operator is, with the
+	// reason the manager recorded.
+	m.noticeMCPStatus(view.MCP)
 	// The in-flight log is replayed through the same handler the live stream
 	// uses, so a client that joins mid-generation renders the generation the
 	// same way it would have rendered it live.
@@ -1179,6 +1420,13 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 		m.showApproval(approvalFromRequest(view.PendingApproval))
 	} else {
 		m.clearApproval()
+	}
+	// A client that joins mid-question sees the form; a view without one means
+	// the question is no longer outstanding, so any form still up is stale.
+	if view.PendingElicitation != nil {
+		m.openElicitForm(*view.PendingElicitation)
+	} else {
+		m.closeElicitForm()
 	}
 }
 
@@ -1279,6 +1527,24 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 		}
 	case contracts.EventApprovalResolved:
 		m.handleApprovalUpdate(ApprovalUpdate{Type: string(event.Kind), Approval: approvalFromRequest(event.HITLCall)})
+	case contracts.EventElicitationRequested:
+		if event.Elicitation != nil {
+			// The form is transient, so the question is written to the
+			// transcript here or it is lost from the record entirely.
+			m.blocks = append(m.blocks, block{role: "event", text: event.Elicitation.Server + " asks: " + event.Elicitation.Message})
+			m.openElicitForm(*event.Elicitation)
+		}
+	case contracts.EventElicitationResolved:
+		if event.ElicitationResult != nil {
+			m.blocks = append(m.blocks, block{role: "event", text: "Elicitation " + event.ElicitationResult.Action + elicitContentNote(event.ElicitationResult.Content)})
+		}
+		// Answering here, answering elsewhere, and tearing the turn down all
+		// land as this event; the form the request belongs to must retract.
+		if m.modal != nil && m.modal.kind == modalElicit {
+			if event.ElicitationResult == nil || event.ElicitationResult.ReqID == m.modal.elicitReqID {
+				m.closeElicitForm()
+			}
+		}
 	case contracts.EventCompactionExecuted:
 		if event.Compaction == nil {
 			break
@@ -1468,19 +1734,44 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		}
 		return renameSessionCmd(m.ctx, m.client, m.session.ID, name)
 	}
+	fields := strings.Fields(command)
+	for _, prompt := range m.mcpPrompts {
+		if len(fields) == 0 || fields[0] != "/"+prompt.Server+":"+prompt.Name {
+			continue
+		}
+		if m.session.ID == uuid.Nil {
+			m.appendError(errors.New("no active session"))
+			m.refreshTranscript(true)
+			return nil
+		}
+		arguments := make(map[string]string, len(fields)-1)
+		for _, field := range fields[1:] {
+			key, value, ok := strings.Cut(field, "=")
+			if !ok || key == "" {
+				m.appendError(fmt.Errorf("usage: /%s:%s [key=value ...]", prompt.Server, prompt.Name))
+				m.refreshTranscript(true)
+				return nil
+			}
+			arguments[key] = value
+		}
+		if promptArgsNeeded(prompt, arguments) {
+			return m.openPromptArgsForm(prompt, arguments)
+		}
+		return renderMCPPromptCmd(m.ctx, m.client, m.session.ID, prompt.Server, prompt.Name, arguments)
+	}
 	switch command {
 	case "/model":
 		if m.session.AgentKind == contracts.SidecarLoopAgent {
 			m.showNotice("Sidecar is read-only", "Switch models from the caller session.", false)
 			return nil
 		}
-		m.modal = loadingModal("Loading models")
+		m.modal = loadingModal("Loading models", "the model providers and the models they offer")
 		return listProvidersCmd(m.ctx, m.client, true)
 	case "/sessions":
 		m.openSessionList()
 		return listSessionsCmd(m.ctx, m.client)
 	case "/new":
-		m.modal = loadingModal("Loading models")
+		m.modal = loadingModal("Loading models", "the model providers and the models they offer")
 		return listProvidersCmd(m.ctx, m.client, false)
 	case "/compact":
 		if m.session.AgentKind == contracts.SidecarLoopAgent {
@@ -1495,13 +1786,14 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		m.working, m.workBegan = true, time.Now()
 		return tea.Batch(compactCmd(m.ctx, m.client, m.session.ID), animationTickCmd())
 	case "/timeline":
-		m.modal = loadingModal("Loading timeline")
+		m.modal = loadingModal("Loading timeline", "the session transcripts")
 		return loadTimelineCmd(m.ctx, m.client, m.session.ID)
 	case "/help":
 		m.blocks = append(m.blocks, block{role: "system", text: strings.Join([]string{
 			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll · Ctrl+O sessions · Ctrl+N new · Ctrl+T thinking",
 			"Ctrl+V paste image · Ctrl+U clear images",
 			"/new · /sessions · /model · /compact · /timeline · /rename · /quit",
+			"MCP prompts: /server:prompt [key=value ...]",
 		}, "\n")})
 		m.refreshTranscript(true)
 	case "/quit", "/exit":
@@ -1511,6 +1803,370 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		m.refreshTranscript(true)
 	}
 	return nil
+}
+
+// promptFor returns the MCP prompt behind a "/server:name" command name.
+func (m *chatModel) promptFor(name string) (contracts.MCPPrompt, bool) {
+	for _, prompt := range m.mcpPrompts {
+		if "/"+prompt.Server+":"+prompt.Name == name {
+			return prompt, true
+		}
+	}
+	return contracts.MCPPrompt{}, false
+}
+
+// promptArgsNeeded is the rule that decides whether a prompt opens the argument
+// form: it declares arguments, and a required one has no value once the preset
+// is filled in. A prompt that fails it keeps the inline key=value path.
+func promptArgsNeeded(prompt contracts.MCPPrompt, preset map[string]string) bool {
+	if len(prompt.Arguments) == 0 {
+		return false
+	}
+	for _, argument := range prompt.Arguments {
+		if argument.Required && strings.TrimSpace(preset[argument.Name]) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// openPromptArgsForm opens the argument form, pre-filling values already typed.
+func (m *chatModel) openPromptArgsForm(prompt contracts.MCPPrompt, preset map[string]string) tea.Cmd {
+	fields := make([]promptField, 0, len(prompt.Arguments))
+	for _, argument := range prompt.Arguments {
+		if argument.Name == "" {
+			continue
+		}
+		fields = append(fields, promptField{
+			name:     argument.Name,
+			help:     argument.Description,
+			required: argument.Required,
+			input:    promptArgInput(argument.Description, preset[argument.Name]),
+		})
+	}
+	focus := -1
+	for i, field := range fields {
+		if field.required && strings.TrimSpace(field.input.Value()) == "" {
+			focus = i
+			break
+		}
+	}
+	if focus < 0 {
+		for i, field := range fields {
+			if strings.TrimSpace(field.input.Value()) == "" {
+				focus = i
+				break
+			}
+		}
+	}
+	if focus < 0 {
+		focus = len(fields) - 1
+	}
+	m.modal = &modalModel{
+		kind: modalPromptArgs, title: prompt.Server + ":" + prompt.Name, body: prompt.Description,
+		required: false, promptServer: prompt.Server, promptName: prompt.Name,
+		promptFields: fields, promptFocus: focus,
+	}
+	m.modal.layoutPromptArgs(m.width)
+	m.reflow()
+	return nil
+}
+
+// promptArgInput builds one argument's textarea: a single line carrying the
+// argument's description as its placeholder, styled like the composer so a
+// value is typed the way text is typed everywhere else.
+func promptArgInput(help, value string) textarea.Model {
+	input := textarea.New()
+	input.Placeholder = help
+	input.ShowLineNumbers = false
+	input.DynamicHeight = true
+	input.MinHeight = 1
+	input.MaxHeight = 1
+	// An argument is a value, not a document: no gutter, and enter renders the
+	// form instead of opening a new line.
+	input.SetPromptFunc(0, func(textarea.PromptInfo) string { return "" })
+	input.KeyMap.InsertNewline.SetKeys("ctrl+alt+enter")
+	styleTextarea(&input, false)
+	input.SetValue(strings.TrimSpace(value))
+	return input
+}
+
+// submitPromptArgs renders the prompt from the form's values. A blank value is
+// left out of the map, so the server sees its own default.
+func (m *chatModel) submitPromptArgs() tea.Cmd {
+	values := make(map[string]string, len(m.modal.promptFields))
+	for _, field := range m.modal.promptFields {
+		value := strings.TrimSpace(field.input.Value())
+		if value == "" {
+			continue
+		}
+		values[field.name] = value
+	}
+	server, name := m.modal.promptServer, m.modal.promptName
+	m.modal = loadingModal("Rendering "+server+":"+name, "the prompt and the messages it returns")
+	return renderMCPPromptCmd(m.ctx, m.client, m.session.ID, server, name, values)
+}
+
+// elicitSchema is the slice of JSON Schema an elicitation form reads: the
+// object's properties, the names it requires, and each property's own type and
+// value constraints. It is only ever read, never validated as JSON Schema.
+type elicitSchema struct {
+	Required   []string                  `json:"required"`
+	Properties map[string]elicitProperty `json:"properties"`
+}
+
+type elicitProperty struct {
+	Type        string            `json:"type"`
+	Title       string            `json:"title"`
+	Description string            `json:"description"`
+	Required    bool              `json:"required"`
+	Enum        []json.RawMessage `json:"enum"`
+	EnumNames   []string          `json:"enumNames"`
+}
+
+// openElicitForm shows an elicitation's question as a full-page form. The same
+// request already on screen is left alone; a different one replaces it.
+func (m *chatModel) openElicitForm(req contracts.ElicitationRequest) {
+	if m.modal != nil && m.modal.kind == modalElicit && m.modal.elicitReqID == req.ID {
+		return
+	}
+	fields := buildElicitFields(req.Schema)
+	focus := 0
+	for i, field := range fields {
+		if field.required && elicitRowProblem(field) != "" {
+			focus = i
+			break
+		}
+	}
+	server := req.Server
+	if server == "" {
+		server = "MCP server"
+	}
+	m.modal = &modalModel{
+		kind: modalElicit, title: server + " asks", body: req.Message,
+		required:    false,
+		elicitReqID: req.ID, elicitServer: req.Server, elicitMessage: req.Message,
+		elicitFields: fields, elicitFocus: focus,
+	}
+	m.modal.layoutElicitFields(m.width)
+	m.reflow()
+}
+
+// closeElicitForm retracts the elicitation form when the request it answers is
+// no longer outstanding: answered here, answered elsewhere, or torn down.
+func (m *chatModel) closeElicitForm() {
+	if m.modal != nil && m.modal.kind == modalElicit {
+		m.modal = nil
+		m.reflow()
+	}
+}
+
+// buildElicitFields turns a request's schema into form rows. Required
+// properties come first, in the schema's required order, then every other
+// property alphabetically: a Go map loses the schema's order, so it is restored
+// here. A schema that will not parse yields no rows, and the user can still
+// accept or cancel the question.
+func buildElicitFields(raw json.RawMessage) []promptField {
+	if len(raw) == 0 {
+		return nil
+	}
+	var schema elicitSchema
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return nil
+	}
+	names := elicitFieldOrder(schema)
+	fields := make([]promptField, 0, len(names))
+	for _, name := range names {
+		property := schema.Properties[name]
+		field := promptField{
+			name:       name,
+			label:      property.Title,
+			help:       property.Description,
+			required:   property.Required || slices.Contains(schema.Required, name),
+			elicitKind: elicitKindFor(property),
+		}
+		placeholder := property.Description
+		if field.elicitKind == elicitEnum {
+			field.enumValues = enumStrings(property.Enum)
+			placeholder = enumPlaceholder(field.enumValues, property.EnumNames)
+		}
+		field.input = promptArgInput(placeholder, "")
+		fields = append(fields, field)
+	}
+	return fields
+}
+
+// elicitFieldOrder lists the properties in the order the form shows them:
+// required first, in the required array's order, then the rest sorted. Names
+// that name no property, and repeats, are dropped.
+func elicitFieldOrder(schema elicitSchema) []string {
+	seen := make(map[string]bool, len(schema.Properties))
+	order := make([]string, 0, len(schema.Properties))
+	for _, name := range schema.Required {
+		if _, ok := schema.Properties[name]; !ok || seen[name] {
+			continue
+		}
+		seen[name] = true
+		order = append(order, name)
+	}
+	rest := make([]string, 0, len(schema.Properties))
+	for name := range schema.Properties {
+		if !seen[name] {
+			rest = append(rest, name)
+		}
+	}
+	sort.Strings(rest)
+	return append(order, rest...)
+}
+
+// elicitKindFor maps a property's JSON Schema type to the row that edits it. A
+// missing type is a string, and an unrecognised type falls back to text so an
+// unexpected schema still renders rather than crashes.
+func elicitKindFor(property elicitProperty) elicitFieldKind {
+	if len(property.Enum) > 0 {
+		return elicitEnum
+	}
+	switch property.Type {
+	case "number":
+		return elicitNumber
+	case "integer":
+		return elicitInteger
+	case "boolean":
+		return elicitBoolean
+	default:
+		return elicitText
+	}
+}
+
+// enumStrings renders an enum's members as the text a user types. A member that
+// is not a JSON string keeps its literal form.
+func enumStrings(enum []json.RawMessage) []string {
+	values := make([]string, 0, len(enum))
+	for _, raw := range enum {
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			values = append(values, text)
+			continue
+		}
+		values = append(values, strings.TrimSpace(string(raw)))
+	}
+	return values
+}
+
+// enumPlaceholder lists what an enum row accepts, preferring the schema's
+// enumNames as the readable name where it supplies them.
+func enumPlaceholder(values, names []string) string {
+	display := make([]string, len(values))
+	for i, value := range values {
+		if i < len(names) && names[i] != "" {
+			display[i] = names[i] + " (" + value + ")"
+			continue
+		}
+		display[i] = value
+	}
+	return "one of: " + strings.Join(display, ", ")
+}
+
+// elicitContent assembles the accepted content from the form's rows. A blank
+// optional row is left out, so the server sees its own default; a blank required
+// row, or a value that fails its row's type or enum check, blocks acceptance and
+// returns the reason. The SDK validates the accepted content against the schema
+// and fails the whole elicitation if it does not match.§(go-sdk mcp/client.go
+// elicit → resolved.Validate), so catching a mismatched value here saves the
+// tool call.
+func elicitContent(fields []promptField) (map[string]any, string) {
+	content := make(map[string]any, len(fields))
+	for _, field := range fields {
+		if problem := elicitRowProblem(field); problem != "" {
+			return nil, problem
+		}
+		if field.elicitKind == elicitBoolean {
+			// A boolean always has a value, so it is always sent.
+			content[field.name] = field.boolValue
+			continue
+		}
+		value := strings.TrimSpace(field.input.Value())
+		if value == "" {
+			continue
+		}
+		switch field.elicitKind {
+		case elicitNumber:
+			number, _ := strconv.ParseFloat(value, 64)
+			content[field.name] = number
+		case elicitInteger:
+			number, _ := strconv.ParseInt(value, 10, 64)
+			content[field.name] = number
+		default:
+			content[field.name] = value
+		}
+	}
+	return content, ""
+}
+
+// elicitContentNote renders an accepted answer for the transcript. The keys are
+// sorted so the same answer always reads the same way.
+func elicitContentNote(content map[string]any) string {
+	if len(content) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(content))
+	for key := range content {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", key, content[key]))
+	}
+	return ": " + strings.Join(parts, ", ")
+}
+
+// elicitRowProblem reports why a row blocks acceptance, or "" when it does not.
+func elicitRowProblem(field promptField) string {
+	if field.elicitKind == elicitBoolean {
+		return ""
+	}
+	value := strings.TrimSpace(field.input.Value())
+	if value == "" {
+		if field.required {
+			return "fill " + elicitLabel(field)
+		}
+		return ""
+	}
+	switch field.elicitKind {
+	case elicitNumber:
+		if _, err := strconv.ParseFloat(value, 64); err != nil {
+			return elicitLabel(field) + " must be a number"
+		}
+	case elicitInteger:
+		if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+			return elicitLabel(field) + " must be a whole number"
+		}
+	case elicitEnum:
+		if !slices.Contains(field.enumValues, value) {
+			return elicitLabel(field) + " must be one of " + strings.Join(field.enumValues, ", ")
+		}
+	}
+	return ""
+}
+
+// elicitBlocker reports the first row that blocks acceptance, or "".
+func elicitBlocker(fields []promptField) string {
+	for _, field := range fields {
+		if problem := elicitRowProblem(field); problem != "" {
+			return problem
+		}
+	}
+	return ""
+}
+
+// submitElicit answers the question and closes the form. The form is gone before
+// the request lands, so a refusal has to surface from the result.
+func (m *chatModel) submitElicit(action string, content map[string]any) tea.Cmd {
+	reqID := m.modal.elicitReqID
+	m.modal = nil
+	m.reflow()
+	return resolveElicitationCmd(m.ctx, m.client, m.session.ID, reqID, action, content)
 }
 
 func (m *chatModel) View() tea.View {
@@ -1530,10 +2186,13 @@ func (m *chatModel) View() tea.View {
 		checklist := m.checklistView()
 		hitl := m.hitlView()
 		commands := m.commandMenuView()
-		files := renderFilePicker(m.filePicker, m.width, m.styles)
+		picker := renderFilePicker(m.filePicker, m.width, m.styles)
+		if m.resourcePicker != nil {
+			picker = renderResourcePicker(m.resourcePicker, m.width, m.styles)
+		}
 		attachments := m.attachmentsView()
 		composer := m.composerView()
-		parts := []string{header, m.viewport.View(), hitl, checklist, sessionRow, commands, files, attachments, composer, status}
+		parts := []string{header, m.viewport.View(), hitl, checklist, sessionRow, commands, picker, attachments, composer, status}
 		if len(m.areas) == len(parts) {
 			parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
 			for i := range parts {
@@ -1582,10 +2241,13 @@ func (m *chatModel) reflow() {
 	checklist := m.checklistView()
 	hitl := m.hitlView()
 	commands := m.commandMenuView()
-	files := renderFilePicker(m.filePicker, m.width, m.styles)
+	picker := renderFilePicker(m.filePicker, m.width, m.styles)
+	if m.resourcePicker != nil {
+		picker = renderResourcePicker(m.resourcePicker, m.width, m.styles)
+	}
 	attachments := m.attachmentsView()
 	composer := m.composerView()
-	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(hitl), intrinsic(checklist), intrinsic(sessionRow), intrinsic(commands), intrinsic(files), intrinsic(attachments), intrinsic(composer), intrinsic(status))
+	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(hitl), intrinsic(checklist), intrinsic(sessionRow), intrinsic(commands), intrinsic(picker), intrinsic(attachments), intrinsic(composer), intrinsic(status))
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
@@ -1965,11 +2627,11 @@ func (m *chatModel) commandMenuViewForHeight(height int) string {
 	if !m.commandMenu {
 		return ""
 	}
-	return renderCommandMenu(matchingCommands(m.composer.Value()), m.commandSelection, m.width, height, m.styles)
+	return renderCommandMenu(matchingCommands(m.composer.Value(), m.mcpPrompts), m.commandSelection, m.width, height, m.styles)
 }
 
 func (m *chatModel) updateCommandMenu() {
-	matches := matchingCommands(m.composer.Value())
+	matches := matchingCommands(m.composer.Value(), m.mcpPrompts)
 	m.commandMenu = len(matches) > 0
 	if m.commandSelection >= len(matches) {
 		m.commandSelection = max(len(matches)-1, 0)
@@ -1998,7 +2660,7 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	var content string
 	switch entry.role {
 	case "user":
-		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, renderFileReferences(entry.text), width)
+		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, renderResourceBlocks(renderFileReferences(entry.text)), width)
 		if badges := m.renderImageBadges(entry.imageCount); badges != "" {
 			content += "\n" + strings.Repeat(" ", lipgloss.Width("●")+1) + badges
 		}
@@ -2135,13 +2797,13 @@ func (m *chatModel) toolMarker(entry *block) (string, lipgloss.Style) {
 		}
 		return "↗", m.styles.agentSidecar
 	}
-	// The glyph names the tool; the colour still says how the call ended, so a
-	// failed fetch stays red whatever its shape.
 	marker := "▲"
-	switch entry.toolName {
-	case string(contracts.WebSearchTool):
+	switch {
+	case contracts.IsMCPTool(entry.toolName):
+		marker = "󰚥"
+	case entry.toolName == string(contracts.WebSearchTool):
 		marker = "⌖"
-	case string(contracts.WebFetchTool):
+	case entry.toolName == string(contracts.WebFetchTool):
 		marker = "⤓"
 	}
 	switch entry.toolStatus {
@@ -3088,8 +3750,12 @@ func (m *chatModel) showTimeline(view *TimelineView) {
 				tree = rows[i].subprefix + strings.Repeat(" ", lipgloss.Width(timelineForkLabel(fork)))
 				fork = ""
 			}
+			label := display.text
+			if display.role == "user" {
+				label = renderResourceBlocks(label)
+			}
 			options = append(options, modalOption{
-				label:   display.text,
+				label:   label,
 				role:    display.role,
 				current: isHeadRow,
 				tree:    tree,
@@ -3116,8 +3782,11 @@ func (m *chatModel) showNotice(title, body string, required bool) {
 	m.modal = &modalModel{kind: modalNotice, title: title, body: body, required: required, options: []modalOption{{label: "OK", shortcut: 'o'}}}
 }
 
-func loadingModal(label string) *modalModel {
-	return &modalModel{kind: modalNotice, title: label, body: "Please wait...", required: true}
+func loadingModal(label, loading string) *modalModel {
+	if loading == "" {
+		loading = "Please wait..."
+	}
+	return &modalModel{kind: modalNotice, title: label, body: loading, required: true}
 }
 
 // isContentDelta reports whether an event carries a piece of the model's own
@@ -3351,6 +4020,26 @@ func compactCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
 		}
 		_, records, err := client.GetSession(ctx, id)
 		return compactedMsg{meta: meta, records: records, err: err}
+	}
+}
+
+func renderMCPPromptCmd(ctx context.Context, client Client, id uuid.UUID, server, name string, arguments map[string]string) tea.Cmd {
+	return func() tea.Msg {
+		messages, err := client.RenderMCPPrompt(ctx, id, server, name, arguments)
+		if err != nil {
+			return mcpPromptRenderedMsg{err: err}
+		}
+		texts := make([]string, 0, len(messages))
+		for _, message := range messages {
+			texts = append(texts, message.Text())
+		}
+		return mcpPromptRenderedMsg{text: strings.Join(texts, "\n\n")}
+	}
+}
+
+func resolveElicitationCmd(ctx context.Context, client Client, sessionID, reqID uuid.UUID, action string, content map[string]any) tea.Cmd {
+	return func() tea.Msg {
+		return elicitResolvedMsg{err: client.ResolveElicitation(ctx, sessionID, reqID, action, content)}
 	}
 }
 
@@ -3698,7 +4387,10 @@ func timelineEventDisplays(event TimelineEvent, toolNames map[string]string) []t
 	if event.Record.Message != nil {
 		message := event.Record.Message
 		if message.Role == "user" {
-			return []timelineDisplay{{role: "user", text: timelineLine(message.Text())}}
+			// Decoded before timelineLine's cut: a resource body is usually
+			// longer than the limit, which would drop the close tag and leave
+			// the block as raw text in the row.
+			return []timelineDisplay{{role: "user", text: timelineLine(renderResourceBlocks(message.Text()))}}
 		}
 		if message.Role == "tool" {
 			if isChecklistTool(toolNames[message.ToolCallID]) {

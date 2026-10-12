@@ -15,6 +15,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/engine"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
+	"github.com/dipankardas011/infai/pkg/agent/session"
 	"github.com/google/uuid"
 )
 
@@ -30,6 +31,9 @@ type Server struct {
 // harness-wide total attachment limit plus envelope overhead.
 const maxChatBodyBytes = 32 << 20
 
+// contentTypeEventStream is what a server-sent-event response declares.
+const contentTypeEventStream = "text/event-stream"
+
 func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz bool) *Server {
 	s := &Server{engine: e, enableHealthz: enableHealthz, logger: l}
 
@@ -43,6 +47,14 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("POST /v1/providers/login", s.handleProviderLogin)
 	mux.HandleFunc("POST /v1/providers/logout", s.handleProviderLogout)
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
+
+	// MCP server management
+	mux.HandleFunc("GET /v1/mcp/servers", s.handleListMCPServers)
+	mux.HandleFunc("POST /v1/mcp/servers", s.handleAddMCPServer)
+	mux.HandleFunc("PUT /v1/mcp/servers/{name}", s.handleEditMCPServer)
+	mux.HandleFunc("DELETE /v1/mcp/servers/{name}", s.handleRemoveMCPServer)
+	mux.HandleFunc("POST /v1/mcp/servers/{name}/probe", s.handleProbeMCPServer)
+	mux.HandleFunc("POST /v1/mcp/servers/{name}/login", s.handleLoginMCPServer)
 
 	// sessions
 	mux.HandleFunc("POST /v1/sessions", s.handleCreateSession)
@@ -58,6 +70,8 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("POST /v1/sessions/{id}/chat", s.handleChat)
 	mux.HandleFunc("POST /v1/sessions/{id}/cancel", s.handleCancelTurn)
 	mux.HandleFunc("POST /v1/sessions/{id}/approvals/{approvalID}", s.handleApproval)
+	mux.HandleFunc("POST /v1/sessions/{id}/elicitations/{elicitationID}", s.handleResolveElicitation)
+	mux.HandleFunc("POST /v1/sessions/{id}/prompts", s.handleRenderPrompt)
 	mux.HandleFunc("POST /v1/sessions/{id}/compact", s.handleCompact)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/close", s.handleCloseSession)
@@ -119,6 +133,65 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
+func (s *Server) handleResolveElicitation(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	elicitationID, err := uuid.Parse(r.PathValue("elicitationID"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid elicitation id"))
+		return
+	}
+	var req glue.ResolveElicitationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Action == "" {
+		s.writeError(w, http.StatusBadRequest, errors.New("action is required"))
+		return
+	}
+	conclusion := contracts.ElicitationConclusion{ReqID: elicitationID, Action: req.Action, Content: req.Content}
+	if err := s.engine.ResolveElicitation(sessionID, elicitationID, conclusion); err != nil {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusConflict, err)
+		return
+	}
+	s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
+func (s *Server) handleRenderPrompt(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	var req glue.RenderPromptRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Server == "" || req.Name == "" {
+		s.writeError(w, http.StatusBadRequest, errors.New("server and name are required"))
+		return
+	}
+	messages, err := s.engine.RenderMCPPrompt(id, req.Server, req.Name, req.Arguments)
+	if err != nil {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusConflict, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, messages)
+}
+
 func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
@@ -151,8 +224,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
+	s.writeText(w, http.StatusOK, "ok")
 }
 
 // ---- providers ----
@@ -172,30 +244,20 @@ func (s *Server) handleProviderLogin(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if _, ok := w.(http.Flusher); !ok {
-		s.writeError(w, http.StatusBadRequest, errors.New("streaming not supported"))
-		return
+	err := s.streamLogin(
+		w, r,
+		func(emit func(any) error) error {
+			return s.engine.LoginProvider(r.Context(), input, func(output glue.LoginProviderOutput) error {
+				return emit(output)
+			})
+		},
+		func(err error) any {
+			return glue.LoginProviderOutput{Status: contracts.ProviderAuthFailed, Error: err.Error()}
+		}, "provider", string(input.ProviderID),
+	)
+	if err != nil {
+		s.logger.Debug("provider login stream ended with an error", "provider", input.ProviderID, "error", err)
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	s.flush(w)
-
-	err := s.engine.LoginProvider(r.Context(), input, func(output glue.LoginProviderOutput) error {
-		if err := s.writeSSE(w, output); err != nil {
-			return err
-		}
-		s.flush(w)
-		return nil
-	})
-	if err == nil || r.Context().Err() != nil {
-		return
-	}
-	if writeErr := s.writeSSE(w, glue.LoginProviderOutput{Status: contracts.ProviderAuthFailed, Error: err.Error()}); writeErr != nil {
-		s.logger.Debug("provider login stream error event failed", "provider", input.ProviderID, "error", writeErr)
-	}
-	s.flush(w)
 }
 
 func (s *Server) handleProviderLogout(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +279,177 @@ func (s *Server) handleProviderLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListModels(w http.ResponseWriter, _ *http.Request) {
 	s.writeJSON(w, http.StatusOK, s.engine.ListAllProviderModels())
+}
+
+func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
+	servers, err := s.engine.ListMCPServers(r.Context())
+	if err != nil {
+		s.writeMCPError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, servers)
+}
+
+func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
+	input, err := decodeMCPServerInput(w, r)
+	if err != nil {
+		s.writeMCPDecodeError(w, err)
+		return
+	}
+	view, err := s.engine.AddMCPServer(r.Context(), input)
+	if err != nil {
+		s.writeMCPError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusCreated, view)
+}
+
+func (s *Server) handleEditMCPServer(w http.ResponseWriter, r *http.Request) {
+	input, err := decodeMCPServerInput(w, r)
+	if err != nil {
+		s.writeMCPDecodeError(w, err)
+		return
+	}
+	name := r.PathValue("name")
+	if input.Name != name {
+		s.writeError(w, http.StatusBadRequest, errors.New("the server name comes from the path and must match the body"))
+		return
+	}
+	view, err := s.engine.EditMCPServer(r.Context(), input)
+	if err != nil {
+		s.writeMCPError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleRemoveMCPServer(w http.ResponseWriter, r *http.Request) {
+	if err := s.engine.RemoveMCPServer(r.Context(), r.PathValue("name")); err != nil {
+		s.writeMCPError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleProbeMCPServer(w http.ResponseWriter, r *http.Request) {
+	probe, err := s.engine.ProbeMCPServer(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.writeMCPError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, probe)
+}
+
+// handleLoginMCPServer streams one interactive authorization, shaped exactly
+// like handleProviderLogin: the URL the user must open arrives as an event, and
+// a failure that happens after the stream opened is a final failed event. The
+// target is checked first, so a request that names no such server is answered
+// with a status code instead of a failure inside a stream that already said 200.
+func (s *Server) handleLoginMCPServer(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := s.engine.MCPLoginTarget(name); err != nil {
+		s.writeMCPError(w, err)
+		return
+	}
+	err := s.streamLogin(w, r,
+		func(emit func(any) error) error {
+			return s.engine.LoginMCPServer(r.Context(), glue.MCPLoginInput{Server: name}, func(output glue.MCPLoginOutput) error {
+				return emit(output)
+			})
+		},
+		func(err error) any {
+			return glue.MCPLoginOutput{Status: contracts.ProviderAuthFailed, Error: err.Error()}
+		}, "server", name,
+	)
+	if err != nil {
+		s.logger.Debug("MCP login stream ended with an error", "server", name, "error", err)
+	}
+}
+
+// streamLogin opens one server-sent-event stream, runs one interactive login on
+// it and, if the login fails after the stream opened, writes its last event as
+// the failure the client reads. The two login endpoints differ only in what they
+// run and in the shape of that event. The error it returns is for the log: the
+// client has already been answered.
+func (s *Server) streamLogin(
+	w http.ResponseWriter,
+	r *http.Request,
+	run func(emit func(any) error) error,
+	failed func(error) any,
+	subject, name string,
+) error {
+	if _, ok := w.(http.Flusher); !ok {
+		s.writeError(w, http.StatusBadRequest, errors.New("streaming not supported"))
+		return nil
+	}
+	w.Header().Set("Content-Type", contentTypeEventStream)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	s.flush(w)
+
+	emit := func(output any) error {
+		if err := s.writeSSE(w, output); err != nil {
+			return err
+		}
+		s.flush(w)
+		return nil
+	}
+	err := run(emit)
+	if err == nil || r.Context().Err() != nil {
+		// The client is gone: there is nobody left to tell.
+		return nil
+	}
+	if writeErr := s.writeSSE(w, failed(err)); writeErr != nil {
+		s.logger.Debug("login stream error event failed", subject, name, "error", writeErr)
+	}
+	s.flush(w)
+	return err
+}
+
+// writeMCPError maps the engine's MCP errors onto status codes: a mistake in
+// the request is the caller's, a missing server and a duplicate name are not,
+// and anything else is this server failing on its own storage.
+func (s *Server) writeMCPError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, engine.ErrMCPNotFound):
+		s.writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, engine.ErrMCPExists):
+		s.writeError(w, http.StatusConflict, err)
+	case errors.Is(err, engine.ErrMCPOperation):
+		// Another registry change or an interactive authorization holds the
+		// registry: the request is valid but cannot run now.
+		s.writeError(w, http.StatusConflict, err)
+	case errors.Is(err, engine.ErrMCPInvalid):
+		s.writeError(w, http.StatusBadRequest, err)
+	default:
+		s.writeError(w, http.StatusInternalServerError, err)
+	}
+}
+
+// maxMCPServerBodyBytes bounds a server management body: one tools.json entry is
+// small even with a token and a handful of headers.
+const maxMCPServerBodyBytes = 64 << 10
+
+// writeMCPDecodeError answers a management body that could not be read: over the
+// limit is 413, anything else is 400.
+func (s *Server) writeMCPDecodeError(w http.ResponseWriter, err error) {
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("request body exceeds the %d KB limit", maxMCPServerBodyBytes>>10))
+		return
+	}
+	s.writeError(w, http.StatusBadRequest, err)
+}
+
+// decodeMCPServerInput reads a bounded management body. The handler answers its
+// two failures differently, so the error is returned rather than written here.
+func decodeMCPServerInput(w http.ResponseWriter, r *http.Request) (glue.MCPServerInput, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxMCPServerBodyBytes)
+	var input glue.MCPServerInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		return glue.MCPServerInput{}, err
+	}
+	return input, nil
 }
 
 // ---- sessions ----
@@ -241,13 +474,18 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.writeJSON(w, http.StatusCreated, glue.SessionOutput{
+	s.writeJSON(w, http.StatusCreated, sessionOutput(sess))
+}
+
+func sessionOutput(sess *session.InfaiAgentSession) glue.SessionOutput {
+	return glue.SessionOutput{
 		SessionMeta:       sess.Meta(),
 		ContextWindow:     sess.CurrentSessionModelContextWindow(),
 		Thinking:          sess.CurrentThinkingPattern(),
 		AvailableThinking: sess.AvailableThinkingPatterns(),
 		Modalities:        sess.SupportedModalities(),
-	})
+		MCP:               sess.MCPStatus(),
+	}
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
@@ -346,13 +584,7 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, glue.SessionOutput{
-		SessionMeta:       sess.Meta(),
-		ContextWindow:     sess.CurrentSessionModelContextWindow(),
-		Thinking:          sess.CurrentThinkingPattern(),
-		AvailableThinking: sess.AvailableThinkingPatterns(),
-		Modalities:        sess.SupportedModalities(),
-	})
+	s.writeJSON(w, http.StatusOK, sessionOutput(sess))
 }
 
 func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
@@ -407,13 +639,7 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, glue.SessionOutput{
-		SessionMeta:       sess.Meta(),
-		ContextWindow:     sess.CurrentSessionModelContextWindow(),
-		Thinking:          sess.CurrentThinkingPattern(),
-		AvailableThinking: sess.AvailableThinkingPatterns(),
-		Modalities:        sess.SupportedModalities(),
-	})
+	s.writeJSON(w, http.StatusOK, sessionOutput(sess))
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -557,6 +783,17 @@ func (s *Server) writeJSON(w http.ResponseWriter, code int, v any) {
 
 func (s *Server) writeError(w http.ResponseWriter, code int, err error) {
 	s.writeJSON(w, code, glue.ErrorResponse{Error: err.Error()})
+}
+
+// writeText answers with a plain-text body. Like writeJSON, a failed write is
+// logged rather than acted on: the status is already sent, and the browser that
+// asked may simply have gone.
+func (s *Server) writeText(w http.ResponseWriter, code int, message string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(code)
+	if _, err := io.WriteString(w, message); err != nil {
+		s.logger.Error("write response", "status", code, "error", err)
+	}
 }
 
 // writeSSE emits one Server-Sent Event carrying a JSON payload. Returns the

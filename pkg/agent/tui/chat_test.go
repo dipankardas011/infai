@@ -2917,8 +2917,11 @@ func (stubChatClient) JoinSession(context.Context, uuid.UUID, func(glue.SessionV
 	return nil
 }
 func (stubChatClient) ResolveApproval(context.Context, Approval, string, string) error { return nil }
-func (stubChatClient) CancelTurn(context.Context, uuid.UUID) error                     { return nil }
-func (stubChatClient) SetSession(uuid.UUID)                                            {}
+func (stubChatClient) ResolveElicitation(context.Context, uuid.UUID, uuid.UUID, string, map[string]any) error {
+	return nil
+}
+func (stubChatClient) CancelTurn(context.Context, uuid.UUID) error { return nil }
+func (stubChatClient) SetSession(uuid.UUID)                        {}
 func (stubChatClient) CreateSession(context.Context, SessionCreateOptions) (*glue.SessionOutput, error) {
 	return &glue.SessionOutput{}, nil
 }
@@ -2947,6 +2950,9 @@ func (stubChatClient) SetSessionModel(context.Context, string, string) (*glue.Se
 }
 func (stubChatClient) Compact(context.Context) (*store.SessionMeta, error) {
 	return &store.SessionMeta{}, nil
+}
+func (stubChatClient) RenderMCPPrompt(context.Context, uuid.UUID, string, string, map[string]string) ([]contracts.ChatMessage, error) {
+	return nil, nil
 }
 func (stubChatClient) GetTimeline(context.Context, uuid.UUID) (*TimelineView, error) {
 	return &TimelineView{}, nil

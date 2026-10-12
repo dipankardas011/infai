@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"strings"
 
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -19,6 +20,20 @@ const (
 	modalCommands
 	modalTimeline
 	modalNotice
+	modalPromptArgs
+	modalElicit
+)
+
+// elicitFieldKind is how an elicitation row's value is typed and validated. It
+// follows the JSON Schema type of the property the row stands for.
+type elicitFieldKind int
+
+const (
+	elicitText elicitFieldKind = iota
+	elicitNumber
+	elicitInteger
+	elicitBoolean
+	elicitEnum
 )
 
 type modalOption struct {
@@ -59,6 +74,29 @@ func (o modalOption) searchHaystack() string {
 	return o.role + ": " + o.label
 }
 
+// promptField is one argument row of the prompt-argument form.
+type promptField struct {
+	name     string
+	help     string
+	required bool
+	// input holds the argument's value. The form edits each argument in the
+	// same textarea the composer uses, so a value is typed the way text is
+	// typed everywhere else in the harness.
+	input textarea.Model
+	// The rest is what an elicitation row needs and a prompt-argument row does
+	// not: the prompt form leaves it zero, so its rows render and submit as
+	// before.
+	//
+	// label overrides the row's display name where the schema supplies a title.
+	label string
+	// elicitKind is how the row's value is typed and validated on submit.
+	elicitKind elicitFieldKind
+	// enumValues are an enum row's allowed values, in schema order.
+	enumValues []string
+	// boolValue is a boolean row's current value; space or enter flips it.
+	boolValue bool
+}
+
 type modalModel struct {
 	kind      modalKind
 	title     string
@@ -67,6 +105,22 @@ type modalModel struct {
 	selected  int
 	switching bool
 	required  bool
+	// promptServer, promptName, promptFields and promptFocus are the
+	// prompt-argument form: the prompt it will render, one row per declared
+	// argument, and the row that owns the keyboard.
+	promptServer string
+	promptName   string
+	promptFields []promptField
+	promptFocus  int
+	// elicitReqID, elicitServer, elicitMessage, elicitFields and elicitFocus
+	// are the elicitation form: the request it answers, the server that asked,
+	// the question it carries, one row per declared schema property, and the
+	// row that owns the keyboard.
+	elicitReqID   uuid.UUID
+	elicitServer  string
+	elicitMessage string
+	elicitFields  []promptField
+	elicitFocus   int
 	// pendingDelete is the session a first "d" armed for deletion. The second
 	// "d" deletes it; anything else drops the arm.
 	pendingDelete uuid.UUID
@@ -240,6 +294,12 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 	if m.kind == modalSessions {
 		return renderSessionWorkspace(m, width, height, styles)
 	}
+	if m.kind == modalPromptArgs {
+		return renderPromptArgsPanel(m, width, height, styles)
+	}
+	if m.kind == modalElicit {
+		return renderElicitPanel(m, width, height, styles)
+	}
 	contentWidth := max(width-4, 1)
 	header := styles.heading(m.title, everforest.Background)
 	if m.body != "" {
@@ -389,6 +449,224 @@ func describeSessionStatus(status contracts.SessionStatus, styles harnessStyles)
 	default:
 		return sessionStatusDescriptor{"○", "idle", styles.statusOpen}
 	}
+}
+
+// renderPromptArgsPanel draws an MCP prompt's argument form: one labelled
+// textarea per declared argument, the focused one framed in the accent colour,
+// and a footer that names what is still missing.
+func renderPromptArgsPanel(m *modalModel, width, height int, styles harnessStyles) string {
+	contentWidth := max(width-4, 1)
+	innerWidth := max(contentWidth-4, 1) // the box's border and padding
+	m.layoutPromptArgs(width)
+
+	header := styles.heading(m.title, everforest.Background)
+	if m.body != "" {
+		header += "\n" + styles.screenBody.Width(contentWidth).Render(m.body)
+	}
+	header += "\n"
+
+	missing := make([]string, 0, len(m.promptFields))
+	for _, field := range m.promptFields {
+		if field.required && strings.TrimSpace(field.input.Value()) == "" {
+			missing = append(missing, field.name)
+		}
+	}
+
+	// Each argument costs a label line and a three-line box, so the window is
+	// measured in whole arguments and follows the focused one.
+	const linesPerField = 4
+	capacity := max(max(height-6, 1)/linesPerField, 1)
+	start, end := visibleRange(len(m.promptFields), m.promptFocus, capacity)
+
+	rows := make([]string, 0, (end-start)*linesPerField)
+	for i := start; i < end; i++ {
+		field := m.promptFields[i]
+		blocking := field.required && strings.TrimSpace(field.input.Value()) == ""
+		rows = append(rows, fieldRow(field.name, field.required, i == m.promptFocus, blocking, field.input.View(), innerWidth, contentWidth, styles)...)
+	}
+	if start > 0 || end < len(m.promptFields) {
+		rows = append(rows, styles.inactive.Render(fmt.Sprintf("  %d-%d of %d", start+1, end, len(m.promptFields))))
+	}
+
+	footer := "tab next  ·  enter render  ·  esc cancel"
+	footerStyle := styles.inactive
+	if len(missing) > 0 {
+		// Enter does nothing until the required values are in, so the footer
+		// that asks for them reads as blocking.
+		footer = "fill " + strings.Join(missing, ", ") + "  ·  tab next  ·  enter render  ·  esc cancel"
+		footerStyle = styles.error
+	}
+	footer = ansi.Truncate(footer, contentWidth, "…")
+
+	tracks := layoutRows(width, height,
+		intrinsic(fullWidth(lipgloss.NewStyle().Padding(1, 2), width, header)),
+		fill(),
+		intrinsic(fullWidth(lipgloss.NewStyle().Padding(0, 2), width, footerStyle.Render(footer))),
+	)
+	parts := []string{
+		fullWidth(lipgloss.NewStyle().Padding(1, 2), width, header),
+		fullWidth(lipgloss.NewStyle().Padding(0, 2), width, strings.Join(rows, "\n")),
+		fullWidth(lipgloss.NewStyle().Padding(0, 2), width, footerStyle.Render(footer)),
+	}
+	for i := range parts {
+		parts[i] = fitArea(tracks[i], parts[i])
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// layoutPromptArgs sizes every argument input to the screen and hands the
+// keyboard to the focused one, so a resize while the form is open keeps the
+// boxes and the caret where the screen says they are.
+func (m *modalModel) layoutPromptArgs(width int) {
+	inner := max(width-8, 8)
+	for i := range m.promptFields {
+		field := &m.promptFields[i]
+		field.input.SetWidth(inner)
+		if i == m.promptFocus {
+			_ = field.input.Focus()
+			continue
+		}
+		field.input.Blur()
+	}
+}
+
+// fieldRow draws one labelled form row: the field's name above a boxed value,
+// the focused row framed in the accent colour and a row that blocks submission
+// named in red whether or not it holds the cursor. Both forms share it so a row
+// looks the same on either.
+func fieldRow(name string, required, focused, blocking bool, content string, innerWidth, contentWidth int, styles harnessStyles) []string {
+	label := "  " + name
+	if required {
+		label += " *"
+	}
+	labelStyle := styles.screenRow
+	if focused {
+		label = "› " + name
+		if required {
+			label += " *"
+		}
+		labelStyle = styles.screenSel
+	}
+	if blocking {
+		labelStyle = labelStyle.Foreground(everforest.Red).Bold(true)
+	}
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).Width(innerWidth)
+	if focused {
+		box = box.BorderForeground(everforest.Green)
+	} else {
+		box = box.BorderForeground(everforest.SurfaceAlt)
+	}
+	return []string{labelStyle.Render(ansi.Truncate(label, contentWidth, "…")), box.Render(content)}
+}
+
+// renderElicitPanel draws an MCP server's elicitation question: the message it
+// asked, one labelled row per declared schema property, and a footer that names
+// what still blocks acceptance. It mirrors the prompt-argument panel so the two
+// forms read as one surface.
+func renderElicitPanel(m *modalModel, width, height int, styles harnessStyles) string {
+	contentWidth := max(width-4, 1)
+	innerWidth := max(contentWidth-4, 1) // the box's border and padding
+	m.layoutElicitFields(width)
+
+	header := styles.heading(m.title, everforest.Background)
+	if m.body != "" {
+		header += "\n" + styles.screenBody.Width(contentWidth).Render(m.body)
+	}
+	header += "\n"
+
+	blocker := elicitBlocker(m.elicitFields)
+
+	// Each row costs a label line and a three-line box, so the window is
+	// measured in whole rows and follows the focused one.
+	const linesPerField = 4
+	capacity := max(max(height-6, 1)/linesPerField, 1)
+	start, end := visibleRange(len(m.elicitFields), m.elicitFocus, capacity)
+
+	rows := make([]string, 0, (end-start)*linesPerField)
+	for i := start; i < end; i++ {
+		field := m.elicitFields[i]
+		content := field.input.View()
+		if field.elicitKind == elicitBoolean {
+			content = elicitBoolToggle(field.boolValue, styles)
+		}
+		rows = append(rows, fieldRow(elicitLabel(field), field.required, i == m.elicitFocus, elicitRowProblem(field) != "", content, innerWidth, contentWidth, styles)...)
+	}
+	if start > 0 || end < len(m.elicitFields) {
+		rows = append(rows, styles.inactive.Render(fmt.Sprintf("  %d-%d of %d", start+1, end, len(m.elicitFields))))
+	}
+
+	footer := "tab next  ·  enter submit  ·  esc cancel"
+	if elicitHasBoolean(m.elicitFields) {
+		footer = "tab next  ·  space toggle  ·  enter submit  ·  esc cancel"
+	}
+	footerStyle := styles.inactive
+	if blocker != "" {
+		// Enter does nothing until the rows are answerable, so the footer that
+		// names the problem reads as blocking.
+		footer = blocker + "  ·  " + footer
+		footerStyle = styles.error
+	}
+	footer = ansi.Truncate(footer, contentWidth, "…")
+
+	tracks := layoutRows(width, height,
+		intrinsic(fullWidth(lipgloss.NewStyle().Padding(1, 2), width, header)),
+		fill(),
+		intrinsic(fullWidth(lipgloss.NewStyle().Padding(0, 2), width, footerStyle.Render(footer))),
+	)
+	parts := []string{
+		fullWidth(lipgloss.NewStyle().Padding(1, 2), width, header),
+		fullWidth(lipgloss.NewStyle().Padding(0, 2), width, strings.Join(rows, "\n")),
+		fullWidth(lipgloss.NewStyle().Padding(0, 2), width, footerStyle.Render(footer)),
+	}
+	for i := range parts {
+		parts[i] = fitArea(tracks[i], parts[i])
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// layoutElicitFields sizes every elicitation input to the screen and hands the
+// keyboard to the focused one. A boolean row has no text to type into, so it
+// never takes the caret.
+func (m *modalModel) layoutElicitFields(width int) {
+	inner := max(width-8, 8)
+	for i := range m.elicitFields {
+		field := &m.elicitFields[i]
+		field.input.SetWidth(inner)
+		if i == m.elicitFocus && field.elicitKind != elicitBoolean {
+			_ = field.input.Focus()
+			continue
+		}
+		field.input.Blur()
+	}
+}
+
+// elicitLabel is the name a row shows: the schema's title where it has one, the
+// property name otherwise.
+func elicitLabel(field promptField) string {
+	if field.label != "" {
+		return field.label
+	}
+	return field.name
+}
+
+// elicitHasBoolean reports whether any row is a boolean toggle, so the footer
+// can teach the key that flips it.
+func elicitHasBoolean(fields []promptField) bool {
+	for _, field := range fields {
+		if field.elicitKind == elicitBoolean {
+			return true
+		}
+	}
+	return false
+}
+
+// elicitBoolToggle renders a boolean row's value: the box has no textarea to
+// show, so it carries the state and the key that flips it.
+func elicitBoolToggle(on bool, styles harnessStyles) string {
+	if on {
+		return styles.screenRow.Render("◼ true") + styles.inactive.Render("   space toggles")
+	}
+	return styles.inactive.Render("◻ false") + styles.inactive.Render("   space toggles")
 }
 
 func renderNewSessionPanel(m *modalModel, width int, styles harnessStyles) string {

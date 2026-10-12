@@ -16,17 +16,12 @@ func ReadSkillTool() contracts.Tool {
 	return contracts.Tool{
 		Name:        string(contracts.ReadSkillTool),
 		Description: "Load a skill's full instructions from memory when the current task matches its description. Call with a name from <available_skills>.",
-		Parameters: contracts.ToolParameters{
-			Type: "object",
-			Properties: map[string]any{
-				"name": map[string]any{
-					"type":        "string",
-					"description": "The skill name to load",
-				},
+		Parameters: contracts.ToolParameterObjectSchema(map[string]any{
+			"name": map[string]any{
+				"type":        "string",
+				"description": "The skill name to load",
 			},
-			RequiredFields:       []string{"name"},
-			AdditionalProperties: false,
-		},
+		}, []string{"name"}),
 	}
 }
 

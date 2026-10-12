@@ -51,6 +51,7 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sessionID, "session", "", "resume a saved session by uuid")
 	cmd.AddCommand(newServerCmd())
 	cmd.AddCommand(newProviderCmd())
+	cmd.AddCommand(newMCPCmd())
 	return cmd
 }
 
@@ -71,6 +72,7 @@ func newProviderCmd() *cobra.Command {
 		Short:   "manage model provider credentials",
 		Args:    cobra.NoArgs,
 	}
+	addServerFlags(provider)
 	provider.AddCommand(
 		&cobra.Command{
 			Use:     "list",
@@ -78,7 +80,7 @@ func newProviderCmd() *cobra.Command {
 			Short:   "list configured provider models",
 			Args:    cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				return tui.RunProviderList(cmd.Context(), providerClient(), cmd.OutOrStdout())
+				return tui.RunProviderList(cmd.Context(), remoteClient(), cmd.OutOrStdout())
 			},
 		},
 		&cobra.Command{
@@ -86,7 +88,7 @@ func newProviderCmd() *cobra.Command {
 			Short: "log in to a managed provider",
 			Args:  cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				return tui.RunProviderLogin(cmd.Context(), providerClient(), cmd.InOrStdin(), cmd.OutOrStdout())
+				return tui.RunProviderLogin(cmd.Context(), remoteClient(), cmd.InOrStdin(), cmd.OutOrStdout())
 			},
 		},
 		&cobra.Command{
@@ -94,15 +96,88 @@ func newProviderCmd() *cobra.Command {
 			Short: "log out from a managed provider",
 			Args:  cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				return tui.RunProviderLogout(cmd.Context(), providerClient(), cmd.InOrStdin(), cmd.OutOrStdout())
+				return tui.RunProviderLogout(cmd.Context(), remoteClient(), cmd.InOrStdin(), cmd.OutOrStdout())
 			},
 		},
 	)
 	return provider
 }
 
-func providerClient() *tui.RemoteClient {
+func remoteClient() *tui.RemoteClient {
 	return tui.NewRemoteClient(fmt.Sprintf("http://%s:%d", host, port))
+}
+
+// addServerFlags lets a command that talks to the agent server choose which one.
+// Only the client commands get these: `infaiw server` is configured through the
+// INFAI_AGENT_* environment and accepts no flags at all.
+func addServerFlags(cmd *cobra.Command) {
+	cmd.PersistentFlags().StringVar(&host, "host", "localhost", "agent server host to attach to")
+	cmd.PersistentFlags().IntVar(&port, "port", 6000, "agent server port to attach to")
+}
+
+func newMCPCmd() *cobra.Command {
+	mcpCmd := &cobra.Command{
+		Use:     "mcp",
+		Aliases: []string{"mcps"},
+		Short:   "manage MCP servers and their authorizations",
+		Args:    cobra.NoArgs,
+	}
+	addServerFlags(mcpCmd)
+	mcpCmd.AddCommand(
+		&cobra.Command{
+			Use:     "list",
+			Aliases: []string{"ls"},
+			Short:   "list configured MCP servers and their token state",
+			Args:    cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				return tui.RunMCPList(cmd.Context(), remoteClient(), cmd.OutOrStdout())
+			},
+		},
+		&cobra.Command{
+			Use:   "add",
+			Short: "add an MCP server, authorizing it when it uses OAuth",
+			Args:  cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				return tui.RunMCPAdd(cmd.Context(), remoteClient(), cmd.InOrStdin(), cmd.OutOrStdout())
+			},
+		},
+		&cobra.Command{
+			Use:   "edit [name]",
+			Short: "change an MCP server's settings",
+			Args:  cobra.MaximumNArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return tui.RunMCPEdit(cmd.Context(), remoteClient(), cmd.InOrStdin(), cmd.OutOrStdout(), optionalName(args))
+			},
+		},
+		&cobra.Command{
+			Use:     "remove [name]",
+			Aliases: []string{"rm"},
+			Short:   "remove an MCP server and its stored authorization",
+			Args:    cobra.MaximumNArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return tui.RunMCPRemove(cmd.Context(), remoteClient(), cmd.InOrStdin(), cmd.OutOrStdout(), optionalName(args))
+			},
+		},
+		&cobra.Command{
+			Use:     "refresh [name]",
+			Aliases: []string{"login"},
+			Short:   "authorize an MCP server again",
+			Args:    cobra.MaximumNArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return tui.RunMCPRefresh(cmd.Context(), remoteClient(), cmd.InOrStdin(), cmd.OutOrStdout(), optionalName(args))
+			},
+		},
+	)
+	return mcpCmd
+}
+
+// optionalName returns the single optional argument, or "" when it was omitted,
+// which leaves the command asking for it interactively.
+func optionalName(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
 }
 
 func newLogger(level string) *slog.Logger {
@@ -177,14 +252,22 @@ func runServer(cmd *cobra.Command, args []string) error {
 	sig := <-sigChan
 	wlog.DebugContext(ctx, "Received terminate signal", "signal", sig.String())
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
+	teardownCtx, teardownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer teardownCancel()
 
-	if err := eng.Shutdown(shutdownCtx); err != nil {
-		wlog.ErrorContext(shutdownCtx, "engine shutdown error", "error", err)
+	if err := eng.Shutdown(teardownCtx); err != nil {
+		if teardownCtx.Err() != nil {
+			wlog.WarnContext(teardownCtx, "engine teardown outlasted its budget", "error", err)
+		} else {
+			wlog.ErrorContext(teardownCtx, "engine teardown failed", "error", err)
+		}
 	}
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		wlog.ErrorContext(shutdownCtx, "server shutdown error", "error", err)
+	if err := srv.Shutdown(teardownCtx); err != nil {
+		if teardownCtx.Err() != nil {
+			wlog.WarnContext(teardownCtx, "server stop outlasted its budget", "error", err)
+		} else {
+			wlog.ErrorContext(teardownCtx, "server stop failed", "error", err)
+		}
 	}
 	wlog.InfoContext(ctx, "shutdown complete")
 	return nil

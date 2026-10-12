@@ -173,7 +173,7 @@ func TestSidecarNameIsPersistedOnCreation(t *testing.T) {
 	// one, and the loop falls back to the session default.
 	parent, err := session.NewSession(e.ctx, parentID, uuid.Nil, "", logger, nil, nil, nil,
 		contracts.NewProvisionedModel(provider.Id, "test", provider.BaseEndpoint, provider.APIType, provider.Auth, model),
-		t.TempDir(), ss, hub.NewSessionAgentComms(parentID), contracts.InteractiveAgent)
+		t.TempDir(), ss, hub.NewSessionAgentComms(parentID), contracts.InteractiveAgent, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

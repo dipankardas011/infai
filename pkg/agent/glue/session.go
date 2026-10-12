@@ -7,12 +7,16 @@ import (
 )
 
 type SessionView struct {
-	Meta            store.SessionMeta            `json:"meta"`
-	History         []contracts.ChatMessage      `json:"history"`
-	Status          contracts.SessionStatus      `json:"status"`
-	InFlight        []contracts.EventStream      `json:"in_flight"`
-	Checklist       contracts.TaskChecklistState `json:"checklist"`
-	PendingApproval *contracts.ApprovalRequest   `json:"pending_approval,omitempty"`
+	Meta               store.SessionMeta             `json:"meta"`
+	History            []contracts.ChatMessage       `json:"history"`
+	Status             contracts.SessionStatus       `json:"status"`
+	InFlight           []contracts.EventStream       `json:"in_flight"`
+	Checklist          contracts.TaskChecklistState  `json:"checklist"`
+	MCP                []contracts.MCPServerStatus   `json:"mcp,omitempty"`
+	Prompts            []contracts.MCPPrompt         `json:"prompts,omitempty"`
+	Resources          []contracts.MCPResource       `json:"resources,omitempty"`
+	PendingApproval    *contracts.ApprovalRequest    `json:"pending_approval,omitempty"`
+	PendingElicitation *contracts.ElicitationRequest `json:"pending_elicitation,omitempty"`
 }
 
 // SessionOutput combines durable session metadata with runtime model capacity.
@@ -22,6 +26,9 @@ type SessionOutput struct {
 	Thinking          contracts.InfaiThinkingLevel     `json:"thinking"`
 	AvailableThinking []contracts.InfaiThinkingLevel   `json:"available_thinking"`
 	Modalities        []contracts.LLMSupportedModality `json:"modalities"`
+	// MCP lists the configured MCP servers this session could not use, with the
+	// reason. It is empty when every configured server was reached.
+	MCP []contracts.MCPServerStatus `json:"mcp,omitempty"`
 }
 
 type CreateSessionRequest struct {
@@ -37,6 +44,17 @@ type SetSessionModelRequest struct {
 
 type RenameSessionRequest struct {
 	Name string `json:"name"`
+}
+
+type RenderPromptRequest struct {
+	Server    string            `json:"server"`
+	Name      string            `json:"name"`
+	Arguments map[string]string `json:"arguments,omitempty"`
+}
+
+type ResolveElicitationRequest struct {
+	Action  string         `json:"action"`
+	Content map[string]any `json:"content,omitempty"`
 }
 
 type BranchRequest struct {

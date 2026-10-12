@@ -32,6 +32,7 @@ type InfaiAgentEngine struct {
 	cancel    context.CancelCauseFunc
 
 	providerMu   sync.Mutex
+	mcpMu        sync.Mutex // serializes MCP registry read-modify-writes and interactive logins
 	providers    contracts.LLMProviders
 	sessionStore *store.SessionStore
 
@@ -98,6 +99,10 @@ func (e *InfaiAgentEngine) listenForAgentComms() {
 	for {
 		msg, err := e.aseComms.SubscribeForSessionAgentsEvents(e.ctx)
 		if err != nil {
+			if e.ctx.Err() != nil || errors.Is(err, comms.ErrAgentCommsClosed) {
+				e.bgLogger.Debug("agent comms loop stopped", "reason", err)
+				return
+			}
 			e.bgLogger.ErrorContext(e.ctx, "failure in subscribe for sessionagentEvents", "error", err)
 			return
 		}
@@ -184,6 +189,11 @@ func (e *InfaiAgentEngine) createSidecarSession(parentID uuid.UUID, request comm
 		return uuid.Nil, fmt.Errorf("engine: model %q not configured for provider %q", parentMeta.Model, parentMeta.Provider)
 	}
 
+	toolConfig, err := store.LoadToolConfig()
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("load MCP config: %w", err)
+	}
+
 	id, err := uuid.NewV7()
 	if err != nil {
 		return uuid.Nil, err
@@ -217,6 +227,7 @@ func (e *InfaiAgentEngine) createSidecarSession(parentID uuid.UUID, request comm
 		e.sessionStore,
 		e.aseComms.NewSessionAgentComms(id),
 		contracts.SidecarLoopAgent,
+		toolConfig.MCPServers,
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(id)
@@ -330,6 +341,11 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	if !ok {
 		return nil, fmt.Errorf("engine: model %q not configured for provider %q", opts.Model, opts.Provider)
 	}
+	toolConfig, err := store.LoadToolConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load MCP config: %w", err)
+	}
+
 	sessID, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
@@ -359,6 +375,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		e.sessionStore,
 		e.aseComms.NewSessionAgentComms(sessID),
 		opts.AgentKind,
+		toolConfig.MCPServers,
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(sessID)
@@ -426,6 +443,12 @@ func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgent
 	if !ok {
 		return nil, fmt.Errorf("engine: model %q not configured for provider %q", meta.Model, meta.Provider)
 	}
+	toolConfig, err := store.LoadToolConfig()
+	if err != nil {
+		_ = timeline.Close()
+		return nil, fmt.Errorf("load MCP config: %w", err)
+	}
+
 	if err := e.aseComms.RegisterSessionAgent(sessionID); err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -444,6 +467,7 @@ func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgent
 		),
 		meta, history, timeline, e.sessionStore,
 		e.aseComms.NewSessionAgentComms(sessionID),
+		toolConfig.MCPServers,
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(sessionID)
@@ -598,6 +622,22 @@ func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, d
 		return harnessErr.ErrSessionNotFound
 	}
 	return sess.ResolveApproval(approvalID, decision)
+}
+
+func (e *InfaiAgentEngine) ResolveElicitation(id uuid.UUID, reqID uuid.UUID, conclusion contracts.ElicitationConclusion) error {
+	sess, ok := e.Session(id)
+	if !ok {
+		return harnessErr.ErrSessionNotFound
+	}
+	return sess.ResolveElicitation(reqID, conclusion)
+}
+
+func (e *InfaiAgentEngine) RenderMCPPrompt(id uuid.UUID, server, name string, arguments map[string]string) ([]contracts.ChatMessage, error) {
+	sess, ok := e.Session(id)
+	if !ok {
+		return nil, harnessErr.ErrSessionNotFound
+	}
+	return sess.RenderPrompt(server, name, arguments)
 }
 
 func (e *InfaiAgentEngine) CancelTurn(id uuid.UUID) error {
@@ -846,15 +886,19 @@ func (e *InfaiAgentEngine) SelectBranch(id, eventID uuid.UUID) (contracts.TaskCh
 
 // Shutdown stops accepting sessions and closes every registered one.
 func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
-	e.bgLogger.DebugContext(ctx, "received shutdown request")
+	started := time.Now()
+	e.bgLogger.DebugContext(ctx, "received teardown request")
 
 	e.stopOnce.Do(func() {
 		close(e.stopCh)
 	})
+
 	e.mu.Lock()
+	closed := 0
 	for id, sess := range e.activeSessionAgents {
 		if sess.Meta().ParentID == uuid.Nil {
 			e.closeSessionTree(id)
+			closed++
 		}
 	}
 	e.mu.Unlock()
@@ -862,9 +906,12 @@ func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
 	e.aseComms.Close()
 
 	if err := ctx.Err(); err != nil {
+		e.bgLogger.WarnContext(ctx, "engine teardown outlasted its budget",
+			"error", err, "trees_closed", closed, "took", time.Since(started).Round(time.Millisecond))
 		return err
 	}
 
-	e.bgLogger.DebugContext(ctx, "engine shutdown complete")
+	e.bgLogger.DebugContext(ctx, "engine teardown complete",
+		"trees_closed", closed, "took", time.Since(started).Round(time.Millisecond))
 	return nil
 }

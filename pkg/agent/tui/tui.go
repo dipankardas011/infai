@@ -66,6 +66,7 @@ type Client interface {
 	SendMessage(ctx context.Context, input contracts.UserInput, thinking contracts.InfaiThinkingLevel) error
 	JoinSession(ctx context.Context, id uuid.UUID, onView func(glue.SessionView), onEvent func(contracts.EventStream)) error
 	ResolveApproval(ctx context.Context, approval Approval, decision string, reason string) error
+	ResolveElicitation(ctx context.Context, id uuid.UUID, reqID uuid.UUID, action string, content map[string]any) error
 	CancelTurn(ctx context.Context, id uuid.UUID) error
 	SetSession(id uuid.UUID)
 	CreateSession(ctx context.Context, opts SessionCreateOptions) (*glue.SessionOutput, error)
@@ -79,6 +80,7 @@ type Client interface {
 	ListAllProviderModels(ctx context.Context) ([]glue.ListModelOutput, error)
 	SetSessionModel(ctx context.Context, provider, model string) (*glue.SessionOutput, error)
 	Compact(ctx context.Context) (*store.SessionMeta, error)
+	RenderMCPPrompt(ctx context.Context, id uuid.UUID, server, name string, arguments map[string]string) ([]contracts.ChatMessage, error)
 	GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error)
 	SelectBranch(ctx context.Context, id, eventID uuid.UUID) (contracts.TaskChecklistState, error)
 }

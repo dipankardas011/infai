@@ -51,33 +51,28 @@ func TaskChecklistTool() contracts.Tool {
 	return contracts.Tool{
 		Name:        string(contracts.TaskChecklistTool),
 		Description: "Manage your task checklist for this session. Keep titles short and descriptions concise but sufficient to resume the work. Actions: list; add requires title and description; update requires title and new_title and/or description; set_status requires title and status; delete requires title; clear removes everything. Every successful call returns the complete current checklist.",
-		Parameters: contracts.ToolParameters{
-			Type: "object",
-			Properties: map[string]any{
-				"action": map[string]any{
-					"type": "string",
-					"enum": []string{"list", "add", "update", "set_status", "delete", "clear"},
-				},
-				"title": map[string]any{
-					"type":        "string",
-					"description": "Item title, or the existing title for update, set_status, and delete",
-				},
-				"new_title": map[string]any{
-					"type":        "string",
-					"description": "Replacement title for update",
-				},
-				"description": map[string]any{
-					"type":        "string",
-					"description": "Task context of at most 150 Unicode grapheme clusters",
-				},
-				"status": map[string]any{
-					"type": "string",
-					"enum": []string{string(contracts.TaskPending), string(contracts.TaskInProgress), string(contracts.TaskCompleted)},
-				},
+		Parameters: contracts.ToolParameterObjectSchema(map[string]any{
+			"action": map[string]any{
+				"type": "string",
+				"enum": []string{"list", "add", "update", "set_status", "delete", "clear"},
 			},
-			RequiredFields:       []string{"action"},
-			AdditionalProperties: false,
-		},
+			"title": map[string]any{
+				"type":        "string",
+				"description": "Item title, or the existing title for update, set_status, and delete",
+			},
+			"new_title": map[string]any{
+				"type":        "string",
+				"description": "Replacement title for update",
+			},
+			"description": map[string]any{
+				"type":        "string",
+				"description": "Task context of at most 150 Unicode grapheme clusters",
+			},
+			"status": map[string]any{
+				"type": "string",
+				"enum": []string{string(contracts.TaskPending), string(contracts.TaskInProgress), string(contracts.TaskCompleted)},
+			},
+		}, []string{"action"}),
 	}
 }
 

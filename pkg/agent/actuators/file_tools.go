@@ -11,12 +11,7 @@ func toolSchema(name, description string, properties map[string]any, required []
 	return contracts.Tool{
 		Name:        name,
 		Description: description,
-		Parameters: contracts.ToolParameters{
-			Type:                 "object",
-			Properties:           properties,
-			RequiredFields:       required,
-			AdditionalProperties: false,
-		},
+		Parameters:  contracts.ToolParameterObjectSchema(properties, required),
 	}
 }
 
