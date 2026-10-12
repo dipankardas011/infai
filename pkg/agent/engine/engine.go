@@ -107,7 +107,7 @@ func (e *InfaiAgentEngine) listenForAgentComms() {
 			return
 		}
 		switch msg.Kind {
-		case comms.AgentCommKindSpawnSidecar, comms.AgentCommKindSpawnSidecarBackground:
+		case comms.AgentCommKindDelegateSidecar, comms.AgentCommKindDelegateSidecarBackground:
 			go e.spawnSidecar(msg)
 		case comms.AgentCommKindResultSidecar:
 			e.relaySidecarResult(msg)
@@ -261,7 +261,7 @@ func (e *InfaiAgentEngine) relaySidecarResult(msg *comms.AgentComm) {
 	}
 
 	resultKind := comms.AgentCommKindResultSidecar
-	if kind == comms.AgentCommKindSpawnSidecarBackground {
+	if kind == comms.AgentCommKindDelegateSidecarBackground {
 		resultKind = comms.AgentCommKindResultSidecarBackground
 	}
 
@@ -655,7 +655,7 @@ func (e *InfaiAgentEngine) CancelTurn(id uuid.UUID) error {
 		return harnessErr.ErrNoTurnToCancel
 	}
 	for childID, kind := range e.children[id] {
-		if kind == comms.AgentCommKindSpawnSidecar {
+		if kind == comms.AgentCommKindDelegateSidecar {
 			e.cancelSidecarTree(childID)
 		}
 	}

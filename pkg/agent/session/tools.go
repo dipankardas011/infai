@@ -46,7 +46,7 @@ func (s *InfaiAgentSession) configureDelegationTools() {
 	if s.meta.AgentKind != contracts.InteractiveAgent {
 		return
 	}
-	s.availableTools = append(s.availableTools, delegate.SpawnSidecarLoopTool(), delegate.SpawnBackgroundSidecarLoopTool())
+	s.availableTools = append(s.availableTools, delegate.DelegateSidecarLoopTool(), delegate.DelegateBackgroundSidecarLoopTool())
 }
 
 func (s *InfaiAgentSession) configureWebTools() {
@@ -533,7 +533,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
 				})
-			case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+			case contracts.DelegateSidecarLoopTool, contracts.DelegateBackgroundSidecarLoopTool:
 				sidecarID, agentName, err := delegate.RequestSidecar(s.ctx, caller, tc)
 				if err != nil {
 					status = contracts.ToolExecutionError
@@ -541,7 +541,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					if errors.Is(err, harnessErr.ErrTurnCanceled) {
 						turnCanceled = true
 					}
-				} else if tc.Function.Name == contracts.SpawnSidecarLoopTool {
+				} else if tc.Function.Name == contracts.DelegateSidecarLoopTool {
 					foregroundIDs = append(foregroundIDs, sidecarID)
 					foregroundCalls = append(foregroundCalls, tc)
 					continue

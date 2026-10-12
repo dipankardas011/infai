@@ -4,9 +4,9 @@ package contracts
 // for the system prompt. Skills live with memory because they are learned
 // capabilities rather than executable actions.
 type Skill struct {
-	Title       string
-	Description string
-	Location    string
+	Title       string `json:"name"`
+	Description string `json:"description"`
+	Location    string `json:"-"`
 }
 
 // DeepKnowledge we can store Skills

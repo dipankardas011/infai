@@ -41,8 +41,8 @@ func NewAuditorPolicy() *AuditorPolicy {
 			contracts.WebFetchTool:  HumanPolicy,
 			contracts.WebSearchTool: HumanPolicy,
 
-			contracts.SpawnBackgroundSidecarLoopTool: HumanPolicy,
-			contracts.SpawnSidecarLoopTool:           HumanPolicy,
+			contracts.DelegateBackgroundSidecarLoopTool: HumanPolicy,
+			contracts.DelegateSidecarLoopTool:           HumanPolicy,
 		},
 	}
 }

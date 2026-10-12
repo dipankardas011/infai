@@ -8,7 +8,7 @@ import (
 )
 
 func TestSidecarAgentNameValidation(t *testing.T) {
-	for _, name := range []string{string(contracts.SpawnSidecarLoopTool), string(contracts.SpawnBackgroundSidecarLoopTool)} {
+	for _, name := range []string{string(contracts.DelegateSidecarLoopTool), string(contracts.DelegateBackgroundSidecarLoopTool)} {
 		for _, tc := range []struct {
 			name string
 			want string

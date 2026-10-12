@@ -94,6 +94,7 @@ type chatModel struct {
 	commandSelection        int
 	mcpPrompts              []contracts.MCPPrompt
 	mcpResources            []contracts.MCPResource
+	availableSkills         []contracts.Skill
 	filePicker              *filePicker
 	resourcePicker          *resourcePicker
 
@@ -428,6 +429,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
 		m.modalities = msg.output.Modalities
+		m.availableSkills = msg.output.Skills
 		m.pending = nil
 		m.approval = nil
 		m.approvalReason = false
@@ -497,6 +499,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
 		m.modalities = msg.output.Modalities
+		m.availableSkills = msg.output.Skills
 		m.pending = nil
 		m.client.SetSession(msg.output.ID)
 		m.blocks = nil
@@ -519,6 +522,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.thinking = msg.output.Thinking
 			m.availableThinking = msg.output.AvailableThinking
 			m.modalities = msg.output.Modalities
+			m.availableSkills = msg.output.Skills
 			m.pending = nil
 			m.reflow()
 			m.blocks = append(m.blocks, block{role: "event", text: "Model switched to " + msg.output.Model + " @ " + msg.output.Provider})
@@ -733,7 +737,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.commandMenu {
-		matches := matchingCommands(m.composer.Value(), m.mcpPrompts)
+		matches := matchingCommands(m.composer.Value(), m.mcpPrompts, m.availableSkills)
 		switch key {
 		case "esc":
 			m.commandMenu = false
@@ -1243,7 +1247,7 @@ func (m *chatModel) submit() tea.Cmd {
 		return nil
 	}
 	images := append([]contracts.ImageInput(nil), m.pending...)
-	if strings.HasPrefix(prompt, "/") && len(images) == 0 {
+	if strings.HasPrefix(prompt, "/") && !strings.HasPrefix(prompt, "/skill:") && len(images) == 0 {
 		m.composer.Reset()
 		m.commandMenu = false
 		m.reflow()
@@ -1270,7 +1274,7 @@ func (m *chatModel) submit() tea.Cmd {
 	m.commandMenu = false
 	m.reflow()
 
-	input := contracts.UserInput{Text: encodeFileReferences(prompt, m.filePickerFiles()), Images: images}
+	input := contracts.UserInput{Text: encodeSkillReferences(encodeFileReferences(prompt, m.filePickerFiles())), Images: images}
 	// A prompt sent while a turn is running is queued by the session and served
 	// next. The turn already in flight owns the status, so it is left as the
 	// events reported it.
@@ -2627,11 +2631,11 @@ func (m *chatModel) commandMenuViewForHeight(height int) string {
 	if !m.commandMenu {
 		return ""
 	}
-	return renderCommandMenu(matchingCommands(m.composer.Value(), m.mcpPrompts), m.commandSelection, m.width, height, m.styles)
+	return renderCommandMenu(matchingCommands(m.composer.Value(), m.mcpPrompts, m.availableSkills), m.commandSelection, m.width, height, m.styles)
 }
 
 func (m *chatModel) updateCommandMenu() {
-	matches := matchingCommands(m.composer.Value(), m.mcpPrompts)
+	matches := matchingCommands(m.composer.Value(), m.mcpPrompts, m.availableSkills)
 	m.commandMenu = len(matches) > 0
 	if m.commandSelection >= len(matches) {
 		m.commandSelection = max(len(matches)-1, 0)
@@ -2660,7 +2664,7 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	var content string
 	switch entry.role {
 	case "user":
-		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, renderResourceBlocks(renderFileReferences(entry.text)), width)
+		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, renderResourceBlocks(renderSkillReferences(renderFileReferences(entry.text))), width)
 		if badges := m.renderImageBadges(entry.imageCount); badges != "" {
 			content += "\n" + strings.Repeat(" ", lipgloss.Width("●")+1) + badges
 		}
@@ -2817,7 +2821,7 @@ func (m *chatModel) toolMarker(entry *block) (string, lipgloss.Style) {
 }
 
 func isSidecarTool(name string) bool {
-	return name == string(contracts.SpawnSidecarLoopTool) || name == string(contracts.SpawnBackgroundSidecarLoopTool)
+	return name == string(contracts.DelegateSidecarLoopTool) || name == string(contracts.DelegateBackgroundSidecarLoopTool)
 }
 
 func renderChatMarker(marker string, markerStyle, bodyStyle lipgloss.Style, text string, width int) string {
@@ -3594,7 +3598,7 @@ func stripDiffNoNewline(diff string) string {
 // text never repeats it. Unknown tools fall back to pretty-printed arguments.
 func toolCallPreview(name, arguments string) string {
 	switch contracts.ToolType(name) {
-	case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+	case contracts.DelegateSidecarLoopTool, contracts.DelegateBackgroundSidecarLoopTool:
 		var args struct {
 			AgentName string `json:"agent_name"`
 			Task      string `json:"task"`
@@ -4227,7 +4231,7 @@ func toolResultDetail(name, status, output, resultErr string) string {
 	switch contracts.ToolType(name) {
 	case contracts.BashTool:
 		return bashResultBody(output)
-	case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+	case contracts.DelegateSidecarLoopTool, contracts.DelegateBackgroundSidecarLoopTool:
 		return strings.TrimRight(output, "\n")
 	}
 	return ""

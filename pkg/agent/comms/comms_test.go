@@ -178,7 +178,7 @@ func TestDelegationRoundTrip(t *testing.T) {
 	}
 	if err := caller.Send(ctx, &AgentComm{
 		From:    callerID,
-		Kind:    AgentCommKindSpawnSidecar,
+		Kind:    AgentCommKindDelegateSidecar,
 		Payload: request,
 	}); err != nil {
 		t.Fatalf("send spawn request: %v", err)
@@ -189,7 +189,7 @@ func TestDelegationRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read engine inbox: %v", err)
 	}
-	assert.Equal(t, AgentCommKindSpawnSidecar, msg.Kind)
+	assert.Equal(t, AgentCommKindDelegateSidecar, msg.Kind)
 
 	var read DelegationToSidecarLoop
 	if err := json.Unmarshal(msg.Payload, &read); err != nil {

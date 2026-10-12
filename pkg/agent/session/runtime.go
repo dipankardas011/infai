@@ -16,6 +16,10 @@ const (
 	SUBSCRIBER_BUFFER = 64
 )
 
+func (s *InfaiAgentSession) AvailableSkills() []contracts.Skill {
+	return append([]contracts.Skill(nil), s.availableSkills...)
+}
+
 // MCPStatus reports the configured MCP servers this session could not use. The
 // manager is set once, while the session is built, so it needs no lock.
 func (s *InfaiAgentSession) MCPStatus() []contracts.MCPServerStatus {

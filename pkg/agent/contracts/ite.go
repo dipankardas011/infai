@@ -65,8 +65,8 @@ const (
 	WebFetchTool      ToolType = "webfetch"
 	WebSearchTool     ToolType = "websearch"
 
-	SpawnSidecarLoopTool           ToolType = "spawn_sidecar_loop"
-	SpawnBackgroundSidecarLoopTool ToolType = "spawn_background_sidecar_loop"
+	DelegateSidecarLoopTool           ToolType = "delegate_sidecar_loop"
+	DelegateBackgroundSidecarLoopTool ToolType = "delegate_background_sidecar_loop"
 )
 
 // MCPToolPrefix marks a tool name that came from an MCP server, so every

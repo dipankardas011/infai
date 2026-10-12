@@ -43,8 +43,8 @@ func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd 
 		Tools:     tools,
 	}
 	for _, availableTools := range tools {
-		if availableTools.Name == string(contracts.SpawnBackgroundSidecarLoopTool) ||
-			availableTools.Name == string(contracts.SpawnSidecarLoopTool) {
+		if availableTools.Name == string(contracts.DelegateBackgroundSidecarLoopTool) ||
+			availableTools.Name == string(contracts.DelegateSidecarLoopTool) {
 			data.HasSidecarTools = true
 			break
 		}
@@ -95,14 +95,15 @@ Do it yourself when it's 1-2 tool calls, you need output verbatim, it touches fi
 
 **Brief**: goal, exact paths, out-of-bounds areas, full context, and the summary format to return. A separate cwd doesn't isolate a shared repo; use separate dirs for parallel edits. max_turns: 20 lookup, 40 multi-step, 100 tree-wide.
 
-**Acceptance script**: write it before spawning, and keep it out of the sidecar's brief. It must be read-only (no writes, deletes, installs, or network), exit 0/nonzero, and print one line per failure saying expected vs found. You run it after return; never trust the sidecar's self-report.
-Use a foreground sidecar when its answer blocks your next step, a background one when you have other useful work meanwhile. Review its answer before claiming completion.
+**Acceptance script**: write a task-specific, read-only evaluator before delegating; do not use grep for function names as a substitute for behavioral evaluation. Prefer tests or checks that demonstrate the requested behavior. If you cannot define deterministic evaluation with confidence, do not delegate yet—clarify the task or work inline. The acceptance script is not available to the user or sidecar unless you explicitly include it in the delegation request, so include it in full. On failure, print the exact check/command that failed and a deterministic expected-versus-actual reason; success may print a concise pass result. Run it yourself after return; never trust the sidecar's self-report.
+Use delegate_sidecar_loop by default when delegating: it waits and returns the result before you continue. Use delegate_background_sidecar_loop only when you have useful independent work to do while it runs; its result arrives asynchronously. Review its answer before claiming completion.
 </sidecar_loop>
 {{ end }}
 </delegation>
 
 <tool_discipline>
 - A tag in the form "[file:relative/path]" is an inline reference/path to a file/folder under the workspace root. Use the read tool to inspect its current contents before reasoning from it.
+- A tag in the form "[skill:skill_name]" names a skill from <available_skills>; load it with read_skill using that exact name before applying its instructions. This is a reference convention, not a file path or a request to decode/read arbitrary content.
 - Prefer the dedicated tool over Bash; reserve Bash for shell and system operations.
 - Independent tool calls in parallel; dependent calls strictly sequential.
 - Use task_checklist for multi-step work. Keep exactly one item in_progress while working and update it as work completes. A harness-provided <task_checklist> block is a session checkpoint, not a user request; later successful task_checklist results supersede it.

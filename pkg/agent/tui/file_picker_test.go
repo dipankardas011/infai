@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
 func TestScanWorkspaceFilesIncludesHiddenAndExcludesGit(t *testing.T) {
@@ -51,6 +52,56 @@ func TestFilePickerSelectionReplacesQuery(t *testing.T) {
 		t.Fatalf("composer=%q want %q", got, want)
 	}
 }
+func TestSlashMenuIncludesBackendSkills(t *testing.T) {
+	skills := []contracts.Skill{{Title: "code-review", Description: "Review code"}, {Title: "ml-researcher", Description: "Research ML"}}
+	matches := matchingCommands("/", nil, skills)
+
+	got := make(map[string]string)
+	for _, match := range matches {
+		if match.insertAs != "" {
+			got[match.name] = match.insertion()
+		}
+	}
+	want := map[string]string{
+		"/skill:code-review":   "/skill:code-review",
+		"/skill:ml-researcher": "/skill:ml-researcher",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("skill commands=%v want %v", got, want)
+	}
+	if got := matches[0].menuText(); got != "/skill:code-review · Review code" {
+		t.Fatalf("skill menu text=%q", got)
+	}
+}
+
+func TestSlashMenuSelectsBackendSkill(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.availableSkills = []contracts.Skill{{Title: "code-review"}, {Title: "ml-researcher"}}
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 20})
+
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: '/', Text: "/"}))
+	if !m.commandMenu {
+		t.Fatal("slash did not open the menu")
+	}
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if got, want := m.composer.Value(), "/skill:code-review"; got != want {
+		t.Fatalf("composer=%q want %q", got, want)
+	}
+}
+
+func TestEncodeAndRenderSkillReferences(t *testing.T) {
+	got := encodeSkillReferences("use /skill:code-review and /skill:ml_researcher")
+	if want := "use [skill:code-review] and [skill:ml_researcher]"; got != want {
+		t.Fatalf("encoded %q want %q", got, want)
+	}
+	got = renderSkillReferences(got)
+	if want := "use /skill:code-review and /skill:ml_researcher"; got != want {
+		t.Fatalf("rendered %q want %q", got, want)
+	}
+}
+
 func TestEncodeAndRenderFileReferences(t *testing.T) {
 	got := encodeFileReferences("compare @a.go and @pkg/b.go", []string{"a.go", "pkg/b.go"})
 	if want := "compare [file:a.go] and [file:pkg/b.go]"; got != want {

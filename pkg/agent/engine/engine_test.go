@@ -31,7 +31,7 @@ func TestEngineRelaysSidecarStatusOnlyFromAChild(t *testing.T) {
 		aseComms:            hub,
 		activeSessionAgents: map[uuid.UUID]*session.InfaiAgentSession{parentID: nil},
 		children: map[uuid.UUID]map[uuid.UUID]comms.AgentCommKind{
-			parentID: {childID: comms.AgentCommKindSpawnSidecar},
+			parentID: {childID: comms.AgentCommKindDelegateSidecar},
 		},
 	}
 
@@ -95,7 +95,7 @@ func TestSidecarStatusReportsKeepTheirOrder(t *testing.T) {
 		aseComms:            hub,
 		activeSessionAgents: map[uuid.UUID]*session.InfaiAgentSession{parentID: nil},
 		children: map[uuid.UUID]map[uuid.UUID]comms.AgentCommKind{
-			parentID: {childID: comms.AgentCommKindSpawnSidecar},
+			parentID: {childID: comms.AgentCommKindDelegateSidecar},
 		},
 	}
 	go e.listenForAgentComms()
@@ -182,7 +182,7 @@ func TestSidecarNameIsPersistedOnCreation(t *testing.T) {
 
 	childID, err := e.createSidecarSession(parentID, comms.DelegationToSidecarLoop{
 		ParentID: parentID, AgentName: "Build worker", Task: "check build", AcceptanceScript: "true", MaxTurns: 20,
-	}, comms.AgentCommKindSpawnSidecar)
+	}, comms.AgentCommKindDelegateSidecar)
 	if err != nil {
 		t.Fatal(err)
 	}

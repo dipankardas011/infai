@@ -208,7 +208,7 @@ func approvalSubject(approval *Approval) (name, preview string) {
 
 func approvalCompactPreview(call contracts.ToolCall) string {
 	switch contracts.ToolType(call.Function.Name) {
-	case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+	case contracts.DelegateSidecarLoopTool, contracts.DelegateBackgroundSidecarLoopTool:
 		var args struct {
 			AgentName string `json:"agent_name"`
 			Task      string `json:"task"`
@@ -287,7 +287,7 @@ func approvalDiffRows(call contracts.ToolCall) []diffRow {
 
 func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 	switch contracts.ToolType(call.Function.Name) {
-	case contracts.SpawnSidecarLoopTool, contracts.SpawnBackgroundSidecarLoopTool:
+	case contracts.DelegateSidecarLoopTool, contracts.DelegateBackgroundSidecarLoopTool:
 		var args struct {
 			AgentName        string `json:"agent_name"`
 			Task             string `json:"task"`

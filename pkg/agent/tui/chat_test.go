@@ -991,7 +991,7 @@ func TestToolMarkerGlyphsByName(t *testing.T) {
 		{name: "websearch", tool: contracts.WebSearchTool, status: "success", want: "⌖"},
 		{name: "webfetch", tool: contracts.WebFetchTool, status: "success", want: "⤓"},
 		{name: "webfetch failed keeps its shape", tool: contracts.WebFetchTool, status: "error", want: "⤓"},
-		{name: "sidecar", tool: contracts.SpawnSidecarLoopTool, status: "success", want: "↗"},
+		{name: "sidecar", tool: contracts.DelegateSidecarLoopTool, status: "success", want: "↗"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1291,7 +1291,7 @@ func TestSidecarHierarchyInSessionList(t *testing.T) {
 
 func TestSidecarApprovalShowsAcceptanceScript(t *testing.T) {
 	call := contracts.ToolCall{Function: contracts.Function{
-		Name:      contracts.SpawnSidecarLoopTool,
+		Name:      contracts.DelegateSidecarLoopTool,
 		Arguments: `{"agent_name":"Worker","task":"Check the build","acceptance_script":"go build ./...\necho done","max_turns":3}`,
 	}}
 	body, script := formatApprovalToolCall(call)

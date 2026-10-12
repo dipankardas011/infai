@@ -118,6 +118,37 @@ func encodeFileReferences(text string, files []string) string {
 	return text
 }
 
+func encodeSkillReferences(text string) string {
+	return replaceSkillReferences(text, "/skill:", "[skill:", "]", false)
+}
+
+func renderSkillReferences(text string) string {
+	return replaceSkillReferences(text, "[skill:", "/skill:", "", true)
+}
+
+func replaceSkillReferences(text, from, to, suffix string, closingBracket bool) string {
+	for {
+		start := strings.Index(text, from)
+		if start < 0 {
+			return text
+		}
+		nameStart := start + len(from)
+		end := nameStart
+		for end < len(text) && (text[end] >= 'a' && text[end] <= 'z' || text[end] >= 'A' && text[end] <= 'Z' || text[end] >= '0' && text[end] <= '9' || strings.ContainsRune("._-", rune(text[end]))) {
+			end++
+		}
+		if end == nameStart || closingBracket && (end == len(text) || text[end] != ']') {
+			text = text[:start] + text[start+len(from):]
+			continue
+		}
+		consume := end
+		if closingBracket {
+			consume++
+		}
+		text = text[:start] + to + text[nameStart:end] + suffix + text[consume:]
+	}
+}
+
 func renderFileReferences(text string) string {
 	for {
 		start := strings.Index(text, "[file:")

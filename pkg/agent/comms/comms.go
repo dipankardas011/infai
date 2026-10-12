@@ -14,10 +14,10 @@ type AgentCommKind string
 const (
 	AgentCommDelegationConformation AgentCommKind = "delegation_conformation"
 
-	AgentCommKindSpawnSidecar            AgentCommKind = "spawn_sidecar_loop"
-	AgentCommKindSpawnSidecarBackground  AgentCommKind = "spawn_sidecar_loop_background"
-	AgentCommKindResultSidecar           AgentCommKind = "result_sidecar_loop"
-	AgentCommKindResultSidecarBackground AgentCommKind = "result_sidecar_loop_background"
+	AgentCommKindDelegateSidecar           AgentCommKind = "delegate_sidecar_loop"
+	AgentCommKindDelegateSidecarBackground AgentCommKind = "delegate_sidecar_loop_background"
+	AgentCommKindResultSidecar             AgentCommKind = "result_sidecar_loop"
+	AgentCommKindResultSidecarBackground   AgentCommKind = "result_sidecar_loop_background"
 
 	// AgentCommKindSidecarStatus is a delegated session reporting what it is
 	// doing. It is fire-and-forget: the caller fans it out to its own clients.
@@ -28,8 +28,8 @@ const (
 
 var allKinds = []AgentCommKind{
 	AgentCommDelegationConformation,
-	AgentCommKindSpawnSidecar,
-	AgentCommKindSpawnSidecarBackground,
+	AgentCommKindDelegateSidecar,
+	AgentCommKindDelegateSidecarBackground,
 	AgentCommKindResultSidecar,
 	AgentCommKindResultSidecarBackground,
 	AgentCommKindSidecarStatus,

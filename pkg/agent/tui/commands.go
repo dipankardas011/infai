@@ -12,8 +12,10 @@ type commandSpec struct {
 	name string
 	// args is the argument hint rendered after the name; empty when the
 	// command takes none.
-	args string
-	help string
+	args      string
+	help      string
+	insertAs  string
+	separator string
 }
 
 // display is the menu row's command column: the name plus its argument hint.
@@ -28,6 +30,9 @@ func (c commandSpec) display() string {
 // carrying arguments gets a trailing space so the next keystroke starts the
 // argument list instead of running into the command name.
 func (c commandSpec) insertion() string {
+	if c.insertAs != "" {
+		return c.insertAs
+	}
 	if c.args == "" {
 		return c.name
 	}
@@ -62,11 +67,17 @@ var harnessCommands = []commandSpec{
 	{name: "/quit", help: "leave the harness"},
 }
 
-func matchingCommands(input string, prompts []contracts.MCPPrompt) []commandSpec {
+func matchingCommands(input string, prompts []contracts.MCPPrompt, skills []contracts.Skill) []commandSpec {
 	if !strings.HasPrefix(input, "/") || strings.ContainsAny(input, " \n\t") {
 		return nil
 	}
 	var matches []commandSpec
+	for _, skill := range skills {
+		name := "/skill:" + skill.Title
+		if strings.HasPrefix(name, input) || strings.HasPrefix("/"+skill.Title, input) {
+			matches = append(matches, commandSpec{name: name, help: skill.Description, insertAs: name, separator: " · "})
+		}
+	}
 	for _, command := range harnessCommands {
 		if strings.HasPrefix(command.name, input) {
 			matches = append(matches, command)
@@ -81,13 +92,24 @@ func matchingCommands(input string, prompts []contracts.MCPPrompt) []commandSpec
 	return matches
 }
 
+func (c commandSpec) menuText() string {
+	if c.help == "" {
+		return c.display()
+	}
+	separator := c.separator
+	if separator == "" {
+		separator = "  "
+	}
+	return c.display() + separator + c.help
+}
+
 func renderCommandMenu(commands []commandSpec, selected, width, height int, styles harnessStyles) string {
 	if len(commands) == 0 {
 		return ""
 	}
 	menuWidth := 0
 	for _, command := range commands {
-		menuWidth = max(menuWidth, lipgloss.Width("  "+command.display()+"  "+command.help))
+		menuWidth = max(menuWidth, lipgloss.Width("  "+command.menuText()))
 	}
 	menuWidth = min(menuWidth+styles.menu.GetHorizontalFrameSize(), width)
 	innerWidth := contentWidth(styles.menu, menuWidth)
@@ -101,7 +123,7 @@ func renderCommandMenu(commands []commandSpec, selected, width, height int, styl
 			style = styles.menuActive
 			prefix = "› "
 		}
-		line := ansi.Truncate(prefix+command.display()+"  "+command.help, innerWidth, "…")
+		line := ansi.Truncate(prefix+command.menuText(), innerWidth, "…")
 		rows = append(rows, style.Width(innerWidth).Render(line))
 	}
 	return styles.menu.Width(menuWidth).Render(strings.Join(rows, "\n"))

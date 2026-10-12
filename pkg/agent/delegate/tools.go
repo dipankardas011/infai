@@ -13,10 +13,10 @@ import (
 	"github.com/google/uuid"
 )
 
-func SpawnSidecarLoopTool() contracts.Tool {
+func DelegateSidecarLoopTool() contracts.Tool {
 	return contracts.Tool{
-		Name:        string(contracts.SpawnSidecarLoopTool),
-		Description: "Start a self-contained task (no overlap among sidecars) for a sidecar agent and get its answer back as this call's result. The sidecar receives only one `task` you give it, cannot ask you questions and does not see this conversation. Use it when you need the answer before you can continue. Its a Foreground task handler.",
+		Name:        string(contracts.DelegateSidecarLoopTool),
+		Description: "Delegate a self-contained task and wait for its result. Include a read-only, task-specific acceptance script; report the exact failed check and reason if it fails.",
 		Parameters: contracts.ToolParameterObjectSchema(map[string]any{
 			"agent_name": map[string]any{
 				"type":        "string",
@@ -43,10 +43,10 @@ func SpawnSidecarLoopTool() contracts.Tool {
 	}
 }
 
-func SpawnBackgroundSidecarLoopTool() contracts.Tool {
+func DelegateBackgroundSidecarLoopTool() contracts.Tool {
 	return contracts.Tool{
-		Name:        string(contracts.SpawnBackgroundSidecarLoopTool),
-		Description: "Start a self-contained task (no overlap among sidecars) for a sidecar agent. Use it when you have other work to do while it runs. The sidecar receives only one `task` and cannot ask questions and does not see this conversation. Its a Background task delegation so sidecar will tell you when its done.",
+		Name:        string(contracts.DelegateBackgroundSidecarLoopTool),
+		Description: "Delegate a self-contained task while you do other work; its result arrives asynchronously. Include a read-only, task-specific acceptance script; report the exact failed check and reason if it fails.",
 		Parameters: contracts.ToolParameterObjectSchema(map[string]any{
 			"agent_name": map[string]any{
 				"type":        "string",
@@ -118,10 +118,10 @@ func RequestSidecar(ctx context.Context, caller Caller, call contracts.ToolCall)
 
 	var requestKind comms.AgentCommKind
 	switch call.Function.Name {
-	case contracts.SpawnBackgroundSidecarLoopTool:
-		requestKind = comms.AgentCommKindSpawnSidecarBackground
-	case contracts.SpawnSidecarLoopTool:
-		requestKind = comms.AgentCommKindSpawnSidecar
+	case contracts.DelegateBackgroundSidecarLoopTool:
+		requestKind = comms.AgentCommKindDelegateSidecarBackground
+	case contracts.DelegateSidecarLoopTool:
+		requestKind = comms.AgentCommKindDelegateSidecar
 	}
 
 	if err := caller.Comms.Send(ctx, &comms.AgentComm{
