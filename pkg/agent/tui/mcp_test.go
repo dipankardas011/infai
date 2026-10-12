@@ -44,7 +44,7 @@ func TestFormatTokenLeft(t *testing.T) {
 		90 * time.Second:             "1m",
 		time.Hour:                    "1h00m",
 		3*time.Hour + 52*time.Minute: "3h52m",
-		25*time.Hour + 5*time.Minute: "25h05m",
+		25*time.Hour + 5*time.Minute: "1d 1h",
 	}
 	for left, want := range cases {
 		if got := formatTokenLeft(left); got != want {
@@ -53,21 +53,21 @@ func TestFormatTokenLeft(t *testing.T) {
 	}
 }
 
-func TestMCPRow(t *testing.T) {
+func TestMCPBlock(t *testing.T) {
 	now := time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)
 	expiry := now.Add(2 * time.Hour)
-	row := mcpRow(glue.MCPServerView{
+	block := strings.Join(mcpBlock(glue.MCPServerView{
 		Name:        "grafana",
 		Transport:   "streamable-http",
 		URL:         "https://grafana.example/mcp",
 		Auth:        "oauth",
 		HasToken:    true,
 		TokenExpiry: &expiry,
-	}, now)
+	}, now), "\n")
 
-	for _, want := range []string{"grafana", "streamable-http", "oauth", "https://grafana.example/mcp", "2026-10-11 12:00Z (2h00m left)"} {
-		if !strings.Contains(row, want) {
-			t.Errorf("row %q does not contain %q", row, want)
+	for _, want := range []string{"grafana", "streamable-http", "oauth", "endpoint", "https://grafana.example/mcp", "token", "2026-10-11 12:00Z (2h00m left)"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("block %q does not contain %q", block, want)
 		}
 	}
 }

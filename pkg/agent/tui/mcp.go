@@ -65,13 +65,65 @@ func RunMCPList(ctx context.Context, client mcpManagementClient, out io.Writer) 
 	styles := newHarnessStyles()
 	fmt.Fprintln(out, styles.heading("MCP servers", everforest.Background))
 	if len(servers) == 0 {
-		fmt.Fprintln(out, styles.screenBody.Render("No MCP servers configured."))
+		fmt.Fprintln(out, styles.screenBody.Render("None configured. Add one with `infaiw mcp add`."))
+		return nil
 	}
 	now := time.Now()
-	for _, server := range servers {
-		fmt.Fprintln(out, styles.screenRow.Render(mcpRow(server, now)))
+	for index, server := range servers {
+		if index > 0 {
+			fmt.Fprintln(out)
+		}
+		for _, line := range mcpBlock(server, now) {
+			fmt.Fprintln(out, line)
+		}
 	}
 	return nil
+}
+
+// mcpBlock is one server as it is listed: what it is, where it points, and the
+// state of its credential. Each fact gets its own line because an endpoint is
+// long — a column wide enough for one leaves the rest of the row empty, and a
+// narrower one cuts the endpoint that is the point of listing it.
+func mcpBlock(view glue.MCPServerView, now time.Time) []string {
+	lines := []string{mcpTitle(view)}
+	if target := mcpTarget(view); target != "" {
+		label := "endpoint"
+		if view.Transport == contracts.MCPTransportStdio {
+			// A local server is reached by running something, not by a URL.
+			label = "command"
+		}
+		lines = append(lines, mcpFact(label, target))
+	}
+	if view.TimeoutSeconds > 0 {
+		lines = append(lines, mcpFact("timeout", fmt.Sprintf("%ds", view.TimeoutSeconds)))
+	}
+	if token := mcpTokenFact(view, now); token != "" {
+		lines = append(lines, mcpFact("token", token))
+	}
+	return lines
+}
+
+// mcpFact is one labelled fact of a server's listing.
+func mcpFact(label, value string) string {
+	styles := newHarnessStyles()
+	return styles.muted.Render("      "+fmt.Sprintf("%-9s", label)) + styles.screenRow.Render(value)
+}
+
+// mcpTokenFact is a server's credential state, with the command that changes it
+// when the operator has to act: a token nobody can use is the one fact worth
+// saying more than a word about.
+func mcpTokenFact(view glue.MCPServerView, now time.Time) string {
+	refresh := " — run `infaiw mcp refresh " + view.Name + "`"
+	if view.Auth != contracts.MCPAuthOAuth {
+		return ""
+	}
+	if !view.HasToken {
+		return formatTokenState(view, now) + refresh
+	}
+	if view.TokenExpiry != nil && !now.Before(*view.TokenExpiry) {
+		return formatTokenState(view, now) + refresh
+	}
+	return formatTokenState(view, now)
 }
 
 // RunMCPAdd opens the form for one new server, stores it, authorizes it when the
@@ -318,10 +370,11 @@ func pickMCPServer(ctx context.Context, in io.Reader, out io.Writer, servers []g
 	return glue.MCPServerView{}, fmt.Errorf("MCP server %q is not configured", choice)
 }
 
-// mcpRow is one server's line: name, transport, authentication, endpoint and
-// token state. It carries no credential — the view it renders has none.
-func mcpRow(view glue.MCPServerView, now time.Time) string {
-	return fmt.Sprintf("%-22s  %-16s  %-11s  %-40s  %s", view.Name, view.Transport, view.Auth, mcpTarget(view), formatTokenState(view, now))
+// mcpTitle is one server's first line: what it is called, how it is reached and
+// how it authenticates. It carries no credential — the view has none.
+func mcpTitle(view glue.MCPServerView) string {
+	styles := newHarnessStyles()
+	return "  " + styles.sessionName.Render(view.Name) + styles.muted.Render("  ·  "+view.Transport+"  ·  "+string(view.Auth))
 }
 
 // mcpTarget is what a row calls the server's endpoint: the URL of a
@@ -353,10 +406,12 @@ func formatTokenState(view glue.MCPServerView, now time.Time) string {
 	return fmt.Sprintf("%s (%s left)", view.TokenExpiry.UTC().Format("2006-01-02 15:04Z"), formatTokenLeft(left))
 }
 
-// formatTokenLeft is a token's remaining life at minute resolution, without the
-// zero seconds a bare Duration prints.
+// formatTokenLeft is a token's remaining life in the largest unit that reads
+// well: a day, an hour, a minute. Hours alone turn a fortnight into "315h59m".
 func formatTokenLeft(left time.Duration) string {
 	switch {
+	case left >= 24*time.Hour:
+		return fmt.Sprintf("%dd %dh", int(left.Hours())/24, int(left.Hours())%24)
 	case left >= time.Hour:
 		return fmt.Sprintf("%dh%02dm", int(left.Hours()), int(left.Minutes())%60)
 	case left >= time.Minute:
