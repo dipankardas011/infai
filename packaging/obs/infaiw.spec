@@ -1,5 +1,5 @@
 Name:           infaiw
-Version:        0.14.1
+Version:        0.15.0
 Release:        0
 Summary:        Agent and workflow engine for infai
 License:        MIT
@@ -37,5 +37,5 @@ install -D -m 0644 %{SOURCE2} %{buildroot}%{_userunitdir}/infaiw.service
 %{_userunitdir}/infaiw.service
 
 %changelog
-* Sun Sep 06 2026 Dipankar Das <dipankardas011@users.noreply.github.com> - 0.14.1-0
+* Sun Sep 06 2026 Dipankar Das <dipankardas011@users.noreply.github.com> - 0.15.0-0
 - Initial package
