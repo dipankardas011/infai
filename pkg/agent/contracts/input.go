@@ -48,24 +48,31 @@ func (in UserInput) RequiredModalities() []LLMSupportedModality {
 // ValidateModalities rejects malformed configured modality lists: unknown
 // values and duplicates are configuration errors, not silent fallbacks.
 func (m LLMModelConfiguration) ValidateModalities() error {
-	seen := make(map[LLMSupportedModality]struct{}, len(m.Modality))
-	for _, modality := range m.Modality {
+	if err := validateModalityList(m.Id, "input", m.InputModality); err != nil {
+		return err
+	}
+	return validateModalityList(m.Id, "output", m.OutputModality)
+}
+
+func validateModalityList(modelID, direction string, modalities []LLMSupportedModality) error {
+	seen := make(map[LLMSupportedModality]struct{}, len(modalities))
+	for _, modality := range modalities {
 		switch modality {
 		case ModalityText, ModalityImage, ModalityAudio:
 		default:
-			return fmt.Errorf("model %q declares unknown modality %q", m.Id, modality)
+			return fmt.Errorf("model %q declares unknown %s modality %q", modelID, direction, modality)
 		}
 		if _, ok := seen[modality]; ok {
-			return fmt.Errorf("model %q declares duplicate modality %q", m.Id, modality)
+			return fmt.Errorf("model %q declares duplicate %s modality %q", modelID, direction, modality)
 		}
 		seen[modality] = struct{}{}
 	}
 	return nil
 }
 
-// SupportsModality reports whether the model declares the given modality.
-func (m LLMModelConfiguration) SupportsModality(modality LLMSupportedModality) bool {
-	return slices.Contains(m.Modality, modality)
+// SupportsInputModality reports whether the model declares the given modality.
+func (m LLMModelConfiguration) SupportsInputModality(modality LLMSupportedModality) bool {
+	return slices.Contains(m.InputModality, modality)
 }
 
 // ValidateUserInput is the authoritative gate for one user turn: every
@@ -76,7 +83,7 @@ func ValidateUserInput(model LLMModelConfiguration, input UserInput) error {
 		return err
 	}
 	for _, modality := range input.RequiredModalities() {
-		if !model.SupportsModality(modality) {
+		if !model.SupportsInputModality(modality) {
 			return fmt.Errorf("model %q does not support %s input", model.Id, modality)
 		}
 	}

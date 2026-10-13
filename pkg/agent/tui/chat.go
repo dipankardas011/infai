@@ -428,7 +428,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
-		m.modalities = msg.output.Modalities
+		m.modalities = msg.output.InputModalities
 		m.availableSkills = msg.output.Skills
 		m.pending = nil
 		m.approval = nil
@@ -498,7 +498,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
-		m.modalities = msg.output.Modalities
+		m.modalities = msg.output.InputModalities
 		m.availableSkills = msg.output.Skills
 		m.pending = nil
 		m.client.SetSession(msg.output.ID)
@@ -521,7 +521,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.contextWindow = msg.output.ContextWindow
 			m.thinking = msg.output.Thinking
 			m.availableThinking = msg.output.AvailableThinking
-			m.modalities = msg.output.Modalities
+			m.modalities = msg.output.InputModalities
 			m.availableSkills = msg.output.Skills
 			m.pending = nil
 			m.reflow()

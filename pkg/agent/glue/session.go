@@ -25,7 +25,7 @@ type SessionOutput struct {
 	ContextWindow     uint64                           `json:"context_window"`
 	Thinking          contracts.InfaiThinkingLevel     `json:"thinking"`
 	AvailableThinking []contracts.InfaiThinkingLevel   `json:"available_thinking"`
-	Modalities        []contracts.LLMSupportedModality `json:"modalities"`
+	InputModalities   []contracts.LLMSupportedModality `json:"input_modalities"`
 	Skills            []contracts.Skill                `json:"skills,omitempty"`
 	// MCP lists the configured MCP servers this session could not use, with the
 	// reason. It is empty when every configured server was reached.

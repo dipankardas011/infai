@@ -22,7 +22,7 @@ func fastPolicy() retryPolicy {
 }
 
 func textOnlyModel(id string) contracts.LLMModelConfiguration {
-	return contracts.LLMModelConfiguration{Id: id, Modality: []contracts.LLMSupportedModality{contracts.ModalityText}}
+	return contracts.LLMModelConfiguration{Id: id, InputModality: []contracts.LLMSupportedModality{contracts.ModalityText}}
 }
 
 func codexModel(endpoint string) contracts.ProvisionedModel {

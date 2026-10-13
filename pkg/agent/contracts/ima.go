@@ -182,7 +182,8 @@ type LLMModelConfiguration struct {
 	MaxContextLength   uint64                 `json:"max_context_window"`
 	MaxOutputTokens    uint64                 `json:"max_output_tokens"`
 	DefaultTemperature *float64               `json:"default_temperature"`
-	Modality           []LLMSupportedModality `json:"modality"`
+	InputModality      []LLMSupportedModality `json:"input_modality"`
+	OutputModality     []LLMSupportedModality `json:"output_modality"`
 	AvailableThinking  bool                   `json:"available_thinking"`
 	ThinkingLevels     ThinkingLevels         `json:"thinking_levels"`
 }

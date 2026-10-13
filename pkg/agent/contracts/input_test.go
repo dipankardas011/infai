@@ -8,8 +8,8 @@ import (
 )
 
 func TestValidateUserInputEnforcesModalities(t *testing.T) {
-	textOnly := contracts.LLMModelConfiguration{Id: "text-only", Modality: []contracts.LLMSupportedModality{contracts.ModalityText}}
-	vision := contracts.LLMModelConfiguration{Id: "vision", Modality: []contracts.LLMSupportedModality{contracts.ModalityText, contracts.ModalityImage}}
+	textOnly := contracts.LLMModelConfiguration{Id: "text-only", InputModality: []contracts.LLMSupportedModality{contracts.ModalityText}}
+	vision := contracts.LLMModelConfiguration{Id: "vision", InputModality: []contracts.LLMSupportedModality{contracts.ModalityText, contracts.ModalityImage}}
 	image := contracts.ImageInput{MediaType: "image/png", Data: []byte{1}}
 
 	if err := contracts.ValidateUserInput(vision, contracts.UserInput{Text: "describe", Images: []contracts.ImageInput{image}}); err != nil {
@@ -37,22 +37,32 @@ func TestValidateUserInputEnforcesModalities(t *testing.T) {
 }
 
 func TestValidateModalitiesRejectsUnknownAndDuplicate(t *testing.T) {
-	unknown := contracts.LLMModelConfiguration{Id: "x", Modality: []contracts.LLMSupportedModality{"video"}}
+	unknown := contracts.LLMModelConfiguration{Id: "x", InputModality: []contracts.LLMSupportedModality{"video"}}
 	if err := unknown.ValidateModalities(); err == nil {
 		t.Fatal("unknown modality was accepted")
 	}
 
-	duplicate := contracts.LLMModelConfiguration{Id: "x", Modality: []contracts.LLMSupportedModality{contracts.ModalityText, contracts.ModalityText}}
+	unknownOutput := contracts.LLMModelConfiguration{Id: "x", OutputModality: []contracts.LLMSupportedModality{"video"}}
+	if err := unknownOutput.ValidateModalities(); err == nil {
+		t.Fatal("unknown output modality was accepted")
+	}
+
+	duplicate := contracts.LLMModelConfiguration{Id: "x", InputModality: []contracts.LLMSupportedModality{contracts.ModalityText, contracts.ModalityText}}
 	if err := duplicate.ValidateModalities(); err == nil {
 		t.Fatal("duplicate modality was accepted")
 	}
 
-	valid := contracts.LLMModelConfiguration{Id: "x", Modality: []contracts.LLMSupportedModality{contracts.ModalityText, contracts.ModalityImage, contracts.ModalityAudio}}
+	duplicateOutput := contracts.LLMModelConfiguration{Id: "x", OutputModality: []contracts.LLMSupportedModality{contracts.ModalityText, contracts.ModalityText}}
+	if err := duplicateOutput.ValidateModalities(); err == nil {
+		t.Fatal("duplicate output modality was accepted")
+	}
+
+	valid := contracts.LLMModelConfiguration{Id: "x", InputModality: []contracts.LLMSupportedModality{contracts.ModalityText, contracts.ModalityImage, contracts.ModalityAudio}, OutputModality: []contracts.LLMSupportedModality{contracts.ModalityText}}
 	if err := valid.ValidateModalities(); err != nil {
 		t.Fatalf("valid modalities rejected: %v", err)
 	}
-	if !valid.SupportsModality(contracts.ModalityImage) || valid.SupportsModality("video") {
-		t.Fatal("SupportsModality reported the wrong result")
+	if !valid.SupportsInputModality(contracts.ModalityImage) || valid.SupportsInputModality("video") {
+		t.Fatal("SupportsInputModality reported the wrong result")
 	}
 }
 

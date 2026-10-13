@@ -190,7 +190,8 @@ func renderGenericProviderHelp(out io.Writer) error {
           "max_context_window": 64000,
           "max_output_tokens": 8192,
           "default_temperature": 0.2,
-          "modality": ["text"],
+          "input_modality": ["text"],
+          "output_modality": ["text"],
           "available_thinking": false,
           "thinking_levels": {}
         }

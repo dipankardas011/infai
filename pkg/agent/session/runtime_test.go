@@ -32,7 +32,7 @@ func newRuntimeTestModel(maxContext uint64) *runtimeTestModel {
 			"http://127.0.0.1",
 			contracts.OpenAICompatableAPI,
 			contracts.LLMProviderAuth{Method: contracts.NoneAuth},
-			contracts.LLMModelConfiguration{Id: "test-model", MaxContextLength: maxContext, Modality: []contracts.LLMSupportedModality{contracts.ModalityText}},
+			contracts.LLMModelConfiguration{Id: "test-model", MaxContextLength: maxContext, InputModality: []contracts.LLMSupportedModality{contracts.ModalityText}},
 		),
 	}
 }

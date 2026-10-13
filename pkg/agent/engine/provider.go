@@ -31,12 +31,12 @@ func (e *InfaiAgentEngine) ListAllProviderModels() []glue.ListModelOutput {
 		for modelName, model := range provider.Models {
 			displayName := modelName
 			providerModels = append(providerModels, glue.ListModelOutput{
-				ModelName:      displayName,
-				ModelID:        model.Id,
-				ProviderName:   providerName,
-				ContextWindow:  model.MaxContextLength,
-				ThinkingLevels: model.AvailableThinkingPatterns(),
-				Modalities:     model.Modality,
+				ModelName:       displayName,
+				ModelID:         model.Id,
+				ProviderName:    providerName,
+				ContextWindow:   model.MaxContextLength,
+				ThinkingLevels:  model.AvailableThinkingPatterns(),
+				InputModalities: model.InputModality,
 			})
 		}
 	}

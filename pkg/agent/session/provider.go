@@ -22,13 +22,13 @@ func (s *InfaiAgentSession) AvailableThinkingPatterns() []contracts.InfaiThinkin
 	return s.model.GetModelSpecs().Model().AvailableThinkingPatterns()
 }
 
-// SupportedModalities returns the input modalities declared by the session's
+// SupportedInputModalities returns the input modalities declared by the session's
 // currently selected model.
-func (s *InfaiAgentSession) SupportedModalities() []contracts.LLMSupportedModality {
+func (s *InfaiAgentSession) SupportedInputModalities() []contracts.LLMSupportedModality {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return append([]contracts.LLMSupportedModality(nil), s.model.GetModelSpecs().Model().Modality...)
+	return append([]contracts.LLMSupportedModality(nil), s.model.GetModelSpecs().Model().InputModality...)
 }
 
 func (s *InfaiAgentSession) CurrentThinkingPattern() contracts.InfaiThinkingLevel {

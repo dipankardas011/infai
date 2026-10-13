@@ -19,10 +19,10 @@ type LogoutProviderInput struct {
 }
 
 type ListModelOutput struct {
-	ModelName      string                           `json:"model_name"`
-	ModelID        string                           `json:"model_id"`
-	ProviderName   string                           `json:"provider_name"`
-	ContextWindow  uint64                           `json:"context_window"`
-	ThinkingLevels []contracts.InfaiThinkingLevel   `json:"thinking_levels"`
-	Modalities     []contracts.LLMSupportedModality `json:"modalities"`
+	ModelName       string                           `json:"model_name"`
+	ModelID         string                           `json:"model_id"`
+	ProviderName    string                           `json:"provider_name"`
+	ContextWindow   uint64                           `json:"context_window"`
+	ThinkingLevels  []contracts.InfaiThinkingLevel   `json:"thinking_levels"`
+	InputModalities []contracts.LLMSupportedModality `json:"input_modalities"`
 }
