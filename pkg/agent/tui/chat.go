@@ -40,6 +40,8 @@ type block struct {
 	role          string
 	text          string
 	imageCount    int
+	artifactCount int
+	artifacts     []contracts.Artifact
 	toolKind      string
 	toolStatus    string
 	toolName      string
@@ -68,14 +70,21 @@ type chatModel struct {
 	used              uint64
 	blocks            []block
 
-	width     int
-	height    int
-	areas     []rowArea
-	viewport  viewport.Model
-	anchor    transcriptAnchor
-	composer  textarea.Model
-	checklist contracts.TaskChecklistState
-	status    contracts.SessionStatus
+	width    int
+	height   int
+	areas    []rowArea
+	viewport viewport.Model
+	anchor   transcriptAnchor
+	// transcriptOffset is the viewport content line its first row shows, and
+	// badgeHits are the artifact chips the last assembled window drew.
+	transcriptOffset int
+	badgeHits        []badgeHit
+	// turnTextBlock is the assistant block this turn's text landed in, so a
+	// produced image joins that block instead of opening one of its own.
+	turnTextBlock int
+	composer      textarea.Model
+	checklist     contracts.TaskChecklistState
+	status        contracts.SessionStatus
 	// sidecars is the latest status reported by each session this one
 	sidecars                []contracts.SidecarStatus
 	sidecarsSession         uuid.UUID
@@ -244,6 +253,7 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 		viewport:       view,
 		composer:       input,
 		clipboard:      defaultClipboard(),
+		turnTextBlock:  -1,
 		toolCallBlocks: make(map[string]int),
 		skillNames:     make(map[string]string),
 	}
@@ -471,6 +481,14 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.showModels(msg.providers, msg.switching)
 		}
 		return m, nil
+	case artifactSavedMsg:
+		if msg.err != nil {
+			m.showNotice("Could not save the generated image", msg.err.Error(), false)
+			return m, nil
+		}
+		m.blocks = append(m.blocks, block{role: "event", text: "saved " + m.relativePaths(msg.paths)})
+		m.refreshTranscript(true)
+		return m, nil
 	case sessionCreatedMsg:
 		if msg.err != nil {
 			m.showNotice("Could not create session", msg.err.Error(), false)
@@ -619,6 +637,12 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.scrollTranscript(-transcriptScrollStep)
 				case tea.MouseWheelDown:
 					m.scrollTranscript(transcriptScrollStep)
+				}
+				return m, nil
+			}
+			if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+				if hit, found := m.badgeAt(click.X, click.Y); found {
+					return m, m.saveArtifactsCmd(hit)
 				}
 			}
 			return m, nil
@@ -1471,6 +1495,11 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 	}
 	switch event.Kind {
 	case contracts.EventSessionTransitionState:
+		if contracts.SessionStatus(content) == contracts.SessionBusy {
+			// A new turn starts: whatever block the last turn's text used is no
+			// longer the one a produced image belongs to.
+			m.turnTextBlock = -1
+		}
 		m.applySessionStatus(contracts.SessionStatus(content))
 	case contracts.EventSessionFatal:
 		m.applySessionStatus(contracts.SessionTombstone)
@@ -1483,6 +1512,8 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 			images = event.Attachments.ImageCount
 		}
 		m.blocks = append(m.blocks, block{role: "user", text: content, imageCount: images})
+	case contracts.EventArtifact:
+		m.attachArtifacts(event.Artifacts)
 	case contracts.EventToolCall:
 		if event.ToolCall != nil {
 			name := string(event.ToolCall.Function.Name)
@@ -1701,14 +1732,19 @@ func clipboardError(err error) error {
 	}
 }
 
-// renderImageBadges renders the green [Image N] chips for a set of attachments.
-func (m *chatModel) renderImageBadges(count int) string {
+// artifactBadgeLabel names a model-produced image in the transcript. That chip
+// is clickable and saves the image into the session workspace.
+const artifactBadgeLabel = "Gen Image"
+
+// renderImageBadges renders the chips for a set of images. label names what the
+// images came from: the user attached them, or the model produced them.
+func (m *chatModel) renderImageBadges(count int, label string, style lipgloss.Style) string {
 	if count <= 0 {
 		return ""
 	}
 	badges := make([]string, 0, count)
 	for i := range count {
-		badges = append(badges, m.styles.imageBadge.Render(fmt.Sprintf("[Image %d]", i+1)))
+		badges = append(badges, style.Render(fmt.Sprintf("[%s %d]", label, i+1)))
 	}
 	return strings.Join(badges, " ")
 }
@@ -2301,7 +2337,7 @@ func (m *chatModel) attachmentsView() string {
 	if len(m.pending) == 0 {
 		return ""
 	}
-	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, m.renderImageBadges(len(m.pending)))
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, m.renderImageBadges(len(m.pending), "Image", m.styles.imageBadge))
 }
 
 // checklistView is the task checklist, rendered above the status row. It is
@@ -2665,7 +2701,7 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	switch entry.role {
 	case "user":
 		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, renderResourceBlocks(renderSkillReferences(renderFileReferences(entry.text))), width)
-		if badges := m.renderImageBadges(entry.imageCount); badges != "" {
+		if badges := m.renderImageBadges(entry.imageCount, "Image", m.styles.imageBadge); badges != "" {
 			content += "\n" + strings.Repeat(" ", lipgloss.Width("●")+1) + badges
 		}
 	case "assistant":
@@ -2674,6 +2710,9 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 			text = m.renderMarkdown(text, max(width-2, 1))
 		}
 		content = renderChatMarker("●", m.styles.active, lipgloss.NewStyle(), text, width)
+		if badges := m.renderImageBadges(entry.artifactCount, artifactBadgeLabel, m.styles.artifactBadge); badges != "" {
+			content += "\n" + strings.Repeat(" ", lipgloss.Width("●")+1) + badges
+		}
 	case "thinking":
 		text := entry.text
 		if !streaming {
@@ -3849,6 +3888,7 @@ func (m *chatModel) appendDelta(kind contracts.EventStreamKind, text string) {
 		m.stopStreaming()
 		m.streaming = true
 		m.streamingAt = len(m.blocks) - 1
+		m.turnTextBlock = m.streamingAt
 	}
 }
 
@@ -4100,8 +4140,8 @@ func blocksFromRecords(records []store.Record) []block {
 				if message.ReasoningContent != "" {
 					blocks = append(blocks, block{role: "thinking", text: message.ReasoningContent})
 				}
-				if message.Text() != "" {
-					blocks = append(blocks, block{role: "assistant", text: message.Text()})
+				if message.Text() != "" || message.HasArtifacts() {
+					blocks = append(blocks, block{role: "assistant", text: message.Text(), artifactCount: len(message.Artifacts), artifacts: message.Artifacts})
 				}
 				for _, call := range message.ToolCalls {
 					toolName := string(call.Function.Name)
@@ -4446,20 +4486,25 @@ func previewDisplays(preview *store.EventPreview) []timelineDisplay {
 	if role == "" {
 		role = "assistant"
 	}
+	badges := make([]string, 0, 2)
+	if preview.ImageCount > 0 {
+		badges = append(badges, imageBadgeText(preview.ImageCount, "Image"))
+	}
+	if preview.ArtifactCount > 0 {
+		badges = append(badges, imageBadgeText(preview.ArtifactCount, artifactBadgeLabel))
+	}
 	text := preview.Text
-	if text == "" {
+	if text == "" && len(badges) == 0 {
 		text = "content unavailable"
 	}
-	if preview.ImageCount > 0 {
-		text = strings.TrimSpace(text + " " + imageBadgeText(preview.ImageCount))
-	}
+	text = strings.TrimSpace(text + " " + strings.Join(badges, " "))
 	return []timelineDisplay{{role: role, text: text}}
 }
 
-func imageBadgeText(count int) string {
+func imageBadgeText(count int, label string) string {
 	badges := make([]string, 0, count)
 	for i := range count {
-		badges = append(badges, fmt.Sprintf("[Image %d]", i+1))
+		badges = append(badges, fmt.Sprintf("[%s %d]", label, i+1))
 	}
 	return strings.Join(badges, " ")
 }

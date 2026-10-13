@@ -11,6 +11,7 @@ type ChatMessage struct {
 	Role               string              `json:"role"`
 	Content            *string             `json:"content,omitempty"`
 	Images             []ImageInput        `json:"images,omitempty"`
+	Artifacts          []Artifact          `json:"artifacts,omitempty"`
 	ReasoningContent   string              `json:"reasoning_content,omitempty"`
 	ReasoningSignature string              `json:"reasoning_signature,omitempty"`
 	Name               *string             `json:"name,omitempty"`
@@ -18,6 +19,21 @@ type ChatMessage struct {
 	ToolCalls          []ToolCall          `json:"tool_calls,omitempty"`
 	Status             ToolExecutionStatus `json:"status,omitempty"`
 }
+
+// Artifact is a non-text payload the model produced, such as a generated
+// image. Unlike Images it is never replayed to a provider.
+type Artifact struct {
+	Kind      string `json:"kind"`
+	MediaType string `json:"media_type"`
+	Data      []byte `json:"data"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
+	ItemID    string `json:"item_id,omitempty"`
+	Prompt    string `json:"prompt,omitempty"`
+}
+
+// HasArtifacts reports whether the message carries any produced artifact.
+func (m ChatMessage) HasArtifacts() bool { return len(m.Artifacts) > 0 }
 
 // Text returns the message content, or "" when the message carried none.
 func (m ChatMessage) Text() string {

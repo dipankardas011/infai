@@ -288,6 +288,19 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 			}
 		}
 
+		// Published before the commit that makes the artifact durable, for the
+		// same reason as the inbox echo: a client joining in between is given
+		// the committed history plus the in-flight log.
+		if reply.HasArtifacts() {
+			if !a.publishEvent(ctx, contracts.EventStream{
+				Kind:      contracts.EventArtifact,
+				Timestamp: time.Now().UTC(),
+				Artifacts: reply.Artifacts,
+			}) {
+				return
+			}
+		}
+
 		messages := []contracts.ChatMessage{reply}
 		lastHadToolCalls = len(reply.ToolCalls) > 0
 		if len(a.availableTools) != 0 && lastHadToolCalls {

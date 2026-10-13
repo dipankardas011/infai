@@ -7,10 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"net/url"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -334,9 +338,9 @@ type codexResponsesRequest struct {
 
 type codexTool struct {
 	Type        string          `json:"type"`
-	Name        string          `json:"name"`
+	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 type codexReasoning struct {
@@ -371,6 +375,9 @@ func (o *openAICodexResponsesAPI) Generate(ctx context.Context, messages []contr
 				Type: "function", Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters,
 			})
 		}
+	}
+	if slices.Contains(o.b.Model().OutputModality, contracts.ModalityImage) {
+		body.Tools = append(body.Tools, codexTool{Type: "image_generation"})
 	}
 	if effort, ok := o.b.ThinkingLevelValue(); ok {
 		body.Reasoning = &codexReasoning{Effort: effort}
@@ -470,7 +477,8 @@ type codexStreamEvent struct {
 	ItemID   string          `json:"item_id"`
 	Item     json.RawMessage `json:"item"`
 	Response struct {
-		Status string `json:"status"`
+		Status string            `json:"status"`
+		Output []codexOutputItem `json:"output"`
 		Error  *struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
@@ -498,6 +506,9 @@ type codexOutputItem struct {
 	Name             string `json:"name"`
 	Arguments        string `json:"arguments"`
 	EncryptedContent string `json:"encrypted_content"`
+	Status           string `json:"status"`
+	Result           string `json:"result"`
+	RevisedPrompt    string `json:"revised_prompt"`
 	Content          []struct {
 		Type    string `json:"type"`
 		Text    string `json:"text"`
@@ -509,6 +520,31 @@ type codexOutputItem struct {
 	} `json:"summary"`
 }
 
+// codexArtifact turns a completed image generation output item into an
+// artifact. The image arrives base64-encoded in result; the raw bytes and the
+// media type are derived here, and no size ceiling is applied because the
+// provider already produced the image.
+func codexArtifact(item codexOutputItem) (contracts.Artifact, bool, error) {
+	if item.Type != "image_generation_call" || item.Result == "" {
+		return contracts.Artifact{}, false, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(item.Result)
+	if err != nil {
+		return contracts.Artifact{}, false, fmt.Errorf("openai codex responses api: decode generated image %s: %w", item.ID, err)
+	}
+	artifact := contracts.Artifact{
+		Kind:      "image",
+		MediaType: http.DetectContentType(raw),
+		Data:      raw,
+		ItemID:    item.ID,
+		Prompt:    item.RevisedPrompt,
+	}
+	if config, _, err := image.DecodeConfig(bytes.NewReader(raw)); err == nil {
+		artifact.Width, artifact.Height = config.Width, config.Height
+	}
+	return artifact, true, nil
+}
+
 func (o *openAICodexResponsesAPI) readStream(ctx context.Context, body io.Reader, opts *contracts.GenerateOptions) (contracts.ChatMessage, *contracts.TokenUsage, error) {
 	dec := NewDecoder(body)
 	var content, reasoning strings.Builder
@@ -518,6 +554,23 @@ func (o *openAICodexResponsesAPI) readStream(ctx context.Context, body io.Reader
 	hasMessage := false
 	toolCalls := make([]contracts.ToolCall, 0)
 	toolIndexes := make(map[string]int)
+	artifacts := make([]contracts.Artifact, 0, 1)
+	artifactIDs := make(map[string]struct{})
+
+	collectArtifact := func(item codexOutputItem) error {
+		artifact, ok, err := codexArtifact(item)
+		if err != nil || !ok {
+			return err
+		}
+		if artifact.ItemID != "" {
+			if _, seen := artifactIDs[artifact.ItemID]; seen {
+				return nil
+			}
+			artifactIDs[artifact.ItemID] = struct{}{}
+		}
+		artifacts = append(artifacts, artifact)
+		return nil
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -554,6 +607,11 @@ func (o *openAICodexResponsesAPI) readStream(ctx context.Context, body io.Reader
 				usage = &contracts.TokenUsage{
 					PromptTokens: value.Response.Usage.InputTokens, CompletionTokens: value.Response.Usage.OutputTokens,
 					TotalTokens: value.Response.Usage.TotalTokens,
+				}
+			}
+			for _, item := range value.Response.Output {
+				if err := collectArtifact(item); err != nil {
+					return contracts.ChatMessage{}, nil, err
 				}
 			}
 		case "response.output_text.delta", "response.refusal.delta":
@@ -636,6 +694,9 @@ func (o *openAICodexResponsesAPI) readStream(ctx context.Context, body io.Reader
 					Function: contracts.Function{Name: contracts.ToolType(item.Name), Arguments: item.Arguments},
 				}
 			}
+			if err := collectArtifact(item); err != nil {
+				return contracts.ChatMessage{}, nil, err
+			}
 		}
 		if terminal {
 			break
@@ -647,6 +708,7 @@ func (o *openAICodexResponsesAPI) readStream(ctx context.Context, body io.Reader
 	text := content.String()
 	reply := contracts.ChatMessage{
 		Role: "assistant", ReasoningContent: reasoning.String(), ReasoningSignature: reasoningSignature, ToolCalls: toolCalls,
+		Artifacts: artifacts,
 	}
 	if hasMessage {
 		reply.Content = &text

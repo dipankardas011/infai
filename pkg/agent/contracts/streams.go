@@ -40,6 +40,11 @@ const (
 	// visible without the client joining it.
 	EventSidecarStatus EventStreamKind = "sidecar_status"
 
+	// EventArtifact reports a non-text payload the model produced, such as a
+	// generated image. Attachments carries the count; the bytes stay in the
+	// record's blob.
+	EventArtifact EventStreamKind = "artifact"
+
 	/// TaskChecklist
 	EventToolTaskCheckList EventStreamKind = "task_checklist_result"
 	// SkillLoaded
@@ -70,6 +75,8 @@ type EventStream struct {
 
 	Content     *string           `json:"content"`
 	Attachments *EventAttachments `json:"attachments,omitempty"`
+	// Artifacts carries the non-text payload the model produced in this turn.
+	Artifacts []Artifact `json:"artifacts,omitempty"`
 
 	ToolCall   *ToolCall            `json:"tool_call"`
 	ToolResult *ToolExecutionResult `json:"tool_result"`

@@ -484,6 +484,7 @@ func sessionOutput(sess *session.InfaiAgentSession) glue.SessionOutput {
 		Thinking:          sess.CurrentThinkingPattern(),
 		AvailableThinking: sess.AvailableThinkingPatterns(),
 		InputModalities:   sess.SupportedInputModalities(),
+		OutputModalities:  sess.SupportedOutputModalities(),
 		Skills:            sess.AvailableSkills(),
 		MCP:               sess.MCPStatus(),
 	}

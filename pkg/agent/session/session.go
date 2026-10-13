@@ -726,6 +726,7 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			contracts.EventToolTaskCheckList,
 			contracts.EventSkillLoad,
 			contracts.EventMessageFromAgentInbox,
+			contracts.EventArtifact,
 			contracts.EventSidecarStatus,
 			contracts.NotifyAgentUsage:
 			s.mu.Lock()

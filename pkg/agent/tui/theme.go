@@ -97,6 +97,7 @@ type harnessStyles struct {
 	userMarker       lipgloss.Style
 	assistant        lipgloss.Style
 	imageBadge       lipgloss.Style
+	artifactBadge    lipgloss.Style
 	thinking         lipgloss.Style
 	system           lipgloss.Style
 	event            lipgloss.Style
@@ -164,22 +165,25 @@ func newHarnessStyles() harnessStyles {
 		userMarker:  lipgloss.NewStyle().Foreground(everforest.Blue).Bold(true),
 		assistant:   lipgloss.NewStyle().Foreground(everforest.Text),
 		imageBadge:  lipgloss.NewStyle().Background(everforest.Green).Foreground(everforest.Background).Bold(true),
-		thinking:    lipgloss.NewStyle().Foreground(everforest.Muted).Italic(true),
-		system:      lipgloss.NewStyle().Foreground(everforest.Purple),
-		event:       lipgloss.NewStyle().Foreground(everforest.Orange),
-		error:       lipgloss.NewStyle().Foreground(everforest.Red),
-		tool:        lipgloss.NewStyle().Foreground(everforest.Muted),
-		skill:       lipgloss.NewStyle().Foreground(everforest.Aqua),
-		modalBody:   lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Muted),
-		screenTitle: lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
-		screenBody:  lipgloss.NewStyle().Foreground(everforest.Muted),
-		screenRow:   lipgloss.NewStyle().Foreground(everforest.Text),
-		screenSel:   lipgloss.NewStyle().Background(everforest.SelectionBg).Foreground(everforest.Yellow).Bold(true),
-		active:      lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
-		inactive:    lipgloss.NewStyle().Foreground(everforest.Muted),
-		menu:        lipgloss.NewStyle().Background(everforest.Surface).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(everforest.Green),
-		menuRow:     lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text),
-		menuActive:  lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
+		// A model-produced image gets the warmer chip, so it reads as produced
+		// rather than attached.
+		artifactBadge: lipgloss.NewStyle().Background(everforest.Orange).Foreground(everforest.Background).Bold(true),
+		thinking:      lipgloss.NewStyle().Foreground(everforest.Muted).Italic(true),
+		system:        lipgloss.NewStyle().Foreground(everforest.Purple),
+		event:         lipgloss.NewStyle().Foreground(everforest.Orange),
+		error:         lipgloss.NewStyle().Foreground(everforest.Red),
+		tool:          lipgloss.NewStyle().Foreground(everforest.Muted),
+		skill:         lipgloss.NewStyle().Foreground(everforest.Aqua),
+		modalBody:     lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Muted),
+		screenTitle:   lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
+		screenBody:    lipgloss.NewStyle().Foreground(everforest.Muted),
+		screenRow:     lipgloss.NewStyle().Foreground(everforest.Text),
+		screenSel:     lipgloss.NewStyle().Background(everforest.SelectionBg).Foreground(everforest.Yellow).Bold(true),
+		active:        lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
+		inactive:      lipgloss.NewStyle().Foreground(everforest.Muted),
+		menu:          lipgloss.NewStyle().Background(everforest.Surface).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(everforest.Green),
+		menuRow:       lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text),
+		menuActive:    lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
 	}
 }
 

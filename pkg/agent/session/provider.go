@@ -31,6 +31,15 @@ func (s *InfaiAgentSession) SupportedInputModalities() []contracts.LLMSupportedM
 	return append([]contracts.LLMSupportedModality(nil), s.model.GetModelSpecs().Model().InputModality...)
 }
 
+// SupportedOutputModalities returns the output modalities declared by the
+// session's currently selected model.
+func (s *InfaiAgentSession) SupportedOutputModalities() []contracts.LLMSupportedModality {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]contracts.LLMSupportedModality(nil), s.model.GetModelSpecs().Model().OutputModality...)
+}
+
 func (s *InfaiAgentSession) CurrentThinkingPattern() contracts.InfaiThinkingLevel {
 	s.mu.Lock()
 	defer s.mu.Unlock()

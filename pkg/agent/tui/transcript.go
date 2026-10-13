@@ -269,6 +269,7 @@ func (m *chatModel) followTranscript() {
 func (m *chatModel) syncTranscript() {
 	height := m.transcriptHeight()
 	if m.viewport.Width() <= 0 || height <= 0 {
+		m.badgeHits = m.badgeHits[:0]
 		return
 	}
 	width := m.transcriptWidth()
@@ -287,6 +288,8 @@ func (m *chatModel) syncTranscript() {
 	}
 	m.viewport.SetContent(window.content)
 	m.viewport.SetYOffset(offset)
+	m.transcriptOffset = offset
+	m.recordBadgeHits(window)
 }
 
 // buildWindow renders the blocks the viewport needs: the anchor's block, enough

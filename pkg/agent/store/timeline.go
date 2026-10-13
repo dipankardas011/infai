@@ -48,9 +48,13 @@ type Event struct {
 // deliberately bounded: text is collapsed to a single line and truncated, so a
 // large blob never forces its full payload through the timeline API.
 type EventPreview struct {
-	Role       string `json:"role,omitempty"`
-	Text       string `json:"text,omitempty"`
-	ImageCount int    `json:"image_count,omitempty"`
+	Role string `json:"role,omitempty"`
+	Text string `json:"text,omitempty"`
+	// ImageCount is how many images the user attached; ArtifactCount is how
+	// many the model produced. They are kept apart because the two are shown
+	// with different labels.
+	ImageCount    int `json:"image_count,omitempty"`
+	ArtifactCount int `json:"artifact_count,omitempty"`
 }
 
 type EventLocation struct {
@@ -257,11 +261,12 @@ func (t *Timeline) CurrentHeadEventID() uuid.UUID {
 	return t.head
 }
 
-// recordHasImages reports whether a durable record carries image attachments.
+// recordHasImages reports whether a durable record carries image payloads:
+// attachments the user supplied, or images the model produced.
 // Image-bearing records always use blob storage so encoded bytes never land in
 // the event chunks, regardless of how small the image is.
 func recordHasImages(record Record) bool {
-	return record.Message != nil && len(record.Message.Images) > 0
+	return record.Message != nil && (len(record.Message.Images) > 0 || len(record.Message.Artifacts) > 0)
 }
 
 // previewTextLimit bounds the sidecar text so a blobbed record never pushes its
@@ -277,6 +282,7 @@ func buildEventPreview(record Record) *EventPreview {
 		message := record.Message
 		preview.Role = message.Role
 		preview.ImageCount = len(message.Images)
+		preview.ArtifactCount = len(message.Artifacts)
 		preview.Text = previewText(message.Text())
 		if preview.Text == "" && len(message.ToolCalls) > 0 {
 			names := make([]string, 0, len(message.ToolCalls))
