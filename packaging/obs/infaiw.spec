@@ -30,7 +30,7 @@ install -D -m 0644 %{SOURCE2} %{buildroot}%{_userunitdir}/infaiw.service
 %systemd_user_preun infaiw.service
 
 %postun
-%systemd_user_postun infaiw.service
+%systemd_user_postun_with_restart infaiw.service
 
 %files
 %{_bindir}/infaiw

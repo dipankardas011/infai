@@ -73,7 +73,9 @@ user data is not moved or removed by the release workflow. Do not use `sudo`
 for the user service. Logs are in `$(brew --prefix)/var/log/infaiw.log`.
 
 Use `brew services stop infaiw` or `brew services restart infaiw` to manage it.
-Homebrew manages launchd on macOS and systemd on Linux.
+Homebrew manages launchd on macOS and systemd on Linux. Upgrading the formula
+terminates a running `infaiw server`; the existing `keep_alive` service then
+starts the new binary. An inactive service remains inactive.
 
 #### Linux packages (OBS)
 
@@ -81,8 +83,9 @@ Install `infaiw` from the
 [openSUSE Software portal](https://software.opensuse.org/download.html?project=home%3Adipankardas%3Ainfai&package=infaiw).
 
 The service is **opt-in**: installing the package does not start the server
-or enable automatic startup. Run the following commands as your normal user,
-without `sudo`:
+or enable automatic startup. Package upgrades restart already-running user
+instances so they use the new binary; inactive instances remain inactive. Run
+the following commands as your normal user, without `sudo`:
 
 ```bash
 systemctl --user daemon-reload

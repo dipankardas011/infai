@@ -91,7 +91,7 @@ jobs:
             output="${template%.in}"
             sed "s/@VERSION@/${VERSION}/g" "$template" > "$output"
           done
-          chmod +x packaging/obs/debian.rules
+          chmod +x packaging/obs/debian.rules packaging/obs/debian.postinst
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -155,6 +155,10 @@ jobs:
 
             def install
               bin.install "infaiw"
+            end
+
+            post_install_steps do
+              terminate_process "infaiw server", match: :full
             end
 
             service do
