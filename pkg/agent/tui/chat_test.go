@@ -2730,6 +2730,62 @@ func TestSubmitKeepsDraftWhenNoSession(t *testing.T) {
 	}
 }
 
+// TestImageInputIsAllowedWhenTheModelDescribesNone covers a server that reports
+// no input modalities at all — an older harness, or one whose report did not
+// land. Silence is not a refusal: the harness must not turn the image away and
+// blame the model for it.
+func TestImageInputIsAllowedWhenTheModelDescribesNone(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.session = store.SessionMeta{ID: uuid.New(), Model: "deepseek-flash"}
+	m.clipboard = &recordingClipboard{}
+	m.pending = []contracts.ImageInput{{Name: "a.png", MediaType: "image/png", Data: []byte("a")}}
+	m.composer.SetValue("look")
+
+	if m.modalities != nil {
+		t.Fatalf("modalities=%v, want none for this case", m.modalities)
+	}
+	if cmd := m.pasteImage(); cmd == nil {
+		t.Fatal("an un-described model was refused the clipboard image")
+	}
+	if cmd := m.submit(); cmd == nil {
+		t.Fatal("submit refused a prompt with images for an un-described model")
+	}
+	if got := m.composer.Value(); got != "" {
+		t.Fatalf("composer=%q want the prompt to have been dispatched", got)
+	}
+}
+
+// TestImageInputIsRefusedWhenTheModelIsTextOnly is the other side of it: a model
+// the server described as text and nothing else is still turned away, and told
+// the truth about why.
+func TestImageInputIsRefusedWhenTheModelIsTextOnly(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.session = store.SessionMeta{ID: uuid.New(), Model: "deepseek-v4-pro"}
+	m.modalities = []contracts.LLMSupportedModality{contracts.ModalityText}
+	m.clipboard = &recordingClipboard{}
+	m.pending = []contracts.ImageInput{{Name: "a.png", MediaType: "image/png", Data: []byte("a")}}
+	m.composer.SetValue("look")
+
+	if cmd := m.pasteImage(); cmd != nil {
+		t.Fatal("a text-only model accepted a clipboard image")
+	}
+	if !strings.Contains(m.viewport.GetContent(), "does not support image input") {
+		t.Fatalf("the refusal does not say why:\n%s", m.viewport.GetContent())
+	}
+	if cmd := m.submit(); cmd != nil {
+		t.Fatal("submit dispatched with images for a text-only model")
+	}
+	if got := m.composer.Value(); got != "look" {
+		t.Fatalf("composer=%q want the draft retained", got)
+	}
+}
+
 func TestSubmitKeepsDraftAndImagesWhenModelLacksImage(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil

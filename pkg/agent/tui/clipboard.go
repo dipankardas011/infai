@@ -27,11 +27,12 @@ var (
 // a process for the life of the app.
 const clipboardTimeout = 10 * time.Second
 
-// ClipboardReader reads one image from the system clipboard. It is an
-// interface so platform support (Windows, OSC 5522) can be added without
-// touching the TUI, and so tests can inject a reader.
-type ClipboardReader interface {
+// Clipboard is the system clipboard as the harness uses it: one image in, and
+// one selection of text out. It is an interface so platform support (Windows,
+// OSC 5522) can be added without touching the TUI, and so tests can inject one.
+type Clipboard interface {
 	ReadImage(ctx context.Context) ([]byte, error)
+	WriteText(ctx context.Context, text string) (string, error)
 }
 
 type clipboardCommand struct {
@@ -40,13 +41,14 @@ type clipboardCommand struct {
 }
 
 // systemClipboard selects a platform clipboard tool. All process execution is
-// deferred to the injected output func so callers can drive it from a tea.Cmd
-// without blocking the Bubble Tea update loop.
+// deferred to the injected output and write funcs so callers can drive it from
+// a tea.Cmd without blocking the Bubble Tea update loop.
 type systemClipboard struct {
 	goos     string
 	getenv   func(string) string
 	lookPath func(string) (string, error)
 	output   func(ctx context.Context, name string, args ...string) ([]byte, error)
+	write    func(ctx context.Context, path string, args []string, text string) error
 }
 
 func defaultClipboard() *systemClipboard {
@@ -55,6 +57,7 @@ func defaultClipboard() *systemClipboard {
 		getenv:   os.Getenv,
 		lookPath: exec.LookPath,
 		output:   runClipboardCommand,
+		write:    runClipboardWrite,
 	}
 }
 
@@ -79,6 +82,54 @@ func runClipboardCommand(ctx context.Context, name string, args ...string) ([]by
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	return writer.buf.Bytes(), nil
+}
+
+// runClipboardWrite feeds all text to the platform clipboard helper and returns
+// once the helper has accepted it. Some helpers stay alive to own the clipboard;
+// their lifetime is bounded by the caller's context and reaped in the background.
+func runClipboardWrite(ctx context.Context, path string, args []string, text string) error {
+	cmd := exec.CommandContext(ctx, path, args...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(stdin, text); err != nil {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return err
+	}
+	if err := stdin.Close(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
+}
+
+// WriteText puts text on the system clipboard and names the helper that took it.
+// A machine with no helper reports ErrClipboardUnavailable, which the TUI turns
+// into an OSC 52 write.
+func (c *systemClipboard) WriteText(ctx context.Context, text string) (string, error) {
+	if text == "" {
+		return "", ErrClipboardEmpty
+	}
+	for _, command := range c.writeCommands() {
+		path, err := c.lookPath(command.name)
+		if err != nil {
+			continue
+		}
+		if err := c.write(ctx, path, command.args, text); err != nil {
+			continue
+		}
+		return command.name, nil
+	}
+	return "", ErrClipboardUnavailable
 }
 
 // limitedWriter stops accepting bytes past its limit and reports
@@ -148,6 +199,23 @@ func (c *systemClipboard) commands() []clipboardCommand {
 			{name: "xclip", args: []string{"-selection", "clipboard", "-t", "image/png", "-o"}},
 			{name: "xclip", args: []string{"-selection", "clipboard", "-t", "image/jpeg", "-o"}},
 		}
+	}
+}
+
+// writeCommands selects the helper that takes text for the clipboard. Unlike a
+// read, a write needs no media type: the platform's tool takes whatever arrives
+// on stdin.
+func (c *systemClipboard) writeCommands() []clipboardCommand {
+	switch c.goos {
+	case "darwin":
+		return []clipboardCommand{{name: "pbcopy"}}
+	case "windows":
+		return []clipboardCommand{{name: "clip"}}
+	default:
+		if isWayland(c.getenv) {
+			return []clipboardCommand{{name: "wl-copy"}}
+		}
+		return []clipboardCommand{{name: "xclip", args: []string{"-selection", "clipboard"}}}
 	}
 }
 

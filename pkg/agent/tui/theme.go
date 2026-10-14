@@ -109,11 +109,16 @@ type harnessStyles struct {
 	screenBody       lipgloss.Style
 	screenRow        lipgloss.Style
 	screenSel        lipgloss.Style
-	active           lipgloss.Style
-	inactive         lipgloss.Style
-	menu             lipgloss.Style
-	menuRow          lipgloss.Style
-	menuActive       lipgloss.Style
+	// selection is the band a mouse selection sits on. It is a background-only
+	// style, so the text under it keeps whatever foreground the terminal would
+	// have given it, and it reuses the list cursor's colour: the harness has one
+	// way of saying "this is the part you chose".
+	selection  lipgloss.Style
+	active     lipgloss.Style
+	inactive   lipgloss.Style
+	menu       lipgloss.Style
+	menuRow    lipgloss.Style
+	menuActive lipgloss.Style
 }
 
 func (s harnessStyles) heading(section string, background color.Color) string {
@@ -179,6 +184,7 @@ func newHarnessStyles() harnessStyles {
 		screenBody:    lipgloss.NewStyle().Foreground(everforest.Muted),
 		screenRow:     lipgloss.NewStyle().Foreground(everforest.Text),
 		screenSel:     lipgloss.NewStyle().Background(everforest.SelectionBg).Foreground(everforest.Yellow).Bold(true),
+		selection:     lipgloss.NewStyle().Background(everforest.SelectionBg),
 		active:        lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
 		inactive:      lipgloss.NewStyle().Foreground(everforest.Muted),
 		menu:          lipgloss.NewStyle().Background(everforest.Surface).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(everforest.Green),

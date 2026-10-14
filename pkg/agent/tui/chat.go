@@ -66,7 +66,7 @@ type chatModel struct {
 	availableThinking []contracts.InfaiThinkingLevel
 	modalities        []contracts.LLMSupportedModality
 	pending           []contracts.ImageInput
-	clipboard         ClipboardReader
+	clipboard         Clipboard
 	used              uint64
 	blocks            []block
 
@@ -79,6 +79,22 @@ type chatModel struct {
 	// badgeHits are the artifact chips the last assembled window drew.
 	transcriptOffset int
 	badgeHits        []badgeHit
+	// window is the last assembled transcript window and windowLines its rows,
+	// kept so a mouse position can be named as a block, a line and a column.
+	window      transcriptWindow
+	windowLines []string
+	// selection is the mouse drag over the transcript, and selecting is the
+	// drag still in flight. A finished selection stays lit until the next press.
+	selection *selection
+	selecting bool
+	// copyGeneration identifies the newest released selection; copyCancel stops
+	// an older clipboard helper so it cannot finish after and replace newer text.
+	copyGeneration uint64
+	copyCancel     context.CancelFunc
+	// dragX and dragY are where the pointer last was, which is what an edge
+	// scroll reads to keep the cursor under it; dragScrolling is the edge timer.
+	dragX, dragY  int
+	dragScrolling bool
 	// turnTextBlock is the assistant block this turn's text landed in, so a
 	// produced image joins that block instead of opening one of its own.
 	turnTextBlock int
@@ -333,7 +349,10 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.toolCallBlocks = make(map[string]int)
 		m.skillNames = make(map[string]string)
 		m.applySessionView(msg.view)
-		m.refreshTranscript(true)
+		// A reader holding a drag keeps their place: the view is the session's
+		// own history, not news, and following it would slide the text out from
+		// under the pointer mid-selection.
+		m.refreshTranscript(!m.selecting)
 		m.reflow()
 		return m, waitStream(m.ctx, m.sessionStream)
 	case sessionEventMsg:
@@ -451,7 +470,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.toolCallBlocks = make(map[string]int)
 		m.skillNames = make(map[string]string)
 		m.client.SetSession(msg.output.ID)
-		m.blocks = blocksFromRecords(msg.records)
+		m.replaceBlocks(blocksFromRecords(msg.records))
 		m.checklist = taskChecklistFromRecords(msg.records)
 		m.modal = nil
 		m.reflow()
@@ -520,7 +539,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.availableSkills = msg.output.Skills
 		m.pending = nil
 		m.client.SetSession(msg.output.ID)
-		m.blocks = nil
+		m.replaceBlocks(nil)
 		m.checklist = contracts.TaskChecklistState{}
 		m.used = 0
 		m.modal = nil
@@ -555,7 +574,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.session = *msg.meta
 			m.used = 0
-			m.blocks = blocksFromRecords(msg.records)
+			m.replaceBlocks(blocksFromRecords(msg.records))
 			m.checklist = taskChecklistFromRecords(msg.records)
 		}
 		m.refreshTranscript(true)
@@ -627,27 +646,13 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.MouseMsg:
 		if m.modal == nil {
-			mouse := msg.Mouse()
-			if len(m.areas) > 1 && (mouse.Y < m.areas[1].y || mouse.Y >= m.areas[1].y+m.areas[1].height) {
-				return m, nil
-			}
-			if wheel, ok := msg.(tea.MouseWheelMsg); ok {
-				switch wheel.Button {
-				case tea.MouseWheelUp:
-					m.scrollTranscript(-transcriptScrollStep)
-				case tea.MouseWheelDown:
-					m.scrollTranscript(transcriptScrollStep)
-				}
-				return m, nil
-			}
-			if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
-				if hit, found := m.badgeAt(click.X, click.Y); found {
-					return m, m.saveArtifactsCmd(hit)
-				}
-			}
-			return m, nil
+			return m.handleMouse(msg)
 		}
 		return m, nil
+	case clipboardCopyMsg:
+		return m.handleCopied(msg)
+	case dragScrollTickMsg:
+		return m, m.dragScrollStep()
 	}
 
 	if m.modal == nil {
@@ -1289,7 +1294,7 @@ func (m *chatModel) submit() tea.Cmd {
 		m.refreshTranscript(true)
 		return nil
 	}
-	if len(images) > 0 && !m.modelSupportsImage() {
+	if len(images) > 0 && !m.acceptsImages() {
 		m.appendError(fmt.Errorf("model %q does not support image input", m.session.Model))
 		m.refreshTranscript(true)
 		return nil
@@ -1429,7 +1434,7 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 		m.sidecarsSession = view.Meta.ID
 	}
 	m.session = view.Meta
-	m.blocks = blocksFromMessages(view.History)
+	m.reapplyBlocks(blocksFromMessages(view.History))
 	m.checklist = view.Checklist
 	m.mcpPrompts = view.Prompts
 	m.mcpResources = view.Resources
@@ -1628,15 +1633,18 @@ func waitStream(ctx context.Context, stream <-chan tea.Msg) tea.Cmd {
 
 // ---- image attachments ----
 
-// modelSupportsImage reports whether the selected model declares image input.
-// An empty modality list means the model declares no multimodal input.
-func (m *chatModel) modelSupportsImage() bool {
-	for _, modality := range m.modalities {
-		if modality == contracts.ModalityImage {
-			return true
-		}
+// acceptsImages reports whether an image may be attached to a prompt. The
+// harness turns one away only when the server said the model takes text and
+// nothing else. A model the server described with no input modality at all — an
+// older server that named the field differently, a provider the catalog does not
+// cover — is not a model that refuses images, and saying it does would be
+// inventing a fact about it. Whether such a model really takes one is the
+// provider's call, and its refusal is the truthful one.
+func (m *chatModel) acceptsImages() bool {
+	if len(m.modalities) == 0 {
+		return true
 	}
-	return false
+	return slices.Contains(m.modalities, contracts.ModalityImage)
 }
 
 // pasteImage kicks off an asynchronous clipboard read. It performs the cheap
@@ -1651,7 +1659,7 @@ func (m *chatModel) pasteImage() tea.Cmd {
 		m.refreshTranscript(true)
 		return nil
 	}
-	if !m.modelSupportsImage() {
+	if !m.acceptsImages() {
 		m.appendError(fmt.Errorf("model %q does not support image input", m.session.Model))
 		m.refreshTranscript(true)
 		return nil
@@ -1669,7 +1677,7 @@ func (m *chatModel) pasteImage() tea.Cmd {
 	return pasteImageCmd(m.ctx, m.clipboard)
 }
 
-func pasteImageCmd(ctx context.Context, reader ClipboardReader) tea.Cmd {
+func pasteImageCmd(ctx context.Context, reader Clipboard) tea.Cmd {
 	return func() tea.Msg {
 		data, err := reader.ReadImage(ctx)
 		if err != nil {
@@ -1696,7 +1704,7 @@ func (m *chatModel) handleClipboardImage(msg clipboardImageMsg) (tea.Model, tea.
 		m.refreshTranscript(true)
 		return m, nil
 	}
-	if !m.modelSupportsImage() {
+	if !m.acceptsImages() {
 		m.appendError(fmt.Errorf("model %q does not support image input", m.session.Model))
 		m.refreshTranscript(true)
 		return m, nil
@@ -1832,6 +1840,7 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		m.blocks = append(m.blocks, block{role: "system", text: strings.Join([]string{
 			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll · Ctrl+O sessions · Ctrl+N new · Ctrl+T thinking",
 			"Ctrl+V paste image · Ctrl+U clear images",
+			"Mouse: drag over the transcript to copy it · hold at an edge to scroll · wheel to scroll",
 			"/new · /sessions · /model · /compact · /timeline · /rename · /quit",
 			"MCP prompts: /server:prompt [key=value ...]",
 		}, "\n")})
@@ -2291,6 +2300,12 @@ func (m *chatModel) reflow() {
 	main := m.areas[1]
 	m.viewport.SetWidth(main.width)
 	m.viewport.SetHeight(main.height)
+	// A selection names cells of rendered lines, and a new width re-wraps every
+	// one of them, so those cells stop existing. The selection goes with the
+	// width that defined it.
+	if previousViewportWidth != main.width {
+		m.selection, m.selecting = nil, false
+	}
 	if previousViewportWidth != main.width || previousViewportHeight != main.height {
 		m.refreshTranscript(wasAtBottom)
 	}
@@ -2736,6 +2751,25 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 		content = m.renderToolBlock(entry, width)
 	}
 	return content
+}
+
+// blockIndent is the column a block's own text starts at on the lines after its
+// first, where the renderers park it under the block's marker. The roles that
+// render under a marker indent by the marker plus its gap; the ones that wrap
+// their text without one start at the left edge.
+//
+// It is alignment the harness added, not anything the reader wrote, so a
+// selection that reaches into it reads and copies from the first real cell.
+func (m *chatModel) blockIndent(entry *block) int {
+	switch entry.role {
+	case "user", "assistant", "thinking", "skill":
+		return lipgloss.Width("●") + 1
+	case "tool":
+		marker, _ := m.toolMarker(entry)
+		return lipgloss.Width(marker) + 1
+	default:
+		return 0
+	}
 }
 
 // renderToolBlock draws one tool call: the call's own preview, then whatever its

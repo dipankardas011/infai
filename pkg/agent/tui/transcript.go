@@ -49,6 +49,24 @@ func (w transcriptWindow) offset(anchor transcriptAnchor) int {
 	return 0
 }
 
+// replaceBlocks swaps the transcript wholesale — a session opened, created or
+// compacted. A selection belonged to the transcript going away, so it goes with
+// it: its block and line indices would otherwise name unrelated text.
+func (m *chatModel) replaceBlocks(blocks []block) {
+	m.blocks = blocks
+	m.selection = nil
+	m.selecting = false
+}
+
+// reapplyBlocks swaps in a fresh copy of the transcript the reader is already
+// looking at: the session's own view, arriving when the harness joins it. That is
+// the same conversation, so a selection still names the text it named, and a drag
+// in flight is the reader's own — joining must not eat the first selection they
+// make in the session.
+func (m *chatModel) reapplyBlocks(blocks []block) {
+	m.blocks = blocks
+}
+
 // transcriptWidth is the width blocks render at: the viewport less its frame.
 func (m *chatModel) transcriptWidth() int {
 	return max(m.viewport.Width()-m.viewport.Style.GetHorizontalFrameSize(), 1)
@@ -243,6 +261,14 @@ func (m *chatModel) clampAnchor(anchor transcriptAnchor, width, height int) tran
 // renders the window it is handed, so the scroll position never depends on how
 // much history that window happens to hold.
 func (m *chatModel) scrollTranscript(delta int) {
+	m.scrollAnchor(delta)
+	m.syncTranscript()
+}
+
+// scrollAnchor moves the top of the view without redrawing it, for a caller that
+// has more to change before the window is worth building — a drag carries its
+// cursor with the scroll, and one redraw serves both.
+func (m *chatModel) scrollAnchor(delta int) {
 	width := m.transcriptWidth()
 	steps := max(delta, -delta)
 	for range steps {
@@ -255,7 +281,6 @@ func (m *chatModel) scrollTranscript(delta int) {
 		}
 		m.anchor = next
 	}
-	m.syncTranscript()
 }
 
 // followTranscript pins the view to the newest output.
@@ -270,6 +295,7 @@ func (m *chatModel) syncTranscript() {
 	height := m.transcriptHeight()
 	if m.viewport.Width() <= 0 || height <= 0 {
 		m.badgeHits = m.badgeHits[:0]
+		m.window, m.windowLines = transcriptWindow{}, nil
 		return
 	}
 	width := m.transcriptWidth()
@@ -286,10 +312,21 @@ func (m *chatModel) syncTranscript() {
 			offset = window.offset(m.anchor)
 		}
 	}
-	m.viewport.SetContent(window.content)
-	m.viewport.SetYOffset(offset)
+	m.window = window
+	m.windowLines = strings.Split(window.content, "\n")
 	m.transcriptOffset = offset
+	m.viewport.SetContent(m.windowContent())
+	m.viewport.SetYOffset(offset)
 	m.recordBadgeHits(window)
+}
+
+// windowContent is what the viewport is handed: the assembled window, with the
+// mouse selection drawn over it when there is one.
+func (m *chatModel) windowContent() string {
+	if m.selection == nil {
+		return m.window.content
+	}
+	return m.paintSelection()
 }
 
 // buildWindow renders the blocks the viewport needs: the anchor's block, enough
