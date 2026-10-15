@@ -1,5 +1,5 @@
 Name:           infaiw
-Version:        0.16.0
+Version:        0.16.1
 Release:        0
 Summary:        Agent and workflow engine for infai
 License:        MIT
@@ -32,10 +32,16 @@ install -D -m 0644 %{SOURCE2} %{buildroot}%{_userunitdir}/infaiw.service
 %postun
 %systemd_user_postun_with_restart infaiw.service
 
+# %postun belongs to the package being replaced, so the restart it marks only
+# takes effect on the upgrade after it. %posttrans runs in the same transaction
+# as the upgrade that installs this package, so the new binary is picked up then.
+%posttrans
+%systemd_user_posttrans_with_restart infaiw.service
+
 %files
 %{_bindir}/infaiw
 %{_userunitdir}/infaiw.service
 
 %changelog
-* Sun Sep 06 2026 Dipankar Das <dipankardas011@users.noreply.github.com> - 0.16.0-0
+* Sun Sep 06 2026 Dipankar Das <dipankardas011@users.noreply.github.com> - 0.16.1-0
 - Initial package

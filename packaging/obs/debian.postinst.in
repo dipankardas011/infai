@@ -3,22 +3,39 @@ set -e
 
 #DEBHELPER#
 
+# run_in_user_manager runs a systemctl --user command as the given user. Any
+# remaining arguments are extra env assignments passed to env, so the session bus
+# is handed over only for a user that has one; it is unset first so an inherited
+# address cannot name another user's bus.
+run_in_user_manager() {
+    target_user=$1
+    target_runtime_dir=$2
+    shift 2
+    "$runuser_bin" -u "$target_user" -- env -u DBUS_SESSION_BUS_ADDRESS \
+        "XDG_RUNTIME_DIR=$target_runtime_dir" "$@" \
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+    "$runuser_bin" -u "$target_user" -- env -u DBUS_SESSION_BUS_ADDRESS \
+        "XDG_RUNTIME_DIR=$target_runtime_dir" "$@" \
+        systemctl --user try-restart infaiw.service >/dev/null 2>&1 || true
+}
+
 if [ "$1" = "configure" ] && [ -n "${2:-}" ]; then
+    # runuser lives in /usr/sbin, which is not guaranteed to be on the PATH a
+    # maintainer script inherits.
+    runuser_bin=$(command -v runuser 2>/dev/null || echo /usr/sbin/runuser)
+
     for runtime_dir in /run/user/[0-9]*; do
         [ -d "$runtime_dir" ] || continue
-        [ -S "$runtime_dir/bus" ] || continue
 
         uid=${runtime_dir##*/}
         user=$(getent passwd "$uid" | cut -d: -f1)
         [ -n "$user" ] || continue
 
-        runuser -u "$user" -- env \
-            XDG_RUNTIME_DIR="$runtime_dir" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
-            systemctl --user daemon-reload >/dev/null 2>&1 || true
-        runuser -u "$user" -- env \
-            XDG_RUNTIME_DIR="$runtime_dir" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
-            systemctl --user try-restart infaiw.service >/dev/null 2>&1 || true
+        if [ -S "$runtime_dir/bus" ]; then
+            run_in_user_manager "$user" "$runtime_dir" \
+                "DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime_dir/bus"
+        else
+            run_in_user_manager "$user" "$runtime_dir"
+        fi
     done
 fi
