@@ -39,6 +39,13 @@ type SessionSummary struct {
 	AgentKind AgentKind     `json:"agent_kind,omitempty"`
 }
 
+type SessionIdentity struct {
+	ID        uuid.UUID     `json:"id"`
+	Name      string        `json:"name,omitempty"`
+	AgentKind AgentKind     `json:"agent_kind,omitempty"`
+	Status    SessionStatus `json:"status"`
+}
+
 type AgentKind string
 
 const (

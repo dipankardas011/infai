@@ -36,7 +36,16 @@ const contentTypeEventStream = "text/event-stream"
 
 func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz bool) *Server {
 	s := &Server{engine: e, enableHealthz: enableHealthz, logger: l}
+	s.httpSrv = &http.Server{
+		Addr:         addr,
+		Handler:      s.routes(),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 0, // chats can take a while
+	}
+	return s
+}
 
+func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	if s.enableHealthz {
 		mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -59,6 +68,7 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	// sessions
 	mux.HandleFunc("POST /v1/sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /v1/sessions", s.handleListSessions)
+	mux.HandleFunc("GET /v1/sessions/identities", s.handleGetSessionIdentities)
 	mux.HandleFunc("GET /v1/sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("GET /v1/sessions/{id}/identity", s.handleGetSessionIdentity)
 	mux.HandleFunc("GET /v1/sessions/{id}/timeline", s.handleGetTimeline)
@@ -76,13 +86,7 @@ func New(l *slog.Logger, e *engine.InfaiAgentEngine, addr string, enableHealthz 
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/close", s.handleCloseSession)
 
-	s.httpSrv = &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 0, // chats can take a while
-	}
-	return s
+	return mux
 }
 
 func (s *Server) handleCancelTurn(w http.ResponseWriter, r *http.Request) {
@@ -492,6 +496,23 @@ func sessionOutput(sess *session.InfaiAgentSession) glue.SessionOutput {
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, s.engine.ListSessions())
+}
+
+// handleGetSessionIdentities names the sessions the ids belong to, for a client
+// holding ids it never opened. It is the plural of the identity route above, and
+// ids that name nothing are left out of the answer.
+func (s *Server) handleGetSessionIdentities(w http.ResponseWriter, r *http.Request) {
+	values := r.URL.Query()["ids"]
+	ids := make([]uuid.UUID, 0, len(values))
+	for _, value := range values {
+		id, err := uuid.Parse(value)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Errorf("invalid session id %q", value))
+			return
+		}
+		ids = append(ids, id)
+	}
+	s.writeJSON(w, http.StatusOK, s.engine.GetSessionIdentities(ids))
 }
 
 func (s *Server) handleGetSessionIdentity(w http.ResponseWriter, r *http.Request) {

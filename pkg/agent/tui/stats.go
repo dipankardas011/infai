@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/store"
+	"github.com/google/uuid"
 )
 
 // sessionStats is the snapshot the session-stats page draws: who the session
@@ -23,6 +24,24 @@ type sessionStats struct {
 	usage         *contracts.TokenUsage
 	usageProvider string
 	usageModel    string
+	// parent and children are the sessions this one hangs off and owns, drawn
+	// with the tree the chat row draws them with. relativeErr is why the engine
+	// could not name them, when it could not.
+	parent      *statsRelative
+	children    []statsRelative
+	relativeErr error
+}
+
+// statsRelative is another session named by the page: the kind of agent running
+// it and the status it reported. A row with no name falls back to the id it was
+// found by, and reported is what separates a session the engine answered for
+// from one it never did — an answer with no name in it is still an answer.
+type statsRelative struct {
+	id       uuid.UUID
+	name     string
+	kind     contracts.AgentKind
+	status   contracts.SessionStatus
+	reported bool
 }
 
 // The stats page's fixed columns: the label column the identity fields and the
@@ -36,8 +55,9 @@ const (
 	statsContextBar = 10
 )
 
-// renderStatsPanel draws the session-stats page. It is read-only, so a short
-// terminal drops whole blocks instead of drawing half of one.
+// renderStatsPanel draws the session-stats page. The page is a record rather
+// than a menu: what it has to say is longer than a terminal often is, so it is
+// scrolled, and nothing it carries is ever cut to fit.
 func renderStatsPanel(m *modalModel, width, height int, styles harnessStyles) string {
 	contentWidth := max(width-4, 1)
 	header := styles.heading(m.title, everforest.Background)
@@ -45,33 +65,46 @@ func renderStatsPanel(m *modalModel, width, height int, styles harnessStyles) st
 		header += "\n" + styles.screenBody.Width(contentWidth).Render(m.body)
 	}
 	header += "\n"
-
 	headerBlock := fullWidth(lipgloss.NewStyle().Padding(1, 2), width, header)
-	footerBlock := fullWidth(lipgloss.NewStyle().Padding(0, 2), width, styles.inactive.Render("esc back"))
-	tracks := layoutRows(width, height, intrinsic(headerBlock), fill(), intrinsic(footerBlock))
-	bodyBlock := fullWidth(lipgloss.NewStyle().Padding(0, 2), width, m.stats.body(tracks[1].height, contentWidth, styles))
 
+	// The chrome is measured first, so the window is the rows the content will
+	// actually be drawn in. Both ends of a scroll are clamped here, which is
+	// what makes the drawn window the page's scroll state.
+	rows := layoutRows(width, height, intrinsic(headerBlock), fill(), intrinsic(" "))[1].height
+	lines := m.stats.lines(contentWidth, styles)
+	offset := clamp(m.scroll, 0, max(len(lines)-rows, 0))
+	m.scroll, m.rows = offset, rows
+	window := lines[offset:min(offset+rows, len(lines))]
+
+	footer := "esc back"
+	if len(lines) > rows {
+		footer = fmt.Sprintf("%d-%d of %d  ·  ↑/↓ scroll  ·  esc back", offset+1, offset+len(window), len(lines))
+	}
+	footerBlock := fullWidth(lipgloss.NewStyle().Padding(0, 2), width, styles.inactive.Render(ansi.Truncate(footer, contentWidth, "…")))
+	bodyBlock := fullWidth(lipgloss.NewStyle().Padding(0, 2), width, strings.Join(window, "\n"))
+
+	tracks := layoutRows(width, height, intrinsic(headerBlock), fill(), intrinsic(footerBlock))
 	parts := []string{fitArea(tracks[0], headerBlock), fitArea(tracks[1], bodyBlock), fitArea(tracks[2], footerBlock)}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-// body draws the page in the order a reader came for it: the window, the
-// numbers it holds, then the identity they belong to. A budget too small for all
-// three gives up the identity first, because the session row already names it.
-func (s sessionStats) body(budget, width int, styles harnessStyles) string {
-	if budget <= 0 {
-		return ""
+// lines is the whole page, in the order a reader came for it: the window, the
+// numbers it holds, then the identity they belong to, and the script the
+// session is judged by at the end.
+func (s sessionStats) lines(width int, styles harnessStyles) []string {
+	var sections [][]string
+	for _, section := range [][]string{
+		s.identityLines(width, styles),
+		s.treeLines(width, styles),
+		s.contextLines(width, styles),
+		s.lastTurnLines(width, styles),
+		s.scriptLines(width, styles),
+	} {
+		if len(section) > 0 {
+			sections = append(sections, section)
+		}
 	}
-	identity := s.identityLines(width, styles)
-	context := s.contextLines(width, styles)
-	lastTurn := s.lastTurnLines(width, styles)
-	if full := statsBlocks(identity, context, lastTurn); lipgloss.Height(full) <= budget {
-		return full
-	}
-	if numbers := statsBlocks(context, lastTurn); lipgloss.Height(numbers) <= budget {
-		return numbers
-	}
-	return statsBlocks(lastTurn)
+	return strings.Split(statsBlocks(sections...), "\n")
 }
 
 // statsBlocks joins sections, one blank line apart.
@@ -127,7 +160,7 @@ func (s sessionStats) identityLines(width int, styles harnessStyles) []string {
 	if s.meta.Provider != "" {
 		model += " (" + s.meta.Provider + ")"
 	}
-	return []string{
+	lines := []string{
 		statsHeading("SESSION", strings.Join(marks, styles.status.Render("  ·  ")), width, styles),
 		statsField("name", name, width, styles),
 		statsField("session", s.meta.ID.String(), width, styles),
@@ -136,6 +169,109 @@ func (s sessionStats) identityLines(width int, styles harnessStyles) []string {
 		statsField("created", humanTime(s.meta.CreatedAt), width, styles),
 		statsField("updated", humanTime(s.meta.UpdatedAt), width, styles),
 	}
+	if s.meta.MaxTurns != nil {
+		lines = append(lines, statsField("budget", fmt.Sprintf("%d turns", *s.meta.MaxTurns), width, styles))
+	}
+	// How a session ended is written once and never rewritten, so it is shown
+	// only while the session is still in it, and then only for what the status in
+	// the heading cannot say. On a session that has since been reopened it is
+	// history, and history that contradicts the heading reads as a bug.
+	if ended := s.meta.Conclusion; ended != nil && ended.Status == s.status {
+		if reason := singleLine(ended.Reason); reason != "" {
+			lines = append(lines, statsField("ended", styles.inactive.Render(reason), width, styles))
+		}
+	}
+	return lines
+}
+
+// treeLines draws the sessions this one hangs off and owns, with the arrow and
+// the branches the chat row uses for the same relationships.
+func (s sessionStats) treeLines(width int, styles harnessStyles) []string {
+	if s.parent == nil && len(s.children) == 0 {
+		return nil
+	}
+	lines := []string{statsHeading("TREE", "", width, styles)}
+	if s.parent != nil {
+		lines = append(lines, statsRelativeRow("↖ ", *s.parent, width, styles))
+	}
+	for i := range s.children {
+		tree := "├─ "
+		if i == len(s.children)-1 {
+			tree = "└─ "
+		}
+		lines = append(lines, statsRelativeRow(tree, s.children[i], width, styles))
+	}
+	// A row left as a bare id is a question the engine never answered, so the
+	// page says the call failed instead of leaving the reader to guess that a
+	// name exists somewhere.
+	if s.relativeErr != nil && s.anyRelativeUnreported() {
+		lines = append(lines, statsNote("the engine did not answer: "+singleLine(s.relativeErr.Error()), width, styles))
+	}
+	return lines
+}
+
+// anyRelativeUnreported reports whether the engine left any session of the tree
+// unnamed: a live report names its own row, so a row without one is what a
+// failed call looks like from here.
+func (s sessionStats) anyRelativeUnreported() bool {
+	if s.parent != nil && !s.parent.reported {
+		return true
+	}
+	for i := range s.children {
+		if !s.children[i].reported {
+			return true
+		}
+	}
+	return false
+}
+
+// statsRelativeRow is one session of the tree: the branch that places it, the
+// kind of agent running it, its name, and the status it reported. A session
+// nothing could name is shown by its id in full — that id is the only handle
+// there is, and a shortened one cannot be looked up — and it keeps the row's
+// plain colour, because an id is a value rather than a title. The status follows
+// the name rather than floating at the panel edge: a lone mark half a screen
+// away reads as a fact about the session the page is about, not about the row
+// it belongs to.
+func statsRelativeRow(tree string, relative statsRelative, width int, styles harnessStyles) string {
+	prefix := "  " + sessionTree(tree, styles.statusRow.PaddingRight(0))
+	kindGlyph, kindStyle := agentKindMark(relative.kind, styles)
+	kind := ""
+	if kindGlyph != "" {
+		kind = kindStyle.Render(kindGlyph) + " "
+	}
+	name, nameStyle := strings.TrimSpace(relative.name), styles.sessionName
+	if name == "" {
+		name, nameStyle = relative.id.String(), styles.screenRow
+	}
+	status := ""
+	if relative.reported {
+		descriptor := describeSessionStatus(relative.status, styles)
+		status = styles.status.Render("  ·  ") + descriptor.style.Render(descriptor.glyph+" "+descriptor.label)
+	}
+	room := max(width-lipgloss.Width(prefix)-lipgloss.Width(kind)-lipgloss.Width(status), 1)
+	return ansi.Truncate(prefix+kind+nameStyle.Render(truncateLine(name, room))+status, width, "…")
+}
+
+// scriptLines highlights the acceptance script the session was created with:
+// the same bash lexer and palette the approval band previews it with, so the
+// session is judged by the script the reader can actually read.
+func (s sessionStats) scriptLines(width int, styles harnessStyles) []string {
+	if s.meta.EvalBashScript == nil {
+		return nil
+	}
+	script := strings.TrimSpace(*s.meta.EvalBashScript)
+	if script == "" {
+		return nil
+	}
+	// The script is indented under its heading, so it is highlighted one inset
+	// narrower than the page's own content.
+	lines := strings.Split(renderApprovalScript(script, max(width-2, 1), styles), "\n")
+	out := []string{statsHeading("ACCEPTANCE SCRIPT", styles.status.Render(fmt.Sprintf("%d lines", len(lines))), width, styles)}
+	for _, line := range lines {
+		out = append(out, "  "+line)
+	}
+	return out
 }
 
 // contextLines answers the question the page exists for: how much of the window

@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -137,9 +139,252 @@ func TestStatsPageSaysWhenTheWindowIsUnknown(t *testing.T) {
 	}
 }
 
-// renderStatsPage draws the page the chat puts up for ctrl+d.
-func renderStatsPage(m *chatModel) string {
+// The page draws the sessions this one hangs off and owns as the tree the chat
+// row draws them with: the arrow for the caller, branches for the children, the
+// kind's glyph, and the status each one reported. The engine's index is what
+// names a session this client never opened.
+func TestStatsPageDrawsTheSessionTree(t *testing.T) {
+	m := statsTestModel()
+	parent, buildWorker, testWorker, closedWorker, unknown := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	m.session.ParentID = parent
+	m.session.Offsprings = []uuid.UUID{buildWorker, testWorker, closedWorker, unknown}
+	m.parentName, m.parentAgentKind = "Orchestrator", contracts.InteractiveAgent
+	m.sidecars = []contracts.SidecarStatus{
+		{ID: testWorker, Name: "test-worker", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionWaitingApproval},
+	}
+	m.recordIdentities([]contracts.SessionIdentity{
+		{ID: parent, Name: "Orchestrator", AgentKind: contracts.InteractiveAgent, Status: contracts.SessionIdle},
+		{ID: buildWorker, Name: "build-worker", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionCompleted},
+		{ID: closedWorker, Name: "docs-writer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionTombstone},
+	})
+
+	page := ansi.Strip(renderStatsPage(m))
+	for _, want := range []string{
+		"TREE",
+		"↖ ⬢ Orchestrator",
+		"○ idle",
+		"├─ ⧉ build-worker",
+		"✓ completed",
+		"├─ ⧉ test-worker",
+		"⚑ waiting for approval",
+		"├─ ⧉ docs-writer",
+		"· inactive",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("session tree lacks %q:\n%s", want, page)
+		}
+	}
+	// A child nothing can name is still shown, by the id it was found by: a row
+	// that says nothing is worse than one that says only which session it is.
+	if !strings.Contains(page, "└─ "+unknown.String()) {
+		t.Fatalf("an unnameable child was not shown by its full id:\n%s", page)
+	}
+
+	// A session with no caller and no children has no tree to draw.
+	m.session.ParentID = uuid.Nil
+	m.session.Offsprings = nil
+	m.sidecars = nil
+	if page := ansi.Strip(renderStatsPage(m)); strings.Contains(page, "TREE") {
+		t.Fatalf("a session with no relatives drew a tree:\n%s", page)
+	}
+}
+
+// A session the engine never answered for is drawn as the id it was found by,
+// and the page says why: a bare id with no explanation reads as a session the
+// harness cannot deal with, which is what a stale engine looks like from here.
+func TestStatsPageSaysWhenTheEngineCouldNotNameARelative(t *testing.T) {
+	m := statsTestModel()
+	child, late := uuid.New(), uuid.New()
+	m.session.Offsprings = []uuid.UUID{child}
+	// A child that reported itself is named by its own report, so the note is
+	// about the engine's silence rather than about the tree being nameless.
+	m.sidecars = []contracts.SidecarStatus{{ID: late, Name: "test-worker", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionBusy}}
 	m.modal = &modalModel{kind: modalStats, title: "Session stats", stats: m.sessionStats()}
+
+	_, _ = m.Update(sessionIdentitiesMsg{err: errors.New("invalid session id")})
+	page := ansi.Strip(renderStatsPage(m))
+	for _, want := range []string{"├─ " + child.String(), "the engine did not answer: invalid session id", "└─ ⧉ test-worker"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("an unanswered tree lacks %q:\n%s", want, page)
+		}
+	}
+
+	// The answer that does arrive takes the note with it.
+	_, _ = m.Update(sessionIdentitiesMsg{sessions: []contracts.SessionIdentity{
+		{ID: child, Name: "build-worker", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionCompleted},
+	}})
+	page = ansi.Strip(renderStatsPage(m))
+	if strings.Contains(page, "did not answer") {
+		t.Fatalf("the note outlived the answer:\n%s", page)
+	}
+	if !strings.Contains(page, "├─ ⧉ build-worker") {
+		t.Fatalf("the answer did not name the child:\n%s", page)
+	}
+}
+
+// ctrl+d asks the engine about exactly the sessions the page draws: the caller,
+// the children it recorded, and the children that have reported since.
+func TestStatsPageAsksTheEngineWhoItsRelativesAre(t *testing.T) {
+	parent, child, lateChild := uuid.New(), uuid.New(), uuid.New()
+	client := &identityChatClient{}
+	m := newChatModel(context.Background(), client, nil, RunOptions{})
+	m.modal = nil
+	m.width, m.height = 100, 30
+	m.session = store.SessionMeta{ID: uuid.New(), Model: "deepseek-flash", ParentID: parent, Offsprings: []uuid.UUID{child}}
+	m.sidecars = []contracts.SidecarStatus{{ID: lateChild, Status: contracts.SessionBusy}}
+
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'd', Mod: tea.ModCtrl}))
+	if cmd == nil {
+		t.Fatal("ctrl+d did not ask the engine who the session's relatives are")
+	}
+	if msg, ok := cmd().(sessionIdentitiesMsg); !ok {
+		t.Fatalf("the identity request answered %T, want a sessionIdentitiesMsg", msg)
+	} else if len(msg.sessions) != 1 || msg.sessions[0].Name != "Orchestrator" {
+		t.Fatalf("the identity request answered %+v, want the name the engine gave", msg.sessions)
+	}
+	if want := []uuid.UUID{parent, child, lateChild}; !slices.Equal(client.asked, want) {
+		t.Fatalf("asked about %v, want %v", client.asked, want)
+	}
+
+	// A session with nobody to name asks about nobody.
+	m.session.ParentID, m.session.Offsprings, m.sidecars = uuid.Nil, nil, nil
+	client.asked = nil
+	if msg, ok := sessionIdentitiesCmd(m.ctx, client, m.statsRelativeIDs())().(sessionIdentitiesMsg); !ok || len(msg.sessions) != 0 {
+		t.Fatalf("a session with no relatives answered %+v", msg)
+	}
+	if len(client.asked) != 0 {
+		t.Fatalf("a session with no relatives asked about %v", client.asked)
+	}
+}
+
+// identityChatClient records the ids it was asked about, and names the first.
+type identityChatClient struct {
+	stubChatClient
+	asked []uuid.UUID
+}
+
+func (c *identityChatClient) GetSessionIdentities(_ context.Context, ids []uuid.UUID) ([]contracts.SessionIdentity, error) {
+	c.asked = ids
+	return []contracts.SessionIdentity{{ID: ids[0], Name: "Orchestrator", AgentKind: contracts.InteractiveAgent, Status: contracts.SessionIdle}}, nil
+}
+
+// The session's acceptance script is shown whole, as the bash it is: the page
+// scrolls rather than cutting it, so the script the session is judged by is the
+// script the reader can read.
+func TestStatsPageShowsTheAcceptanceScript(t *testing.T) {
+	m := statsTestModel()
+	script := "#!/usr/bin/env bash\nset -euo pipefail\n\n# every check must be read-only\ngo test ./pkg/agent/... -count=1\nbash build/verify.sh --strict"
+	m.session.EvalBashScript = &script
+
+	m.width, m.height = 100, 34
+	page := ansi.Strip(renderStatsPage(m))
+	for _, want := range []string{"ACCEPTANCE SCRIPT", "6 lines", "#!/usr/bin/env bash", "bash build/verify.sh --strict"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("acceptance script lacks %q:\n%s", want, page)
+		}
+	}
+
+	// A session created without one has no script block to draw.
+	m.session.EvalBashScript = nil
+	if page := ansi.Strip(renderStatsPage(m)); strings.Contains(page, "ACCEPTANCE SCRIPT") {
+		t.Fatalf("a session with no script drew one:\n%s", page)
+	}
+}
+
+// A page longer than the terminal is scrolled, not shortened: every line it
+// carries is reachable, the footer names the window, and scrolling stops on the
+// last line instead of running past it.
+func TestStatsPageScrollsItsWholeContent(t *testing.T) {
+	m := statsTestModel()
+	m.width, m.height = 100, 20
+	last := "echo done-verifying"
+	script := "#!/usr/bin/env bash\nset -euo pipefail\nfor i in 1 2 3 4 5; do\n  echo check-$i\ndone\n" + last
+	m.session.EvalBashScript = &script
+
+	page := ansi.Strip(renderStatsPage(m))
+	if !strings.Contains(page, "1-") || !strings.Contains(page, "↑/↓ scroll") {
+		t.Fatalf("a page with more to show did not name its window:\n%s", page)
+	}
+	if strings.Contains(page, last) {
+		t.Fatalf("the first window already showed the last line:\n%s", page)
+	}
+
+	// Holding down rests on the last line rather than scrolling past it, and the
+	// offset is clamped where it is kept: a page-down at the bottom leaves the
+	// page where it was instead of parking the offset past the end.
+	for range 40 {
+		_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	}
+	atEnd := m.modal.scroll
+	bottom := ansi.Strip(renderStatsPage(m))
+	if !strings.Contains(bottom, last) {
+		t.Fatalf("scrolling to the bottom did not reach the last line:\n%s", bottom)
+	}
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyPgDown}))
+	if m.modal.scroll != atEnd {
+		t.Fatalf("offset after a page-down at the end=%d want %d", m.modal.scroll, atEnd)
+	}
+	if again := ansi.Strip(renderStatsPage(m)); again != bottom {
+		t.Fatalf("the page scrolled past its last line:\n%s", again)
+	}
+
+	// A page that fits has nothing to scroll, and does not say it does.
+	m.session.EvalBashScript = nil
+	m.height = 30
+	if page := ansi.Strip(renderStatsPage(m)); strings.Contains(page, "scroll") || !strings.Contains(page, "esc back") {
+		t.Fatalf("a page that fits still offered a scroll:\n%s", page)
+	}
+}
+
+// A session that has ended says how and why it ended — but only while it is
+// still in that state, and only for what the status in the heading does not
+// already say. An end the session has since left is history, not state.
+func TestStatsPageShowsHowTheSessionEnded(t *testing.T) {
+	m := statsTestModel()
+	m.status = contracts.SessionMaxIterationExhausted
+	m.session.MaxTurns = ptr(uint64(40))
+	m.session.Conclusion = &store.SessionConclusion{Status: contracts.SessionMaxIterationExhausted, Reason: "the sidecar exhausted its turn budget"}
+
+	page := ansi.Strip(renderStatsPage(m))
+	for _, want := range []string{"budget     40 turns", "ended      the sidecar exhausted its turn budget"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("end record lacks %q:\n%s", want, page)
+		}
+	}
+
+	// An end with nothing to add to the status above it is not repeated.
+	m.session.Conclusion = &store.SessionConclusion{Status: contracts.SessionMaxIterationExhausted}
+	if page := ansi.Strip(renderStatsPage(m)); strings.Contains(page, "ended") {
+		t.Fatalf("the end record repeated the status above it:\n%s", page)
+	}
+
+	// A session that was closed and reopened is running again, so its close is
+	// not what it is doing: the record of it must not be shown as the session's
+	// state, however it was ended.
+	m.status = contracts.SessionWaitingApproval
+	m.session.Conclusion = &store.SessionConclusion{Status: contracts.SessionTombstone, Reason: "session closed"}
+	page = ansi.Strip(renderStatsPage(m))
+	if strings.Contains(page, "ended") || strings.Contains(page, "session closed") {
+		t.Fatalf("a reopened session still advertised its close:\n%s", page)
+	}
+	if !strings.Contains(page, "waiting for approval") {
+		t.Fatalf("the page does not say what the session is doing:\n%s", page)
+	}
+}
+
+// ptr returns a pointer to a value, for the optional fields of a session.
+func ptr[T any](value T) *T { return &value }
+
+// renderStatsPage draws a frame of the page the chat puts up for ctrl+d. A page
+// already open keeps its scroll, and the session is re-read the way View does.
+func renderStatsPage(m *chatModel) string {
+	if m.modal == nil || m.modal.kind != modalStats {
+		m.modal = &modalModel{
+			kind: modalStats, title: "Session stats",
+			body: "What this session is, how full its context is, and where the last turn's tokens went.",
+		}
+	}
+	m.modal.stats = m.sessionStats()
 	return renderSelectionScreen(m.modal, m.width, m.height, m.styles)
 }
 

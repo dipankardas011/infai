@@ -136,6 +136,12 @@ type modalModel struct {
 	// stats is the session-stats page's snapshot. The page has no options to
 	// choose from and shows only what the session has already reported.
 	stats sessionStats
+	// scroll is how many lines down the stats page is scrolled, and rows is the
+	// window the last frame gave its content. A page is a record, so it is
+	// scrolled rather than shortened; the renderer owns the window and clamps
+	// both, so a scroll key only ever asks.
+	scroll int
+	rows   int
 }
 
 // search runs query over the timeline's rows and puts the cursor on the first

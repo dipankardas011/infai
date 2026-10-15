@@ -782,6 +782,20 @@ func (e *InfaiAgentEngine) RenameSession(id uuid.UUID, name string) (*store.Sess
 	return &meta, nil
 }
 
+// sessionStatus is what a session reports about itself: a session the engine
+// holds answers for itself, one that has ended answers with how it ended, and
+// one that neither holds nor recorded anything has nothing left to run. Callers
+// NOTE: must hold e.mu.
+func (e *InfaiAgentEngine) sessionStatus(meta store.SessionMeta) contracts.SessionStatus {
+	if sess, active := e.activeSessionAgents[meta.ID]; active {
+		return sess.Status()
+	}
+	if meta.Conclusion != nil {
+		return meta.Conclusion.Status
+	}
+	return contracts.SessionTombstone
+}
+
 // ListSessions returns every saved session's meta (active or not), newest
 // first.
 func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
@@ -794,15 +808,7 @@ func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 	defer e.mu.Unlock()
 	summaries := make([]contracts.SessionSummary, 0, len(metas))
 	for _, meta := range metas {
-		sess, active := e.activeSessionAgents[meta.ID]
-		// A session that is not resident has no runtime state left to report, so
-		// it reports the conclusion it recorded, and concludes otherwise.
-		status := contracts.SessionTombstone
-		if active {
-			status = sess.Status()
-		} else if meta.Conclusion != nil {
-			status = meta.Conclusion.Status
-		}
+		_, active := e.activeSessionAgents[meta.ID]
 		summaries = append(summaries, contracts.SessionSummary{
 			ID:        meta.ID,
 			ParentID:  meta.ParentID,
@@ -813,11 +819,31 @@ func (e *InfaiAgentEngine) ListSessions() []contracts.SessionSummary {
 			CreatedAt: meta.CreatedAt,
 			UpdatedAt: meta.UpdatedAt,
 			Active:    active,
-			Status:    status,
+			Status:    e.sessionStatus(meta),
 			AgentKind: meta.AgentKind,
 		})
 	}
 	return summaries
+}
+
+func (e *InfaiAgentEngine) GetSessionIdentities(ids []uuid.UUID) []contracts.SessionIdentity {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	identities := make([]contracts.SessionIdentity, 0, len(ids))
+	for _, id := range ids {
+		meta, err := e.sessionStore.LoadMeta(id)
+		if err != nil {
+			e.bgLogger.ErrorContext(e.ctx, "failed to get loadmeta for sessionIdentity for", "session", id, "error", err)
+			continue
+		}
+		identities = append(identities, contracts.SessionIdentity{
+			ID:        id,
+			Name:      meta.Name,
+			AgentKind: meta.AgentKind,
+			Status:    e.sessionStatus(meta),
+		})
+	}
+	return identities
 }
 
 // GetSessionIdentity returns only persisted display identity, avoiding timeline

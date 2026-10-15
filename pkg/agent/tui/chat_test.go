@@ -3062,6 +3062,9 @@ func (stubChatClient) LoadSession(context.Context, uuid.UUID) (*glue.SessionOutp
 func (stubChatClient) GetSession(context.Context, uuid.UUID) (*store.SessionMeta, []store.Record, error) {
 	return nil, nil, nil
 }
+func (stubChatClient) GetSessionIdentities(context.Context, []uuid.UUID) ([]contracts.SessionIdentity, error) {
+	return nil, nil
+}
 func (stubChatClient) GetSessionIdentity(context.Context, uuid.UUID) (string, contracts.AgentKind, error) {
 	return "", "", nil
 }
@@ -3107,5 +3110,62 @@ func TestCtrlUClearsImagesAndComposer(t *testing.T) {
 	}
 	if got := m.composer.Value(); got != "" {
 		t.Fatalf("composer=%q want cleared", got)
+	}
+}
+
+// A decision arriving does not move the reader: a page stays where it was put,
+// says the session is waiting, and answers no key that belongs to it. esc is the
+// way back to the chat, where the decision is waiting in its usual place.
+func TestAPendingDecisionDoesNotMoveTheReader(t *testing.T) {
+	m := statsTestModel()
+	m.width, m.height = 100, 30
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'd', Mod: tea.ModCtrl}))
+	if m.modal == nil {
+		t.Fatal("ctrl+d did not open the session stats page")
+	}
+	m.status = contracts.SessionWaitingApproval
+	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{
+		Name: contracts.BashTool, Arguments: `{"command":"rm -rf build"}`}}})
+
+	if m.modal == nil {
+		t.Fatal("a pending decision closed the page the reader was on")
+	}
+	page := ansi.Strip(m.View().Content)
+	if !strings.Contains(page, "Session stats") {
+		t.Fatalf("the page stopped being drawn:\n%s", page)
+	}
+	// The page says the session is waiting, and it does not carry the band: the
+	// decision is not flattened onto a screen it does not belong to.
+	if !strings.Contains(page, "waiting for approval") {
+		t.Fatalf("the page does not say the session is waiting:\n%s", page)
+	}
+	if strings.Contains(page, "Approve") {
+		t.Fatalf("the decision was drawn over the page:\n%s", page)
+	}
+
+	// The page's keys are the page's: enter on a page with no options answers
+	// nothing, and certainly not a decision that is not on the screen.
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd != nil {
+		t.Fatal("enter on the page dispatched something")
+	}
+	if m.approval == nil {
+		t.Fatal("a key aimed at the page answered the decision")
+	}
+
+	// esc leaves the page, and the decision is where it always is.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	if m.modal != nil {
+		t.Fatal("esc did not leave the page")
+	}
+	chat := ansi.Strip(m.View().Content)
+	for _, want := range []string{"rm -rf build", "Approve", "Deny With Reason", "ctrl+g detail"} {
+		if !strings.Contains(chat, want) {
+			t.Fatalf("the chat does not carry the waiting decision, %q missing:\n%s", want, chat)
+		}
+	}
+	_, cmd = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd == nil || m.approval != nil {
+		t.Fatal("the decision could not be answered in the chat")
 	}
 }

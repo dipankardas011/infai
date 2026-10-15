@@ -194,3 +194,65 @@ func TestSidecarNameIsPersistedOnCreation(t *testing.T) {
 		t.Fatalf("persisted child identity = (%q, %s)", meta.Name, meta.ParentID)
 	}
 }
+
+// A client holding ids it never opened is told who they are: the name, the kind,
+// and the status each session reports — a resident session answers for itself,
+// one that ended answers with how it ended, and one that recorded nothing is
+// left with nothing to run. Ids that name nothing are left out.
+func TestEngineNamesTheSessionsTheIdsBelongTo(t *testing.T) {
+	ss, err := store.NewSessionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := contracts.LLMModelConfiguration{Id: "test-model", MaxContextLength: 1000}
+	provider := contracts.LLMProviderConfiguration{
+		Id: contracts.OpenAIGeneric, BaseEndpoint: "http://127.0.0.1:1", APIType: contracts.OpenAICompatableAPI,
+		Auth: contracts.LLMProviderAuth{Method: contracts.NoneAuth}, Models: map[string]contracts.LLMModelConfiguration{model.Id: model},
+	}
+	hub := comms.NewAgentComms()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	e := &InfaiAgentEngine{
+		ctx: context.Background(), bgLogger: logger, sessionStore: ss, aseComms: hub,
+		providers:           contracts.LLMProviders{Providers: map[string]contracts.LLMProviderConfiguration{"test": provider}},
+		activeSessionAgents: make(map[uuid.UUID]*session.InfaiAgentSession),
+		children:            make(map[uuid.UUID]map[uuid.UUID]comms.AgentCommKind), stopCh: make(chan struct{}),
+	}
+
+	residentID, childID, endedID, missingID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	for _, meta := range []store.SessionMeta{
+		{ID: childID, Name: "build-worker", ParentID: residentID, AgentKind: contracts.SidecarLoopAgent},
+		{ID: endedID, Name: "docs-writer", AgentKind: contracts.SidecarLoopAgent,
+			Conclusion: &store.SessionConclusion{Status: contracts.SessionCompleted}},
+	} {
+		if err := ss.SaveMeta(meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A session the engine holds answers with the status it is in, not with what
+	// its index says: this one has just been opened and is idle.
+	if err := hub.RegisterSessionAgent(residentID); err != nil {
+		t.Fatal(err)
+	}
+	resident, err := session.NewSession(e.ctx, residentID, uuid.Nil, "Orchestrator", logger, nil, nil, nil,
+		contracts.NewProvisionedModel(provider.Id, "test", provider.BaseEndpoint, provider.APIType, provider.Auth, model),
+		t.TempDir(), ss, hub.NewSessionAgentComms(residentID), contracts.InteractiveAgent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.activeSessionAgents[residentID] = resident
+
+	identities := e.GetSessionIdentities([]uuid.UUID{childID, missingID, endedID, residentID})
+	want := []contracts.SessionIdentity{
+		{ID: childID, Name: "build-worker", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionTombstone},
+		{ID: endedID, Name: "docs-writer", AgentKind: contracts.SidecarLoopAgent, Status: contracts.SessionCompleted},
+		{ID: residentID, Name: "Orchestrator", AgentKind: contracts.InteractiveAgent, Status: contracts.SessionIdle},
+	}
+	if len(identities) != len(want) {
+		t.Fatalf("identities=%+v want %+v", identities, want)
+	}
+	for i := range want {
+		if identities[i] != want[i] {
+			t.Fatalf("identity %d = %+v want %+v", i, identities[i], want[i])
+		}
+	}
+}

@@ -72,7 +72,14 @@ type chatModel struct {
 	// finish. It is the live half of what the stats page draws; the session's
 	// saved report covers a client that joined after the turn.
 	lastUsage *contracts.TokenUsage
-	blocks    []block
+	// relativeIdentities names the sessions this one hangs off and owns, by id:
+	// their ids are all the session's own metadata carries, so the engine is
+	// asked who they are. A live report covers the rest, and relativeIdentityErr
+	// remembers an answer that never came, so the page can say why a session is
+	// drawn as a bare id rather than looking like it has no name.
+	relativeIdentities  map[uuid.UUID]contracts.SessionIdentity
+	relativeIdentityErr error
+	blocks              []block
 
 	width    int
 	height   int
@@ -195,6 +202,10 @@ type sessionLoadedMsg struct {
 }
 type sessionsListedMsg struct {
 	sessions []contracts.SessionSummary
+	err      error
+}
+type sessionIdentitiesMsg struct {
+	sessions []contracts.SessionIdentity
 	err      error
 }
 type providersListedMsg struct {
@@ -332,6 +343,7 @@ func (m *chatModel) sessionStats() sessionStats {
 		status:        m.status,
 		contextWindow: m.contextWindow,
 		used:          m.used,
+		relativeErr:   m.relativeIdentityErr,
 	}
 	last := m.session.LastTurnMeta
 	switch {
@@ -349,7 +361,102 @@ func (m *chatModel) sessionStats() sessionStats {
 			stats.contextWindow = last.ContextWindow
 		}
 	}
+	if m.session.ParentID != uuid.Nil {
+		parent := m.relativeFor(m.session.ParentID, nil)
+		// Loading the session already named its caller, which is all there is
+		// to go on when the engine's list has not answered yet.
+		if parent.name == "" {
+			parent.name, parent.kind = m.parentName, m.parentAgentKind
+		}
+		stats.parent = &parent
+	}
+	seen := make(map[uuid.UUID]struct{}, len(m.session.Offsprings)+len(m.sidecars))
+	for _, id := range m.session.Offsprings {
+		seen[id] = struct{}{}
+		stats.children = append(stats.children, m.relativeFor(id, m.liveSidecar(id)))
+	}
+	// A child spawned after this client loaded the session is not in the
+	// session's own list yet, so the reports carrying it are the only record.
+	for i := range m.sidecars {
+		if _, ok := seen[m.sidecars[i].ID]; ok {
+			continue
+		}
+		stats.children = append(stats.children, m.relativeFor(m.sidecars[i].ID, &m.sidecars[i]))
+	}
 	return stats
+}
+
+// relativeFor names one session this one hangs off or owns. A session this
+// client never opened is named by the identity the engine answered with; a live
+// report always wins where it says something, because the answer was read
+// earlier.
+func (m *chatModel) relativeFor(id uuid.UUID, live *contracts.SidecarStatus) statsRelative {
+	relative := statsRelative{id: id}
+	if identity, ok := m.relativeIdentities[id]; ok {
+		relative.name, relative.kind, relative.status = identity.Name, identity.AgentKind, identity.Status
+		relative.reported = true
+	}
+	if live != nil {
+		relative.reported = true
+		if live.Name != "" {
+			relative.name = live.Name
+		}
+		if live.AgentKind != "" {
+			relative.kind = live.AgentKind
+		}
+		if live.Status != "" {
+			relative.status = live.Status
+		}
+	}
+	return relative
+}
+
+// liveSidecar is the latest report from a session this one delegated to, which
+// carries the status the index cannot know yet.
+func (m *chatModel) liveSidecar(id uuid.UUID) *contracts.SidecarStatus {
+	for i := range m.sidecars {
+		if m.sidecars[i].ID == id {
+			return &m.sidecars[i]
+		}
+	}
+	return nil
+}
+
+// statsRelativeIDs is every session the stats page will name: the session's
+// caller, its children, and the children that have reported themselves since it
+// loaded. The engine is asked about these and nothing else.
+func (m *chatModel) statsRelativeIDs() []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(m.session.Offsprings)+len(m.sidecars)+1)
+	seen := make(map[uuid.UUID]struct{}, cap(ids))
+	add := func(id uuid.UUID) {
+		if id == uuid.Nil {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	add(m.session.ParentID)
+	for _, id := range m.session.Offsprings {
+		add(id)
+	}
+	for i := range m.sidecars {
+		add(m.sidecars[i].ID)
+	}
+	return ids
+}
+
+// recordIdentities folds the engine's answer into what the page draws. An id the
+// engine did not answer for keeps whatever it was last called.
+func (m *chatModel) recordIdentities(identities []contracts.SessionIdentity) {
+	if m.relativeIdentities == nil {
+		m.relativeIdentities = make(map[uuid.UUID]contracts.SessionIdentity, len(identities))
+	}
+	for _, identity := range identities {
+		m.relativeIdentities[identity.ID] = identity
+	}
 }
 
 // statsHintView is the row's hint that the session has a page of its own: the
@@ -520,6 +627,15 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.showNotice("Could not list sessions", msg.err.Error(), false)
 		} else {
 			m.showSessions(msg.sessions, false)
+		}
+		return m, nil
+	case sessionIdentitiesMsg:
+		// The page draws what it is given and re-reads it every frame, so a
+		// failure leaves the sessions it could not name as bare ids, and says so
+		// rather than hiding that they were never named.
+		m.relativeIdentityErr = msg.err
+		if msg.err == nil {
+			m.recordIdentities(msg.sessions)
 		}
 		return m, nil
 	case sessionActionedMsg:
@@ -720,7 +836,8 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, listSessionsCmd(m.ctx, m.client)
 	}
 	// The session's own accounting is a page like any other, and the key that
-	// opens it closes it again.
+	// opens it closes it again. The sessions this one hangs off and owns are
+	// asked about here, so the page can name them by more than an id.
 	if key == "ctrl+d" && m.modal == nil {
 		if m.session.ID == uuid.Nil {
 			return m, nil
@@ -730,7 +847,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			body:  "What this session is, how full its context is, and where the last turn's tokens went.",
 			stats: m.sessionStats(),
 		}
-		return m, nil
+		return m, sessionIdentitiesCmd(m.ctx, m.client, m.statsRelativeIDs())
 	}
 	if key == "esc" && m.modal == nil && m.relatedSessionSelection != uuid.Nil {
 		m.relatedSessionSelection = uuid.Nil
@@ -755,16 +872,13 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	if m.modal != nil {
+		return m, m.handleModalKey(msg)
+	}
 	// A pending decision owns the keyboard: the turn is blocked until it is
 	// answered, so the composer is not accepting prompts anyway.
 	if model, cmd, handled := m.handleApprovalKey(key); handled {
 		return model, cmd
-	}
-	// A modal can open before any turn exists — a resource read asks a question
-	// before the message is enqueued — so esc has to reach the modal instead of
-	// arming a cancel the session would refuse.
-	if m.modal != nil {
-		return m, m.handleModalKey(msg)
 	}
 	if m.working && key == "esc" && m.session.AgentKind != contracts.SidecarLoopAgent {
 		if !m.cancelArmed {
@@ -1221,10 +1335,10 @@ func (m *chatModel) handleTimelineSearchKey(msg tea.KeyPressMsg, key string) (te
 
 func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
-	// A read-only page owns nothing but itself: the key that opened it takes it
-	// down again.
-	if m.modal.kind == modalStats && key == "ctrl+d" {
-		return m.closePage()
+	if m.modal.kind == modalStats {
+		if cmd, handled := m.handleStatsKey(key); handled {
+			return cmd
+		}
 	}
 	if m.modal.kind == modalSessions {
 		if cmd, handled := m.handleSessionListKey(key); handled {
@@ -1273,6 +1387,35 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// handleStatsKey routes the keys the session-stats page owns: it scrolls the
+// whole page, and the key that opened it takes it down again. The offset is
+// bounded by the window the renderer last drew, so a scroll can never run away
+// from what is on screen.
+func (m *chatModel) handleStatsKey(key string) (tea.Cmd, bool) {
+	switch key {
+	case "up":
+		m.modal.scroll = m.clampStatsScroll(m.modal.scroll - 1)
+	case "down":
+		m.modal.scroll = m.clampStatsScroll(m.modal.scroll + 1)
+	case "pgup":
+		m.modal.scroll = m.clampStatsScroll(m.modal.scroll - max(m.modal.rows, 1))
+	case "pgdown":
+		m.modal.scroll = m.clampStatsScroll(m.modal.scroll + max(m.modal.rows, 1))
+	case "ctrl+d":
+		return m.closePage(), true
+	default:
+		return nil, false
+	}
+	return nil, true
+}
+
+// clampStatsScroll keeps the page's offset inside what it has to show: the last
+// window ends on the last line rather than scrolling past it.
+func (m *chatModel) clampStatsScroll(offset int) int {
+	total := len(m.modal.stats.lines(max(m.width-4, 1), m.styles))
+	return clamp(offset, 0, max(total-m.modal.rows, 0))
 }
 
 func (m *chatModel) resumeSessionFromList() tea.Cmd {
@@ -4168,6 +4311,19 @@ func listSessionsCmd(ctx context.Context, client Client) tea.Cmd {
 	return func() tea.Msg {
 		sessions, err := client.ListSessions(ctx)
 		return sessionsListedMsg{sessions: sessions, err: err}
+	}
+}
+
+// sessionIdentitiesCmd asks the engine who the given sessions are, without
+// opening any of them: the stats page names the relatives it draws from the
+// answer.
+func sessionIdentitiesCmd(ctx context.Context, client Client, ids []uuid.UUID) tea.Cmd {
+	return func() tea.Msg {
+		if len(ids) == 0 {
+			return sessionIdentitiesMsg{}
+		}
+		sessions, err := client.GetSessionIdentities(ctx, ids)
+		return sessionIdentitiesMsg{sessions: sessions, err: err}
 	}
 }
 

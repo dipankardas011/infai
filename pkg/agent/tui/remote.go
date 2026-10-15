@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -427,6 +428,32 @@ func (c *RemoteClient) LoadSession(ctx context.Context, id uuid.UUID) (*glue.Ses
 		return nil, err
 	}
 	return &out, nil
+}
+
+// GetSessionIdentities names the sessions the ids belong to. An id that names
+// nothing is left out of the answer.
+func (c *RemoteClient) GetSessionIdentities(ctx context.Context, ids []uuid.UUID) ([]contracts.SessionIdentity, error) {
+	query := url.Values{}
+	for _, id := range ids {
+		query.Add("ids", id.String())
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions/identities?"+query.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+	var out []contracts.SessionIdentity
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *RemoteClient) GetSessionIdentity(ctx context.Context, id uuid.UUID) (string, contracts.AgentKind, error) {
