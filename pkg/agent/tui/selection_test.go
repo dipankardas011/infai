@@ -848,7 +848,7 @@ func TestSystemClipboardWriteTextReportsWhatTookIt(t *testing.T) {
 			}
 			return "", errors.New("not found")
 		},
-		write: func(_ context.Context, _ string, _ []string, text string) error {
+		write: func(_ context.Context, _ string, _ []string, text string, _ time.Duration) error {
 			got = text
 			return nil
 		},
@@ -867,7 +867,7 @@ func TestSystemClipboardWriteTextUnavailable(t *testing.T) {
 		goos:     "linux",
 		getenv:   func(string) string { return "" },
 		lookPath: func(string) (string, error) { return "", errors.New("not found") },
-		write:    func(context.Context, string, []string, string) error { return nil },
+		write:    func(context.Context, string, []string, string, time.Duration) error { return nil },
 	}
 	if _, err := c.WriteText(context.Background(), "hello"); !errors.Is(err, ErrClipboardUnavailable) {
 		t.Fatalf("err = %v, want ErrClipboardUnavailable", err)
@@ -906,5 +906,37 @@ func TestBadgeClickStillWinsOverSelection(t *testing.T) {
 	}
 	if m.selecting {
 		t.Fatal("clicking an artifact chip started a selection")
+	}
+}
+
+// TestCopyReleasesTheOldOwnerOnlyAfterTheNewTextLands covers what happens to the
+// process the previous copy left owning the clipboard: it is let go once the new
+// text is in, and kept when the new text never lands — releasing it first would
+// empty the clipboard on a failed copy.
+func TestCopyReleasesTheOldOwnerOnlyAfterTheNewTextLands(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		clipboard   Clipboard
+		wantRelease bool
+	}{
+		{name: "the new text landed", clipboard: &recordingClipboard{tool: "wl-copy"}, wantRelease: true},
+		{name: "the new text never landed", clipboard: &recordingClipboard{err: ErrClipboardUnavailable}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := selectableChat(t, tc.clipboard, block{role: "user", text: "hello world"})
+			released := false
+			m.copyCancel = func() { released = true }
+
+			x, y := screenAt(t, m, "world")
+			cmd := drag(t, m, x, y, x+5, y)
+			if cmd == nil {
+				t.Fatal("the release did not copy the selection")
+			}
+			_, _ = m.Update(cmd())
+
+			if released != tc.wantRelease {
+				t.Fatalf("released the previous owner = %v, want %v", released, tc.wantRelease)
+			}
+		})
 	}
 }

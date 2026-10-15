@@ -7,7 +7,11 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
+	"os"
+	"strings"
 	"testing"
+	"time"
 )
 
 func testPNG(t *testing.T, width, height int) []byte {
@@ -128,5 +132,54 @@ func TestSystemClipboardFallsBackToJPEG(t *testing.T) {
 	}
 	if len(tried) != 2 {
 		t.Fatalf("tried=%v want png then jpeg", tried)
+	}
+}
+
+// TestClipboardWriteHelper is not a test: it is the helper the two write tests
+// run, re-executed from the test binary so a real child process is what gets
+// exercised.
+func TestClipboardWriteHelper(t *testing.T) {
+	mode := os.Getenv("INFAI_CLIPBOARD_HELPER")
+	if mode == "" {
+		return
+	}
+	switch mode {
+	case "owner":
+		// Takes the text and then keeps serving it, the way wl-copy does. The
+		// sleep only has to outlive the assertion; it bounds how long the helper
+		// can outlive the test.
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		time.Sleep(15 * time.Second)
+	case "wedged":
+		// Present, but never reads.
+		time.Sleep(time.Minute)
+	}
+	os.Exit(0)
+}
+
+func TestClipboardWriteReturnsOnceAnOwnerHelperTakesTheText(t *testing.T) {
+	t.Setenv("INFAI_CLIPBOARD_HELPER", "owner")
+
+	start := time.Now()
+	if err := runClipboardWrite(context.Background(), os.Args[0], []string{"-test.run=^TestClipboardWriteHelper$"}, "hello", 30*time.Second); err != nil {
+		t.Fatalf("write to a helper that owns the clipboard = %v", err)
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Fatalf("the write waited %s for a helper that had taken the text", waited)
+	}
+}
+
+func TestClipboardWriteGivesUpOnAHelperThatNeverReads(t *testing.T) {
+	t.Setenv("INFAI_CLIPBOARD_HELPER", "wedged")
+
+	// Larger than a pipe buffer, so the write cannot complete behind the
+	// helper's back.
+	text := strings.Repeat("x", 1<<20)
+	start := time.Now()
+	if err := runClipboardWrite(context.Background(), os.Args[0], []string{"-test.run=^TestClipboardWriteHelper$"}, text, 200*time.Millisecond); err == nil {
+		t.Fatal("a helper that never read was reported as having taken the text")
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Fatalf("gave up after %s", waited)
 	}
 }

@@ -309,16 +309,14 @@ func (m *chatModel) selectionPointAt(x, y int) (selectionPoint, bool) {
 	return selectionPoint{block: entry.block, line: line, col: column}, true
 }
 
-// selectionText is the plain text the selection covers, and how many lines that
-// is. The lines are cut out of the rendered blocks, so what reaches the
-// clipboard is what the screen showed. Two things the renderer adds are undone,
-// because neither survives a paste: it pads every line to the wrap width with
-// blanks the reader never selected, and it pads inline code with a non-breaking
-// space, which a shell does not read as a delimiter.
+// selectionText is the plain text the selection covers and how many lines that
+// is, cut from the rendered blocks so the clipboard gets what the screen showed.
+// Two renderer artifacts are undone because neither survives a paste: the blanks
+// padding each line to the wrap width, and the non-breaking space padding inline
+// code, which a shell does not read as a delimiter.
 func (m *chatModel) selectionText(blocks []block, from, to selectionPoint) (string, int) {
-	// The endpoints arrive by value and the span is built here, so the cut reads
-	// nothing the live model can move under it: it runs while the reader can
-	// already be starting the next drag.
+	// Endpoints arrive by value and the span is rebuilt here, so the cut reads
+	// nothing the live model can move under it while the reader drags again.
 	span := selection{anchor: from, cursor: to}
 	width := m.transcriptWidth()
 	var copied []string
@@ -333,8 +331,7 @@ func (m *chatModel) selectionText(blocks []block, from, to selectionPoint) (stri
 			continue
 		}
 		if last >= 0 {
-			// Two blocks are separated by a blank line on screen, so a copy that
-			// spans both has to carry it or it is not what the reader saw.
+			// The blank line the transcript draws between blocks.
 			copied = append(copied, "")
 		}
 		last = index
@@ -358,9 +355,8 @@ func (m *chatModel) selectionText(blocks []block, from, to selectionPoint) (stri
 	return text, strings.Count(text, "\n") + 1
 }
 
-// paintSelection draws the selection band over the assembled window. It runs on
-// the window content, never on a block's cache, so a block stays rendered once
-// however often the band moves across it.
+// paintSelection draws the band over the assembled window, never over a block's
+// render cache, so a block stays rendered once however often the band moves.
 func (m *chatModel) paintSelection() string {
 	lines := make([]string, len(m.windowLines))
 	copy(lines, m.windowLines)
@@ -384,8 +380,8 @@ func (m *chatModel) paintSelection() string {
 	return strings.Join(lines, "\n")
 }
 
-// clipboardCopyMsg reports a finished copy: the text that went out, how much of
-// it there was, and which tool carried it.
+// clipboardCopyMsg reports a finished copy: what went out, how much, and which
+// tool carried it.
 type clipboardCopyMsg struct {
 	generation uint64
 	text       string
@@ -394,13 +390,10 @@ type clipboardCopyMsg struct {
 	err        error
 }
 
-// copySelectionCmd cuts the selection out of the transcript and hands it to the
-// system clipboard. Cutting renders every block the selection spans, which on a
-// long selection is work measured in seconds — far too much for the update loop,
-// the same reason a clipboard image is decoded in a command. So the model is
-// copied and the cut runs beside it, against a snapshot of the transcript: the
-// render cache it fills is the snapshot's, and a turn still streaming keeps
-// filling the live one.
+// copySelectionCmd cuts the selection and hands it to the clipboard. Cutting
+// renders every block it spans — seconds of work on a long selection — so it runs
+// as a tea.Cmd against a snapshot: the render cache it fills is the snapshot's, and
+// a turn still streaming keeps filling the live one.
 func (m *chatModel) copySelectionCmd() tea.Cmd {
 	if m.clipboard == nil || m.selection == nil || m.selection.empty() {
 		return nil
@@ -408,9 +401,10 @@ func (m *chatModel) copySelectionCmd() tea.Cmd {
 	snapshot := *m
 	blocks := append([]block(nil), m.blocks...)
 	from, to := m.selection.ordered()
-	if m.copyCancel != nil {
-		m.copyCancel()
-	}
+	// The owner the last copy left holding the clipboard, released only once this
+	// write has landed: killing it first empties the clipboard whenever the
+	// replacement fails.
+	previous := m.copyCancel
 	m.copyGeneration++
 	generation := m.copyGeneration
 	ctx, cancel := context.WithCancel(m.ctx)
@@ -422,18 +416,20 @@ func (m *chatModel) copySelectionCmd() tea.Cmd {
 			return clipboardCopyMsg{generation: generation}
 		}
 		tool, err := clipboard.WriteText(ctx, text)
+		if err == nil && previous != nil {
+			previous()
+		}
 		return clipboardCopyMsg{generation: generation, text: text, lines: lines, tool: tool, err: err}
 	}
 }
 
-// handleCopied confirms a copy the way every other user-visible outcome is
-// confirmed: as an event in the transcript. A machine with no clipboard helper
-// is not a failure — the terminal is handed the text over OSC 52, which is what
-// makes a copy land across an SSH hop. That path is write-only, though: nothing
-// comes back to say the terminal took it, so the line says what was sent rather
-// than that it landed.
+// handleCopied confirms a copy as a transcript event. No helper is not a failure:
+// the terminal gets the text over OSC 52, which is what carries a copy across an
+// SSH hop. That path is write-only, so its line says what was sent, not that it
+// landed.
 func (m *chatModel) handleCopied(msg clipboardCopyMsg) (tea.Model, tea.Cmd) {
 	if msg.generation != m.copyGeneration {
+		// A newer copy has already taken over; this one's text never landed.
 		return m, nil
 	}
 	if msg.lines == 0 && msg.err == nil {
@@ -454,8 +450,7 @@ func copiedLines(lines int) string {
 	return fmt.Sprintf("%d lines", lines)
 }
 
-// appendCopyEvent adds the confirmation at the bottom of the chat and reveals
-// it immediately, matching other transcript events.
+// appendCopyEvent adds the confirmation at the bottom of the chat and reveals it.
 func (m *chatModel) appendCopyEvent(text string) {
 	m.blocks = append(m.blocks, block{role: "event", text: text})
 	m.refreshTranscript(true)

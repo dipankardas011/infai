@@ -9,27 +9,26 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/vision"
 )
 
-// Clipboard image failures surfaced to the user. They are distinguishable so
-// the TUI can explain whether the problem is missing tooling or an empty
-// clipboard.
+// Clipboard image failures surfaced to the user, distinguishable so the TUI can
+// tell missing tooling apart from an empty or oversized clipboard.
 var (
 	ErrClipboardUnavailable = errors.New("clipboard: no image clipboard tool is available")
 	ErrClipboardEmpty       = errors.New("clipboard: no image found on the clipboard")
 	ErrClipboardTooLarge    = errors.New("clipboard: image exceeds the size limit")
 )
 
-// clipboardTimeout bounds a single clipboard read so a hung helper cannot leak
-// a process for the life of the app.
+// clipboardTimeout bounds one exchange with a helper: a read, and the handover
+// half of a write.
 const clipboardTimeout = 10 * time.Second
 
-// Clipboard is the system clipboard as the harness uses it: one image in, and
-// one selection of text out. It is an interface so platform support (Windows,
-// OSC 5522) can be added without touching the TUI, and so tests can inject one.
+// Clipboard is the system clipboard as the harness uses it: one image in, one
+// selection of text out. It is an interface so tests can inject one.
 type Clipboard interface {
 	ReadImage(ctx context.Context) ([]byte, error)
 	WriteText(ctx context.Context, text string) (string, error)
@@ -40,15 +39,15 @@ type clipboardCommand struct {
 	args []string
 }
 
-// systemClipboard selects a platform clipboard tool. All process execution is
-// deferred to the injected output and write funcs so callers can drive it from
-// a tea.Cmd without blocking the Bubble Tea update loop.
+// systemClipboard selects a platform clipboard tool. Process execution goes
+// through the injected funcs so a caller can drive it from a tea.Cmd without
+// blocking the Bubble Tea update loop.
 type systemClipboard struct {
 	goos     string
 	getenv   func(string) string
 	lookPath func(string) (string, error)
 	output   func(ctx context.Context, name string, args ...string) ([]byte, error)
-	write    func(ctx context.Context, path string, args []string, text string) error
+	write    func(ctx context.Context, path string, args []string, text string, timeout time.Duration) error
 }
 
 func defaultClipboard() *systemClipboard {
@@ -61,9 +60,8 @@ func defaultClipboard() *systemClipboard {
 	}
 }
 
-// runClipboardCommand runs one clipboard helper with a hard timeout and a
-// bounded stdout buffer, so an oversized image cannot be fully materialized in
-// memory and a hung helper is killed.
+// runClipboardCommand reads one helper with a hard timeout and a bounded buffer,
+// so an oversized image is never fully materialized and a hung helper is killed.
 func runClipboardCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, clipboardTimeout)
 	defer cancel()
@@ -84,37 +82,58 @@ func runClipboardCommand(ctx context.Context, name string, args ...string) ([]by
 	return writer.buf.Bytes(), nil
 }
 
-// runClipboardWrite feeds all text to the platform clipboard helper and returns
-// once the helper has accepted it. Some helpers stay alive to own the clipboard;
-// their lifetime is bounded by the caller's context and reaped in the background.
-func runClipboardWrite(ctx context.Context, path string, args []string, text string) error {
+// runClipboardWrite hands text to a helper, bounded by timeout. Success is the
+// helper taking every byte, not the process ending: a clipboard owner forks and
+// then serves pastes for as long as it holds the selection. Its stderr stays on
+// the null device rather than a pipe, because the forked owner inherits that pipe
+// and keeps it open, which hangs anything waiting on the handover.
+func runClipboardWrite(ctx context.Context, path string, args []string, text string, timeout time.Duration) error {
 	cmd := exec.CommandContext(ctx, path, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
 	}
-	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if _, err := io.WriteString(stdin, text); err != nil {
-		_ = stdin.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return err
+	written := make(chan error, 1)
+	go func() {
+		// io.Copy rather than one write: a pipe may accept only part of the
+		// selection, and the helper must see all of it before it owns the text.
+		_, err := io.Copy(stdin, strings.NewReader(text))
+		if cerr := stdin.Close(); err == nil {
+			err = cerr
+		}
+		written <- err
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err = <-written:
+		if err != nil {
+			killHelper(cmd)
+			return err
+		}
+	case <-timer.C:
+		killHelper(cmd)
+		return fmt.Errorf("%s did not take the text within %s", path, timeout)
 	}
-	if err := stdin.Close(); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return err
-	}
+	// The helper owns the clipboard now, so it is reaped in the background
+	// rather than waited on.
 	go func() { _ = cmd.Wait() }()
 	return nil
 }
 
+// killHelper stops a helper that never took the text and reaps it, so a failed
+// copy leaves no process behind.
+func killHelper(cmd *exec.Cmd) {
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
+
 // WriteText puts text on the system clipboard and names the helper that took it.
-// A machine with no helper reports ErrClipboardUnavailable, which the TUI turns
-// into an OSC 52 write.
+// No usable helper reports ErrClipboardUnavailable, which the TUI turns into an
+// OSC 52 write.
 func (c *systemClipboard) WriteText(ctx context.Context, text string) (string, error) {
 	if text == "" {
 		return "", ErrClipboardEmpty
@@ -124,7 +143,7 @@ func (c *systemClipboard) WriteText(ctx context.Context, text string) (string, e
 		if err != nil {
 			continue
 		}
-		if err := c.write(ctx, path, command.args, text); err != nil {
+		if err := c.write(ctx, path, command.args, text, clipboardTimeout); err != nil {
 			continue
 		}
 		return command.name, nil
@@ -132,8 +151,8 @@ func (c *systemClipboard) WriteText(ctx context.Context, text string) (string, e
 	return "", ErrClipboardUnavailable
 }
 
-// limitedWriter stops accepting bytes past its limit and reports
-// ErrClipboardTooLarge, which makes os/exec tear the child process down.
+// limitedWriter refuses bytes past its limit with ErrClipboardTooLarge, which
+// tears the helper down before it can stream a whole oversized image.
 type limitedWriter struct {
 	buf   bytes.Buffer
 	limit int
@@ -146,9 +165,9 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return w.buf.Write(p)
 }
 
-// ReadImage tries each clipboard command for the current platform. A missing
-// tool reports ErrClipboardUnavailable; a present tool that returns no bytes
-// reports ErrClipboardEmpty.
+// ReadImage tries each clipboard command for the platform. A missing tool
+// reports ErrClipboardUnavailable; a present tool returning no bytes reports
+// ErrClipboardEmpty.
 func (c *systemClipboard) ReadImage(ctx context.Context) ([]byte, error) {
 	commands := c.commands()
 	if len(commands) == 0 {
@@ -202,9 +221,8 @@ func (c *systemClipboard) commands() []clipboardCommand {
 	}
 }
 
-// writeCommands selects the helper that takes text for the clipboard. Unlike a
-// read, a write needs no media type: the platform's tool takes whatever arrives
-// on stdin.
+// writeCommands selects the helper that takes text. A write carries no media
+// type: the platform's tool stores whatever arrives on stdin.
 func (c *systemClipboard) writeCommands() []clipboardCommand {
 	switch c.goos {
 	case "darwin":
