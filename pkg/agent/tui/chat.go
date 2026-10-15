@@ -252,6 +252,9 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 	input.MaxContentHeight = 200
 	input.KeyMap.InsertNewline.SetKeys("shift+enter", "alt+enter", "ctrl+j")
 	input.SetVirtualCursor(true)
+	// The frame already says the composer is live, so it carries no marker: the
+	// placeholder names what goes in.
+	input.SetPromptFunc(0, func(textarea.PromptInfo) string { return "" })
 	styleTextarea(&input, false)
 
 	// The viewport only renders the window it is handed: the model owns the
@@ -279,33 +282,25 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 	} else {
 		m.showSessions(sessions, true)
 	}
-	m.refreshInputMark()
+	m.refreshComposerState()
 	return m
 }
-
-// inputMark opens the composer: "∞" while it takes a prompt, "why" while it is
-// capturing the reason a decision was denied.
-const inputMark = "∞ "
 
 // transcriptScrollStep is how far a wheel notch or ctrl+up/down moves the
 // transcript, in lines. It matches what the viewport used to scroll by.
 const transcriptScrollStep = 3
 
-// refreshInputMark names what the composer is currently for, and pads the
-// continuation rows of a wrapped draft to the same width. The placeholder spells
-// out how to finish a reason, so the reserved block above does not have to.
-func (m *chatModel) refreshInputMark() {
-	// A pending decision owns the keyboard, so the composer is not taking a
-	// prompt. Capturing a reason is the exception: the decision asked for it.
+// refreshComposerState updates what the composer is for: whether it can take
+// input at all, and the placeholder that says so. A composer that cannot take
+// input keeps its draft, but its frame is grey instead of green.
+func (m *chatModel) refreshComposerState() {
 	waiting := (m.approval != nil && !m.approvalReason) || m.session.AgentKind == contracts.SidecarLoopAgent
-	mark := inputMark
 	placeholder := "Ask, plan, build... (external editor ctrl+x)"
 	if m.session.AgentKind == contracts.SidecarLoopAgent {
 		placeholder = "Read-only sidecar · Ctrl+O to open sessions"
 	}
 	switch {
 	case m.approvalReason:
-		mark = "why▸ "
 		placeholder = "(reason to deny · ⏎ send · esc cancel)"
 	case waiting:
 		placeholder = "answer the decision above to continue"
@@ -315,13 +310,6 @@ func (m *chatModel) refreshInputMark() {
 		styleTextarea(&m.composer, waiting)
 	}
 	m.composer.Placeholder = placeholder
-	width := lipgloss.Width(mark)
-	m.composer.SetPromptFunc(width, func(info textarea.PromptInfo) string {
-		if info.LineNumber == 0 {
-			return mark
-		}
-		return strings.Repeat(" ", width)
-	})
 }
 
 func (m *chatModel) Init() tea.Cmd {
@@ -2282,7 +2270,7 @@ func (m *chatModel) reflow() {
 	previousViewportWidth := m.viewport.Width()
 	previousViewportHeight := m.viewport.Height()
 	wasAtBottom := m.atBottom()
-	m.refreshInputMark()
+	m.refreshComposerState()
 	m.composer.SetWidth(contentWidth(m.styles.composer, m.width))
 	header := m.headerView()
 	status := m.statusView()

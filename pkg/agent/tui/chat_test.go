@@ -273,7 +273,7 @@ func TestApprovalDetailScrollsWithTheTranscript(t *testing.T) {
 }
 
 // A pending decision owns the keyboard, so the composer greys out, drops its
-// cursor and says why — while keeping the draft that is waiting in it.
+// cursor and keeps the draft that is waiting in it.
 func TestPendingDecisionDimsTheComposerAndKeepsTheDraft(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
@@ -299,15 +299,9 @@ func TestPendingDecisionDimsTheComposerAndKeepsTheDraft(t *testing.T) {
 	if !strings.Contains(view, "a queued prompt") {
 		t.Fatalf("the pending decision dropped the draft:\n%s", view)
 	}
-	if !strings.Contains(view, inputMark) {
-		t.Fatalf("the waiting composer changed its mark instead of only greying:\n%s", view)
-	}
 	styles := m.composer.Styles().Focused
 	if got := styles.Text.GetForeground(); got != everforest.Muted {
 		t.Fatalf("composer text is %v while a decision waits, want the muted colour", got)
-	}
-	if got := styles.Prompt.GetForeground(); got != everforest.Muted {
-		t.Fatalf("composer mark is %v while a decision waits, want the muted colour", got)
 	}
 	if strings.Contains(m.composer.View(), "\x1b[7;") {
 		t.Fatal("a waiting composer still draws a cursor cell")
@@ -324,13 +318,10 @@ func TestPendingDecisionDimsTheComposerAndKeepsTheDraft(t *testing.T) {
 	if got := m.composer.Value(); got != "a queued prompt" {
 		t.Fatalf("the draft did not survive the decision: %q", got)
 	}
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, inputMark) {
-		t.Fatalf("the composer did not take its prompt mark back:\n%s", view)
-	}
 }
 
 // Capturing a reason is the one thing a pending decision asks the composer to
-// do, so that mode keeps the composer live and marked as the reason field.
+// do, so that mode keeps the composer live and takes its draft.
 func TestReasonModeKeepsTheComposerActive(t *testing.T) {
 	m := newChatModel(context.Background(), nil, nil, RunOptions{})
 	m.modal = nil
@@ -348,9 +339,6 @@ func TestReasonModeKeepsTheComposerActive(t *testing.T) {
 	}
 	if !strings.Contains(m.composer.View(), "\x1b[7;") {
 		t.Fatal("the reason field draws no cursor cell")
-	}
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "why▸") {
-		t.Fatalf("the reason field is not marked:\n%s", view)
 	}
 
 	// Leaving reason mode puts the composer back to waiting, draft and all.
@@ -1850,9 +1838,6 @@ func TestApprovalKeysAnswerTheDecision(t *testing.T) {
 
 	// [R]eason hands the composer to the reason and sends it with the denial.
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'r', Text: "r"}))
-	if m.composer.Prompt != "" && !strings.Contains(m.composer.View(), "why") {
-		t.Fatal("reason mode did not mark the composer")
-	}
 	m.composer.SetValue("delete only inside build")
 	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	if cmd == nil {

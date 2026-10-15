@@ -64,11 +64,13 @@ var everforest = struct {
 const appName = "InfaiW"
 
 type harnessStyles struct {
-	app             lipgloss.Style
-	header          lipgloss.Style
-	brand           lipgloss.Style
-	headerMeta      lipgloss.Style
-	composer        lipgloss.Style
+	app        lipgloss.Style
+	header     lipgloss.Style
+	brand      lipgloss.Style
+	headerMeta lipgloss.Style
+	composer   lipgloss.Style
+	// composerWaiting frames the composer while it cannot take input: it keeps
+	// the palette's plain grey, so a green frame means typing goes in.
 	composerWaiting lipgloss.Style
 	status          lipgloss.Style
 	statusBusy      lipgloss.Style
@@ -129,15 +131,12 @@ func (s harnessStyles) heading(section string, background color.Color) string {
 
 func newHarnessStyles() harnessStyles {
 	return harnessStyles{
-		app:        lipgloss.NewStyle().Background(everforest.Background).Foreground(everforest.Text),
-		header:     lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Padding(0, 1),
-		brand:      lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
-		headerMeta: lipgloss.NewStyle().Foreground(everforest.Muted),
-		composer:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
-		// While a decision is pending the composer's frame drops to the plain
-		// surface, so the row recedes and the band above it is the only thing
-		// asking for an answer.
-		composerWaiting: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.Surface).Padding(0, 1),
+		app:             lipgloss.NewStyle().Background(everforest.Background).Foreground(everforest.Text),
+		header:          lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Padding(0, 1),
+		brand:           lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
+		headerMeta:      lipgloss.NewStyle().Foreground(everforest.Muted),
+		composer:        lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.Green).Padding(0, 1),
+		composerWaiting: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
 		status:          lipgloss.NewStyle().Foreground(everforest.Muted),
 		statusBusy:      lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
 		statusWaiting:   lipgloss.NewStyle().Foreground(everforest.Orange).Bold(true),
@@ -193,25 +192,23 @@ func newHarnessStyles() harnessStyles {
 	}
 }
 
-// styleTextarea paints the composer for the two states it has: taking a prompt,
-// and waiting on a decision that owns the keyboard. A waiting composer keeps its
-// draft — the text is still the reader's — but greys out, mark included, and
-// stops drawing a cursor. Nothing in the row reads as ready for input, and the
-// decision above it is the only thing asking for an answer.
+// styleTextarea paints a textarea for the two states it has: accepting input,
+// and waiting on a decision that owns the keyboard. A waiting one keeps its
+// draft but greys out and stops drawing a cursor. Textareas carry no prompt, so
+// the cursor is the only thing left to colour by state.
 func styleTextarea(input *textarea.Model, waiting bool) {
-	text, mark := everforest.Text, everforest.Green
+	text, cursor := everforest.Text, everforest.Green
 	if waiting {
-		text, mark = everforest.Muted, everforest.Muted
+		text, cursor = everforest.Muted, everforest.Muted
 	}
 	s := input.Styles()
 	s.Focused.Base = lipgloss.NewStyle().Foreground(text)
 	s.Focused.Text = lipgloss.NewStyle().Foreground(text)
-	s.Focused.Prompt = lipgloss.NewStyle().Foreground(mark).Bold(true)
 	s.Focused.Placeholder = lipgloss.NewStyle().Foreground(everforest.Muted)
 	s.Focused.CursorLine = lipgloss.NewStyle()
 	s.Focused.Selection = lipgloss.NewStyle().Background(everforest.SurfaceAlt)
 	s.Blurred = s.Focused
-	s.Cursor.Color = mark
+	s.Cursor.Color = cursor
 	input.SetStyles(s)
 	input.SetVirtualCursor(!waiting)
 }

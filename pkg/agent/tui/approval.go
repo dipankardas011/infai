@@ -35,7 +35,7 @@ func (m *chatModel) handleApprovalKey(key string) (tea.Model, tea.Cmd, bool) {
 			m.composer.SetValue(m.approvalDraft)
 			m.composer.CursorEnd()
 			m.approvalDraft = ""
-			m.refreshInputMark()
+			m.refreshComposerState()
 			m.reflow()
 			return m, nil, true
 		case "enter":
@@ -56,7 +56,7 @@ func (m *chatModel) handleApprovalKey(key string) (tea.Model, tea.Cmd, bool) {
 		m.approvalReason = true
 		m.approvalDraft = m.composer.Value()
 		m.composer.Reset()
-		m.refreshInputMark()
+		m.refreshComposerState()
 		m.reflow()
 		return m, nil, true
 	case "ctrl+g":
@@ -80,7 +80,7 @@ func (m *chatModel) resolveApproval(decision, reason string) tea.Cmd {
 	m.approvalShown = false
 	m.approvalReason = false
 	m.approvalDraft = ""
-	m.refreshInputMark()
+	m.refreshComposerState()
 	note := "Approval " + decision
 	if reason != "" {
 		note += ": " + reason
@@ -112,7 +112,7 @@ func (m *chatModel) clearApproval() {
 	m.approvalShown = false
 	m.approvalReason = false
 	m.approvalDraft = ""
-	m.refreshInputMark()
+	m.refreshComposerState()
 	m.reflow()
 }
 
