@@ -119,6 +119,19 @@ type harnessStyles struct {
 	menu       lipgloss.Style
 	menuRow    lipgloss.Style
 	menuActive lipgloss.Style
+	// hint names a key the user can press. It takes Everforest's grey0 — the
+	// terminal's bright black — so a shortcut reads as an aside beside the
+	// marks that describe the session rather than as one of them.
+	hint lipgloss.Style
+	// The session-stats page's token bars, one hue per way a token was spent:
+	// cachedTokens is the prompt the provider re-read from its cache,
+	// freshTokens is everything processed for the first time, reasoningTokens is
+	// the model's own thinking, and tokenRest is what a bar leaves empty. The
+	// same hue means the same thing wherever the bars use it.
+	cachedTokens    lipgloss.Style
+	freshTokens     lipgloss.Style
+	reasoningTokens lipgloss.Style
+	tokenRest       lipgloss.Style
 }
 
 func (s harnessStyles) heading(section string, background color.Color) string {
@@ -185,6 +198,14 @@ func newHarnessStyles() harnessStyles {
 		menu:          lipgloss.NewStyle().Background(everforest.Surface).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(everforest.Green),
 		menuRow:       lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text),
 		menuActive:    lipgloss.NewStyle().Background(everforest.SurfaceAlt).Foreground(everforest.Yellow).Bold(true),
+		hint:          lipgloss.NewStyle().Foreground(everforest.Faint),
+		// Green is the palette's "kept" colour and aqua its telemetry colour, so
+		// the prompt a provider re-read is green and the rest is aqua; reasoning
+		// takes the secondary accent, because it is work the reader never sees.
+		cachedTokens:    lipgloss.NewStyle().Foreground(everforest.Green),
+		freshTokens:     lipgloss.NewStyle().Foreground(everforest.Aqua),
+		reasoningTokens: lipgloss.NewStyle().Foreground(everforest.Purple),
+		tokenRest:       lipgloss.NewStyle().Foreground(everforest.SurfaceAlt),
 	}
 }
 

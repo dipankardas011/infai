@@ -510,6 +510,54 @@ func TestSessionRowShowsParentBelowSidecarName(t *testing.T) {
 	}
 }
 
+// The session row advertises the key that opens the session's own page. The
+// hint is the terminal's bright black — the quietest thing on the row — and sits
+// just inside the marks, which stay on the right edge.
+func TestSessionRowHintsTheStatsKey(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.width = 120
+	m.session = store.SessionMeta{
+		ID: uuid.New(), Name: "Deploy the cluster", AgentKind: contracts.InteractiveAgent,
+	}
+	m.status = contracts.SessionIdle
+
+	row := ansi.Strip(m.sessionRowView())
+	if !strings.Contains(row, "ctrl+d stats") {
+		t.Fatalf("session row does not advertise the stats page: %q", row)
+	}
+	if !strings.Contains(row, "ctrl+d stats  ·  ⬢ interactive") {
+		t.Fatalf("the hint does not sit inside the marks: %q", row)
+	}
+	if !strings.HasSuffix(strings.TrimRight(row, " "), "idle") {
+		t.Fatalf("the marks left the right edge: %q", row)
+	}
+	if m.styles.hint.GetForeground() != everforest.Faint {
+		t.Fatalf("hint foreground=%v want the terminal's bright black", m.styles.hint.GetForeground())
+	}
+
+	// A row with no room gives up the hint before it gives up the marks or the
+	// name: the name still says which session this is.
+	m.width = 50
+	narrow := ansi.Strip(m.sessionRowView())
+	if strings.Contains(narrow, "ctrl+d") {
+		t.Fatalf("a narrow row kept the hint: %q", narrow)
+	}
+	if !strings.Contains(narrow, "Deploy the cluster") || !strings.Contains(narrow, "interactive") {
+		t.Fatalf("a narrow row dropped the wrong things: %q", narrow)
+	}
+}
+
+// A row with no session has no page to advertise, so it says nothing about one.
+func TestSessionRowWithoutASessionHasNoHint(t *testing.T) {
+	m := newChatModel(context.Background(), nil, nil, RunOptions{})
+	m.modal = nil
+	m.width = 120
+	if got := m.statsHintView(); got != "" {
+		t.Fatalf("hint=%q want empty for a session that does not exist", got)
+	}
+}
+
 func TestArrowKeysNavigateRelatedSessionsAcrossHITL(t *testing.T) {
 	parentID, firstChild, secondChild := uuid.New(), uuid.New(), uuid.New()
 	client := &navigationChatClient{}

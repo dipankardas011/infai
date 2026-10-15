@@ -22,6 +22,7 @@ const (
 	modalNotice
 	modalPromptArgs
 	modalElicit
+	modalStats
 )
 
 // elicitFieldKind is how an elicitation row's value is typed and validated. It
@@ -132,6 +133,9 @@ type modalModel struct {
 	searching  bool
 	matches    []int
 	matchIndex int
+	// stats is the session-stats page's snapshot. The page has no options to
+	// choose from and shows only what the session has already reported.
+	stats sessionStats
 }
 
 // search runs query over the timeline's rows and puts the cursor on the first
@@ -299,6 +303,9 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 	}
 	if m.kind == modalElicit {
 		return renderElicitPanel(m, width, height, styles)
+	}
+	if m.kind == modalStats {
+		return renderStatsPanel(m, width, height, styles)
 	}
 	contentWidth := max(width-4, 1)
 	header := styles.heading(m.title, everforest.Background)

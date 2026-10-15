@@ -68,7 +68,11 @@ type chatModel struct {
 	pending           []contracts.ImageInput
 	clipboard         Clipboard
 	used              uint64
-	blocks            []block
+	// lastUsage is the provider's own accounting for the turn this client saw
+	// finish. It is the live half of what the stats page draws; the session's
+	// saved report covers a client that joined after the turn.
+	lastUsage *contracts.TokenUsage
+	blocks    []block
 
 	width    int
 	height   int
@@ -317,6 +321,46 @@ func (m *chatModel) Init() tea.Cmd {
 	return tea.Batch(m.composer.Focus(), m.initCmd)
 }
 
+// sessionStats snapshots what the stats page draws. The last turn is the report
+// this client saw live, otherwise the one the session saved, so a resumed
+// session still shows the turn that filled its context. Context usage comes
+// from the same reports: the live total when this client has one, and the turn
+// that was measured when it does not.
+func (m *chatModel) sessionStats() sessionStats {
+	stats := sessionStats{
+		meta:          m.session,
+		status:        m.status,
+		contextWindow: m.contextWindow,
+		used:          m.used,
+	}
+	last := m.session.LastTurnMeta
+	switch {
+	case m.lastUsage != nil:
+		stats.usage = m.lastUsage
+		stats.usageProvider, stats.usageModel = m.session.Provider, m.session.Model
+	case last != nil:
+		usage := last.Usage
+		stats.usage = &usage
+		stats.usageProvider, stats.usageModel = last.Provider, last.Model
+		if stats.used == 0 {
+			stats.used = usage.PromptTokens + usage.CompletionTokens
+		}
+		if stats.contextWindow == 0 {
+			stats.contextWindow = last.ContextWindow
+		}
+	}
+	return stats
+}
+
+// statsHintView is the row's hint that the session has a page of its own: the
+// key to press, in the terminal's bright black.
+func (m *chatModel) statsHintView() string {
+	if m.session.ID == uuid.Nil {
+		return ""
+	}
+	return m.styles.hint.Render("ctrl+d stats")
+}
+
 func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
@@ -331,6 +375,10 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.used = 0
+		// The view carries the session's own report, and the observer stream is
+		// about to deliver the turns that follow it, so a report this client saw
+		// in a session it has just left must not stand in for either.
+		m.lastUsage = nil
 		m.workStatus = ""
 		m.workBegan = time.Time{}
 		m.status = contracts.SessionIdle
@@ -437,6 +485,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.parentAgentKind = msg.parentAgentKind
 		m.relatedSessionSelection = uuid.Nil
 		m.used = 0
+		m.lastUsage = nil
 		m.workStatus = ""
 		m.workBegan = time.Time{}
 		m.working = false
@@ -533,6 +582,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.replaceBlocks(nil)
 		m.checklist = contracts.TaskChecklistState{}
 		m.used = 0
+		m.lastUsage = nil
 		m.modal = nil
 		// The response carries the MCP status because this client has not joined
 		// the new session yet; the join view repeats it once it arrives, which
@@ -565,6 +615,11 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.session = *msg.meta
 			m.used = 0
+			// The measurement describes the context compaction has just
+			// replaced, so it goes with it: the next turn measures the new one
+			// and both this page and the status row read that.
+			m.lastUsage = nil
+			m.session.LastTurnMeta = nil
 			m.replaceBlocks(blocksFromRecords(msg.records))
 			m.checklist = taskChecklistFromRecords(msg.records)
 		}
@@ -663,6 +718,19 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+o" && m.modal == nil {
 		m.openSessionList()
 		return m, listSessionsCmd(m.ctx, m.client)
+	}
+	// The session's own accounting is a page like any other, and the key that
+	// opens it closes it again.
+	if key == "ctrl+d" && m.modal == nil {
+		if m.session.ID == uuid.Nil {
+			return m, nil
+		}
+		m.modal = &modalModel{
+			kind: modalStats, title: "Session stats",
+			body:  "What this session is, how full its context is, and where the last turn's tokens went.",
+			stats: m.sessionStats(),
+		}
+		return m, nil
 	}
 	if key == "esc" && m.modal == nil && m.relatedSessionSelection != uuid.Nil {
 		m.relatedSessionSelection = uuid.Nil
@@ -1153,6 +1221,11 @@ func (m *chatModel) handleTimelineSearchKey(msg tea.KeyPressMsg, key string) (te
 
 func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	// A read-only page owns nothing but itself: the key that opened it takes it
+	// down again.
+	if m.modal.kind == modalStats && key == "ctrl+d" {
+		return m.closePage()
+	}
 	if m.modal.kind == modalSessions {
 		if cmd, handled := m.handleSessionListKey(key); handled {
 			return cmd
@@ -1185,11 +1258,7 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 			if m.modal.kind == modalSessions {
 				return m.resumeSessionFromList()
 			}
-			m.modal = nil
-			m.reflow()
-			if m.session.ID != uuid.Nil && m.sessionCancel == nil {
-				return m.startSessionObserver(m.session.ID)
-			}
+			return m.closePage()
 		}
 	case "enter":
 		return m.activateModal(m.modal.selected)
@@ -1210,6 +1279,18 @@ func (m *chatModel) resumeSessionFromList() tea.Cmd {
 	m.modal = nil
 	m.reflow()
 	if m.session.ID != uuid.Nil {
+		return m.startSessionObserver(m.session.ID)
+	}
+	return nil
+}
+
+// closePage takes down a full page that owns nothing but itself. A page opened
+// before the session was joined leaves no observer behind, so one is started
+// again here.
+func (m *chatModel) closePage() tea.Cmd {
+	m.modal = nil
+	m.reflow()
+	if m.session.ID != uuid.Nil && m.sessionCancel == nil {
 		return m.startSessionObserver(m.session.ID)
 	}
 	return nil
@@ -1592,6 +1673,9 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 	case contracts.NotifyAgentUsage:
 		var usage contracts.TokenUsage
 		if json.Unmarshal([]byte(content), &usage) == nil {
+			// The report is kept whole, not just the total the status row shows:
+			// the stats page reads its parts.
+			m.lastUsage = &usage
 			m.used = usage.TotalTokens
 		}
 	default:
@@ -2218,6 +2302,13 @@ func (m *chatModel) View() tea.View {
 		// A modal is a screen of its own: the chat behind it is not built at
 		// all, so a keystroke on a 4k-event branch timeline costs the rows it
 		// shows and nothing else.
+		//
+		// The stats page is the one screen that draws a session's own moves, and
+		// the session keeps reporting while it is up, so its snapshot is rebuilt
+		// for the frame it is drawing.
+		if m.modal.kind == modalStats {
+			m.modal.stats = m.sessionStats()
+		}
 		base = renderSelectionScreen(m.modal, m.width, m.height, m.styles)
 	} else {
 		header := m.headerView()
@@ -2409,11 +2500,25 @@ func (m *chatModel) sessionRowView() string {
 	}
 
 	inner := max(m.width-2, 1)
+	// trail renders the run at the right edge: the key that opens the session's
+	// own page, then the marks that describe it. The marks stay on the edge, so
+	// the hint is what a tight row gives up, before the name does.
+	hint := m.statsHintView()
+	trail := func(withWords, withHint bool) string {
+		run := groups(withWords)
+		if withHint && hint != "" {
+			run = hint + separator + run
+		}
+		return run
+	}
 	// The words are the first thing to go, exactly as in the session list: the
 	// glyphs still carry the kind and the status.
-	marks := groups(false)
-	if inner-lipgloss.Width(groups(true))-sessionRowGap >= minSessionNameRoom {
-		marks = groups(true)
+	marks := trail(false, false)
+	if inner-lipgloss.Width(trail(true, false))-sessionRowGap >= minSessionNameRoom {
+		marks = trail(true, false)
+	}
+	if inner-lipgloss.Width(trail(true, true))-sessionRowGap >= minSessionNameRoom {
+		marks = trail(true, true)
 	}
 	name := ""
 	if room := inner - lipgloss.Width(marks) - sessionRowGap; room >= minSessionNameRoom {
@@ -2617,7 +2722,7 @@ func contextProgressBar(styles harnessStyles, percent, width int) string {
 	}
 	filled := strings.Repeat("█", full) + contextBarLevels[partial]
 	return styles.active.Render(filled) +
-		lipgloss.NewStyle().Foreground(everforest.SurfaceAlt).Render(strings.Repeat("░", max(width-lipgloss.Width(filled), 0)))
+		styles.tokenRest.Render(strings.Repeat("░", max(width-lipgloss.Width(filled), 0)))
 }
 
 func (m *chatModel) taskChecklistView(width int) string {
