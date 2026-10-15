@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/color"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -48,17 +49,16 @@ func (m *chatModel) handleApprovalKey(key string) (tea.Model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 	switch key {
-	case "a":
-		return m, m.resolveApproval(string(contracts.ApprovalApprove), ""), true
-	case "d":
-		return m, m.resolveApproval(string(contracts.ApprovalDeny), ""), true
-	case "r":
-		m.approvalReason = true
-		m.approvalDraft = m.composer.Value()
-		m.composer.Reset()
-		m.refreshComposerState()
-		m.reflow()
-		return m, nil, true
+	case "left":
+		return m, m.moveApprovalChoice(-1), true
+	case "right":
+		return m, m.moveApprovalChoice(1), true
+	case "enter":
+		choice := approvalChoices[m.approvalChoice]
+		if choice.decision == string(contracts.ApprovalDenyWithReason) {
+			return m, m.typeApprovalReason(), true
+		}
+		return m, m.resolveApproval(choice.decision, ""), true
 	case "ctrl+g":
 		m.approvalShown = !m.approvalShown
 		m.refreshTranscript(true)
@@ -70,6 +70,43 @@ func (m *chatModel) handleApprovalKey(key string) (tea.Model, tea.Cmd, bool) {
 	return m, nil, true
 }
 
+// approvalChoice is one answer the band offers: what the server is told, what
+// the button says, and the tint that says which answer it is.
+type approvalChoice struct {
+	decision string
+	label    string
+	tint     color.Color
+}
+
+// approvalChoices are the answers, in the order the band draws them. The tints
+// are one per answer so the row reads the same on every decision: go, stop, and
+// stop with a note.
+var approvalChoices = []approvalChoice{
+	{decision: string(contracts.ApprovalApprove), label: "Approve", tint: everforest.Green},
+	{decision: string(contracts.ApprovalDeny), label: "Deny", tint: everforest.Red},
+	{decision: string(contracts.ApprovalDenyWithReason), label: "Deny With Reason", tint: everforest.Orange},
+}
+
+// moveApprovalChoice walks the selection by one button and stops at the ends:
+// the row is short enough to read at a glance, so a selection that wrapped would
+// only move work that is already done.
+func (m *chatModel) moveApprovalChoice(delta int) tea.Cmd {
+	m.approvalChoice = max(0, min(m.approvalChoice+delta, len(approvalChoices)-1))
+	m.reflow()
+	return nil
+}
+
+// typeApprovalReason hands the composer to the reason, keeping the draft that
+// was in it for the turn that resumes afterwards.
+func (m *chatModel) typeApprovalReason() tea.Cmd {
+	m.approvalReason = true
+	m.approvalDraft = m.composer.Value()
+	m.composer.Reset()
+	m.refreshComposerState()
+	m.reflow()
+	return nil
+}
+
 // resolveApproval answers the pending decision and records what was answered.
 func (m *chatModel) resolveApproval(decision, reason string) tea.Cmd {
 	approval := m.approval
@@ -78,6 +115,7 @@ func (m *chatModel) resolveApproval(decision, reason string) tea.Cmd {
 	}
 	m.approval = nil
 	m.approvalShown = false
+	m.approvalChoice = 0
 	m.approvalReason = false
 	m.approvalDraft = ""
 	m.refreshComposerState()
@@ -97,6 +135,7 @@ func (m *chatModel) resolveApproval(decision, reason string) tea.Cmd {
 func (m *chatModel) showApproval(approval *Approval) {
 	m.approval = approval
 	m.approvalShown = false
+	m.approvalChoice = 0
 	m.approvalReason = false
 	m.approvalDraft = ""
 	m.reflow()
@@ -110,6 +149,7 @@ func (m *chatModel) clearApproval() {
 	}
 	m.approval = nil
 	m.approvalShown = false
+	m.approvalChoice = 0
 	m.approvalReason = false
 	m.approvalDraft = ""
 	m.refreshComposerState()
@@ -148,9 +188,10 @@ func (m *chatModel) approvalDetailBlock(width int) string {
 }
 
 // hitlView is the reserved block for a pending decision. The first row names the
-// tool and previews what it would do; the second carries the answers, with the
-// way to expand the detail right-aligned. It sits between the task checklist and
-// the status row, so a blocked turn stays visible without covering anything.
+// tool and previews what it would do; the second carries the answers as
+// buttons, with the way to expand the detail right-aligned. It sits between the
+// task checklist and the status row, so a blocked turn stays visible without
+// covering anything.
 func (m *chatModel) hitlView() string {
 	if m.approval == nil {
 		return ""
@@ -163,18 +204,19 @@ func (m *chatModel) hitlView() string {
 		first += band.Render("  ") + m.styles.hitlBody.Render(truncateLine(preview, room))
 	}
 
-	answers := band.Render("   ") + m.styles.hitlAllow.Render("[A]llow") +
-		band.Render("   ") + m.styles.hitlDeny.Render("[D]eny") +
-		band.Render("   ") + m.styles.hitlBody.Render("[R]eason")
-	second := answers
+	second := m.approvalButtons()
 	if m.approvalReason {
-		// The composer is taking the reason, so the answers are not live; the row
-		// names the mode instead of offering keys that would type instead.
+		// The composer is taking the reason, so the buttons are not live; the row
+		// names the mode instead of offering buttons that would only take a click
+		// the composer needs for a character.
 		second = band.Render("   ") + m.styles.hitlMuted.Render("deny with reason")
 	}
-	hint := "(expand with ctrl+g)"
-	if m.approvalShown {
-		hint = "(collapse with ctrl+g)"
+	hint := "(←/→ choose · ⏎ answer · ctrl+g detail)"
+	switch {
+	case m.approvalReason:
+		hint = "(⏎ deny · esc back)"
+	case m.approvalShown:
+		hint = "(←/→ choose · ⏎ answer · ctrl+g collapse)"
 	}
 	// The hint is the same subdued grey as a muted span: it is an aside, so it
 	// stays on the band instead of carving a darker island out of the tint.
@@ -183,6 +225,26 @@ func (m *chatModel) hitlView() string {
 		second += band.Render(strings.Repeat(" ", gap)) + styled
 	}
 	return bandLine(band, m.width, first) + "\n" + bandLine(band, m.width, second)
+}
+
+// approvalButtons draws the answers as one button per choice. Every button keeps
+// its own tint, so the row says which answer is which; the chosen one is filled
+// with that tint, and the rest are dark cells on the band, so the row also says
+// which answer enter would take.
+func (m *chatModel) approvalButtons() string {
+	band := m.styles.hitl
+	row := band.Render("   ")
+	for i, choice := range approvalChoices {
+		if i > 0 {
+			row += band.Render(" ")
+		}
+		style := lipgloss.NewStyle().Background(everforest.Surface).Foreground(choice.tint)
+		if i == m.approvalChoice {
+			style = lipgloss.NewStyle().Background(choice.tint).Foreground(everforest.Background).Bold(true)
+		}
+		row += style.Render(" " + choice.label + " ")
+	}
+	return row
 }
 
 // bandLine fills a band row out to the given width with the band's own

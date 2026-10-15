@@ -92,8 +92,6 @@ type harnessStyles struct {
 	hitlName         lipgloss.Style
 	hitlBody         lipgloss.Style
 	hitlMuted        lipgloss.Style
-	hitlAllow        lipgloss.Style
-	hitlDeny         lipgloss.Style
 	sessionName      lipgloss.Style
 	muted            lipgloss.Style
 	userMarker       lipgloss.Style
@@ -160,8 +158,6 @@ func newHarnessStyles() harnessStyles {
 		hitlName:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Purple).Bold(true),
 		hitlBody:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Text),
 		hitlMuted: lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Muted),
-		hitlAllow: lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Green).Bold(true),
-		hitlDeny:  lipgloss.NewStyle().Background(everforest.AttentionBg).Foreground(everforest.Red).Bold(true),
 		// The session name is a title, not a state: it takes weight instead of a
 		// hue, so every colour on the session row is left to mean kind or status.
 		sessionName: lipgloss.NewStyle().Foreground(everforest.Text).Bold(true),

@@ -311,7 +311,7 @@ func TestPendingDecisionDimsTheComposerAndKeepsTheDraft(t *testing.T) {
 	}
 
 	// Answering hands the composer back with the draft intact.
-	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	if got := m.composer.Styles().Focused.Text.GetForeground(); got != everforest.Text {
 		t.Fatalf("composer text stayed dim after the decision: %v", got)
 	}
@@ -333,7 +333,7 @@ func TestReasonModeKeepsTheComposerActive(t *testing.T) {
 		Name: contracts.BashTool, Arguments: `{"command":"ls"}`,
 	}}})
 
-	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'r', Text: "r"}))
+	answerApproval(m, 2) // Deny With Reason
 	if got := m.composer.Styles().Focused.Text.GetForeground(); got != everforest.Text {
 		t.Fatalf("the reason field is dimmed: %v", got)
 	}
@@ -1088,7 +1088,7 @@ func TestHitlViewUsesCompactEditPreview(t *testing.T) {
 	}}})
 
 	view := ansi.Strip(m.hitlView())
-	for _, want := range []string{"edit", "demo/workload_demov1.yaml", "3→4 lines", "[A]llow"} {
+	for _, want := range []string{"edit", "demo/workload_demov1.yaml", "3→4 lines", "Approve"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("HITL view lacks %q:\n%s", want, view)
 		}
@@ -1767,7 +1767,7 @@ func TestApprovalBandKeepsTranscriptVisible(t *testing.T) {
 	m.showApproval(&Approval{})
 
 	collapsed := ansi.Strip(m.View().Content)
-	for _, want := range []string{"transcript remains visible", "TOOL", "[A]llow", "[D]eny"} {
+	for _, want := range []string{"transcript remains visible", "TOOL", "Approve", "Deny"} {
 		if !strings.Contains(collapsed, want) {
 			t.Fatalf("approval view does not contain %q:\n%s", want, collapsed)
 		}
@@ -1776,7 +1776,7 @@ func TestApprovalBandKeepsTranscriptVisible(t *testing.T) {
 	// content visible behind it.
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	expanded := ansi.Strip(m.View().Content)
-	for _, want := range []string{"transcript remains visible", "Human In the Loop", "tool_call: TOOL", "[A]llow", "[D]eny"} {
+	for _, want := range []string{"transcript remains visible", "Human In the Loop", "tool_call: TOOL", "Approve", "Deny"} {
 		if !strings.Contains(expanded, want) {
 			t.Fatalf("expanded approval view does not contain %q:\n%s", want, expanded)
 		}
@@ -1796,13 +1796,13 @@ func TestApprovalReservesOneLineAndExpandsIntoTheTranscript(t *testing.T) {
 
 	// Collapsed: one reserved line that carries the answers and hides the body.
 	collapsed := ansi.Strip(m.View().Content)
-	for _, want := range []string{"bash", "[A]llow", "[D]eny", "[R]eason", "ctrl+g"} {
+	for _, want := range []string{"bash", "Approve", "Deny", "Deny With Reason", "ctrl+g"} {
 		if !strings.Contains(collapsed, want) {
 			t.Fatalf("pending block lacks %q:\n%s", want, collapsed)
 		}
 	}
 	// The answers get their own row rather than crowding the preview.
-	if !strings.Contains(collapsed, "\n   [A]llow   [D]eny   [R]eason") {
+	if !strings.Contains(collapsed, "Approve   Deny   Deny With Reason") {
 		t.Fatalf("answers are not on their own row:\n%s", collapsed)
 	}
 	if strings.Contains(collapsed, "WORKING DIRECTORY") {
@@ -1812,7 +1812,7 @@ func TestApprovalReservesOneLineAndExpandsIntoTheTranscript(t *testing.T) {
 	// Expanded: the detail joins the transcript, which owns the scrolling.
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	expanded := ansi.Strip(m.View().Content)
-	for _, want := range []string{"WORKING DIRECTORY  /w", "[A]llow", "[D]eny", "ctrl+g"} {
+	for _, want := range []string{"WORKING DIRECTORY  /w", "Approve", "Deny", "ctrl+g"} {
 		if !strings.Contains(expanded, want) {
 			t.Fatalf("expanded approval lacks %q:\n%s", want, expanded)
 		}
@@ -1820,6 +1820,15 @@ func TestApprovalReservesOneLineAndExpandsIntoTheTranscript(t *testing.T) {
 	if height := lipgloss.Height(m.View().Content); height != 24 {
 		t.Fatalf("approval frame height=%d want 24", height)
 	}
+}
+
+// answerApproval walks the band's buttons to a choice and takes it, the way the
+// arrow keys and enter do.
+func answerApproval(m *chatModel, choice int) {
+	for range choice {
+		_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
+	}
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 }
 
 func TestApprovalKeysAnswerTheDecision(t *testing.T) {
@@ -1836,8 +1845,9 @@ func TestApprovalKeysAnswerTheDecision(t *testing.T) {
 		t.Fatalf("pending approval let %q into the composer", m.composer.Value())
 	}
 
-	// [R]eason hands the composer to the reason and sends it with the denial.
-	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'r', Text: "r"}))
+	// The reason button hands the composer to the reason and sends it with the
+	// denial.
+	answerApproval(m, 2)
 	m.composer.SetValue("delete only inside build")
 	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	if cmd == nil {
@@ -1865,7 +1875,7 @@ func TestApprovalKeysPreserveComposerDraft(t *testing.T) {
 	m.composer.SetValue("queued prompt")
 	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{Name: contracts.BashTool, Arguments: `{"command":"ls"}`}}})
 
-	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+	answerApproval(m, 0)
 	if got := m.composer.Value(); got != "queued prompt" {
 		t.Fatalf("approving cleared draft: got %q", got)
 	}
@@ -1878,7 +1888,7 @@ func TestApprovalReasonRestoresComposerDraft(t *testing.T) {
 	m.composer.SetValue("queued prompt")
 	m.showApproval(&Approval{ToolCall: &contracts.ToolCall{Function: contracts.Function{Name: contracts.BashTool, Arguments: `{"command":"ls"}`}}})
 
-	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'r', Text: "r"}))
+	answerApproval(m, 2)
 	if got := m.composer.Value(); got != "" {
 		t.Fatalf("reason mode kept draft: got %q", got)
 	}
@@ -1902,7 +1912,7 @@ func TestApprovalDetailRendersEditDiff(t *testing.T) {
 
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"Human In the Loop", "tool_call: edit", "TARGET  main.go", "- return old", "+ return new", "[A]llow", "[D]eny"} {
+	for _, want := range []string{"Human In the Loop", "tool_call: edit", "TARGET  main.go", "- return old", "+ return new", "Approve", "Deny"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("edit approval detail lacks %q:\n%s", want, content)
 		}
@@ -1932,7 +1942,7 @@ func TestEditDiffWrapsAndKeepsActionsPinned(t *testing.T) {
 		t.Fatalf("approval view height=%d want 20", height)
 	}
 	content := ansi.Strip(view)
-	for _, want := range []string{"[A]llow", "[D]eny"} {
+	for _, want := range []string{"Approve", "Deny"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("wrapped edit approval lost pinned action %q:\n%s", want, content)
 		}

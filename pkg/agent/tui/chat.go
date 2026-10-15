@@ -107,6 +107,7 @@ type chatModel struct {
 	relatedSessionSelection uuid.UUID
 	approval                *Approval
 	approvalShown           bool
+	approvalChoice          int
 	composerWaiting         bool
 	approvalReason          bool
 	approvalDraft           string
@@ -449,6 +450,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.availableSkills = msg.output.Skills
 		m.pending = nil
 		m.approval = nil
+		m.approvalChoice = 0
 		m.approvalReason = false
 		m.approvalShown = false
 		m.approvalDraft = ""
@@ -512,6 +514,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelStatus = ""
 		m.status = contracts.SessionIdle
 		m.approval = nil
+		m.approvalChoice = 0
 		m.approvalReason = false
 		m.approvalShown = false
 		m.approvalDraft = ""
