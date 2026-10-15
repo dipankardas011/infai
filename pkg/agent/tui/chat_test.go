@@ -1002,6 +1002,9 @@ func TestToolCallPreviewFormatsKnownTools(t *testing.T) {
 		{name: "bash", arguments: `{"command":"grep -E 'MemTotal' /proc/meminfo; lscpu","workdir":"scripts"}`, want: []string{"cwd  scripts", "$ grep -E 'MemTotal' /proc/meminfo; lscpu"}},
 		{name: "write", arguments: `{"path":"notes.txt","content":"first\nsecond"}`, want: []string{"→ notes.txt", "2 lines, 12 bytes", "1  first", "2  second"}},
 		{name: "edit", arguments: `{"path":"main.go","old_string":"old\nsame","new_string":"new\nsame","replace_all":true}`, want: []string{"diff --git a/main.go b/main.go", "--- a/main.go", "+++ b/main.go", "@@ -1,2 +1,2 @@", "\n-old\n+new\n same", "(every match)"}},
+		{name: "search", arguments: `{"path":"pkg/agent/tui/selection.go","pattern":"func (m *chatModel) selectionText"}`, want: []string{"func (m *chatModel) selectionText", "path  pkg/agent/tui/selection.go"}},
+		{name: "glob", arguments: `{"pattern":"pkg/agent/tui/*.go"}`, want: []string{"pkg/agent/tui/*.go"}},
+		{name: "list", arguments: `{"path":"pkg/agent/tui"}`, want: []string{"pkg/agent/tui"}},
 	}
 	for _, tt := range tests {
 		body := ansi.Strip(toolCallPreview(tt.name, tt.arguments))
@@ -1010,6 +1013,35 @@ func TestToolCallPreviewFormatsKnownTools(t *testing.T) {
 				t.Fatalf("tool preview for %q lacks %q: %q", tt.name, want, body)
 			}
 		}
+	}
+}
+
+func TestToolCallPreviewFormatsFilesystemToolsWithoutJSON(t *testing.T) {
+	cases := []struct {
+		name      string
+		arguments string
+		want      []string
+		unwanted  []string
+	}{
+		{name: "search", arguments: `{"path":"pkg/agent/tui","pattern":"selectionText"}`, want: []string{"selectionText", "path  pkg/agent/tui"}, unwanted: []string{"{", `"pattern"`, `"path"`}},
+		{name: "glob", arguments: `{"pattern":"pkg/agent/tui/*.go"}`, want: []string{"pkg/agent/tui/*.go"}, unwanted: []string{"{", `"pattern"`}},
+		{name: "list", arguments: `{"path":"pkg/agent/tui"}`, want: []string{"pkg/agent/tui"}, unwanted: []string{"{", `"path"`}},
+		{name: "list", arguments: `{}`, want: []string{"."}, unwanted: []string{"{"}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			body := ansi.Strip(toolCallPreview(tt.name, tt.arguments))
+			for _, want := range tt.want {
+				if !strings.Contains(body, want) {
+					t.Fatalf("preview for %q lacks %q: %q", tt.name, want, body)
+				}
+			}
+			for _, unwanted := range tt.unwanted {
+				if strings.Contains(body, unwanted) {
+					t.Fatalf("preview for %q still shows %q: %q", tt.name, unwanted, body)
+				}
+			}
+		})
 	}
 }
 

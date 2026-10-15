@@ -3682,6 +3682,40 @@ func toolCallPreview(name, arguments string) string {
 		}
 		return preview
 
+	case contracts.SearchTool:
+		var args struct {
+			Path    string `json:"path"`
+			Pattern string `json:"pattern"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return prettyToolArguments(arguments)
+		}
+		if args.Path == "" {
+			return args.Pattern
+		}
+		return args.Pattern + "\npath  " + args.Path
+
+	case contracts.GlobTool:
+		var args struct {
+			Pattern string `json:"pattern"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return prettyToolArguments(arguments)
+		}
+		return args.Pattern
+
+	case contracts.ListTool:
+		var args struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return prettyToolArguments(arguments)
+		}
+		if args.Path == "" {
+			return "."
+		}
+		return args.Path
+
 	case contracts.BashTool:
 		var args struct {
 			Command string `json:"command"`
