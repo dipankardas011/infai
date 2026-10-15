@@ -33,12 +33,25 @@ type SessionMeta struct {
 	// Conclusion records how the session ended, written once when it does and
 	// never rewritten. Nil while the session has not ended.
 	Conclusion *SessionConclusion `json:"conclusion,omitempty"`
+
+	LastTurnMeta *LastTurnMeta `json:"last_turn_meta,omitempty"`
 }
 
 type SessionConclusion struct {
 	// Status is the settled status the session ended on.
 	Status contracts.SessionStatus `json:"status"`
 	Reason string                  `json:"reason,omitempty"`
+}
+
+type LastTurnMeta struct {
+	Usage         contracts.TokenUsage `json:"usage"`
+	ContextWindow uint64               `json:"context_window"`
+
+	// The model that produced this report, which is not always the session's
+	// current model: a session can switch models, and these numbers were
+	// measured against the window of the one that answered.
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 type sessionFile struct {
@@ -51,6 +64,7 @@ type sessionFile struct {
 	CreatedAt      time.Time           `json:"created_at"`
 	UpdatedAt      time.Time           `json:"updated_at"`
 	Conclusion     *SessionConclusion  `json:"conclusion,omitempty"`
+	LastTurnMeta   *LastTurnMeta       `json:"last_turn_meta,omitempty"`
 	AgentKind      contracts.AgentKind `json:"agent_kind"`
 	EvalBashScript *string             `json:"eval_bash_script"`
 	MaxTurns       *uint64             `json:"max_turns,omitempty"`
@@ -83,6 +97,10 @@ func newSessionFile(meta SessionMeta) sessionFile {
 		conclusion := *meta.Conclusion
 		file.Conclusion = &conclusion
 	}
+	if meta.LastTurnMeta != nil {
+		lastTurn := *meta.LastTurnMeta
+		file.LastTurnMeta = &lastTurn
+	}
 	return file
 }
 
@@ -112,6 +130,10 @@ func (f sessionFile) meta() SessionMeta {
 	if f.Conclusion != nil {
 		conclusion := *f.Conclusion
 		meta.Conclusion = &conclusion
+	}
+	if f.LastTurnMeta != nil {
+		lastTurn := *f.LastTurnMeta
+		meta.LastTurnMeta = &lastTurn
 	}
 	return meta
 }
@@ -190,9 +212,23 @@ func (s *SessionStore) SaveMeta(meta SessionMeta) error {
 	if err != nil {
 		return fmt.Errorf("store: encode session metadata: %w", err)
 	}
-	tmpPath := s.sessionMetaPath(meta.ID) + ".tmp"
-	if err := os.WriteFile(tmpPath, append(data, '\n'), 0o600); err != nil {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tmp, err := os.CreateTemp(s.SessionStoreDirectory(meta.ID), "session.json.*.tmp")
+	if err != nil {
+		return fmt.Errorf("store: stage session metadata: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		tmp.Close()
 		return fmt.Errorf("store: write session metadata: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("store: close session metadata: %w", err)
 	}
 	if err := os.Rename(tmpPath, s.sessionMetaPath(meta.ID)); err != nil {
 		return fmt.Errorf("store: commit session metadata: %w", err)

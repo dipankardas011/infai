@@ -727,8 +727,20 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			contracts.EventSkillLoad,
 			contracts.EventMessageFromAgentInbox,
 			contracts.EventArtifact,
-			contracts.EventSidecarStatus,
-			contracts.NotifyAgentUsage:
+			contracts.EventSidecarStatus:
+			s.mu.Lock()
+			s.inFlight = append(s.inFlight, event)
+			s.notifySubscribers(event)
+			s.mu.Unlock()
+
+		case contracts.NotifyAgentUsage:
+			var usage contracts.TokenUsage
+			if err := json.Unmarshal([]byte(*event.Content), &usage); err != nil {
+				s.l.Warn("discard undecodable agent usage", "session_id", s.meta.ID, "error", err)
+			} else {
+				s.recordLastTurnUsage(usage)
+			}
+
 			s.mu.Lock()
 			s.inFlight = append(s.inFlight, event)
 			s.notifySubscribers(event)

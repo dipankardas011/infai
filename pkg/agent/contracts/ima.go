@@ -80,6 +80,38 @@ type TokenUsage struct {
 	PromptTokens     uint64 `json:"prompt_tokens"`
 	CompletionTokens uint64 `json:"completion_tokens"`
 	TotalTokens      uint64 `json:"total_tokens"`
+
+	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+func (u TokenUsage) UncachedPromptTokens() uint64 {
+	if u.PromptTokensDetails == nil || u.PromptTokensDetails.CachedTokens > u.PromptTokens {
+		return u.PromptTokens
+	}
+	return u.PromptTokens - u.PromptTokensDetails.CachedTokens
+}
+
+type PromptTokensDetails struct {
+	CachedTokens     uint64 `json:"cached_tokens,omitempty"`
+	CacheWriteTokens uint64 `json:"cache_write_tokens,omitempty"` // Written into the cache by this request, not read from it.
+
+	TextTokens  uint64 `json:"text_tokens,omitempty"`
+	ImageTokens uint64 `json:"image_tokens,omitempty"`
+	AudioTokens uint64 `json:"audio_tokens,omitempty"`
+}
+
+type CompletionTokensDetails struct {
+	ReasoningTokens uint64 `json:"reasoning_tokens,omitempty"`
+
+	// Prediction tokens belong to the predicted-output feature: the accepted
+	// ones are the draft the model kept, the rejected ones are the draft it
+	// threw away.
+	AcceptedPredictionTokens uint64 `json:"accepted_prediction_tokens,omitempty"`
+	RejectedPredictionTokens uint64 `json:"rejected_prediction_tokens,omitempty"`
+
+	TextTokens  uint64 `json:"text_tokens,omitempty"`
+	AudioTokens uint64 `json:"audio_tokens,omitempty"`
 }
 
 // GenerateOptions carries per-request provider knobs.

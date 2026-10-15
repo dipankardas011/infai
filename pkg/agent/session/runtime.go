@@ -107,6 +107,24 @@ func (s *InfaiAgentSession) recordSessionConclusion(status contracts.SessionStat
 	}
 }
 
+func (s *InfaiAgentSession) recordLastTurnUsage(usage contracts.TokenUsage) {
+	specs := s.modelClient().GetModelSpecs()
+
+	s.mu.Lock()
+	s.meta.LastTurnMeta = &store.LastTurnMeta{
+		Usage:         usage,
+		ContextWindow: specs.Model().MaxContextLength,
+		Provider:      specs.ProviderName(),
+		Model:         specs.Model().Id,
+	}
+	meta := s.meta
+	s.mu.Unlock()
+
+	if err := s.store.SaveMeta(meta); err != nil {
+		s.l.Error("persist last turn usage", "session_id", meta.ID, "error", err)
+	}
+}
+
 // publish hands one event to the session's hub.
 //
 // Callers must not hold s.mu: the hub takes it to fan an event out, so a send

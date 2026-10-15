@@ -281,10 +281,12 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 			continue
 		}
 
-		if encoded, err := json.Marshal(usage); err == nil {
-			content := string(encoded)
-			if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.NotifyAgentUsage, Timestamp: time.Now().UTC(), Content: &content}) {
-				return
+		if usage != nil {
+			if encoded, err := json.Marshal(usage); err == nil {
+				content := string(encoded)
+				if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.NotifyAgentUsage, Timestamp: time.Now().UTC(), Content: &content}) {
+					return
+				}
 			}
 		}
 

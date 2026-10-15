@@ -497,6 +497,41 @@ type codexUsage struct {
 	InputTokens  uint64 `json:"input_tokens"`
 	OutputTokens uint64 `json:"output_tokens"`
 	TotalTokens  uint64 `json:"total_tokens"`
+
+	InputTokensDetails  *codexUsageDetails `json:"input_tokens_details"`
+	OutputTokensDetails *codexUsageDetails `json:"output_tokens_details"`
+}
+
+type codexUsageDetails struct {
+	CachedTokens     uint64 `json:"cached_tokens"`
+	CacheWriteTokens uint64 `json:"cache_write_tokens"`
+	ReasoningTokens  uint64 `json:"reasoning_tokens"`
+}
+
+// tokenUsage converts one Responses API report into the canonical accounting. It
+// answers a nil receiver with nil, so a response that carried no usage stays a
+// response that carried no usage.
+func (u *codexUsage) tokenUsage() *contracts.TokenUsage {
+	if u == nil {
+		return nil
+	}
+	usage := &contracts.TokenUsage{
+		PromptTokens:     u.InputTokens,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      u.TotalTokens,
+	}
+	if u.InputTokensDetails != nil {
+		usage.PromptTokensDetails = &contracts.PromptTokensDetails{
+			CachedTokens:     u.InputTokensDetails.CachedTokens,
+			CacheWriteTokens: u.InputTokensDetails.CacheWriteTokens,
+		}
+	}
+	if u.OutputTokensDetails != nil {
+		usage.CompletionTokensDetails = &contracts.CompletionTokensDetails{
+			ReasoningTokens: u.OutputTokensDetails.ReasoningTokens,
+		}
+	}
+	return usage
 }
 
 type codexOutputItem struct {
@@ -603,12 +638,7 @@ func (o *openAICodexResponsesAPI) readStream(ctx context.Context, body io.Reader
 				return contracts.ChatMessage{}, nil, fmt.Errorf("openai codex responses api: response ended with status %q", value.Response.Status)
 			}
 			terminal = true
-			if value.Response.Usage != nil {
-				usage = &contracts.TokenUsage{
-					PromptTokens: value.Response.Usage.InputTokens, CompletionTokens: value.Response.Usage.OutputTokens,
-					TotalTokens: value.Response.Usage.TotalTokens,
-				}
-			}
+			usage = value.Response.Usage.tokenUsage()
 			for _, item := range value.Response.Output {
 				if err := collectArtifact(item); err != nil {
 					return contracts.ChatMessage{}, nil, err

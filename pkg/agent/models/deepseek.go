@@ -132,6 +132,7 @@ type deepSeekChatResponse struct {
 		Message      contracts.ChatMessage `json:"message"`
 		FinishReason string                `json:"finish_reason"`
 	} `json:"choices"`
+
 	Usage *contracts.TokenUsage `json:"usage"`
 }
 
