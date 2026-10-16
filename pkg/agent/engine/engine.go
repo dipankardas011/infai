@@ -90,6 +90,8 @@ func NewInfaiAgentEngine(parent context.Context, bgLogger *slog.Logger, cfg *con
 		}
 	}
 
+	go engine.watchManagedProviderCatalogs()
+
 	return engine, nil
 }
 
