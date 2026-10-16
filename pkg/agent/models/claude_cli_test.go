@@ -21,13 +21,9 @@ func realClaude(t *testing.T) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix paths")
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		local := filepath.Join(home, ".local", "bin")
-		t.Setenv("PATH", local+string(os.PathListSeparator)+os.Getenv("PATH"))
-	}
 	path, err := exec.LookPath("claude")
 	if err != nil {
-		t.Skip("claude is not installed")
+		t.Skipf("claude is not on PATH: %v", err)
 	}
 	return path
 }
