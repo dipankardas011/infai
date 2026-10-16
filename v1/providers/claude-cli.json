@@ -1,0 +1,94 @@
+{
+    "fable": {
+        "provider": "claude-cli",
+        "base_url": "claude",
+        "api_type": "claude-cli-print",
+        "id": "fable",
+        "name": "Claude Fable 5.1",
+        "max_context_window": 1000000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+        }
+    },
+    "opus": {
+        "provider": "claude-cli",
+        "base_url": "claude",
+        "api_type": "claude-cli-print",
+        "id": "opus",
+        "name": "Claude Opus 5.5",
+        "max_context_window": 1000000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+        }
+    },
+    "sonnet": {
+        "provider": "claude-cli",
+        "base_url": "claude",
+        "api_type": "claude-cli-print",
+        "id": "sonnet",
+        "name": "Claude Sonnet 5.5",
+        "max_context_window": 1000000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+        }
+    },
+    "haiku": {
+        "provider": "claude-cli",
+        "base_url": "claude",
+        "api_type": "claude-cli-print",
+        "id": "haiku",
+        "name": "Claude Haiku 5.5",
+        "max_context_window": 1000000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "modality": [
+            "text"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+        }
+    }
+}
