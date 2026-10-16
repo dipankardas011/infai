@@ -421,7 +421,7 @@ func TestWorkingStatusIsProminentAndOmitsTurns(t *testing.T) {
 	if strings.Contains(normalStatus, "turn") {
 		t.Fatalf("status contains turn count: %q", normalStatus)
 	}
-	for _, want := range []string{"gemma4-e2b-it (infai)", "thinking low", "ctx ▎░░░░░ 6% 6/100"} {
+	for _, want := range []string{"gemma4-e2b-it (infai)", "thinking low", "ctx ▎░░░░░ 6/100"} {
 		if !strings.Contains(normalStatus, want) {
 			t.Fatalf("status lacks %q: %q", want, normalStatus)
 		}
@@ -2948,7 +2948,7 @@ func TestSessionLoadResetsStatusAndIgnoresOldObserver(t *testing.T) {
 		ContextWindow: 200, Thinking: contracts.ThinkingHigh,
 	}})
 	status := ansi.Strip(m.statusView())
-	for _, want := range []string{"new-model (new)", "/new", "thinking high", "0% 0/200"} {
+	for _, want := range []string{"new-model (new)", "/new", "thinking high", "0/200"} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("status lacks %q: %q", want, status)
 		}

@@ -112,6 +112,12 @@ func TestStatsPageFallsBackToTheSavedTurn(t *testing.T) {
 		}
 	}
 
+	// The status row reads the same measurement, so a resumed session shows
+	// the context it holds rather than an empty window.
+	if status := ansi.Strip(m.statusView()); !strings.Contains(status, "37.5k/1M") {
+		t.Fatalf("resumed status row lacks the saved turn's context: %q", status)
+	}
+
 	// A session that has never reported a turn says so instead of drawing zero
 	// as if it were a measurement. Its model's window is still known, because
 	// the session was opened with it.

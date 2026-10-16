@@ -332,6 +332,33 @@ func (m *chatModel) Init() tea.Cmd {
 	return tea.Batch(m.composer.Focus(), m.initCmd)
 }
 
+// contextUsed is the token count the context window should be measured
+// against. This client's live report wins; otherwise the turn the session
+// saved stands in, so a resumed session shows the context it actually holds
+// instead of an empty window. It is the same rule the stats page applies.
+func (m *chatModel) contextUsed() uint64 {
+	if m.used > 0 {
+		return m.used
+	}
+	if last := m.session.LastTurnMeta; last != nil {
+		return last.Usage.PromptTokens + last.Usage.CompletionTokens
+	}
+	return 0
+}
+
+// contextWindowSize is the window that measurement is measured against, with
+// the same fallback: a session that reports its window only from the saved turn
+// still draws the right denominator before its model reports one.
+func (m *chatModel) contextWindowSize() uint64 {
+	if m.contextWindow > 0 {
+		return m.contextWindow
+	}
+	if last := m.session.LastTurnMeta; last != nil {
+		return last.ContextWindow
+	}
+	return 0
+}
+
 // sessionStats snapshots what the stats page draws. The last turn is the report
 // this client saw live, otherwise the one the session saved, so a resumed
 // session still shows the turn that filled its context. Context usage comes
@@ -341,8 +368,8 @@ func (m *chatModel) sessionStats() sessionStats {
 	stats := sessionStats{
 		meta:          m.session,
 		status:        m.status,
-		contextWindow: m.contextWindow,
-		used:          m.used,
+		contextWindow: m.contextWindowSize(),
+		used:          m.contextUsed(),
 		relativeErr:   m.relativeIdentityErr,
 	}
 	last := m.session.LastTurnMeta
@@ -354,12 +381,6 @@ func (m *chatModel) sessionStats() sessionStats {
 		usage := last.Usage
 		stats.usage = &usage
 		stats.usageProvider, stats.usageModel = last.Provider, last.Model
-		if stats.used == 0 {
-			stats.used = usage.PromptTokens + usage.CompletionTokens
-		}
-		if stats.contextWindow == 0 {
-			stats.contextWindow = last.ContextWindow
-		}
 	}
 	if m.session.ParentID != uuid.Nil {
 		parent := m.relativeFor(m.session.ParentID, nil)
@@ -2548,9 +2569,11 @@ func (m *chatModel) statusView() string {
 	if m.session.ID == uuid.Nil {
 		rest = m.styles.status.Render("choose a session to begin")
 	} else {
+		used := m.contextUsed()
+		window := m.contextWindowSize()
 		pct := 0
-		if m.contextWindow > 0 {
-			pct = min(int(m.used*100/m.contextWindow), 100)
+		if window > 0 {
+			pct = min(int(used*100/window), 100)
 		}
 		thinking := m.thinking
 		if thinking == "" {
@@ -2564,7 +2587,7 @@ func (m *chatModel) statusView() string {
 		}
 		fields = append(fields,
 			m.styles.active.Render("thinking "+string(thinking)),
-			m.styles.status.Render("ctx ")+contextProgressBar(m.styles, pct, 6)+m.styles.status.Render(fmt.Sprintf(" %d%% %s/%s", pct, tokenCount(m.used), tokenCount(m.contextWindow))),
+			m.styles.status.Render("ctx ")+contextProgressBar(m.styles, pct, 6)+m.styles.status.Render(fmt.Sprintf(" %s/%s", tokenCount(used), tokenCount(window))),
 		)
 		rest = strings.Join(fields, separator)
 	}
