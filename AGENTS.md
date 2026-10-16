@@ -19,11 +19,26 @@ Version is injected via ldflags (`-X github.com/dipankardas011/infai/internal/co
 cmd/inference/   entrypoint (main.go). Other binaries go under cmd/ as well.
 internal/        all shared packages. Not importable outside this module.
 pkg/             reserved for packages promoted for external reuse (empty for now).
-docs/            static site, kept at the repo root.
+catalog/         provider catalogs infaiw fetches from infai.dipankar-das.com/v1/.
+scripts/         buildlog.py, which keeps the site's infaiw build log current.
 ```
 
 Internal packages are promoted to `pkg/` when an external consumer (separate repo or
 module) actually needs them — `git mv internal/<pkg> pkg/<pkg>` plus a path rewrite.
+
+## Website
+
+The site (infai.dipankar-das.com) lives at the root of the **`gh-pages` branch**,
+served by GitHub Pages from that branch. Edit pages by committing to `gh-pages`
+(`git worktree add ../infai-site gh-pages` keeps it beside main).
+
+Two parts of the site are generated and must not be hand-edited there;
+`.github/workflows/site-sync.yml` owns them and is the only automated writer:
+- `v1/` is copied from `catalog/v1` on main. Change provider catalogs on main, in
+  the same commit as the code that depends on them. Released infaiw builds fetch
+  these URLs hourly, so the paths are a public contract.
+- `buildlog.json` is synced from the build-in-public posts on X and the `infaiw-*`
+  tags, every 3 hours and on each infaiw release.
 
 ## Layered Architecture
 

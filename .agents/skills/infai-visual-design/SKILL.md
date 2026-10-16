@@ -12,16 +12,17 @@ like infai: a focused local inference control plane, not a generic AI product.
 
 ## Source Of Truth
 
-The implemented product is authoritative:
+The implemented product is authoritative. The website lives at the root of the
+`gh-pages` branch (read it with `git show gh-pages:<path>`):
 
-- Marketing composition and copy: `docs/index.html`
-- Marketing tokens, typography, effects, and layout: `docs/style.css`
+- Marketing composition and copy: `index.html` (infai) and `infaiw/index.html` (infaiw)
+- Marketing tokens, typography, effects, and layout: `style.css`
 - Terminal palette and theme behavior: `tui/themes.go`
 - Terminal component language: `tui/styles.go`, `tui/header.go`
-- Product screenshots: `docs/profile-config.webp`, `docs/runningmodel.webp`
+- Product screenshots: `profile-config.webp`, `runningmodel.webp`, `infaiw-sidecar-loop.webp`
 
 Inspect these files before inventing a new visual direction. The default public
-identity is based on the Everforest-like dark palette in `docs/style.css`; the TUI
+identity is based on the Everforest-like dark palette in `style.css`; the TUI
 also supports alternate themes, but external branded artwork should use the
 canonical palette below unless a specific theme is requested.
 

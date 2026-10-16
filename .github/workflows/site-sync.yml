@@ -1,0 +1,83 @@
+name: Site sync
+
+# The website lives at the root of the gh-pages branch (GitHub Pages, deploy from
+# branch). Hand-edited pages are committed there directly; this workflow is the only
+# automated writer, and it owns two generated parts of the site:
+#   - v1/   the provider catalogs infaiw fetches, copied from catalog/v1 on main
+#   - buildlog.json   the infaiw build-in-public log (posts on X + infaiw-* tags)
+
+on:
+  push:
+    branches: [main]
+    # Path filters are not evaluated for tag pushes, so every infaiw tag runs this
+    # and refreshes the release markers.
+    tags: ["infaiw-v*.*.*"]
+    paths:
+      - "catalog/**"
+      - "scripts/buildlog.py"
+      - ".github/workflows/site-sync.yml"
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      post:
+        description: "Post URL to start the build-log walk from (optional; defaults to the newest Day NN post)"
+        required: false
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: site-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Kolkata
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/checkout@v6
+        with:
+          ref: gh-pages
+          path: site
+
+      - name: Copy provider catalogs
+        run: rsync -a --delete catalog/v1/ site/v1/
+
+      - name: Sync build log
+        # A mirror outage must not block the catalog sync; the log just waits a run.
+        continue-on-error: true
+        env:
+          POST: ${{ inputs.post }}
+        run: python3 scripts/buildlog.py --log site/buildlog.json ${POST:+"$POST"}
+
+      - name: Commit to gh-pages
+        id: commit
+        working-directory: site
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "site already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore(site): sync provider catalogs and build log"
+          git push origin HEAD:gh-pages
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Request a Pages build
+        # Pushes made with GITHUB_TOKEN may not start a branch-based Pages build.
+        if: steps.commit.outputs.pushed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds"
