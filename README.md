@@ -9,8 +9,6 @@
 ╚═╝╚═╝  ╚═══╝╚═╝     ╚═╝  ╚═╝╚═╝
 ```
 
-![](./cover.webp)
-
 **Two terminal tools for local-first AI, from one repository.**
 
 | | What it is | Website |
@@ -29,6 +27,8 @@ Use either one on its own, or both together.
 ---
 
 ## infai: local inference
+
+[![The infai website: "Flags are not a workflow. Profiles are." beside a runs dashboard with three models running and live CPU, RAM, and VRAM meters](./cover-infai.webp)](https://infai.dipankar-das.com/)
 
 Every inference engine has its own dialect of flags. infai gives them one shape, the
 **profile**: model + engine + config. Define it once, then launch it with a keypress.
@@ -111,6 +111,8 @@ Schema migrations run automatically on startup.
 ---
 
 ## infaiw: agent harness
+
+[![The infaiw website: "Delegate the work. Keep the wheel." beside a chat session waiting for approval to write a file while five sidecar loops run](./cover-infaiw.webp)](https://infai.dipankar-das.com/infaiw/)
 
 infaiw runs agents as a background service, so a session keeps working after you
 close the terminal. The `infaiw` TUI is a client: attach from several terminals,
