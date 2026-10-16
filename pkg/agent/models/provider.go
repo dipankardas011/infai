@@ -27,7 +27,7 @@ func ProvisionProviderAuth(ctx context.Context, providerID contracts.ProviderSlu
 	case contracts.DeepSeek:
 		return beginDeepSeekAuth(method, credential)
 	case contracts.ClaudeCLI:
-		return beginClaudeCLIAuth(method)
+		return beginClaudeCLIAuth(ctx, method)
 	default:
 		return nil, fmt.Errorf("provider %q does not support managed authentication", providerID)
 	}

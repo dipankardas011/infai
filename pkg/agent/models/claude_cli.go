@@ -2,7 +2,6 @@ package models
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,8 +12,13 @@ import (
 
 // claude-cli authenticates outside infai: the user signs the locally installed
 // Claude Code CLI in themselves. infai never reads, stores or forwards a
-// credential for this provider, so the only supported method is "none" and the
-// flow completes immediately.
+// credential for this provider, so the only supported method is "none".
+//
+// Adding the provider is still where the CLI is checked. A provider that could
+// never answer is worth rejecting at add time rather than at the first prompt,
+// so the flow refuses to complete unless the CLI is on PATH and already signed
+// in. It reports only that; the CLI's own status output also names an account
+// and an organisation, and infai keeps none of it.
 func claudeCLIAuthMethods() []contracts.ProviderAuthMethod {
 	return []contracts.ProviderAuthMethod{{
 		Method:      contracts.NoneAuth,
@@ -23,9 +27,12 @@ func claudeCLIAuthMethods() []contracts.ProviderAuthMethod {
 	}}
 }
 
-func beginClaudeCLIAuth(method contracts.LLMProviderAuthMethod) (contracts.ProviderAuthFlow, error) {
+func beginClaudeCLIAuth(ctx context.Context, method contracts.LLMProviderAuthMethod) (contracts.ProviderAuthFlow, error) {
 	if method != contracts.NoneAuth {
 		return nil, fmt.Errorf("claude cli does not support auth method %q", method)
+	}
+	if err := checkClaudeCLIAvailable(ctx, "claude"); err != nil {
+		return nil, err
 	}
 	return staticAuthFlow{auth: contracts.LLMProviderAuth{Method: contracts.NoneAuth}}, nil
 }
@@ -64,17 +71,9 @@ func NewClaudeCLI(model contracts.ProvisionedModel) (*claudeCLI, error) {
 
 func (c *claudeCLI) GetModelSpecs() contracts.ProvisionedModel { return c.model }
 
-// resolveBinary locates the CLI. A path is honoured as given; a bare name is
-// searched on PATH.
+// resolveBinary locates the CLI, sharing its rule with the add-time preflight.
 func (c *claudeCLI) resolveBinary() (string, error) {
-	if strings.ContainsRune(c.binary, '/') {
-		return c.binary, nil
-	}
-	resolved, err := execLookPath(c.binary)
-	if err != nil {
-		return "", errors.New("Claude Code CLI not found. Install it and run `claude` once to sign in.")
-	}
-	return resolved, nil
+	return resolveClaudeBinary(c.binary)
 }
 
 func (c *claudeCLI) attempts(ctx context.Context, systemPrompt, transcript, schema string, allowed map[string]struct{}, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
