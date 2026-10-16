@@ -209,8 +209,6 @@ nav {
 }
 .logo:hover { text-decoration: none; }
 .logo-mark { color: var(--green); margin-right: 0.15em; }
-.logo, .logo-sm { display: inline-flex; align-items: center; }
-.logo-icon { margin-right: 0.55em; border-radius: 22%; box-shadow: 0 0 0 1px var(--border); }
 .logo-cursor { color: var(--green); animation: blink 1.1s step-end infinite; }
 @keyframes blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
 
@@ -446,7 +444,8 @@ nav {
   border-bottom: 1px solid var(--border);
   font-family: var(--mono);
 }
-.panel-title { font-size: 0.72rem; font-weight: 700; color: var(--green); }
+.panel-title { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.72rem; font-weight: 700; color: var(--green); }
+.panel-icon { display: block; border-radius: 22%; }
 .panel-tabs { display: flex; gap: 0.35rem; font-size: 0.64rem; color: var(--muted); }
 .panel-tabs span { padding: 0.18rem 0.55rem; border-radius: 4px; }
 .panel-tabs .tab-active { background: var(--green-dim); color: var(--green); font-weight: 700; }
