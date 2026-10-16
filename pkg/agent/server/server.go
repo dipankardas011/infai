@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -219,8 +220,14 @@ func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) ListenAndServe() error {
-	s.logger.Info("agent server listening", "addr", s.httpSrv.Addr)
-	return s.httpSrv.ListenAndServe()
+	// Bound first, announced second: a listener that could not be opened — the
+	// address is in use, most often — must not be reported as one that is up.
+	listener, err := net.Listen("tcp", s.httpSrv.Addr)
+	if err != nil {
+		return err
+	}
+	s.logger.Info("agent server listening", "addr", listener.Addr().String())
+	return s.httpSrv.Serve(listener)
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

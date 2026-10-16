@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -239,18 +240,25 @@ func runServer(cmd *cobra.Command, args []string) error {
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	srv := server.New(wlog, eng, addr, cfg.EnableHealthz)
 
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			wlog.ErrorContext(ctx, "server error", "error", err)
-			cancel()
-		}
-	}()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	sig := <-sigChan
-	wlog.DebugContext(ctx, "Received terminate signal", "signal", sig.String())
+	// A server that never listened — the address is taken, most often — has to end
+	// the run with that reason. Waiting on the signal alone would leave a process
+	// that holds no port and serves nobody, with one line in the log to say so.
+	var serveFailure error
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			wlog.ErrorContext(ctx, "server error", "error", err)
+			serveFailure = fmt.Errorf("agent server on %s: %w", addr, err)
+		}
+	case sig := <-sigChan:
+		wlog.DebugContext(ctx, "Received terminate signal", "signal", sig.String())
+	}
 
 	teardownCtx, teardownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer teardownCancel()
@@ -270,5 +278,5 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 	}
 	wlog.InfoContext(ctx, "shutdown complete")
-	return nil
+	return serveFailure
 }
