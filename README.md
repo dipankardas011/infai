@@ -13,8 +13,8 @@
 
 | | What it is | Website |
 |---|---|---|
-| **infai** · engine | A control plane for local inference. Find or download a model, save a launch profile for llama.cpp or vLLM, and run and monitor many models from one TUI. | [infai.dipankar-das.com](https://infai.dipankar-das.com/) |
-| **infaiw** · workflows | An agent harness that works with you, not around you. It runs as a background service with durable sessions, delegated sidecar loops, MCP, and approvals that wait for you. | [infai.dipankar-das.com/infaiw](https://infai.dipankar-das.com/infaiw/) |
+| <img src="icon-infai.svg" width="20" height="20" alt=""> **infai** · engine | A control plane for local inference. Find or download a model, save a launch profile for llama.cpp or vLLM, and run and monitor many models from one TUI. | [infai.dipankar-das.com](https://infai.dipankar-das.com/) |
+| <img src="icon-infaiw.svg" width="20" height="20" alt=""> **infaiw** · workflows | An agent harness that works with you, not around you. It runs as a background service with durable sessions, delegated sidecar loops, MCP, and approvals that wait for you. | [infai.dipankar-das.com/infaiw](https://infai.dipankar-das.com/infaiw/) |
 
 Each is a single Go binary for macOS and Linux, released and installed separately.
 Use either one on its own, or both together.
@@ -26,7 +26,7 @@ Use either one on its own, or both together.
 
 ---
 
-## infai: local inference
+## <img src="icon-infai.svg" width="28" height="28" alt="" align="top"> infai: local inference
 
 [![The infai website: "Flags are not a workflow. Profiles are." beside a runs dashboard with three models running and live CPU, RAM, and VRAM meters](./cover-infai.webp)](https://infai.dipankar-das.com/)
 
@@ -110,7 +110,7 @@ Schema migrations run automatically on startup.
 
 ---
 
-## infaiw: agent harness
+## <img src="icon-infaiw.svg" width="28" height="28" alt="" align="top"> infaiw: agent harness
 
 [![The infaiw website: "Delegate the work. Keep the wheel." beside a chat session waiting for approval to write a file while five sidecar loops run](./cover-infaiw.webp)](https://infai.dipankar-das.com/infaiw/)
 
