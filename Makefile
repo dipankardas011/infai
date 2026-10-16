@@ -1,6 +1,8 @@
 BINARY    := infai
 MODULE    := github.com/dipankardas011/infai
 MAIN      := ./cmd/inference
+AGENT_BINARY := infaiw
+AGENT_MAIN   := ./cmd/agent
 GO        ?= go
 CGO_ENABLED ?= 1
 
@@ -39,11 +41,11 @@ inference-install: ## Install inference into GOBIN
 
 .PHONY: agent-run
 agent-run: ## Run the agent
-	$(call go-run, ./cmd/agent)
+	$(call go-run,$(AGENT_MAIN))
 
 .PHONY: agent-build
 agent-build: ## Compile the agent binary into ./$(BUILD_DIR)
-	$(call go-build,$(BINARY),./cmd/agent)
+	$(call go-build,$(AGENT_BINARY),$(AGENT_MAIN))
 
 .PHONY: test
 test: ## Run all tests
