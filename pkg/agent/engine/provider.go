@@ -242,6 +242,9 @@ func validateProvider(name string, provider contracts.LLMProviderConfiguration) 
 		if model.DefaultTemperature != nil && (*model.DefaultTemperature < 0 || *model.DefaultTemperature > 2) {
 			return fmt.Errorf("model %q for provider %q has temperature outside the OpenAI-compatible range 0..2", modelName, name)
 		}
+		if model.DefaultThinking != "" && model.DefaultThinkingPattern() == "" {
+			return fmt.Errorf("model %q for provider %q has default thinking %q which it does not offer", modelName, name, model.DefaultThinking)
+		}
 	}
 	return nil
 }

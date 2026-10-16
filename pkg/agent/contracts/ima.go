@@ -29,7 +29,10 @@ type ProvisionedModel struct {
 }
 
 func NewProvisionedModel(providerId ProviderSlug, providerName string, baseEndpoint string, apiType ProviderAPIType, auth LLMProviderAuth, model LLMModelConfiguration) ProvisionedModel {
-	return ProvisionedModel{providerId: providerId, providerName: providerName, baseEndpoint: baseEndpoint, apiType: apiType, auth: auth, model: model}
+	return ProvisionedModel{
+		providerId: providerId, providerName: providerName, baseEndpoint: baseEndpoint, apiType: apiType, auth: auth, model: model,
+		thinking: model.DefaultThinkingPattern(),
+	}
 }
 func (model ProvisionedModel) ProviderSlug() ProviderSlug          { return model.providerId }
 func (model ProvisionedModel) ProviderName() string                { return model.providerName }
@@ -218,6 +221,16 @@ type LLMModelConfiguration struct {
 	OutputModality     []LLMSupportedModality `json:"output_modality"`
 	AvailableThinking  bool                   `json:"available_thinking"`
 	ThinkingLevels     ThinkingLevels         `json:"thinking_levels"`
+	DefaultThinking    InfaiThinkingLevel     `json:"default_thinking"`
+}
+
+// DefaultThinkingPattern is the pattern a model starts on when nothing has been
+// chosen. An unset or unsupported default reads as no default.
+func (m LLMModelConfiguration) DefaultThinkingPattern() InfaiThinkingLevel {
+	if slices.Contains(m.AvailableThinkingPatterns(), m.DefaultThinking) {
+		return m.DefaultThinking
+	}
+	return ""
 }
 
 func (m LLMModelConfiguration) AvailableThinkingPatterns() []InfaiThinkingLevel {

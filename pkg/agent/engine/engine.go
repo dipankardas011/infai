@@ -556,7 +556,7 @@ func (e *InfaiAgentEngine) Chat(ctx context.Context, id uuid.UUID, input contrac
 		}
 	}
 
-	if sess.CurrentThinkingPattern() != opts.Thinking {
+	if opts.Thinking != "" && sess.CurrentThinkingPattern() != opts.Thinking {
 		if err := sess.SetThinkingPattern(opts.Thinking); err != nil {
 			return err
 		}

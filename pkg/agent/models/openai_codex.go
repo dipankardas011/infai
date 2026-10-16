@@ -348,13 +348,13 @@ type codexReasoning struct {
 	Summary string `json:"summary,omitempty"`
 }
 
-func (o *openAICodexResponsesAPI) Generate(ctx context.Context, messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) (contracts.ChatMessage, *contracts.TokenUsage, error) {
+func (o *openAICodexResponsesAPI) buildRequest(messages []contracts.ChatMessage, tools []contracts.Tool) ([]byte, error) {
 	instructions, input, err := codexInput(messages)
 	if err != nil {
-		return contracts.ChatMessage{}, nil, err
+		return nil, err
 	}
 	if instructions == "" {
-		return contracts.ChatMessage{}, nil, fmt.Errorf("instructions recieved by the openai-codex provider is empty")
+		return nil, fmt.Errorf("instructions recieved by the openai-codex provider is empty")
 	}
 
 	body := codexResponsesRequest{
@@ -379,16 +379,21 @@ func (o *openAICodexResponsesAPI) Generate(ctx context.Context, messages []contr
 	if slices.Contains(o.b.Model().OutputModality, contracts.ModalityImage) {
 		body.Tools = append(body.Tools, codexTool{Type: "image_generation"})
 	}
+	// A model with no choice made sends no reasoning field at all, which leaves
+	// the backend on its own default. Turning reasoning off is the off level,
+	// never the absence of a level.
 	if effort, ok := o.b.ThinkingLevelValue(); ok {
 		body.Reasoning = &codexReasoning{Effort: effort}
 		if effort != "none" {
 			body.Reasoning.Summary = "auto"
 		}
-	} else if o.b.Model().AvailableThinking && o.b.Model().ThinkingLevels.Off != nil {
-		body.Reasoning = &codexReasoning{Effort: *o.b.Model().ThinkingLevels.Off}
 	}
 
-	raw, err := json.Marshal(body)
+	return json.Marshal(body)
+}
+
+func (o *openAICodexResponsesAPI) Generate(ctx context.Context, messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) (contracts.ChatMessage, *contracts.TokenUsage, error) {
+	raw, err := o.buildRequest(messages, tools)
 	if err != nil {
 		return contracts.ChatMessage{}, nil, err
 	}

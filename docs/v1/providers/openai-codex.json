@@ -19,13 +19,14 @@
         "available_thinking": true,
         "thinking_levels": {
             "off": null,
-            "minimal": "low",
-            "low": null,
-            "medium": null,
-            "high": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
             "xhigh": "xhigh",
             "max": null
-        }
+        },
+        "default_thinking": "medium"
     },
     "gpt-5.6-luna": {
         "provider": "openai-codex",
@@ -47,13 +48,14 @@
         "available_thinking": true,
         "thinking_levels": {
             "off": null,
-            "minimal": "low",
-            "low": null,
-            "medium": null,
-            "high": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
             "xhigh": "xhigh",
             "max": "max"
-        }
+        },
+        "default_thinking": "medium"
     },
     "gpt-5.6-sol": {
         "provider": "openai-codex",
@@ -75,13 +77,14 @@
         "available_thinking": true,
         "thinking_levels": {
             "off": null,
-            "minimal": "low",
-            "low": null,
-            "medium": null,
-            "high": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
             "xhigh": "xhigh",
             "max": "max"
-        }
+        },
+        "default_thinking": "low"
     },
     "gpt-5.6-terra": {
         "provider": "openai-codex",
@@ -103,13 +106,14 @@
         "available_thinking": true,
         "thinking_levels": {
             "off": null,
-            "minimal": "low",
-            "low": null,
-            "medium": null,
-            "high": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
             "xhigh": "xhigh",
             "max": "max"
-        }
+        },
+        "default_thinking": "medium"
     },
     "gpt-6-astra": {
         "provider": "openai-codex",
@@ -131,13 +135,14 @@
         "available_thinking": true,
         "thinking_levels": {
             "off": null,
-            "minimal": "low",
+            "minimal": null,
             "low": "low",
             "medium": "medium",
             "high": "high",
             "xhigh": "xhigh",
             "max": "max"
-        }
+        },
+        "default_thinking": "low"
     },
     "gpt-6-luna": {
         "provider": "openai-codex",
@@ -158,14 +163,15 @@
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "off": "none",
-            "minimal": "low",
+            "off": null,
+            "minimal": null,
             "low": "low",
             "medium": "medium",
             "high": "high",
             "xhigh": "xhigh",
             "max": "max"
-        }
+        },
+        "default_thinking": "medium"
     },
     "gpt-6-sol": {
         "provider": "openai-codex",
@@ -186,14 +192,15 @@
         ],
         "available_thinking": true,
         "thinking_levels": {
-            "off": "none",
-            "minimal": "low",
+            "off": null,
+            "minimal": null,
             "low": "low",
             "medium": "medium",
             "high": "high",
             "xhigh": "xhigh",
             "max": "max"
-        }
+        },
+        "default_thinking": "medium"
     },
     "gpt-6.1-sol": {
         "provider": "openai-codex",
@@ -215,12 +222,13 @@
         "available_thinking": true,
         "thinking_levels": {
             "off": null,
-            "minimal": "low",
+            "minimal": null,
             "low": "low",
             "medium": "medium",
             "high": "high",
             "xhigh": "xhigh",
             "max": "max"
-        }
+        },
+        "default_thinking": "low"
     }
 }
