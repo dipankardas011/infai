@@ -8,7 +8,10 @@
         "max_context_window": 1000000,
         "max_output_tokens": 128000,
         "default_temperature": null,
-        "modality": [
+        "input_modality": [
+            "text"
+        ],
+        "output_modality": [
             "text"
         ],
         "available_thinking": true,
@@ -20,7 +23,8 @@
             "high": "high",
             "xhigh": "xhigh",
             "max": "max"
-        }
+        },
+        "default_thinking": "high"
     },
     "opus": {
         "provider": "claude-cli",
@@ -31,7 +35,10 @@
         "max_context_window": 1000000,
         "max_output_tokens": 128000,
         "default_temperature": null,
-        "modality": [
+        "input_modality": [
+            "text"
+        ],
+        "output_modality": [
             "text"
         ],
         "available_thinking": true,
@@ -43,7 +50,8 @@
             "high": "high",
             "xhigh": "xhigh",
             "max": "max"
-        }
+        },
+        "default_thinking": "medium"
     },
     "sonnet": {
         "provider": "claude-cli",
@@ -54,7 +62,10 @@
         "max_context_window": 1000000,
         "max_output_tokens": 128000,
         "default_temperature": null,
-        "modality": [
+        "input_modality": [
+            "text"
+        ],
+        "output_modality": [
             "text"
         ],
         "available_thinking": true,
@@ -66,7 +77,8 @@
             "high": "high",
             "xhigh": "xhigh",
             "max": "max"
-        }
+        },
+        "default_thinking": "high"
     },
     "haiku": {
         "provider": "claude-cli",
@@ -77,7 +89,10 @@
         "max_context_window": 1000000,
         "max_output_tokens": 128000,
         "default_temperature": null,
-        "modality": [
+        "input_modality": [
+            "text"
+        ],
+        "output_modality": [
             "text"
         ],
         "available_thinking": true,
@@ -89,6 +104,7 @@
             "high": "high",
             "xhigh": "xhigh",
             "max": "max"
-        }
+        },
+        "default_thinking": "medium"
     }
 }
