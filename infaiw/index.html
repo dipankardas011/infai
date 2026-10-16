@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>infaiw — An agent harness that works with you</title>
+  <meta name="description" content="infaiw is a daemon-first agent harness for your terminal. Sessions live on durable, branching timelines; sidecar loops must pass an acceptance check; every consequential step waits for your approval. MCP, skills, and evals included.">
+  <meta name="keywords" content="agent harness, coding agent, terminal agent, subagents, sidecar loop, MCP, human in the loop, agent daemon, DeepSeek, OpenAI Codex, macOS, Linux">
+  <meta name="robots" content="index,follow,max-image-preview:large">
+  <meta name="author" content="Dipankar Das">
+  <link rel="canonical" href="https://infai.dipankar-das.com/infaiw/">
+  <meta property="og:title" content="infaiw — An agent harness that works with you">
+  <meta property="og:description" content="Delegate the work. Keep the wheel. A daemon-first agent harness with sidecar loops, durable timelines, and human-in-the-loop approvals.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://infai.dipankar-das.com/infaiw/">
+  <meta property="og:image" content="https://infai.dipankar-das.com/infaiw-sidecar-loop.webp">
+  <meta property="og:image:alt" content="infaiw parent session tracking several sidecar loops, with pending approvals">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="infaiw — An agent harness that works with you">
+  <meta name="twitter:description" content="Delegate the work. Keep the wheel. Sidecar loops, durable timelines, and approvals that wait for you.">
+  <meta name="twitter:image" content="https://infai.dipankar-das.com/infaiw-sidecar-loop.webp">
+  <meta name="theme-color" content="#11171a">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,500;12..96,700;12..96,800&family=Martian+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../style.css">
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "infaiw",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux",
+      "description": "An agent harness that runs as a background service: durable branching session timelines, sidecar loops with acceptance checks, inter-session messaging, MCP support, and human-in-the-loop approvals.",
+      "url": "https://infai.dipankar-das.com/infaiw/",
+      "downloadUrl": "https://github.com/dipankardas011/infai/releases",
+      "softwareVersion": "latest",
+      "license": "https://github.com/dipankardas011/infai/blob/main/LICENSE",
+      "isAccessibleForFree": true,
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "sameAs": ["https://github.com/dipankardas011/infai"]
+    }
+  </script>
+</head>
+<body class="is-w">
+
+  <div class="noise" aria-hidden="true"></div>
+
+  <!-- OPS STRIP -->
+  <div class="ops-strip">
+    <span class="ops-dot" aria-hidden="true"></span>
+    <a href="#buildlog" class="ops-link">BUILDING IN PUBLIC · DAY <span data-bl="day">44</span></a>
+    <span class="ops-sep" aria-hidden="true">/</span>
+    <span>LOCAL FIRST · APACHE-2.0</span>
+    <span class="ops-sep" aria-hidden="true">/</span>
+    <span>MACOS + LINUX</span>
+  </div>
+
+  <!-- NAV -->
+  <nav>
+    <div class="nav-inner">
+      <a href="./" class="logo" aria-label="infaiw home">
+        <span class="logo-mark">▸</span>infaiw<span class="logo-cursor">_</span>
+      </a>
+      <div class="nav-links">
+        <a href="#loop">sidecar loop</a>
+        <a href="#daemon">daemon</a>
+        <a href="#features">features</a>
+        <a href="#install">install</a>
+        <a href="#roadmap">roadmap</a>
+        <a href="#buildlog">build log</a>
+        <a href="../" class="nav-infai">infai ↗</a>
+        <a href="https://github.com/dipankardas011/infai" class="btn-nav" target="_blank" rel="noopener">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <header class="hero">
+    <div class="hero-glow" aria-hidden="true"></div>
+    <div class="hero-copy">
+      <p class="kicker reveal-up" style="--d:0">[ agent harness · daemon-first ]</p>
+      <h1>
+        <span class="h1-line reveal-line" style="--d:1">Delegate</span>
+        <span class="h1-line reveal-line" style="--d:2">the work.</span>
+        <span class="h1-line h1-accent reveal-line" style="--d:3">Keep the wheel.</span>
+      </h1>
+      <p class="hero-sub reveal-up" style="--d:4">
+        infaiw is an agent harness that works <strong>with</strong> you, not around you.
+        It runs as a background service: hand off a task, close the terminal, and come back
+        to a durable timeline of everything it did, with every consequential step waiting
+        for your <strong>approval</strong>.
+      </p>
+      <div class="hero-actions reveal-up" style="--d:5">
+        <a href="#install" class="btn-solid"><span class="btn-prompt">$</span>brew install infaiw</a>
+        <a href="https://github.com/dipankardas011/infai" class="btn-line btn-icon" target="_blank" rel="noopener" aria-label="View infaiw on GitHub" title="View infaiw on GitHub">
+          <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        </a>
+      </div>
+      <p class="hero-fine reveal-up" style="--d:6">sidecar loops · MCP · skills · evals · one Go binary + one user service</p>
+    </div>
+
+    <!-- SESSION MOCK (mirrors the real infaiw chat screen) -->
+    <div class="panel reveal-up" style="--d:7" role="img" aria-label="infaiw chat screen: the agent waits for approval to write a file while five sidecar loops run in the background">
+      <div class="panel-chrome">
+        <span class="panel-title">InfaiW · Chat</span>
+        <span class="panel-hint" aria-hidden="true">ctrl+x editor · ctrl+d stats</span>
+      </div>
+      <div class="panel-body" aria-hidden="true">
+        <div class="ss" data-phase="0">
+          <p class="ss-say">Splitting the review across five sidecars. Each one reports back only after its acceptance check passes. Writing the plan first.</p>
+          <p class="ss-tool"><span class="ss-tri">▲</span><span class="ss-verb">write</span>review/plan.md <span class="c-dim">(3 lines, 112 bytes)</span></p>
+          <div class="ss-diff">
+            <p><span class="ss-ln">1 +</span> # oauth review: five sidecars</p>
+            <p><span class="ss-ln">2 +</span> done = each acceptance check passes</p>
+            <p><span class="ss-ln">3 +</span></p>
+          </div>
+          <div class="ss-ask">
+            <p><span class="ss-flag">⚑</span><span class="ss-verb">write</span>review/plan.md <span class="c-dim">(3 lines, 112 bytes)</span></p>
+            <p class="ss-btns"><span class="ss-btn ss-approve">Approve</span><span class="ss-btn ss-deny">Deny</span><span class="ss-btn ss-reason">Deny With Reason</span><span class="ss-keys">(<span class="ss-glyph">←/→</span> choose · <span class="ss-glyph">⏎</span> answer)</span></p>
+          </div>
+          <p class="ss-done"><span class="ss-dia">◆</span> Approval <span class="ss-ok">approve</span></p>
+          <p class="ss-check"><span class="ss-ok">✓</span> adv-review-oauth-core · acceptance check passed · reported over ISAC</p>
+
+          <div class="ss-status">
+            <span class="ss-name">oauth-review</span>
+            <span class="ss-meta"><span class="ss-int">● interactive</span> <span class="c-dim">·</span> <span class="ss-state"></span> <span class="c-dim">·</span> <span class="ss-timer">▮ <span class="cell-up" data-uptime="1000"></span></span></span>
+          </div>
+          <div class="ss-tree">
+            <div class="ss-row" data-states="busy,busy,busy"><span class="ss-br">├─</span><span class="ss-ico">⧉</span><span class="ss-sc">adv-review-backend</span><span class="ss-st"></span></div>
+            <div class="ss-row" data-states="waiting,busy,busy"><span class="ss-br">├─</span><span class="ss-ico">⧉</span><span class="ss-sc">adv-review-tui</span><span class="ss-st"></span></div>
+            <div class="ss-row" data-states="busy,busy,done"><span class="ss-br">├─</span><span class="ss-ico">⧉</span><span class="ss-sc">adv-review-oauth-core</span><span class="ss-st"></span></div>
+            <div class="ss-row" data-states="done,done,done"><span class="ss-br">├─</span><span class="ss-ico">⧉</span><span class="ss-sc">adv-review-config</span><span class="ss-st"></span></div>
+            <div class="ss-row" data-states="maxed,maxed,maxed"><span class="ss-br">└─</span><span class="ss-ico">⧉</span><span class="ss-sc">adv-review-api</span><span class="ss-st"></span></div>
+          </div>
+          <p class="ss-composer"></p>
+        </div>
+        <div class="panel-footline">deepseek-flash (deepseek) · <span class="ss-think">thinking high</span> · ctx <span class="ss-ctx"><i></i></span> 34% 343k/1M</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- BAND / RIBBON -->
+  <section class="band" aria-hidden="true">
+    <div class="band-track">
+      <span>1 daemon · many clients · same session</span><i>◆</i><span>sidecar loops with acceptance checks</span><i>◆</i><span>every event on a durable timeline</span><i>◆</i><span>allow · deny · deny with reason</span><i>◆</i><span>MCP · skills · evals</span><i>◆</i>
+      <span>1 daemon · many clients · same session</span><i>◆</i><span>sidecar loops with acceptance checks</span><i>◆</i><span>every event on a durable timeline</span><i>◆</i><span>allow · deny · deny with reason</span><i>◆</i><span>MCP · skills · evals</span><i>◆</i>
+    </div>
+  </section>
+
+  <!-- THE LOOP -->
+  <section class="loop" id="loop">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 01 / the sidecar loop ]</p>
+      <h2 class="reveal-up">Subagents that can't<br>just declare victory.</h2>
+      <p class="sec-sub reveal-up">Agents love to say "done". A sidecar loop is a delegated subagent that isn't finished until an acceptance check agrees, and it leaves a full record behind.</p>
+    </div>
+    <div class="eq-points loop-points">
+      <div class="eq-point reveal-up" style="--d:0">
+        <span class="pt-num">1</span>
+        <div><h3>Delegate</h3><p>The parent session hands off a task together with an AcceptanceCheck: what "done" has to look like.</p></div>
+      </div>
+      <div class="eq-point reveal-up" style="--d:1">
+        <span class="pt-num">2</span>
+        <div><h3>Verify</h3><p>The sidecar keeps iterating until the check passes, or stops at its iteration limit and says so.</p></div>
+      </div>
+      <div class="eq-point reveal-up" style="--d:2">
+        <span class="pt-num">3</span>
+        <div><h3>Record</h3><p>Results come back over ISAC, and every step stays on the durable timeline for you to inspect.</p></div>
+      </div>
+    </div>
+    <div class="show-item show-wide reveal-up">
+      <figure class="show-img">
+        <img src="../infaiw-sidecar-loop.webp" alt="Four infaiw sessions side by side: a parent session tracking six sidecar loops that are busy, waiting for approval, completed, or stopped at max iterations, next to three sidecar sessions with pending bash approvals" loading="lazy" width="3840" height="2084">
+      </figure>
+      <p class="show-cap">A real session: one parent reviewing a change through six sidecar loops, three of them paused on approvals.</p>
+    </div>
+  </section>
+
+  <!-- THE DAEMON -->
+  <section class="daemon" id="daemon">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 02 / the daemon ]</p>
+      <h2 class="reveal-up">Close the terminal.<br>The work keeps going.</h2>
+      <p class="sec-sub reveal-up">infaiw runs as a user service. The TUI is just a client: attach from as many as you like, leave, and come back to the same session. Sessions talk to each other through mailboxes, routed by the engine (ISAC).</p>
+    </div>
+    <div class="arch reveal-up" role="img" aria-label="Clients attach to the infaiw daemon; the engine routes messages between session mailboxes">
+      <div class="arch-col">
+        <p class="arch-label">clients</p>
+        <div class="arch-box">tui · laptop</div>
+        <div class="arch-box">tui · tmux pane</div>
+        <div class="arch-box is-dim">workflows · next</div>
+      </div>
+      <div class="arch-arrow" aria-hidden="true">⇄</div>
+      <div class="arch-col arch-core">
+        <p class="arch-label">infaiw daemon</p>
+        <div class="arch-engine">
+          <p class="arch-engine-name">engine</p>
+          <p>routes messages</p>
+          <p>holds approvals</p>
+          <p>writes the timeline</p>
+        </div>
+      </div>
+      <div class="arch-arrow" aria-hidden="true">⇄</div>
+      <div class="arch-col">
+        <p class="arch-label">sessions · mailboxes</p>
+        <div class="arch-box"><span class="arch-mb">✉</span>parent</div>
+        <div class="arch-box"><span class="arch-mb">✉</span>sidecar · backend</div>
+        <div class="arch-box"><span class="arch-mb">✉</span>sidecar · tui</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section class="features" id="features">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 03 / on board ]</p>
+      <h2 class="reveal-up">Built for long-running work.</h2>
+    </div>
+    <div class="feat-grid">
+      <div class="feat reveal-up" style="--d:0">
+        <span class="feat-id">W-01</span>
+        <h3>Timeline sessions</h3>
+        <p>Every session is an event timeline: compact to store, fast to replay. Branch from any point and move between timelines.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:1">
+        <span class="feat-id">W-02</span>
+        <h3>Daemon, not a window</h3>
+        <p>infaiw runs as a background service. Close the terminal mid-task and the work continues. Several clients can attach to the same session.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:2">
+        <span class="feat-id">W-03</span>
+        <h3>sidecar_loop</h3>
+        <p>Subagents, grown up. Each delegated task carries an AcceptanceCheck, so a sidecar can't just declare victory, and every loop is recorded on the timeline.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:3">
+        <span class="feat-id">W-04</span>
+        <h3>ISAC</h3>
+        <p>Inter-session agent comms, modelled on actors: every session has a mailbox and the engine routes messages between sessions. Simple wiring, no special cases.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:0">
+        <span class="feat-id">W-05</span>
+        <h3>Checklists with intent</h3>
+        <p>Each task carries a short note on what was actually expected. If the agent loses the thread, it recovers the goal from the checklist: infaiw's first memory.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:1">
+        <span class="feat-id">W-06</span>
+        <h3>Hybrid auto-compaction</h3>
+        <p>The latest events stay verbatim; older ones are compressed. The agent keeps sight of what it just did and resumes mid-task. Informed by DeepSeek's approach.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:2">
+        <span class="feat-id">W-07</span>
+        <h3>Human first</h3>
+        <p>Approvals wait for you, even if you closed the window hours ago. Allow, deny, or deny with a reason. One simple mental model.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:3">
+        <span class="feat-id">W-08</span>
+        <h3>One system prompt</h3>
+        <p>No per-model prompt hacks. Agents, like people, follow clear instructions, so one well-written prompt works across models.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:0">
+        <span class="feat-id">W-09</span>
+        <h3>Beyond text</h3>
+        <p>Attach images as input, and capture model-generated images in the session, saved straight from the TUI.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:1">
+        <span class="feat-id">W-10</span>
+        <h3>MCP, skills &amp; evals</h3>
+        <p>MCP servers with OAuth, elicitation and prompts. Reusable skills. Evals to check the agent does what you asked.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:2">
+        <span class="feat-id">W-11</span>
+        <h3>Guarded web tools</h3>
+        <p>Web fetch and web search, with safeguards built in.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:3">
+        <span class="feat-id">W-12</span>
+        <h3>Your choice of model</h3>
+        <p>DeepSeek and OpenAI Codex today, with configurable thinking levels and provider catalogs that refresh hourly.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- INSTALL -->
+  <section class="install" id="install">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 04 / install ]</p>
+      <h2 class="reveal-up">Install it. Start the service.<br>Hand it something.</h2>
+    </div>
+    <div class="install-grid">
+      <div class="inst-card inst-hot reveal-up" style="--d:0">
+        <p class="inst-method">Homebrew <span class="inst-tag">recommended</span></p>
+        <button class="inst-cmd" data-copy="brew install dipankardas011/tap/infaiw && brew services start infaiw">
+          <code>brew install dipankardas011/tap/infaiw
+brew services start infaiw</code>
+          <span class="inst-copy">copy</span>
+        </button>
+        <p class="inst-note">macOS &amp; Linux · runs as a background service</p>
+      </div>
+      <div class="inst-card inst-hot reveal-up" style="--d:1">
+        <p class="inst-method">Linux package manager</p>
+        <p class="inst-text">Install <code>infaiw</code> from the <a href="https://software.opensuse.org/download.html?project=home%3Adipankardas%3Ainfai&amp;package=infaiw" target="_blank" rel="noopener">package repository</a>, then start its user service:</p>
+        <button class="inst-cmd" data-copy="systemctl --user enable --now infaiw">
+          <code>systemctl --user enable --now infaiw</code>
+          <span class="inst-copy">copy</span>
+        </button>
+        <div class="distro-list" aria-label="Supported Linux distributions">
+          <span><img src="https://cdn.simpleicons.org/debian/A81D33" alt="" width="16" height="16">Debian</span>
+          <span><img src="https://cdn.simpleicons.org/ubuntu/E95420" alt="" width="16" height="16">Ubuntu</span>
+          <span><img src="https://cdn.simpleicons.org/fedora/51A2DA" alt="" width="16" height="16">Fedora</span>
+          <span><img src="https://cdn.simpleicons.org/opensuse/73BA25" alt="" width="16" height="16">openSUSE</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ROADMAP -->
+  <section class="roadmap" id="roadmap">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 05 / shipped &amp; next ]</p>
+      <h2 class="reveal-up">From interactive sessions<br>to unattended workflows.</h2>
+      <p class="sec-sub reveal-up">The harness is in place. Next, the same daemon runs multi-step pipelines and many cooperating agents, with the same human checkpoints.</p>
+    </div>
+    <div class="rm-timeline">
+      <div class="rm-line" aria-hidden="true" style="--done:62%"></div>
+<div class="rm-node done reveal-up" style="--d:0">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>Optimized session storage</h3>
+        <p>Sessions as compact event timelines: cheaper to store, faster to load, and branchable.</p>
+      </div>
+      <div class="rm-node done reveal-up" style="--d:1">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>Delegate sidecar loop</h3>
+        <p>Delegated subagents that must pass an acceptance check before they report back, recorded on the timeline.</p>
+      </div>
+      <div class="rm-node done reveal-up" style="--d:2">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>MCP support</h3>
+        <p>Connect MCP servers, with OAuth authorization, elicitation, and reusable prompts.</p>
+      </div>
+      <div class="rm-node done reveal-up" style="--d:3">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>Eval support</h3>
+        <p>Evals that check whether the agent actually did what it was asked.</p>
+      </div>
+      <div class="rm-node next reveal-up" style="--d:4">
+        <div class="rm-dot"></div>
+        <span class="rm-status">next</span>
+        <h3>Workflows: agentic pipelines</h3>
+        <p>Multi-step pipelines that run unattended on the same daemon, with the same human checkpoints.</p>
+      </div>
+      <div class="rm-node next reveal-up" style="--d:5">
+        <div class="rm-dot"></div>
+        <span class="rm-status">next</span>
+        <h3>Agentic swarm</h3>
+        <p>Many cooperating agents, coordinated through the same inter-session mailboxes.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- BUILD LOG -->
+  <section class="buildlog" id="buildlog">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 06 / building in public ]</p>
+      <h2 class="reveal-up"><span data-bl="day">44</span> days of infaiw,<br>one post at a time.</h2>
+      <p class="sec-sub reveal-up">Every day of building infaiw, posted on X as it happened: plans, dead ends, work in progress and releases. Start from the first post or jump to the latest.</p>
+      <div class="hero-actions bl-actions reveal-up">
+        <a class="btn-solid" data-bl="latest" href="https://x.com/DipankarDas011/status/2110817984331870208" target="_blank" rel="noopener">Latest · day <span data-bl="day">44</span></a>
+        <a class="btn-line" data-bl="first" href="https://x.com/DipankarDas011/status/2090342848428429337" target="_blank" rel="noopener">Start from day 02</a>
+      </div>
+    </div>
+    <div class="bl-board reveal-up">
+      <div class="bl-cal-wrap">
+        <div class="bl-cal" role="list" aria-label="Posting calendar"></div>
+        <div class="bl-legend" aria-hidden="true">
+          <span><i class="bl-cell"></i>no post</span>
+          <span><i class="bl-cell is-post"></i>post</span>
+          <span><i class="bl-cell is-post is-multi"></i>several</span>
+          <span><i class="bl-cell is-rel"></i>release</span>
+        </div>
+      </div>
+      <div class="bl-side">
+        <div class="bl-stats">
+          <div><span class="bl-num" data-bl="posts">45</span><span class="bl-lbl">posts</span></div>
+          <div><span class="bl-num" data-bl="releases">28</span><span class="bl-lbl">releases</span></div>
+          <div><span class="bl-num" data-bl="span">58</span><span class="bl-lbl">days since day 02</span></div>
+        </div>
+        <p class="bl-readout" aria-live="polite">Hover or focus a day to see what shipped.</p>
+      </div>
+    </div>
+    <ol class="bl-list reveal-up" reversed></ol>
+    <button class="bl-more reveal-up" type="button" aria-expanded="false" hidden>show all posts</button>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta">
+    <div class="cta-inner reveal-up">
+      <h2>Hand it off.<br><em>Stay in charge.</em></h2>
+      <div class="hero-actions">
+        <a href="#install" class="btn-solid"><span class="btn-prompt">$</span>brew install infaiw</a>
+        <a href="../" class="btn-line">Need local models? Meet infai</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer>
+    <div class="footer-inner">
+      <div class="footer-left">
+        <span class="logo-sm"><span class="logo-mark">▸</span>infaiw</span>
+        <span class="footer-meta">Apache-2.0 · part of the infai project</span>
+      </div>
+      <div class="footer-links">
+        <a href="../">infai</a>
+        <a href="https://github.com/dipankardas011/infai" target="_blank" rel="noopener">github</a>
+        <a href="https://github.com/dipankardas011/infai/releases" target="_blank" rel="noopener">releases</a>
+        <a href="https://github.com/dipankardas011/infai/issues" target="_blank" rel="noopener">issues</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // ── Scroll reveals ──
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) { e.target.classList.add('revealed'); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+    function observeReveals(scope) {
+      scope.querySelectorAll('.reveal-up, .reveal-line').forEach(el => {
+        if (el.getBoundingClientRect().top < window.innerHeight) el.classList.add('revealed');
+        else io.observe(el);
+      });
+    }
+    observeReveals(document);
+
+    // ── Copy-to-clipboard ──
+    document.querySelectorAll('.inst-cmd').forEach(btn => {
+      btn.addEventListener('click', () => {
+        navigator.clipboard.writeText(btn.dataset.copy).then(() => {
+          const tag = btn.querySelector('.inst-copy');
+          tag.textContent = 'copied';
+          tag.classList.add('copied');
+          setTimeout(() => { tag.textContent = 'copy'; tag.classList.remove('copied'); }, 2000);
+        });
+      });
+    });
+
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // ── Session mock: a decision is answered, the agent resumes, a sidecar lands ──
+    const STATES = {
+      busy: ['◐ busy', 'ss-st-busy'],
+      waiting: ['⚑ waiting for approval', 'ss-st-wait'],
+      done: ['✓ completed', 'ss-st-done'],
+      maxed: ['▲ max iterations reached', 'ss-st-max'],
+    };
+    const PHASES = [
+      { state: STATES.waiting, composer: 'answer the decision above to continue' },
+      { state: STATES.busy, composer: '∞ Ask, plan, build... (external editor ctrl+x)' },
+      { state: STATES.busy, composer: '∞ Ask, plan, build... (external editor ctrl+x)' },
+    ];
+    const ss = document.querySelector('.ss');
+    function paint(phase) {
+      const ph = PHASES[phase];
+      ss.dataset.phase = phase;
+      const state = ss.querySelector('.ss-state');
+      state.textContent = ph.state[0];
+      state.className = 'ss-state ' + ph.state[1];
+      ss.querySelector('.ss-composer').textContent = ph.composer;
+      ss.querySelectorAll('.ss-row').forEach(row => {
+        const [label, cls] = STATES[row.dataset.states.split(',')[phase]];
+        const st = row.querySelector('.ss-st');
+        st.textContent = label;
+        st.className = 'ss-st ' + cls;
+      });
+    }
+    function fmtUptime(s) {
+      if (s >= 3600) return Math.floor(s / 3600) + 'h' + String(Math.floor((s % 3600) / 60)).padStart(2, '0') + 'm';
+      return Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's';
+    }
+    const up = document.querySelector('.cell-up');
+    up.textContent = fmtUptime(+up.dataset.uptime);
+    paint(0);
+    if (!reduceMotion) {
+      let phase = 0;
+      setInterval(() => {
+        const s = +up.dataset.uptime + 1;
+        up.dataset.uptime = s;
+        up.textContent = fmtUptime(s);
+      }, 1000);
+      setInterval(() => paint(phase = (phase + 1) % PHASES.length), 3400);
+    }
+
+    // ── Build log: calendar + posts from buildlog.json ──
+    (async () => {
+      const root = document.getElementById('buildlog');
+      let log;
+      try {
+        const res = await fetch('../buildlog.json', { cache: 'no-cache' });
+        if (!res.ok) throw new Error(res.status);
+        log = await res.json();
+      } catch (err) {
+        root.querySelector('.bl-readout').textContent = 'Could not load the build log. Follow along on X from the first post.';
+        return;
+      }
+      const entries = log.entries;
+      const releases = log.releases || [];
+      if (!entries.length) return;
+      const first = entries[0], last = entries[entries.length - 1];
+      const dayNum = d => +d.split('-').pop();
+      const maxDay = Math.max(...entries.map(e => dayNum(e.day)));
+      const byDate = new Map(), relByDate = new Map();
+      entries.forEach(e => { if (!byDate.has(e.date)) byDate.set(e.date, []); byDate.get(e.date).push(e); });
+      releases.forEach(r => { if (!relByDate.has(r.date)) relByDate.set(r.date, []); relByDate.get(r.date).push(r.tag); });
+
+      const parse = iso => { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d)); };
+      const iso = dt => dt.toISOString().slice(0, 10);
+      const fmt = isoDate => parse(isoDate).toLocaleDateString('en', { month: 'short', day: 'numeric', timeZone: 'UTC' }).toLowerCase();
+      const relLabel = tags => tags.length > 2 ? `${tags[0]} – ${tags[tags.length - 1]}` : tags.join(' · ');
+      const end = [last.date, ...releases.map(r => r.date)].sort().pop();
+      const start = parse(first.date), stop = parse(end);
+      const span = Math.round((stop - start) / 864e5) + 1;
+
+      document.querySelectorAll('[data-bl="day"]').forEach(el => { el.textContent = String(maxDay); });
+      root.querySelector('[data-bl="posts"]').textContent = entries.length;
+      root.querySelector('[data-bl="releases"]').textContent = releases.length;
+      root.querySelector('[data-bl="span"]').textContent = span;
+      root.querySelector('[data-bl="latest"]').href = last.url;
+      root.querySelector('[data-bl="first"]').href = first.url;
+      root.querySelector('[data-bl="first"]').textContent = `Start from day ${first.day}`;
+
+      // calendar: one column per week (Mon–Sun), one cell per day
+      const cal = root.querySelector('.bl-cal');
+      const readout = root.querySelector('.bl-readout');
+      const describe = (date) => {
+        const posts = byDate.get(date) || [], tags = relByDate.get(date) || [];
+        const parts = [fmt(date)];
+        if (posts.length) parts.push('day ' + posts.map(p => p.day).filter((d, i, a) => a.indexOf(d) === i).join(', '));
+        if (tags.length) parts.push(relLabel(tags));
+        parts.push(posts.length ? posts[0].text : (tags.length ? 'released, no post' : 'no post'));
+        return parts.join(' · ');
+      };
+      const lead = (start.getUTCDay() + 6) % 7;
+      for (let i = 0; i < lead; i++) {
+        const pad = document.createElement('span');
+        pad.className = 'bl-cell is-pad';
+        cal.appendChild(pad);
+      }
+      for (let t = start; t <= stop; t = new Date(t.getTime() + 864e5)) {
+        const date = iso(t), posts = byDate.get(date), tags = relByDate.get(date);
+        const cell = document.createElement(posts ? 'a' : 'span');
+        cell.className = 'bl-cell';
+        cell.setAttribute('role', 'listitem');
+        if (posts) {
+          cell.classList.add('is-post');
+          if (posts.length > 1) cell.classList.add('is-multi');
+          cell.href = posts[0].url;
+          cell.target = '_blank';
+          cell.rel = 'noopener';
+        }
+        if (tags) cell.classList.add('is-rel');
+        const text = describe(date);
+        cell.setAttribute('aria-label', text);
+        cell.title = text;
+        const show = () => { readout.textContent = text; };
+        cell.addEventListener('mouseenter', show);
+        cell.addEventListener('focus', show);
+        cal.appendChild(cell);
+      }
+      readout.textContent = describe(last.date);
+
+      // newest-first list: first six visible, rest behind a toggle
+      const list = root.querySelector('.bl-list');
+      const more = root.querySelector('.bl-more');
+      const VISIBLE = 6;
+      entries.slice().reverse().forEach((e, i) => {
+        const li = document.createElement('li');
+        if (i >= VISIBLE) li.hidden = true;
+        const a = document.createElement('a');
+        a.href = e.url; a.target = '_blank'; a.rel = 'noopener';
+        const tags = relByDate.get(e.date);
+        const cols = [
+          ['bl-day', 'day ' + e.day + (e.update ? '+' : '')],
+          ['bl-date', fmt(e.date)],
+          ['bl-tag', tags && byDate.get(e.date)[0] === e ? tags[tags.length - 1] : ''],
+          ['bl-text', e.text],
+          ['bl-arrow', '↗'],
+        ];
+        cols.forEach(([cls, txt]) => {
+          const span = document.createElement('span');
+          span.className = cls; span.textContent = txt;
+          a.appendChild(span);
+        });
+        li.appendChild(a);
+        list.appendChild(li);
+      });
+      if (entries.length > VISIBLE) {
+        more.hidden = false;
+        more.textContent = `show all ${entries.length} posts`;
+        more.addEventListener('click', () => {
+          const open = more.getAttribute('aria-expanded') !== 'true';
+          list.querySelectorAll('li').forEach((li, i) => { if (i >= VISIBLE) li.hidden = !open; });
+          more.setAttribute('aria-expanded', String(open));
+          more.textContent = open ? 'show fewer' : `show all ${entries.length} posts`;
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,394 @@
+{
+  "handle": "DipankarDas011",
+  "entries": [
+    {
+      "day": "02",
+      "date": "2026-08-20",
+      "text": "Now much more proper attempt and got the iter-1 working",
+      "url": "https://x.com/DipankarDas011/status/2090342848428429337"
+    },
+    {
+      "day": "03",
+      "date": "2026-08-21",
+      "text": "Got it to work with streaming and thinking",
+      "url": "https://x.com/DipankarDas011/status/2090521304097321314"
+    },
+    {
+      "day": "04",
+      "date": "2026-08-22",
+      "text": "Adding storage layer of sessions and models.json for infai harness",
+      "url": "https://x.com/DipankarDas011/status/2091066962264858820"
+    },
+    {
+      "day": "05",
+      "date": "2026-08-23",
+      "text": "Adding session management in Infai harness",
+      "url": "https://x.com/DipankarDas011/status/2091233271191585135"
+    },
+    {
+      "day": "06",
+      "date": "2026-08-23",
+      "text": "proper context mgt and compaction in Infai Harness",
+      "url": "https://x.com/DipankarDas011/status/2091575883698246123"
+    },
+    {
+      "day": "07",
+      "date": "2026-08-25",
+      "text": "goal of Fault tolerant infai harness session we all know how annoying it is when AI agents forget what we typed",
+      "url": "https://x.com/DipankarDas011/status/2092302538175644141"
+    },
+    {
+      "day": "08",
+      "date": "2026-08-29",
+      "text": "infai harness - Tools ground work(actuators) - multi agent - human in loop (auditor)",
+      "url": "https://x.com/DipankarDas011/status/2093409426778833262"
+    },
+    {
+      "day": "09",
+      "date": "2026-08-29",
+      "text": "infai harness with IAC + Tool calls + Approval gate",
+      "url": "https://x.com/DipankarDas011/status/2093755068021633396"
+    },
+    {
+      "day": "10",
+      "date": "2026-08-31",
+      "text": "tool calling like read,write,search,glob,edit infai harness",
+      "url": "https://x.com/DipankarDas011/status/2094133578863186365"
+    },
+    {
+      "day": "11",
+      "date": "2026-08-31",
+      "text": "improve stability of tool calls + shell/bash added to infai harness",
+      "url": "https://x.com/DipankarDas011/status/2094486540202524778"
+    },
+    {
+      "day": "12",
+      "date": "2026-09-02",
+      "text": "getting system prompt and compaction sorted infai",
+      "url": "https://x.com/DipankarDas011/status/2095021553457176897"
+    },
+    {
+      "day": "13",
+      "date": "2026-09-04",
+      "text": "making skills working using the same IAC of infai",
+      "url": "https://x.com/DipankarDas011/status/2095584886828786039"
+    },
+    {
+      "day": "14",
+      "date": "2026-09-05",
+      "text": "New TUI and tons of updates for infai harness",
+      "url": "https://x.com/DipankarDas011/status/2095953515365765249"
+    },
+    {
+      "day": "15",
+      "date": "2026-09-06",
+      "text": "New Task checklist in infai harness+retries",
+      "url": "https://x.com/DipankarDas011/status/2096312829997670613"
+    },
+    {
+      "day": "16",
+      "date": "2026-09-07",
+      "text": "Got on work of release and download streamlined of infai harness",
+      "url": "https://x.com/DipankarDas011/status/2096673623776137725"
+    },
+    {
+      "day": "17",
+      "date": "2026-09-10",
+      "text": "model provider+thinking setup of infai harness",
+      "url": "https://x.com/DipankarDas011/status/2097927486189502880"
+    },
+    {
+      "day": "19",
+      "date": "2026-09-11",
+      "text": "optimization+openai support of infai harness",
+      "url": "https://x.com/DipankarDas011/status/2098299472275292170"
+    },
+    {
+      "day": "20",
+      "date": "2026-09-12",
+      "text": "Openai codex+codesyntax+thinking in infai harness",
+      "url": "https://x.com/DipankarDas011/status/2098479894867202486"
+    },
+    {
+      "day": "21",
+      "date": "2026-09-12",
+      "text": "Deepseek+Codex+Image support in infai harness (Its released as infaiw@v0.4.0 and v0.5.0)",
+      "url": "https://x.com/DipankarDas011/status/2098833308146913605"
+    },
+    {
+      "day": "22",
+      "date": "2026-09-13",
+      "text": "Designing and planning multi agents in infai harness [WIP]",
+      "url": "https://x.com/DipankarDas011/status/2099155452991029280"
+    },
+    {
+      "day": "23",
+      "date": "2026-09-16",
+      "text": "planning agent swarm and subagents in Infai harness [WIP]",
+      "url": "https://x.com/DipankarDas011/status/2100100257862533473"
+    },
+    {
+      "day": "24",
+      "date": "2026-09-17",
+      "text": "now I know what to do in infai harness [WIP]",
+      "url": "https://x.com/DipankarDas011/status/2100595951874506754"
+    },
+    {
+      "day": "25-26",
+      "date": "2026-09-20",
+      "text": "Still Making the multi agent reality for infai harness  [WIP]",
+      "url": "https://x.com/DipankarDas011/status/2101676761352389056"
+    },
+    {
+      "day": "27",
+      "date": "2026-09-21",
+      "text": "Getting Circuit breakers in ToolExecution for infai harness [multi-agents🛣️]",
+      "url": "https://x.com/DipankarDas011/status/2102090867003785406"
+    },
+    {
+      "day": "28",
+      "date": "2026-09-22",
+      "text": "for now still making it proper multi client for infai harness [multi-agents 🛣️]",
+      "url": "https://x.com/DipankarDas011/status/2102444112951853290"
+    },
+    {
+      "day": "29",
+      "date": "2026-09-25",
+      "text": "got multi client with proper statemachine for agentSession for infai harness",
+      "url": "https://x.com/DipankarDas011/status/2103198420123123842"
+    },
+    {
+      "day": "29",
+      "date": "2026-09-26",
+      "text": "got multi client properly working with cancellation for infai harness",
+      "url": "https://x.com/DipankarDas011/status/2103716237872386420",
+      "update": true
+    },
+    {
+      "day": "30",
+      "date": "2026-09-26",
+      "text": "improved the TUI for HITL of infai harness",
+      "url": "https://x.com/DipankarDas011/status/2103912723272851736"
+    },
+    {
+      "day": "31",
+      "date": "2026-09-27",
+      "text": "added AgentKind and other fixing of infai harness",
+      "url": "https://x.com/DipankarDas011/status/2104239401010446825"
+    },
+    {
+      "day": "31",
+      "date": "2026-09-27",
+      "text": "got @ file attach and External Editor in infai harness",
+      "url": "https://x.com/DipankarDas011/status/2104275267636322331",
+      "update": true
+    },
+    {
+      "day": "32",
+      "date": "2026-09-28",
+      "text": "render optimization of big conversations in infai harness",
+      "url": "https://x.com/DipankarDas011/status/2104619415346233598"
+    },
+    {
+      "day": "32",
+      "date": "2026-09-29",
+      "text": "Updated infai harness to latest version v0.10.0 and its just 21MiB only 😍",
+      "url": "https://x.com/DipankarDas011/status/2104778089226199498",
+      "update": true
+    },
+    {
+      "day": "32",
+      "date": "2026-09-29",
+      "text": "Very low resource consumption of infai harness v0.10.0 (just a ~50M) Unlike some taking > 300M or even some instances 1G",
+      "url": "https://x.com/DipankarDas011/status/2104811129990234403",
+      "update": true
+    },
+    {
+      "day": "33",
+      "date": "2026-09-30",
+      "text": "planning done now implementing sidecar_loop in infai harness",
+      "url": "https://x.com/DipankarDas011/status/2105363934173954337"
+    },
+    {
+      "day": "34-35",
+      "date": "2026-10-03",
+      "text": "Got the sidecar_loop working for infai harness 😌",
+      "url": "https://x.com/DipankarDas011/status/2106426247396130971"
+    },
+    {
+      "day": "36",
+      "date": "2026-10-04",
+      "text": "release v0.11 and made sidecar_loop for infai harness available",
+      "url": "https://x.com/DipankarDas011/status/2106802204770456044"
+    },
+    {
+      "day": "37",
+      "date": "2026-10-06",
+      "text": "got websearch and webfetch working for infai harness Got v0.12.0 released as well link 👇",
+      "url": "https://x.com/DipankarDas011/status/2107181179434926181"
+    },
+    {
+      "day": "38",
+      "date": "2026-10-06",
+      "text": "working on next important feature for infai harness",
+      "url": "https://x.com/DipankarDas011/status/2107493292648825100"
+    },
+    {
+      "day": "39",
+      "date": "2026-10-07",
+      "text": "got it configured to brew formula and linux systemd daemon for infaiw",
+      "url": "https://x.com/DipankarDas011/status/2107884326176333833"
+    },
+    {
+      "day": "40",
+      "date": "2026-10-10",
+      "text": "got first parts of the MCP working for infaiw Though not completed Still need to work on resources,prompts and oauth2.1 and Elicitation",
+      "url": "https://x.com/DipankarDas011/status/2108635315867120074"
+    },
+    {
+      "day": "41",
+      "date": "2026-10-10",
+      "text": "infaiw just got a major upgrade with MCP support! 🛠️ - Reusable prompts. - Simplified elicitation (no more mid-call questions). - Read-only data sources. OAuth2.1 support is in progress.  Stay tuned for the release!  #infai",
+      "url": "https://x.com/DipankarDas011/status/2108982832429469978"
+    },
+    {
+      "day": "42",
+      "date": "2026-10-11",
+      "text": "ended with mcp_connect for infaiw will release soon but enjoy the infaiw at its full glory",
+      "url": "https://x.com/DipankarDas011/status/2109334379969544623"
+    },
+    {
+      "day": "42",
+      "date": "2026-10-12",
+      "text": "now mcp oauth works and got context7 working 🎉",
+      "url": "https://x.com/DipankarDas011/status/2109362069703418266",
+      "update": true
+    },
+    {
+      "day": "43",
+      "date": "2026-10-14",
+      "text": "MCP released and Added Artifact in infaiw Now the same TUI Interface has OutputModality as image so now single place to get image generated as well 👌",
+      "url": "https://x.com/DipankarDas011/status/2110083337872433325"
+    },
+    {
+      "day": "44",
+      "date": "2026-10-16",
+      "text": "added the basic functionality of context meta in infai harness(infaiw)",
+      "url": "https://x.com/DipankarDas011/status/2110817984331870208"
+    }
+  ],
+  "releases": [
+    {
+      "tag": "v0.1.0",
+      "date": "2026-09-06"
+    },
+    {
+      "tag": "v0.1.1",
+      "date": "2026-09-06"
+    },
+    {
+      "tag": "v0.1.2",
+      "date": "2026-09-06"
+    },
+    {
+      "tag": "v0.1.3",
+      "date": "2026-09-06"
+    },
+    {
+      "tag": "v0.1.4",
+      "date": "2026-09-06"
+    },
+    {
+      "tag": "v0.1.5",
+      "date": "2026-09-06"
+    },
+    {
+      "tag": "v0.1.6",
+      "date": "2026-09-06"
+    },
+    {
+      "tag": "v0.1.7",
+      "date": "2026-09-06"
+    },
+    {
+      "tag": "v0.2.0",
+      "date": "2026-09-10"
+    },
+    {
+      "tag": "v0.3.0",
+      "date": "2026-09-10"
+    },
+    {
+      "tag": "v0.4.0",
+      "date": "2026-09-12"
+    },
+    {
+      "tag": "v0.5.0",
+      "date": "2026-09-12"
+    },
+    {
+      "tag": "v0.6.0",
+      "date": "2026-09-27"
+    },
+    {
+      "tag": "v0.7.0",
+      "date": "2026-09-27"
+    },
+    {
+      "tag": "v0.8.0",
+      "date": "2026-09-27"
+    },
+    {
+      "tag": "v0.9.0",
+      "date": "2026-09-27"
+    },
+    {
+      "tag": "v0.10.0",
+      "date": "2026-09-29"
+    },
+    {
+      "tag": "v0.11.0",
+      "date": "2026-10-04"
+    },
+    {
+      "tag": "v0.12.0",
+      "date": "2026-10-06"
+    },
+    {
+      "tag": "v0.13.0",
+      "date": "2026-10-07"
+    },
+    {
+      "tag": "v0.14.0",
+      "date": "2026-10-12"
+    },
+    {
+      "tag": "v0.14.1",
+      "date": "2026-10-12"
+    },
+    {
+      "tag": "v0.15.0",
+      "date": "2026-10-14"
+    },
+    {
+      "tag": "v0.16.0",
+      "date": "2026-10-15"
+    },
+    {
+      "tag": "v0.16.1",
+      "date": "2026-10-15"
+    },
+    {
+      "tag": "v0.17.0",
+      "date": "2026-10-15"
+    },
+    {
+      "tag": "v0.17.1",
+      "date": "2026-10-16"
+    },
+    {
+      "tag": "v0.18.0",
+      "date": "2026-10-16"
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+    "deepseek-flash": {
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "api_type": "openai-completions",
+        "id": "deepseek-flash",
+        "name": "DeepSeek V4.1 Flash",
+        "max_context_window": 1000000,
+        "max_output_tokens": 384000,
+        "default_temperature": null,
+        "input_modality": [
+            "text",
+            "image"
+        ],
+        "output_modality": [
+            "text"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": "none",
+            "minimal": null,
+            "low": "low",
+            "medium": null,
+            "high": "high",
+            "xhigh": null,
+            "max": "max"
+        },
+        "default_thinking": "high"
+    },
+    "deepseek-v4-pro": {
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "api_type": "openai-completions",
+        "id": "deepseek-v4-pro",
+        "name": "DeepSeek V4 Pro",
+        "max_context_window": 1000000,
+        "max_output_tokens": 384000,
+        "default_temperature": null,
+        "input_modality": [
+            "text"
+        ],
+        "output_modality": [
+            "text"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": "none",
+            "minimal": null,
+            "low": "low",
+            "medium": null,
+            "high": "high",
+            "xhigh": null,
+            "max": "max"
+        },
+        "default_thinking": "high"
+    }
+}
