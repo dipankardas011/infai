@@ -124,13 +124,12 @@ func (c *claudeCLI) Generate(ctx context.Context, messages []contracts.ChatMessa
 	if opts != nil && opts.OnDelta != nil {
 		// The validated object only exists once the turn is complete, so the
 		// visible answer is published in one piece rather than token by token.
+		//
+		// Tool calls are deliberately not published here: the agent loop
+		// publishes EventToolCall for every call in the reply it commits, and
+		// publishing in both places renders each call twice in the live view.
 		if reply.Content != nil && *reply.Content != "" {
 			if opts.OnDelta(contracts.DeltaContent, *reply.Content) {
-				return contracts.ChatMessage{}, result.Usage, harnessErr.ErrTurnCanceled
-			}
-		}
-		for _, call := range reply.ToolCalls {
-			if opts.OnDelta(contracts.EventToolCall, contracts.ToolCallDisplay(call)) {
 				return contracts.ChatMessage{}, result.Usage, harnessErr.ErrTurnCanceled
 			}
 		}

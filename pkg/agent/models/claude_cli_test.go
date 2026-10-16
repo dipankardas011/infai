@@ -254,10 +254,14 @@ func TestClaudeCLIGenerateAsksForAToolAsStructuredData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var kinds []contracts.EventStreamKind
 	message, usage, err := client.Generate(context.Background(), []contracts.ChatMessage{
 		{Role: "system", Content: ptr("You are infai's model.")},
 		contracts.NewUserMessage(`Answer with content "need the file" and exactly one tool_calls entry: name read, arguments.path main.go. Do not read anything.`),
-	}, testClaudeTools(), nil)
+	}, testClaudeTools(), &contracts.GenerateOptions{
+		Stream:  true,
+		OnDelta: func(kind contracts.EventStreamKind, _ string) bool { kinds = append(kinds, kind); return false },
+	})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -270,6 +274,14 @@ func TestClaudeCLIGenerateAsksForAToolAsStructuredData(t *testing.T) {
 	}
 	if usage == nil || usage.PromptTokens == 0 {
 		t.Fatalf("usage = %+v", usage)
+	}
+	// The agent loop publishes EventToolCall for every call in the reply it
+	// commits. When the adapter publishes it too, each call renders twice in
+	// the live view while the timeline holds one, so resume disagrees with it.
+	for _, kind := range kinds {
+		if kind == contracts.EventToolCall {
+			t.Fatalf("the adapter published a tool call the agent loop also publishes: %v", kinds)
+		}
 	}
 }
 
