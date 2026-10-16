@@ -163,6 +163,9 @@ func providerHasUsableAuth(provider contracts.LLMProviderConfiguration) bool {
 			strings.TrimSpace(provider.Auth.AccountID) != ""
 	case contracts.DeepSeek:
 		return provider.Auth.Method == contracts.APIKey && strings.TrimSpace(provider.Auth.BearerToken) != ""
+	case contracts.ClaudeCLI:
+		// The CLI owns its own login; infai never holds a credential for it.
+		return provider.Auth.Method == contracts.NoneAuth
 	default:
 		return true
 	}
@@ -170,7 +173,7 @@ func providerHasUsableAuth(provider contracts.LLMProviderConfiguration) bool {
 
 func (e *InfaiAgentEngine) LogoutProvider(input glue.LogoutProviderInput) error {
 	providerName := string(input.ProviderID)
-	if input.ProviderID != contracts.Codex && input.ProviderID != contracts.DeepSeek {
+	if input.ProviderID != contracts.Codex && input.ProviderID != contracts.DeepSeek && input.ProviderID != contracts.ClaudeCLI {
 		return fmt.Errorf("provider %q does not support managed logout", input.ProviderID)
 	}
 
@@ -223,8 +226,21 @@ func validateProvider(name string, provider contracts.LLMProviderConfiguration) 
 		if provider.APIType != contracts.OpenAICompatableAPI {
 			return fmt.Errorf("managed provider %q has unsupported API type %q", provider.Id, provider.APIType)
 		}
+	case contracts.ClaudeCLI:
+		if name != string(provider.Id) {
+			return fmt.Errorf("managed provider %q must use its provider ID as its name", provider.Id)
+		}
+		if provider.BaseEndpoint == "" || len(provider.Models) == 0 {
+			return fmt.Errorf("managed provider %q has incomplete catalog configuration", provider.Id)
+		}
+		if provider.APIType != contracts.ClaudeCLIPrint {
+			return fmt.Errorf("managed provider %q has unsupported API type %q", provider.Id, provider.APIType)
+		}
+		if provider.Auth.Method != contracts.NoneAuth {
+			return fmt.Errorf("managed provider %q must not carry credentials: the CLI owns its own login", provider.Id)
+		}
 	case contracts.OpenAIGeneric:
-		if name == string(contracts.Codex) || name == string(contracts.DeepSeek) {
+		if name == string(contracts.Codex) || name == string(contracts.DeepSeek) || name == string(contracts.ClaudeCLI) {
 			return fmt.Errorf("generic provider cannot use reserved name %q", name)
 		}
 		endpoint, err := url.Parse(provider.BaseEndpoint)

@@ -136,6 +136,7 @@ type ProviderSlug string
 const (
 	DeepSeek      ProviderSlug = "deepseek"
 	Codex         ProviderSlug = "openai-codex"
+	ClaudeCLI     ProviderSlug = "claude-cli"
 	OpenAIGeneric ProviderSlug = "openai-generic"
 )
 
@@ -144,6 +145,7 @@ type ProviderAPIType string
 const (
 	OpenAICompatableAPI     ProviderAPIType = "openai-completions"
 	OpenAICodexResponsesAPI ProviderAPIType = "openai-codex-responses"
+	ClaudeCLIPrint          ProviderAPIType = "claude-cli-print"
 )
 
 type LLMSupportedModality string

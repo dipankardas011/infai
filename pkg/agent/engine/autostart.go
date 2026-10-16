@@ -24,7 +24,7 @@ func (e *InfaiAgentEngine) LoadConfiguredProviders(ctx context.Context) error {
 	for providerName, providerConfig := range providerStore.Providers {
 		switch providerConfig.Id {
 		case contracts.OpenAIGeneric:
-		case contracts.Codex, contracts.DeepSeek:
+		case contracts.Codex, contracts.DeepSeek, contracts.ClaudeCLI:
 			fetchConfigurationFromInfai.Add(providerConfig.Id)
 		default:
 			return fmt.Errorf("provider %q has unsupported ID %q", providerName, providerConfig.Id)
@@ -104,7 +104,7 @@ func (e *InfaiAgentEngine) refreshManagedProviderCatalogs(ctx context.Context) {
 
 	e.providerMu.Lock()
 	for _, provider := range e.providers.Providers {
-		if provider.Id == contracts.Codex || provider.Id == contracts.DeepSeek {
+		if provider.Id == contracts.Codex || provider.Id == contracts.DeepSeek || provider.Id == contracts.ClaudeCLI {
 			configured.Add(provider.Id)
 		}
 	}

@@ -31,6 +31,7 @@ func RunProviderLogin(ctx context.Context, client ProviderManagementClient, in i
 	choice, err := runProviderMenu(ctx, in, out, "Provider login", "Select a managed provider", []string{
 		"DeepSeek",
 		"OpenAI Codex",
+		"Claude (via your local Claude Code login)",
 		custom,
 	})
 	if err != nil {
@@ -40,8 +41,11 @@ func RunProviderLogin(ctx context.Context, client ProviderManagementClient, in i
 		return renderGenericProviderHelp(out)
 	}
 	providerID := contracts.DeepSeek
-	if choice == "OpenAI Codex" {
+	switch choice {
+	case "OpenAI Codex":
 		providerID = contracts.Codex
+	case "Claude (via your local Claude Code login)":
+		providerID = contracts.ClaudeCLI
 	}
 	methods, err := client.ProviderAuthMethods(ctx, providerID)
 	if err != nil {
@@ -125,7 +129,7 @@ func RunProviderLogout(ctx context.Context, client ProviderManagementClient, in 
 	}
 	configured := make(map[string]bool)
 	for _, model := range models {
-		if model.ProviderName == string(contracts.Codex) || model.ProviderName == string(contracts.DeepSeek) {
+		if model.ProviderName == string(contracts.Codex) || model.ProviderName == string(contracts.DeepSeek) || model.ProviderName == string(contracts.ClaudeCLI) {
 			configured[model.ProviderName] = true
 		}
 	}

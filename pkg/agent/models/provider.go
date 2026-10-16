@@ -13,6 +13,8 @@ func ProviderAuthMethods(providerID contracts.ProviderSlug) ([]contracts.Provide
 		return codexAuthMethods(), nil
 	case contracts.DeepSeek:
 		return deepSeekAuthMethods(), nil
+	case contracts.ClaudeCLI:
+		return claudeCLIAuthMethods(), nil
 	default:
 		return nil, fmt.Errorf("provider %q does not support managed authentication", providerID)
 	}
@@ -24,6 +26,8 @@ func ProvisionProviderAuth(ctx context.Context, providerID contracts.ProviderSlu
 		return beginCodexAuth(ctx, method)
 	case contracts.DeepSeek:
 		return beginDeepSeekAuth(method, credential)
+	case contracts.ClaudeCLI:
+		return beginClaudeCLIAuth(method)
 	default:
 		return nil, fmt.Errorf("provider %q does not support managed authentication", providerID)
 	}
@@ -46,6 +50,8 @@ func ProvisionModelClient(
 		return NewDeepSeekAPI(m)
 	case contracts.Codex:
 		return NewOpenAICodexResponsesAPI(m)
+	case contracts.ClaudeCLI:
+		return NewClaudeCLI(m)
 	case contracts.OpenAIGeneric:
 		return NewOpenAICompatableAPI(m)
 	default:
