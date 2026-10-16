@@ -1,15 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <rect width="512" height="512" rx="113" fill="#11171a"/>
-  <rect x="96" y="64" width="64" height="64" fill="#83c092"/>
-  <rect x="352" y="64" width="64" height="64" fill="#83c092"/>
-  <rect x="224" y="128" width="64" height="64" fill="#83c092"/>
-  <rect x="96" y="192" width="64" height="64" fill="#d3c6aa"/>
-  <rect x="352" y="192" width="64" height="64" fill="#d3c6aa"/>
-  <rect x="96" y="256" width="64" height="64" fill="#d3c6aa"/>
-  <rect x="224" y="256" width="64" height="64" fill="#d3c6aa"/>
-  <rect x="352" y="256" width="64" height="64" fill="#d3c6aa"/>
-  <rect x="96" y="320" width="64" height="64" fill="#d3c6aa"/>
-  <rect x="224" y="320" width="64" height="64" fill="#d3c6aa"/>
-  <rect x="352" y="320" width="64" height="64" fill="#d3c6aa"/>
-  <rect x="96" y="384" width="320" height="64" fill="#d3c6aa"/>
+  <path fill="#d3c6aa" d="M96 192h64v64h-64zM352 192h64v64h-64zM96 256h64v64h-64zM224 256h64v64h-64zM352 256h64v64h-64zM96 320h64v64h-64zM224 320h64v64h-64zM352 320h64v64h-64zM96 384h320v64h-320z"/>
+  <path fill="#83c092" d="M96 64h64v64h-64zM352 64h64v64h-64zM224 128h64v64h-64z"/>
 </svg>
