@@ -24,6 +24,9 @@ type claudeCgroup struct {
 }
 
 type claudeCgroupLimits struct {
+	// CPUMax is written as-is to cpu.max ("<quota> <period>"). A CPU limit is a
+	// throttle: the process runs slower, it is never killed for it.
+	CPUMax    string
 	MemoryMax uint64
 	PidsMax   int
 }
@@ -54,6 +57,11 @@ func newClaudeCgroup(limits claudeCgroupLimits) (*claudeCgroup, error) {
 }
 
 func (c *claudeCgroup) writeLimits(limits claudeCgroupLimits) error {
+	if limits.CPUMax != "" {
+		if err := os.WriteFile(filepath.Join(c.path, "cpu.max"), []byte(limits.CPUMax), 0); err != nil {
+			return fmt.Errorf("claude cli: cgroup cpu limit: %w", err)
+		}
+	}
 	// Swap is switched off so a runaway process cannot exceed the cap by
 	// paging, which is the point of the cap.
 	if err := os.WriteFile(filepath.Join(c.path, "memory.swap.max"), []byte("0"), 0); err != nil {
@@ -163,7 +171,7 @@ func enableCgroupControllers(unit string) error {
 		return err
 	}
 	var missing strings.Builder
-	for _, controller := range []string{"memory", "pids"} {
+	for _, controller := range []string{"cpu", "memory", "pids"} {
 		if !strings.Contains(string(current), controller) {
 			missing.WriteString("+" + controller + " ")
 		}

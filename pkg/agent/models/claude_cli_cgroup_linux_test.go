@@ -38,13 +38,14 @@ func TestCgroupV2PathParsing(t *testing.T) {
 // skips rather than failing, because running unconstrained is the documented
 // fallback.
 func TestClaudeCgroupCarriesTheLimitsWhenDelegated(t *testing.T) {
-	cgroup, err := newClaudeCgroup(claudeCgroupLimits{MemoryMax: 64 << 20, PidsMax: 64})
+	cgroup, err := newClaudeCgroup(claudeCgroupLimits{CPUMax: "50000 100000", MemoryMax: 64 << 20, PidsMax: 64})
 	if err != nil {
 		t.Skipf("cgroup subtree is not delegated to this process: %v", err)
 	}
 	defer cgroup.remove()
 
 	for _, tc := range []struct{ file, want string }{
+		{"cpu.max", "50000 100000"},
 		{"memory.max", strconv.FormatUint(64<<20, 10)},
 		{"memory.swap.max", "0"},
 		{"pids.max", "64"},

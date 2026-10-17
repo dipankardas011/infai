@@ -23,10 +23,15 @@ const (
 	// claudeMaxAttempts bounds retries of a transient provider failure. Auth
 	// and rate-limit failures are never retried.
 	claudeMaxAttempts = 2
-	// claudeCLIMemoryMax bounds a turn's resident memory. A measured tiny turn
-	// peaks near 200 MB, and a tight cap is a real risk at long contexts, so
-	// this is a runaway ceiling rather than a budget.
-	claudeCLIMemoryMax = 1 << 30
+	// claudeCLIMemoryMax bounds a turn's resident memory. Measured peaks are
+	// ~287 MB for a trivial turn and ~291 MB for a 140 KB prompt: the runtime,
+	// not the context, dominates. 512 MiB leaves roughly 220 MB of headroom,
+	// so a long context has room without the cap being merely decorative.
+	claudeCLIMemoryMax = 512 << 20
+	// claudeCLICPUQuota and claudeCLICPUPeriod give the turn 500m: 50 ms of CPU
+	// per 100 ms, i.e. half a core. CPU is throttled, never killed.
+	claudeCLICPUQuota  = 50000
+	claudeCLICPUPeriod = 100000
 	// claudeCLIPidsMax stops a fork storm; the CLI needs only a handful.
 	claudeCLIPidsMax = 256
 )
@@ -101,6 +106,7 @@ func (c *claudeCLI) run(ctx context.Context, systemPrompt, transcript, schema st
 	// containment, not isolation: the CLI still runs as the user. A host that
 	// has not delegated runs unconstrained, exactly as before.
 	cgroup, _ := newClaudeCgroup(claudeCgroupLimits{
+		CPUMax:    fmt.Sprintf("%d %d", claudeCLICPUQuota, claudeCLICPUPeriod),
 		MemoryMax: c.opts.memoryMax,
 		PidsMax:   c.opts.pidsMax,
 	})

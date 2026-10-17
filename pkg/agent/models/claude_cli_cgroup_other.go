@@ -12,6 +12,7 @@ import (
 type claudeCgroup struct{}
 
 type claudeCgroupLimits struct {
+	CPUMax    string
 	MemoryMax uint64
 	PidsMax   int
 }
