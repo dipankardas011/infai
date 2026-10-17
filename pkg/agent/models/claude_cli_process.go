@@ -23,6 +23,12 @@ const (
 	// claudeMaxAttempts bounds retries of a transient provider failure. Auth
 	// and rate-limit failures are never retried.
 	claudeMaxAttempts = 2
+	// claudeCLIMemoryMax bounds a turn's resident memory. A measured tiny turn
+	// peaks near 200 MB, and a tight cap is a real risk at long contexts, so
+	// this is a runaway ceiling rather than a budget.
+	claudeCLIMemoryMax = 1 << 30
+	// claudeCLIPidsMax stops a fork storm; the CLI needs only a handful.
+	claudeCLIPidsMax = 256
 )
 
 var execLookPath = exec.LookPath
@@ -90,9 +96,28 @@ func (c *claudeCLI) run(ctx context.Context, systemPrompt, transcript, schema st
 	}
 	stderr := newClaudeTailBuffer(64 * 1024)
 	cmd.Stderr = stderr
+
+	// Bound the turn with a cgroup when the unit delegated one to us. This is
+	// containment, not isolation: the CLI still runs as the user. A host that
+	// has not delegated runs unconstrained, exactly as before.
+	cgroup, _ := newClaudeCgroup(claudeCgroupLimits{
+		MemoryMax: c.opts.memoryMax,
+		PidsMax:   c.opts.pidsMax,
+	})
+	releaseCgroup := func() {}
+	if cgroup != nil {
+		defer cgroup.remove()
+		if release, err := cgroup.attach(cmd); err == nil {
+			releaseCgroup = release
+		}
+	}
+
 	if err := cmd.Start(); err != nil {
+		releaseCgroup()
 		return claudeStreamResult{}, fmt.Errorf("claude cli: start: %w", err)
 	}
+	// The clone has happened; the directory handle is no longer needed.
+	releaseCgroup()
 
 	done := make(chan struct{})
 	go func() {
@@ -119,6 +144,11 @@ func (c *claudeCLI) run(ctx context.Context, systemPrompt, transcript, schema st
 		return result, decodeErr
 	}
 	if waitErr != nil || !result.ResultSeen {
+		if cgroup != nil {
+			if kills, ok := cgroup.oomKills(); ok && kills > 0 {
+				return result, fmt.Errorf("claude cli: the turn was killed by its memory limit of %d MB", c.opts.memoryMax>>20)
+			}
+		}
 		message := stderr.String()
 		if isClaudeAuthError(message) {
 			return result, claudeAuthError()

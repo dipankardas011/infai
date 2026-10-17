@@ -55,6 +55,10 @@ type claudeCLIOptions struct {
 	workDir    string
 	minVersion string
 	retryDelay time.Duration
+	// memoryMax and pidsMax bound each CLI turn when the unit delegated a
+	// cgroup subtree to this process. Zero means no limit of that kind.
+	memoryMax uint64
+	pidsMax   int
 }
 
 func NewClaudeCLI(model contracts.ProvisionedModel) (*claudeCLI, error) {
@@ -66,7 +70,12 @@ func NewClaudeCLI(model contracts.ProvisionedModel) (*claudeCLI, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &claudeCLI{model: model, binary: binary, opts: claudeCLIOptions{workDir: workDir, minVersion: claudeCLIMinVersion}}, nil
+	return &claudeCLI{model: model, binary: binary, opts: claudeCLIOptions{
+		workDir:    workDir,
+		minVersion: claudeCLIMinVersion,
+		memoryMax:  claudeCLIMemoryMax,
+		pidsMax:    claudeCLIPidsMax,
+	}}, nil
 }
 
 func (c *claudeCLI) GetModelSpecs() contracts.ProvisionedModel { return c.model }
