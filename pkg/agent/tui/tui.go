@@ -83,6 +83,7 @@ type Client interface {
 	Compact(ctx context.Context) (*store.SessionMeta, error)
 	RenderMCPPrompt(ctx context.Context, id uuid.UUID, server, name string, arguments map[string]string) ([]contracts.ChatMessage, error)
 	GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error)
+	GetReport(ctx context.Context, id uuid.UUID) ([]byte, error)
 	SelectBranch(ctx context.Context, id, eventID uuid.UUID) (contracts.TaskChecklistState, error)
 }
 

@@ -14,6 +14,9 @@ var (
 var (
 	ErrSessionClosed  = errors.New("session closed")
 	ErrNoTurnToCancel = errors.New("no turn is in flight")
+	// ErrSessionNotIdle marks a request that needs a quiescent session, so the
+	// server can return 409.
+	ErrSessionNotIdle = errors.New("session is not idle")
 	ErrTurnCanceled   = errors.New("turn canceled by user")
 	ErrNoProvider     = errors.New("engine: no provider configured")
 	ErrApprovalDenied = errors.New("tool execution was denied by the user")

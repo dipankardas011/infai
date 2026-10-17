@@ -24,6 +24,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/memory"
 	"github.com/dipankardas011/infai/pkg/agent/models"
 	"github.com/dipankardas011/infai/pkg/agent/prompts"
+	"github.com/dipankardas011/infai/pkg/agent/report"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/dipankardas011/infai/pkg/agent/vision"
 	"github.com/google/uuid"
@@ -387,6 +388,35 @@ func (s *InfaiAgentSession) ViewTimeline() ([]store.Event, uuid.UUID, error) {
 		head = s.pendingBranchParent
 	}
 	return events, head, err
+}
+
+// GetReport snapshots the session's meta and entire timeline, every branch with
+// each event's full payload. It requires an idle session; the status, metadata
+// and timeline are read under one lock so a turn cannot append mid-export.
+func (s *InfaiAgentSession) GetReport() (report.SessionTimeline, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status != contracts.SessionIdle {
+		return report.SessionTimeline{}, fmt.Errorf("%w: wait for the current turn to finish", harnessErr.ErrSessionNotIdle)
+	}
+	events, err := s.timeline.LoadEntireTimeline()
+	if err != nil {
+		return report.SessionTimeline{}, err
+	}
+	head := s.timeline.CurrentHeadEventID()
+	if s.pendingBranchParent != uuid.Nil {
+		head = s.pendingBranchParent
+	}
+	records, err := CompleteResolveRawTimelineEventsToRecords(s.timeline, events)
+	if err != nil {
+		return report.SessionTimeline{}, err
+	}
+	for i := range events {
+		events[i].Record = &records[i]
+	}
+	meta := s.meta
+	meta.Offsprings = append([]uuid.UUID(nil), meta.Offsprings...)
+	return report.SessionTimeline{Meta: meta, Events: events, Head: head}, nil
 }
 
 func (s *InfaiAgentSession) SelectBranch(eventID uuid.UUID) (contracts.TaskChecklistState, error) {

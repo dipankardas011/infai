@@ -63,6 +63,7 @@ var harnessCommands = []commandSpec{
 	{name: "/rename", args: "<name>", help: "rename the active session"},
 	{name: "/compact", help: "compact conversation context"},
 	{name: "/timeline", help: "branch from an earlier event"},
+	{name: "/report", help: "export the full timeline as an HTML report"},
 	{name: "/help", help: "show keyboard help"},
 	{name: "/quit", help: "leave the harness"},
 }

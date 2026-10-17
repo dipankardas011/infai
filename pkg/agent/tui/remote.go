@@ -521,6 +521,23 @@ func (c *RemoteClient) GetTimeline(ctx context.Context, id uuid.UUID) (*Timeline
 	return &out, nil
 }
 
+// GetReport fetches the session's entire timeline as one self-contained HTML page.
+func (c *RemoteClient) GetReport(ctx context.Context, id uuid.UUID) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions/"+id.String()+"/report", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, readAPIError(resp)
+	}
+	return io.ReadAll(resp.Body)
+}
+
 func (c *RemoteClient) SelectBranch(ctx context.Context, id, eventID uuid.UUID) (contracts.TaskChecklistState, error) {
 	var response struct {
 		TaskChecklist contracts.TaskChecklistState `json:"task_checklist"`

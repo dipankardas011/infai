@@ -73,6 +73,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /v1/sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("GET /v1/sessions/{id}/identity", s.handleGetSessionIdentity)
 	mux.HandleFunc("GET /v1/sessions/{id}/timeline", s.handleGetTimeline)
+	mux.HandleFunc("GET /v1/sessions/{id}/report", s.handleGetReport)
 	mux.HandleFunc("POST /v1/sessions/{id}/timeline/branch", s.handleBranchTimeline)
 	mux.HandleFunc("POST /v1/sessions/{id}/load", s.handleLoadSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/rename", s.handleRenameSession)
@@ -574,6 +575,30 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		response.Events = append(response.Events, glue.TimelineEventResponse{ID: event.ID, ParentID: event.ParentID, BranchFrom: event.BranchFrom, Kind: event.Kind, BlobHash: event.BlobHash, Preview: event.Preview, Record: event.Record})
 	}
 	s.writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleGetReport(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	page, err := s.engine.GetReport(id)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, harnessErr.ErrSessionNotFound) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		if errors.Is(err, harnessErr.ErrSessionNotIdle) {
+			s.writeError(w, http.StatusConflict, err)
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(page)
 }
 
 func (s *Server) handleBranchTimeline(w http.ResponseWriter, r *http.Request) {

@@ -16,6 +16,7 @@ import (
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/models"
+	"github.com/dipankardas011/infai/pkg/agent/report"
 	"github.com/dipankardas011/infai/pkg/agent/session"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/google/uuid"
@@ -902,6 +903,85 @@ func (e *InfaiAgentEngine) GetTimeline(id uuid.UUID) (store.SessionMeta, []store
 		return store.SessionMeta{}, nil, uuid.Nil, err
 	}
 	return meta, events, timeline.CurrentHeadEventID(), err
+}
+
+// GetReport renders a root session and all of its offspring timelines as one
+// self-contained HTML page. If id names an offspring, its top-level parent is
+// used so the report always opens on the main session.
+func (e *InfaiAgentEngine) GetReport(id uuid.UUID) ([]byte, error) {
+	root, err := e.reportRoot(id)
+	if err != nil {
+		return nil, err
+	}
+	var sessions []report.SessionTimeline
+	seen := make(map[uuid.UUID]bool)
+	var collect func(uuid.UUID) error
+	collect = func(sessionID uuid.UUID) error {
+		if seen[sessionID] {
+			return fmt.Errorf("report: offspring cycle at session %s", sessionID)
+		}
+		seen[sessionID] = true
+		snapshot, err := e.reportSession(sessionID)
+		if err != nil {
+			return err
+		}
+		sessions = append(sessions, snapshot)
+		for _, childID := range snapshot.Meta.Offsprings {
+			if err := collect(childID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := collect(root); err != nil {
+		return nil, err
+	}
+	return report.RenderSessions(sessions)
+}
+
+func (e *InfaiAgentEngine) reportRoot(id uuid.UUID) (uuid.UUID, error) {
+	seen := make(map[uuid.UUID]bool)
+	for {
+		if seen[id] {
+			return uuid.Nil, fmt.Errorf("report: parent cycle at session %s", id)
+		}
+		seen[id] = true
+		meta, err := e.sessionStore.LoadMeta(id)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if meta.ParentID == uuid.Nil {
+			return id, nil
+		}
+		id = meta.ParentID
+	}
+}
+
+func (e *InfaiAgentEngine) reportSession(id uuid.UUID) (report.SessionTimeline, error) {
+	if sess, ok := e.Session(id); ok {
+		return sess.GetReport()
+	}
+	meta, err := e.sessionStore.LoadMeta(id)
+	if err != nil {
+		return report.SessionTimeline{}, err
+	}
+	timeline, err := e.sessionStore.LoadSessionTimelineClient(id)
+	if err != nil {
+		return report.SessionTimeline{}, err
+	}
+	defer timeline.Close()
+	events, err := timeline.LoadEntireTimeline()
+	if err != nil {
+		return report.SessionTimeline{}, err
+	}
+	records, err := session.CompleteResolveRawTimelineEventsToRecords(timeline, events)
+	if err != nil {
+		return report.SessionTimeline{}, err
+	}
+	for i := range events {
+		events[i].Record = &records[i]
+	}
+	return report.SessionTimeline{Meta: meta, Events: events, Head: timeline.CurrentHeadEventID()}, nil
 }
 
 func (e *InfaiAgentEngine) SelectBranch(id, eventID uuid.UUID) (contracts.TaskChecklistState, error) {

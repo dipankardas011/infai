@@ -684,6 +684,14 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.blocks = append(m.blocks, block{role: "event", text: "saved " + m.relativePaths(msg.paths)})
 		m.refreshTranscript(true)
 		return m, nil
+	case reportSavedMsg:
+		if msg.err != nil {
+			m.showNotice("Could not save the report", msg.err.Error(), false)
+			return m, nil
+		}
+		m.blocks = append(m.blocks, block{role: "event", text: "saved " + m.relativePaths([]string{msg.path})})
+		m.refreshTranscript(true)
+		return m, nil
 	case sessionCreatedMsg:
 		if msg.err != nil {
 			m.showNotice("Could not create session", msg.err.Error(), false)
@@ -2075,12 +2083,21 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 	case "/timeline":
 		m.modal = loadingModal("Loading timeline", "the session transcripts")
 		return loadTimelineCmd(m.ctx, m.client, m.session.ID)
+	case "/report":
+		if m.session.ID == uuid.Nil {
+			m.appendError(errors.New("no active session"))
+			m.refreshTranscript(true)
+			return nil
+		}
+		m.blocks = append(m.blocks, block{role: "event", text: "building report…"})
+		m.refreshTranscript(true)
+		return saveReportCmd(m.ctx, m.client, m.session.ID, m.session.Cwd)
 	case "/help":
 		m.blocks = append(m.blocks, block{role: "system", text: strings.Join([]string{
 			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll · Ctrl+O sessions · Ctrl+N new · Ctrl+T thinking",
 			"Ctrl+V paste image · Ctrl+U clear images",
 			"Mouse: drag over the transcript to copy it · hold at an edge to scroll · wheel to scroll",
-			"/new · /sessions · /model · /compact · /timeline · /rename · /quit",
+			"/new · /sessions · /model · /compact · /timeline · /report · /rename · /quit",
 			"MCP prompts: /server:prompt [key=value ...]",
 		}, "\n")})
 		m.refreshTranscript(true)

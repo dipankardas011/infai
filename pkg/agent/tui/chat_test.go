@@ -3091,6 +3091,9 @@ func (stubChatClient) RenderMCPPrompt(context.Context, uuid.UUID, string, string
 func (stubChatClient) GetTimeline(context.Context, uuid.UUID) (*TimelineView, error) {
 	return &TimelineView{}, nil
 }
+func (stubChatClient) GetReport(context.Context, uuid.UUID) ([]byte, error) {
+	return []byte("<html></html>"), nil
+}
 func (stubChatClient) SelectBranch(context.Context, uuid.UUID, uuid.UUID) (contracts.TaskChecklistState, error) {
 	return contracts.TaskChecklistState{}, nil
 }

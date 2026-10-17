@@ -23,6 +23,7 @@ func TestRoutesMatchThePathsTheClientCalls(t *testing.T) {
 		{"GET", "/v1/sessions/01a114d7-0234-7b1a-b629-c877f0e15a24", "GET /v1/sessions/{id}"},
 		{"GET", "/v1/sessions/01a114d7-0234-7b1a-b629-c877f0e15a24/identity", "GET /v1/sessions/{id}/identity"},
 		{"GET", "/v1/sessions/01a114d7-0234-7b1a-b629-c877f0e15a24/timeline", "GET /v1/sessions/{id}/timeline"},
+		{"GET", "/v1/sessions/01a114d7-0234-7b1a-b629-c877f0e15a24/report", "GET /v1/sessions/{id}/report"},
 		{"POST", "/v1/sessions/01a114d7-0234-7b1a-b629-c877f0e15a24/close", "POST /v1/sessions/{id}/close"},
 	} {
 		_, pattern := mux.Handler(httptest.NewRequest(want.method, want.path, nil))
