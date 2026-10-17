@@ -85,7 +85,7 @@ func (c *claudeCLI) resolveBinary() (string, error) {
 	return resolveClaudeBinary(c.binary)
 }
 
-func (c *claudeCLI) attempts(ctx context.Context, systemPrompt, transcript, schema string, allowed map[string]struct{}, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
+func (c *claudeCLI) attempts(ctx context.Context, systemPrompt, transcript, schema string, allowed claudeTools, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
 	var last claudeStreamResult
 	var err error
 	for attempt := 1; attempt <= claudeMaxAttempts; attempt++ {

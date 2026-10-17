@@ -11,6 +11,15 @@ import (
 const claudeTranscriptInstruction = "The JSON in the user message is the conversation so far, oldest first. " +
 	"Reply only as the next assistant turn, answering through the supplied output schema."
 
+// claudeNativeToolsDisabled closes what the output schema cannot: the CLI also
+// exposes a native tool channel, and it is disabled (--tools ""). A model that
+// reaches for it receives "No such tool available" and, without this rule,
+// concludes that no tool exists at all. It goes last because the model weighs
+// the final instruction most.
+const claudeNativeToolsDisabled = "The native tool channel is disabled. " +
+	"Do not emit native tool calls: they fail with \"No such tool available\". " +
+	"Every action must be requested in the tool_calls array of the output object; leave it empty when no tool is needed."
+
 // claudeSystemPrompt joins infai's own system messages with the instruction that
 // frames the transcript. Tool definitions travel in the output schema, not here.
 func claudeSystemPrompt(messages []contracts.ChatMessage) string {
@@ -20,7 +29,7 @@ func claudeSystemPrompt(messages []contracts.ChatMessage) string {
 			parts = append(parts, *message.Content)
 		}
 	}
-	parts = append(parts, claudeTranscriptInstruction)
+	parts = append(parts, claudeTranscriptInstruction, claudeNativeToolsDisabled)
 	return strings.Join(parts, "\n\n")
 }
 

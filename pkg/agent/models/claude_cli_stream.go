@@ -33,6 +33,18 @@ type claudeStreamResult struct {
 	ResultSeen bool
 	Retryable  bool
 	RateLimit  string
+	// NativeTool is a call the model made through the CLI's own tool channel
+	// instead of the output schema. The channel is disabled, so the CLI answers
+	// "No such tool available"; infai still honours the call because it names a
+	// tool infai offered, and the model's argument object is already the one the
+	// tool expects. NativeText is what the model said in that same turn.
+	NativeTool *claudeNativeToolCall
+	NativeText string
+}
+
+type claudeNativeToolCall struct {
+	Name  string
+	Input json.RawMessage
 }
 
 type claudeStreamEvent struct {
@@ -51,20 +63,26 @@ type claudeStreamEvent struct {
 	} `json:"event"`
 	Message struct {
 		Content []struct {
-			Type     string `json:"type"`
-			Thinking string `json:"thinking"`
+			Type     string          `json:"type"`
+			Thinking string          `json:"thinking"`
+			Text     string          `json:"text"`
+			Name     string          `json:"name"`
+			Input    json.RawMessage `json:"input"`
 		} `json:"content"`
+		Usage claudeTokenUsage `json:"usage"`
 	} `json:"message"`
-	Usage struct {
-		InputTokens              uint64 `json:"input_tokens"`
-		CacheCreationInputTokens uint64 `json:"cache_creation_input_tokens"`
-		CacheReadInputTokens     uint64 `json:"cache_read_input_tokens"`
-		OutputTokens             uint64 `json:"output_tokens"`
-	} `json:"usage"`
+	Usage         claudeTokenUsage `json:"usage"`
 	RateLimitInfo struct {
 		Status   string `json:"status"`
 		ResetsAt string `json:"resets_at"`
 	} `json:"rate_limit_info"`
+}
+
+type claudeTokenUsage struct {
+	InputTokens              uint64 `json:"input_tokens"`
+	CacheCreationInputTokens uint64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     uint64 `json:"cache_read_input_tokens"`
+	OutputTokens             uint64 `json:"output_tokens"`
 }
 
 // decodeClaudeStream consumes the CLI's newline-delimited JSON for one turn.
@@ -74,7 +92,12 @@ type claudeStreamEvent struct {
 // forwards reasoning and provider status. The raw structured JSON that streams
 // in between must never reach the client, which is why nothing else is
 // forwarded.
-func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
+//
+// A tool_use block for a tool in allowed is not forwarded either: it is the
+// model skipping the schema for the CLI's native channel, which is disabled.
+// The call is captured and stop ends the turn before the CLI can reject it and
+// the model starts retrying.
+func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.GenerateOptions, allowed claudeTools, stop func()) (claudeStreamResult, error) {
 	scanner := claudeScanner(reader)
 	var reasoning strings.Builder
 	var result claudeStreamResult
@@ -101,14 +124,29 @@ func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.G
 				return result, harnessErr.ErrTurnCanceled
 			}
 		case "assistant":
-			// Only a fallback source of reasoning: the validated answer is
-			// read from the result event, which is authoritative.
-			if reasoning.Len() > 0 {
-				continue
-			}
 			for _, block := range event.Message.Content {
-				if block.Type == "thinking" && block.Thinking != "" {
-					reasoning.WriteString(block.Thinking)
+				switch block.Type {
+				case "thinking":
+					// Only a fallback source of reasoning: the validated answer
+					// is read from the result event, which is authoritative.
+					if reasoning.Len() == 0 && block.Thinking != "" {
+						reasoning.WriteString(block.Thinking)
+					}
+				case "text":
+					result.NativeText += block.Text
+				case "tool_use":
+					if _, ok := allowed[block.Name]; !ok {
+						continue
+					}
+					result.NativeTool = &claudeNativeToolCall{Name: block.Name, Input: block.Input}
+					// No result event follows a stopped turn, so the cost of
+					// the call that produced this tool_use is read here.
+					result.Usage = claudeUsage(event.Message.Usage)
+					result.Reasoning = reasoning.String()
+					if stop != nil {
+						stop()
+					}
+					return result, nil
 				}
 			}
 		case "rate_limit_event":
@@ -120,7 +158,7 @@ func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.G
 			}
 		case "result":
 			result.ResultSeen = true
-			result.Usage = claudeUsage(event)
+			result.Usage = claudeUsage(event.Usage)
 			if event.IsError || strings.HasPrefix(event.Subtype, "error") {
 				return result, claudeResultError(event, &result)
 			}
@@ -140,15 +178,15 @@ func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.G
 
 // claudeUsage reports what the turn cost. Cache reads and writes are input the
 // model had to read, so they count towards the prompt side.
-func claudeUsage(event claudeStreamEvent) *contracts.TokenUsage {
-	prompt := event.Usage.InputTokens + event.Usage.CacheCreationInputTokens + event.Usage.CacheReadInputTokens
-	if prompt == 0 && event.Usage.OutputTokens == 0 {
+func claudeUsage(usage claudeTokenUsage) *contracts.TokenUsage {
+	prompt := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+	if prompt == 0 && usage.OutputTokens == 0 {
 		return nil
 	}
 	return &contracts.TokenUsage{
 		PromptTokens:     prompt,
-		CompletionTokens: event.Usage.OutputTokens,
-		TotalTokens:      prompt + event.Usage.OutputTokens,
+		CompletionTokens: usage.OutputTokens,
+		TotalTokens:      prompt + usage.OutputTokens,
 	}
 }
 

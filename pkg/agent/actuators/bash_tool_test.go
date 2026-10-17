@@ -125,6 +125,37 @@ func TestBashToolRejectsEmptyCommand(t *testing.T) {
 	}
 }
 
+func TestBashToolSchemaDeclaresTimeoutAsAnInteger(t *testing.T) {
+	var schema struct {
+		Properties struct {
+			Timeout struct {
+				Type string `json:"type"`
+			} `json:"timeout"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(actuators.BashTool().Parameters, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema.Properties.Timeout.Type != "integer" {
+		t.Fatalf("timeout schema type = %q, want integer", schema.Properties.Timeout.Type)
+	}
+}
+
+// Claude writes numeric arguments as strings ("timeout":"60"). The decoder
+// rejects that, so the error has to name the field and both types: the agent
+// reads it and corrects the next call itself.
+func TestBashToolNamesAStringTimeoutInTheError(t *testing.T) {
+	m := manager(t, t.TempDir())
+	err := executeError(t, m, contracts.BashTool, map[string]any{
+		"command": "echo hi", "timeout": "60",
+	})
+	for _, want := range []string{`field "timeout"`, "must be int", "got string"} {
+		if !strings.Contains(err, want) {
+			t.Fatalf("error = %s, want %q", err, want)
+		}
+	}
+}
+
 func TestBashToolValidatesTimeoutParameter(t *testing.T) {
 	m := manager(t, t.TempDir())
 	for _, timeout := range []int{0, -5} {

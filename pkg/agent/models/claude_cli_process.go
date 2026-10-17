@@ -79,7 +79,7 @@ func claudeCLIArgs(model contracts.ProvisionedModel, systemPrompt, schema string
 	return args
 }
 
-func (c *claudeCLI) run(ctx context.Context, systemPrompt, transcript, schema string, allowed map[string]struct{}, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
+func (c *claudeCLI) run(ctx context.Context, systemPrompt, transcript, schema string, allowed claudeTools, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
 	binary, err := c.resolveBinary()
 	if err != nil {
 		return claudeStreamResult{}, err
@@ -125,18 +125,27 @@ func (c *claudeCLI) run(ctx context.Context, systemPrompt, transcript, schema st
 	// The clone has happened; the directory handle is no longer needed.
 	releaseCgroup()
 
+	// A native tool call ends the turn from the reader, so the process has to
+	// be terminated to unblock Wait. The cause stays local: the caller asked to
+	// cancel only when it cancels ctx, not when it supplies a tool call.
+	turnCtx, cancelTurn := context.WithCancel(ctx)
+	defer cancelTurn()
+
 	done := make(chan struct{})
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-turnCtx.Done():
 			terminateClaudeProcess(cmd.Process)
 		case <-done:
 		}
 	}()
-	result, decodeErr := decodeClaudeStream(ctx, stdout, opts)
+	result, decodeErr := decodeClaudeStream(turnCtx, stdout, opts, allowed, cancelTurn)
 	waitErr := cmd.Wait()
 	close(done)
 
+	if result.NativeTool != nil {
+		return result, nil
+	}
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}

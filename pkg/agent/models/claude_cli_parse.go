@@ -9,6 +9,11 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
+// claudeTools is the set offered to the model, keyed by tool name. The value
+// carries the tool's own parameter schema, which is also the validator the
+// provider uses to repair Claude's argument types.
+type claudeTools map[string]contracts.Tool
+
 // claudeToolSchema builds the JSON Schema that tells the CLI what shape to
 // answer in. Tools are represented as data inside it, so the model requests
 // them structurally and the CLI never runs anything.
@@ -16,17 +21,17 @@ import (
 // Every tool becomes one variant of tool_calls items, keyed by a const name
 // with the tool's own parameter schema as its arguments. With no tools the
 // array is pinned to empty, which keeps a plain answer answerable.
-func claudeToolSchema(tools []contracts.Tool) (string, map[string]struct{}, error) {
+func claudeToolSchema(tools []contracts.Tool) (string, claudeTools, error) {
 	ordered := append([]contracts.Tool(nil), tools...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name < ordered[j].Name })
 
-	allowed := make(map[string]struct{}, len(ordered))
+	allowed := make(claudeTools, len(ordered))
 	variants := make([]map[string]any, 0, len(ordered))
 	for _, tool := range ordered {
 		if _, exists := allowed[tool.Name]; exists {
 			return "", nil, fmt.Errorf("claude cli: two tools are named %q", tool.Name)
 		}
-		allowed[tool.Name] = struct{}{}
+		allowed[tool.Name] = tool
 		variants = append(variants, map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -85,7 +90,22 @@ type claudeStructuredToolCall struct {
 // claudeMessage converts the validated object into infai's assistant message,
 // rejecting anything the schema should have prevented. A name the CLI invented
 // is an error rather than a tool call: infai only executes tools it offered.
-func claudeMessage(result claudeStreamResult, allowed map[string]struct{}) (contracts.ChatMessage, error) {
+//
+// A native call replaces the structured object: the reader ends the turn as
+// soon as it sees one, so there is no result event to read.
+func claudeMessage(result claudeStreamResult, allowed claudeTools) (contracts.ChatMessage, error) {
+	if result.NativeTool != nil {
+		message := contracts.ChatMessage{Role: "assistant", ReasoningContent: result.Reasoning}
+		if result.NativeText != "" {
+			message.Content = &result.NativeText
+		}
+		call, err := claudeToolCall(result.NativeTool.Name, result.NativeTool.Input, allowed)
+		if err != nil {
+			return contracts.ChatMessage{}, err
+		}
+		message.ToolCalls = append(message.ToolCalls, call)
+		return message, nil
+	}
 	output := result.Output
 	if output == nil {
 		return contracts.ChatMessage{}, errors.New("claude cli: the CLI returned no structured output")
@@ -95,25 +115,38 @@ func claudeMessage(result claudeStreamResult, allowed map[string]struct{}) (cont
 		message.Content = output.Content
 	}
 	for _, call := range output.ToolCalls {
-		if _, ok := allowed[call.Name]; !ok {
-			return contracts.ChatMessage{}, fmt.Errorf("claude cli: the CLI asked for tool %q, which was not offered", call.Name)
-		}
-		var arguments map[string]any
-		if len(call.Arguments) == 0 || json.Unmarshal(call.Arguments, &arguments) != nil || arguments == nil {
-			return contracts.ChatMessage{}, fmt.Errorf("claude cli: tool %q was given arguments that are not a JSON object", call.Name)
-		}
-		compact, err := json.Marshal(arguments)
+		converted, err := claudeToolCall(call.Name, call.Arguments, allowed)
 		if err != nil {
-			return contracts.ChatMessage{}, fmt.Errorf("claude cli: tool %q arguments: %w", call.Name, err)
+			return contracts.ChatMessage{}, err
 		}
-		message.ToolCalls = append(message.ToolCalls, contracts.ToolCall{
-			ID:   claudeToolCallID(),
-			Type: "function",
-			Function: contracts.Function{
-				Name:      contracts.ToolType(call.Name),
-				Arguments: string(compact),
-			},
-		})
+		message.ToolCalls = append(message.ToolCalls, converted)
 	}
 	return message, nil
+}
+
+// claudeToolCall validates one requested call and converts it to infai's shape.
+// Names and argument objects are checked identically whether the request came
+// through the output schema or the CLI's native channel. The tool's own schema
+// repairs Claude's type mistakes before infai's strict decoder sees the object.
+func claudeToolCall(name string, arguments json.RawMessage, allowed claudeTools) (contracts.ToolCall, error) {
+	tool, ok := allowed[name]
+	if !ok {
+		return contracts.ToolCall{}, fmt.Errorf("claude cli: the CLI asked for tool %q, which was not offered", name)
+	}
+	var parsed map[string]any
+	if len(arguments) == 0 || json.Unmarshal(arguments, &parsed) != nil || parsed == nil {
+		return contracts.ToolCall{}, fmt.Errorf("claude cli: tool %q was given arguments that are not a JSON object", name)
+	}
+	compact, err := json.Marshal(claudeArguments(tool, parsed))
+	if err != nil {
+		return contracts.ToolCall{}, fmt.Errorf("claude cli: tool %q arguments: %w", name, err)
+	}
+	return contracts.ToolCall{
+		ID:   claudeToolCallID(),
+		Type: "function",
+		Function: contracts.Function{
+			Name:      contracts.ToolType(name),
+			Arguments: string(compact),
+		},
+	}, nil
 }

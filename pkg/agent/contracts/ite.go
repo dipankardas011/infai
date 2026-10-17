@@ -156,7 +156,8 @@ func DecodeToolArguments[T any](tool ToolType, tc ToolCall) (T, error) {
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&args); err != nil {
-		return args, NewToolExecutionError(tool, "invalid_arguments", "tool arguments do not match the tool schema", ResponsibilityAgent, err)
+		reason := "tool arguments do not match the tool schema: " + toolArgumentMismatch(err)
+		return args, NewToolExecutionError(tool, "invalid_arguments", reason, ResponsibilityAgent, err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
@@ -166,6 +167,17 @@ func DecodeToolArguments[T any](tool ToolType, tc ToolCall) (T, error) {
 		return args, NewToolExecutionError(tool, "invalid_arguments", "tool arguments contain trailing invalid JSON", ResponsibilityAgent, err)
 	}
 	return args, nil
+}
+
+// toolArgumentMismatch turns a decoder error into a sentence a model can act
+// on. A type error names the JSON field and both types; anything else (an
+// unknown field, malformed JSON) already has a usable message.
+func toolArgumentMismatch(err error) string {
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) && typeErr.Field != "" {
+		return fmt.Sprintf("field %q must be %s, got %s", typeErr.Field, typeErr.Type, typeErr.Value)
+	}
+	return err.Error()
 }
 
 // RunBounded releases the caller when a tool exceeds its deadline. Tool work

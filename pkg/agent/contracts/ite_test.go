@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,6 +70,25 @@ func TestDecodeToolArgumentsRejectsMalformedInput(t *testing.T) {
 	}
 	if decoded.Path != "a" {
 		t.Fatalf("decoded path = %q", decoded.Path)
+	}
+}
+
+func TestDecodeToolArgumentsNamesTheMismatchedField(t *testing.T) {
+	type bashArgs struct {
+		Timeout int `json:"timeout"`
+	}
+	_, err := DecodeToolArguments[bashArgs](BashTool, ToolCall{
+		Function: Function{Name: BashTool, Arguments: `{"timeout":"60"}`},
+	})
+	if err == nil {
+		t.Fatal("a string timeout decoded as an integer")
+	}
+	// The model reads this text, so it has to carry the field and both types;
+	// the type mismatch is what it is meant to correct.
+	for _, want := range []string{`field "timeout"`, "must be int", "got string"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %s, want %q", err, want)
+		}
 	}
 }
 

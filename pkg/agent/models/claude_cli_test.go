@@ -158,8 +158,76 @@ func TestClaudeTranscriptIsStableAndAppendOnly(t *testing.T) {
 	if !strings.HasPrefix(claudeTranscriptText(grown), strings.TrimSuffix(first, "]}")) {
 		t.Fatal("appending a turn changed the earlier serialization")
 	}
-	if system := claudeSystemPrompt(history); !strings.Contains(system, "you are infai") {
+	system := claudeSystemPrompt(history)
+	if !strings.Contains(system, "you are infai") {
 		t.Fatalf("system prompt = %s", system)
+	}
+	// The native channel is disabled, so the model is told last that it must
+	// act through the schema; the position carries the instruction.
+	if !strings.HasSuffix(system, claudeNativeToolsDisabled) {
+		t.Fatalf("system prompt does not end with the native-tool rule: %s", system)
+	}
+}
+
+func TestClaudeStreamHonoursANativeToolUse(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"deciding"}}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"I'll edit it."},{"type":"tool_use","name":"edit","input":{"path":"main.go","old_string":"a","new_string":"b"}}],"usage":{"input_tokens":7,"output_tokens":3}}}`,
+		`{"type":"result","structured_output":{"content":"gave up","tool_calls":[]}}`,
+	}, "\n")
+	stopped := false
+	result, err := decodeClaudeStream(context.Background(), strings.NewReader(stream), nil,
+		claudeTools{"edit": {Name: "edit"}}, func() { stopped = true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stopped {
+		t.Fatal("the turn was not stopped after the native call")
+	}
+	if result.NativeTool == nil || result.NativeTool.Name != "edit" ||
+		string(result.NativeTool.Input) != `{"path":"main.go","old_string":"a","new_string":"b"}` {
+		t.Fatalf("native call = %+v", result.NativeTool)
+	}
+	if result.NativeText != "I'll edit it." {
+		t.Fatalf("native text = %q", result.NativeText)
+	}
+	if result.Reasoning != "deciding" {
+		t.Fatalf("reasoning = %q", result.Reasoning)
+	}
+	if result.Usage == nil || result.Usage.PromptTokens != 7 || result.Usage.CompletionTokens != 3 {
+		t.Fatalf("usage = %+v", result.Usage)
+	}
+
+	message, err := claudeMessage(result, claudeTools{"edit": {Name: "edit"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message.ToolCalls) != 1 || message.ToolCalls[0].Function.Name != contracts.EditTool {
+		t.Fatalf("tool calls = %+v", message.ToolCalls)
+	}
+	if got := message.ToolCalls[0].Function.Arguments; got != `{"new_string":"b","old_string":"a","path":"main.go"}` {
+		t.Fatalf("arguments = %s", got)
+	}
+	if message.Text() != "I'll edit it." {
+		t.Fatalf("content = %q", message.Text())
+	}
+}
+
+func TestClaudeStreamIgnoresANativeToolItWasNotOffered(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"rm","input":{}}]}}`,
+		`{"type":"result","structured_output":{"content":"answer","tool_calls":[]}}`,
+	}, "\n")
+	result, err := decodeClaudeStream(context.Background(), strings.NewReader(stream), nil,
+		claudeTools{"read": {Name: "read"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NativeTool != nil {
+		t.Fatalf("native call = %+v", result.NativeTool)
+	}
+	if result.Output == nil || result.Output.Content == nil || *result.Output.Content != "answer" {
+		t.Fatalf("output = %+v", result.Output)
 	}
 }
 
@@ -167,7 +235,7 @@ func TestClaudeMessageRefusesAToolItNeverOffered(t *testing.T) {
 	result := claudeStreamResult{Output: &claudeStructuredOutput{
 		ToolCalls: []claudeStructuredToolCall{{Name: "rm", Arguments: json.RawMessage(`{}`)}},
 	}}
-	if _, err := claudeMessage(result, map[string]struct{}{"read": {}}); err == nil || !strings.Contains(err.Error(), "not offered") {
+	if _, err := claudeMessage(result, claudeTools{"read": {Name: "read"}}); err == nil || !strings.Contains(err.Error(), "not offered") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -179,7 +247,7 @@ func TestClaudeUsageCountsCacheAsInput(t *testing.T) {
 	event.Usage.CacheReadInputTokens = 4
 	event.Usage.OutputTokens = 5
 	want := contracts.TokenUsage{PromptTokens: 9, CompletionTokens: 5, TotalTokens: 14}
-	if usage := claudeUsage(event); usage == nil || *usage != want {
+	if usage := claudeUsage(event.Usage); usage == nil || *usage != want {
 		t.Fatalf("usage = %+v", usage)
 	}
 }
@@ -197,7 +265,7 @@ func TestClaudeStreamHidesStructuredJSONAndReportsReasoning(t *testing.T) {
 			deltas = append(deltas, string(kind)+":"+text)
 			return false
 		},
-	})
+	}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
