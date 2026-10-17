@@ -132,7 +132,8 @@ leave, and come back to the same session.
   compressed.
 - **Tools:** files, bash, web fetch and search, images in and out, skills, MCP servers
   (with OAuth, elicitation, and prompts), and evals.
-- **Providers:** DeepSeek and OpenAI Codex, with configurable thinking levels.
+- **Providers:** DeepSeek, OpenAI Codex, and Claude Code through your local login,
+  with configurable thinking levels.
 
 ### Install and start
 
@@ -163,6 +164,24 @@ infaiw                   # open the TUI and start a session
 
 The TUI attaches to `localhost:6000` by default. Use `--host` and `--port` to reach
 another server, and `--session <uuid>` to resume a saved session.
+
+#### Claude Code
+
+This provider uses the Claude Code CLI already installed and signed in on the same
+machine. There is no API key: infai never reads, stores or forwards the CLI's login.
+It requires Claude Code 2.1.301 or newer, which you can check with `claude --version`;
+adding the provider fails with an actionable message if the CLI is missing, too old,
+or not signed in.
+
+infai keeps the agent loop, so the CLI runs with its own tools, MCP servers, settings
+and slash commands disabled, in an empty infai-owned directory, and without writing a
+session. Tool requests come back through a JSON Schema infai supplies, and infai
+executes them under its own approvals.
+
+When the service delegates its cgroup — the packaged unit does, on systemd 254 or
+newer — each turn is capped at 500m CPU and 512 MiB of memory, entered at process
+start. A turn that exceeds the memory cap is reported as a provider failure naming
+the limit. Hosts without delegation run the provider unconstrained.
 
 | Command | Does |
 |---|---|

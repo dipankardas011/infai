@@ -150,9 +150,9 @@ func (c *claudeCLI) run(ctx context.Context, systemPrompt, transcript, schema st
 		return result, decodeErr
 	}
 	if waitErr != nil || !result.ResultSeen {
-		if cgroup != nil {
+		if cgroup != nil && c.opts.memoryMax > 0 {
 			if kills, ok := cgroup.oomKills(); ok && kills > 0 {
-				return result, fmt.Errorf("claude cli: the turn was killed by its memory limit of %d MB", c.opts.memoryMax>>20)
+				return result, fmt.Errorf("claude cli: the turn was killed by its memory limit of %d MiB", c.opts.memoryMax>>20)
 			}
 		}
 		message := stderr.String()
