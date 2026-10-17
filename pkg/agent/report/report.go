@@ -314,7 +314,11 @@ func eventDisplays(event store.Event) []displayView {
 		message := record.Message
 		switch message.Role {
 		case "user":
-			return []displayView{{Role: "user", Text: previewText(message.Text())}}
+			text := previewText(message.Text())
+			if text == "" && len(message.Images) > 0 {
+				text = imageText(len(message.Images)) + " attached"
+			}
+			return []displayView{{Role: "user", Text: text}}
 		case "tool":
 			text := previewText(message.Text())
 			if result := parseToolResult(message.Text()); result != nil {
@@ -336,7 +340,11 @@ func eventDisplays(event store.Event) []displayView {
 			displays = append(displays, displayView{Role: "tool_call", Text: previewText(toolCallSummary(string(call.Function.Name), call.Function.Arguments))})
 		}
 		if len(displays) == 0 {
-			displays = append(displays, displayView{Role: "assistant", Text: "empty response"})
+			text := "empty response"
+			if n := len(message.Images) + len(message.Artifacts); n > 0 {
+				text = imageText(n) + " generated"
+			}
+			displays = append(displays, displayView{Role: "assistant", Text: text})
 		}
 		return displays
 	}
@@ -359,6 +367,15 @@ func toolCallSummary(name, arguments string) string {
 		return name + " " + rows[0].Key + "=" + previewText(rows[0].Value)
 	}
 	return name
+}
+
+// imageText describes an attachment count without leaking payloads into the
+// collapsed timeline row, where only the gist is shown.
+func imageText(n int) string {
+	if n == 1 {
+		return "1 image"
+	}
+	return fmt.Sprintf("%d images", n)
 }
 
 func sessionTitle(meta store.SessionMeta) string {

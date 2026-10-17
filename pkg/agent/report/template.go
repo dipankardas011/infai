@@ -33,12 +33,12 @@ var pageTemplate = template.Must(template.New("report").Parse(`<!doctype html>
   --purple:#d699b6;
   --font-sans:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,"Helvetica Neue","Cantarell","Ubuntu","Noto Sans",Arial,sans-serif;
   --font-mono:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono","Fira Code","Iosevka",Menlo,Consolas,"DejaVu Sans Mono",monospace;
-  --fs-micro:.6875rem;
-  --fs-xs:.75rem;
-  --fs-sm:.875rem;
-  --fs-base:.9375rem;
-  --fs-md:1.125rem;
-  --fs-lg:1.375rem;
+  --fs-micro:.8125rem;
+  --fs-xs:.875rem;
+  --fs-sm:.9375rem;
+  --fs-base:1rem;
+  --fs-md:1.25rem;
+  --fs-lg:1.5rem;
   --s1:.25rem;
   --s2:.5rem;
   --s3:.75rem;
@@ -137,7 +137,7 @@ a:hover{text-decoration:underline}
 .panel h2{margin:0 0 var(--s4);color:#e2dbc4;font-size:var(--fs-md);font-weight:600;letter-spacing:-.01em}
 .panel p{margin:0 0 var(--s3);color:var(--muted);font-size:var(--fs-sm);line-height:1.7}
 .panel p:last-child{margin-bottom:0}
-.facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--s2) var(--s5);margin:0;font-size:.8125rem;line-height:1.55}
+.facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--s2) var(--s5);margin:0;font-size:.875rem;line-height:1.55}
 .facts dt{color:var(--faint);padding-top:.0625rem}
 .facts dd{margin:0;color:var(--muted);font-family:var(--font-mono);overflow-wrap:anywhere}
 .dim{color:var(--faint);font-size:var(--fs-xs);line-height:1.7}
@@ -263,7 +263,7 @@ a:hover{text-decoration:underline}
 .markdown p{margin:.7em 0}
 .markdown ul,.markdown ol{margin:.7em 0;padding-left:1.4em}
 .markdown li{margin:.25em 0}
-.markdown pre,.call pre,details pre{background:var(--deep);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:var(--s4);overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono);font-size:.8125rem;line-height:1.75}
+.markdown pre,.call pre,details pre{background:var(--deep);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:var(--s4);overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono);font-size:.875rem;line-height:1.75}
 .markdown code{color:var(--yellow);font-family:var(--font-mono);font-size:.9em}
 .markdown :not(pre)>code{background:var(--deep);border:1px solid var(--line-soft);border-radius:.25rem;padding:.05em .3em}
 .markdown blockquote{margin:.8em 0;padding:.1em 0 .1em .9em;border-left:2px solid var(--purple);color:var(--muted)}
@@ -283,7 +283,7 @@ a:hover{text-decoration:underline}
 .args dt{color:var(--faint);font-family:var(--font-mono)}
 .args dd{margin:0;white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono)}
 .tool-result{margin-top:var(--s3)}
-.tool-output{margin:var(--s3) 0 0;background:var(--deep);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:var(--s4);white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono);font-size:.8125rem;line-height:1.7;max-height:26rem;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--raised-2) transparent}
+.tool-output{margin:var(--s3) 0 0;background:var(--deep);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:var(--s4);white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono);font-size:.875rem;line-height:1.7;max-height:26rem;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--raised-2) transparent}
 .arg{display:flex;gap:var(--s3);padding:.15rem 0;color:var(--muted);font-size:var(--fs-xs)}
 .arg-key{min-width:6rem;color:var(--faint);font-family:var(--font-mono)}
 .tl-detail details{margin-top:var(--s3)}
@@ -307,12 +307,12 @@ a:hover{text-decoration:underline}
 :focus-visible{outline:2px solid var(--yellow);outline-offset:2px}
 kbd{background:var(--deep);border:1px solid var(--line);border-bottom-width:2px;border-radius:.25rem;padding:.0625rem .375rem;font-family:var(--font-mono);font-size:var(--fs-micro);color:var(--muted)}
 
-@media(max-width:1100px){
+@media(max-width:68.75em){
   .session-panel{padding-left:var(--s5);padding-right:var(--s5)}
   .overview{grid-template-columns:minmax(0,1fr)}
   .metric{padding:0 var(--s4)}
 }
-@media(max-width:820px){
+@media(max-width:51.25em){
   .shell{display:block}
   .sidebar{transform:translateX(-100%);transition:transform .22s ease;width:min(88vw,20rem);box-shadow:1rem 0 2.5rem rgba(0,0,0,.4)}
   body.nav-open .sidebar{transform:none}
