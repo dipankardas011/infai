@@ -1,4 +1,88 @@
 {
+    "claude-opus-4-6": {
+        "provider": "claude-cli",
+        "base_url": "claude",
+        "api_type": "claude-cli-print",
+        "id": "claude-opus-4-6",
+        "name": "Claude Opus 4.6",
+        "max_context_window": 1000000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "input_modality": [
+            "text",
+            "image"
+        ],
+        "output_modality": [
+            "text"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+        },
+        "default_thinking": "medium"
+    },
+    "claude-opus-4-8": {
+        "provider": "claude-cli",
+        "base_url": "claude",
+        "api_type": "claude-cli-print",
+        "id": "claude-opus-4-8",
+        "name": "Claude Opus 4.8",
+        "max_context_window": 1000000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "input_modality": [
+            "text",
+            "image"
+        ],
+        "output_modality": [
+            "text"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+        },
+        "default_thinking": "medium"
+    },
+    "claude-opus-5": {
+        "provider": "claude-cli",
+        "base_url": "claude",
+        "api_type": "claude-cli-print",
+        "id": "claude-opus-5",
+        "name": "Claude Opus 5",
+        "max_context_window": 1000000,
+        "max_output_tokens": 128000,
+        "default_temperature": null,
+        "input_modality": [
+            "text",
+            "image"
+        ],
+        "output_modality": [
+            "text"
+        ],
+        "available_thinking": true,
+        "thinking_levels": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+        },
+        "default_thinking": "medium"
+    },
     "claude-fable-5-1": {
         "provider": "claude-cli",
         "base_url": "claude",
@@ -9,7 +93,8 @@
         "max_output_tokens": 128000,
         "default_temperature": null,
         "input_modality": [
-            "text"
+            "text",
+            "image"
         ],
         "output_modality": [
             "text"
@@ -36,7 +121,8 @@
         "max_output_tokens": 128000,
         "default_temperature": null,
         "input_modality": [
-            "text"
+            "text",
+            "image"
         ],
         "output_modality": [
             "text"
@@ -63,7 +149,8 @@
         "max_output_tokens": 128000,
         "default_temperature": null,
         "input_modality": [
-            "text"
+            "text",
+            "image"
         ],
         "output_modality": [
             "text"
@@ -90,7 +177,8 @@
         "max_output_tokens": 128000,
         "default_temperature": null,
         "input_modality": [
-            "text"
+            "text",
+            "image"
         ],
         "output_modality": [
             "text"
