@@ -2,10 +2,10 @@ Format: 1.0
 Source: infaiw
 Binary: infaiw
 Architecture: any
-Version: 0.19.3-0
+Version: 0.20.1-0
 Maintainer: Dipankar Das <dipankardas011@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.6.2
 Debtransform-Release: 0
-Debtransform-Tar: infaiw-0.19.3.tar.gz
+Debtransform-Tar: infaiw-0.20.1.tar.gz
 Debtransform-Files: infaiw.service debian.postinst
