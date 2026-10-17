@@ -173,6 +173,11 @@ It requires Claude Code 2.1.301 or newer, which you can check with `claude --ver
 adding the provider fails with an actionable message if the CLI is missing, too old,
 or not signed in.
 
+The systemd user manager does not read shell startup files, so its `PATH` does not
+include `~/.local/bin` where the native install lives. The packaged unit adds it, and
+`~/.config/infaiw/server.env` can override the service environment when the CLI is
+somewhere else.
+
 infai keeps the agent loop, so the CLI runs with its own tools, MCP servers, settings
 and slash commands disabled, in an empty infai-owned directory, and without writing a
 session. Tool requests come back through a JSON Schema infai supplies, and infai

@@ -5,6 +5,11 @@ Description=infaiw server
 ExecStart=/usr/bin/infaiw server
 WorkingDirectory=%h
 EnvironmentFile=-%h/.config/infaiw/server.env
+# The user manager does not read shell startup files, so its PATH lacks the
+# user's ~/.local/bin, where a native Claude Code install lives. Add it here so
+# the server, and the commands it runs, can find the tools the user can.
+# %h is systemd's specifier for the user's home directory.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
