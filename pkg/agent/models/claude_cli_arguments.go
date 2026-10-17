@@ -29,7 +29,99 @@ func claudeArguments(tool contracts.Tool, arguments map[string]any) map[string]a
 	if err := json.Unmarshal(tool.Parameters, &schema); err != nil {
 		return arguments
 	}
+	arguments = claudeUnwrapEnvelope(tool.Name, schema, arguments)
 	return claudeNormalizeObject(schema, arguments)
+}
+
+// claudeUnwrapEnvelope collapses the tool-call envelope the model sometimes
+// nests inside the input: {"arguments":"{\"command\":...}","name":"bash"}
+// instead of {"command":...}. A tool whose schema really declares that key
+// keeps it, and an open schema with other keys is left alone, so real data is
+// never discarded.
+func claudeUnwrapEnvelope(toolName string, schema map[string]any, arguments map[string]any) map[string]any {
+	properties, _ := schema["properties"].(map[string]any)
+	if !claudeEnvelopeOnly(arguments) && !claudeClosedSchema(schema) {
+		return arguments
+	}
+	for depth := 0; depth < 3; depth++ {
+		unwrapped := false
+		for _, key := range []string{"input", "arguments"} {
+			if _, declared := properties[key]; declared {
+				continue
+			}
+			nested, ok := arguments[key]
+			if !ok {
+				continue
+			}
+			parsed := claudeObject(nested)
+			if parsed == nil {
+				continue
+			}
+			arguments = parsed
+			unwrapped = true
+			break
+		}
+		if !unwrapped {
+			break
+		}
+	}
+	// The envelope can also arrive without the inner key, as
+	// {"name":"bash","command":...}; the name is not a bash parameter.
+	if name, ok := arguments["name"]; ok {
+		if _, declared := properties["name"]; !declared {
+			if text, ok := name.(string); ok && text == toolName {
+				delete(arguments, "name")
+			}
+		}
+	}
+	return arguments
+}
+
+// claudeEnvelopeOnly reports whether every key could belong to the tool-call
+// envelope, so unwrapping cannot discard real arguments.
+func claudeEnvelopeOnly(arguments map[string]any) bool {
+	for key := range arguments {
+		switch key {
+		case "arguments", "input", "name":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// claudeClosedSchema reports whether the schema forbids unknown fields, which
+// makes an undeclared envelope key a wrapper rather than real data.
+func claudeClosedSchema(schema map[string]any) bool {
+	additional, ok := schema["additionalProperties"]
+	if !ok {
+		return false
+	}
+	closed, ok := additional.(bool)
+	return ok && !closed
+}
+
+// claudeObject accepts an object either directly or as a JSON string. Models
+// occasionally encode the input object once or twice.
+func claudeObject(value any) map[string]any {
+	for depth := 0; depth < 3; depth++ {
+		switch typed := value.(type) {
+		case map[string]any:
+			return typed
+		case string:
+			var object map[string]any
+			if json.Unmarshal([]byte(typed), &object) == nil && object != nil {
+				return object
+			}
+			var text string
+			if json.Unmarshal([]byte(typed), &text) == nil {
+				value = text
+				continue
+			}
+		}
+		return nil
+	}
+	return nil
 }
 
 func claudeNormalizeObject(schema map[string]any, value map[string]any) map[string]any {

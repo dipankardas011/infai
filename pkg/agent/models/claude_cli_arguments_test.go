@@ -80,6 +80,43 @@ func TestClaudeArgumentsRepairsDeclaredTypes(t *testing.T) {
 			want: map[string]any{"agent_name": "a", "task": "t", "acceptance_script": "true", "max_turns": int64(40)},
 		},
 		{
+			name: "arguments envelope string",
+			tool: actuators.BashTool(),
+			in:   map[string]any{"arguments": `{"command":"true","timeout":"60"}`},
+			want: map[string]any{"command": "true", "timeout": int64(60)},
+		},
+		{
+			name: "input envelope string",
+			tool: actuators.BashTool(),
+			in:   map[string]any{"input": `{"command":"true","timeout":"30"}`},
+			want: map[string]any{"command": "true", "timeout": int64(30)},
+		},
+		{
+			name: "arguments envelope with name",
+			tool: actuators.BashTool(),
+			in:   map[string]any{"arguments": `{"command":"true"}`, "name": "bash"},
+			want: map[string]any{"command": "true"},
+		},
+		{
+			name: "name without an envelope",
+			tool: actuators.BashTool(),
+			in:   map[string]any{"name": "bash", "command": "true"},
+			want: map[string]any{"command": "true"},
+		},
+		{
+			name: "double nested input",
+			tool: actuators.BashTool(),
+			in:   map[string]any{"input": map[string]any{"input": `{"command":"true"}`}},
+			want: map[string]any{"command": "true"},
+		},
+		{
+			name: "a declared input property is kept",
+			tool: contracts.Tool{Name: "declared", Parameters: contracts.ToolParameterObjectSchema(
+				map[string]any{"input": map[string]any{"type": "string"}}, []string{"input"})},
+			in:   map[string]any{"input": "keep"},
+			want: map[string]any{"input": "keep"},
+		},
+		{
 			name: "stringified array is parsed",
 			tool: nested,
 			in:   map[string]any{"items": `[{"count":"2"}]`},
@@ -114,8 +151,8 @@ func TestClaudeArgumentsRepairsDeclaredTypes(t *testing.T) {
 func TestClaudeMessageRepairsAStringTimeout(t *testing.T) {
 	result := claudeStreamResult{Output: &claudeStructuredOutput{
 		ToolCalls: []claudeStructuredToolCall{{
-			Name:      "bash",
-			Arguments: json.RawMessage(`{"command":"true","timeout":"60"}`),
+			Name:  "bash",
+			Input: json.RawMessage(`{"command":"true","timeout":"60"}`),
 		}},
 	}}
 	message, err := claudeMessage(result, claudeTools{"bash": actuators.BashTool()})

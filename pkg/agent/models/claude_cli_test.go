@@ -81,7 +81,7 @@ func TestClaudeCLIArgsKeepToolsDisabledAndPassTheCatalogID(t *testing.T) {
 	}
 }
 
-func TestClaudeToolSchemaCarriesEachToolOwnArguments(t *testing.T) {
+func TestClaudeToolSchemaCarriesEachToolOwnInput(t *testing.T) {
 	schema, allowed, err := claudeToolSchema(testClaudeTools())
 	if err != nil {
 		t.Fatal(err)
@@ -99,8 +99,10 @@ func TestClaudeToolSchemaCarriesEachToolOwnArguments(t *testing.T) {
 					OneOf []struct {
 						Properties struct {
 							Name      map[string]any `json:"name"`
+							Input     map[string]any `json:"input"`
 							Arguments map[string]any `json:"arguments"`
 						} `json:"properties"`
+						Required []string `json:"required"`
 					} `json:"oneOf"`
 				} `json:"items"`
 			} `json:"tool_calls"`
@@ -116,8 +118,16 @@ func TestClaudeToolSchemaCarriesEachToolOwnArguments(t *testing.T) {
 	if variant.Properties.Name["const"] != string(contracts.ReadTool) {
 		t.Errorf("variant name = %v", variant.Properties.Name)
 	}
-	if _, ok := variant.Properties.Arguments["properties"].(map[string]any)["path"]; !ok {
-		t.Errorf("arguments schema = %v", variant.Properties.Arguments)
+	if _, ok := variant.Properties.Input["properties"].(map[string]any)["path"]; !ok {
+		t.Errorf("input schema = %v", variant.Properties.Input)
+	}
+	// The envelope must match the CLI's native tool_use block: name plus
+	// input. An arguments field here reintroduces the second dialect.
+	if fmt.Sprint(variant.Required) != "[name input]" {
+		t.Errorf("required = %v", variant.Required)
+	}
+	if variant.Properties.Arguments != nil {
+		t.Error("the schema still carries an arguments property")
 	}
 }
 
@@ -166,6 +176,28 @@ func TestClaudeTranscriptIsStableAndAppendOnly(t *testing.T) {
 	// act through the schema; the position carries the instruction.
 	if !strings.HasSuffix(system, claudeNativeToolsDisabled) {
 		t.Fatalf("system prompt does not end with the native-tool rule: %s", system)
+	}
+}
+
+// The transcript has to speak the same dialect as the output schema and the
+// CLI's native tool_use block; replaying function.arguments as a string is the
+// second dialect that made the model nest one inside the other.
+func TestClaudeTranscriptUsesTheNativeToolCallShape(t *testing.T) {
+	history := []contracts.ChatMessage{{
+		Role: "assistant",
+		ToolCalls: []contracts.ToolCall{{
+			ID:       "call_1",
+			Type:     "function",
+			Function: contracts.Function{Name: contracts.BashTool, Arguments: `{"command":"pwd"}`},
+		}},
+	}}
+	text := claudeTranscriptText(history)
+	want := `{"role":"assistant","tool_calls":[{"id":"call_1","name":"bash","input":{"command":"pwd"}}]}`
+	if text != `{"messages":[`+want+`]}` {
+		t.Fatalf("transcript = %s", text)
+	}
+	if strings.Contains(text, `"function"`) || strings.Contains(text, `"arguments"`) {
+		t.Fatalf("transcript still carries the OpenAI tool-call shape: %s", text)
 	}
 }
 
@@ -233,7 +265,7 @@ func TestClaudeStreamIgnoresANativeToolItWasNotOffered(t *testing.T) {
 
 func TestClaudeMessageRefusesAToolItNeverOffered(t *testing.T) {
 	result := claudeStreamResult{Output: &claudeStructuredOutput{
-		ToolCalls: []claudeStructuredToolCall{{Name: "rm", Arguments: json.RawMessage(`{}`)}},
+		ToolCalls: []claudeStructuredToolCall{{Name: "rm", Input: json.RawMessage(`{}`)}},
 	}}
 	if _, err := claudeMessage(result, claudeTools{"read": {Name: "read"}}); err == nil || !strings.Contains(err.Error(), "not offered") {
 		t.Fatalf("error = %v", err)

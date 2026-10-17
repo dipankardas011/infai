@@ -43,12 +43,39 @@ type claudeTranscript struct {
 // cache across separate processes. Field order and key order are therefore
 // fixed by the struct and by encoding/json.
 type claudeTranscriptMessage struct {
-	Role       string               `json:"role"`
-	Content    *string              `json:"content,omitempty"`
-	ToolCalls  []contracts.ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string               `json:"tool_call_id,omitempty"`
-	Name       *string              `json:"name,omitempty"`
-	Status     string               `json:"status,omitempty"`
+	Role       string                     `json:"role"`
+	Content    *string                    `json:"content,omitempty"`
+	ToolCalls  []claudeTranscriptToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string                     `json:"tool_call_id,omitempty"`
+	Name       *string                    `json:"name,omitempty"`
+	Status     string                     `json:"status,omitempty"`
+}
+
+// claudeTranscriptToolCall mirrors the CLI's native tool_use block: a name and
+// an input object. Replaying the OpenAI function.arguments string here gives
+// the model a second tool-call dialect, and it occasionally merges the two
+// into arguments: {arguments: "..."} instead of the requested fields.
+type claudeTranscriptToolCall struct {
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
+func claudeTranscriptToolCalls(calls []contracts.ToolCall) []claudeTranscriptToolCall {
+	projected := make([]claudeTranscriptToolCall, 0, len(calls))
+	for _, call := range calls {
+		input := json.RawMessage(`{}`)
+		var object map[string]any
+		if json.Unmarshal([]byte(call.Function.Arguments), &object) == nil && object != nil {
+			input = json.RawMessage(call.Function.Arguments)
+		}
+		projected = append(projected, claudeTranscriptToolCall{
+			ID:    call.ID,
+			Name:  string(call.Function.Name),
+			Input: input,
+		})
+	}
+	return projected
 }
 
 // claudeTranscriptText serializes the conversation as JSON. It deliberately
@@ -60,7 +87,7 @@ func claudeTranscriptText(messages []contracts.ChatMessage) string {
 		entry := claudeTranscriptMessage{
 			Role:       message.Role,
 			Content:    message.Content,
-			ToolCalls:  message.ToolCalls,
+			ToolCalls:  claudeTranscriptToolCalls(message.ToolCalls),
 			ToolCallID: message.ToolCallID,
 			Name:       message.Name,
 		}
