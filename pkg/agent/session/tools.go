@@ -93,7 +93,6 @@ func (s *InfaiAgentSession) configureMCPTools(mcpServers map[string]contracts.MC
 
 	for _, tool := range mcpToolCalls {
 		s.availableTools = append(s.availableTools, tool)
-		s.auditorPolicy.SetPolicy(contracts.ToolType(tool.Name), auditor.HumanPolicy)
 	}
 	return nil
 }
@@ -163,7 +162,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 				continue
 			}
 
-			policy := s.auditorPolicy.Check(tc.Function.Name)
+			policy := s.policyDecision(tc.Function.Name)
 			if !checkIfAllowedToolCall(tc) {
 				policy = auditor.DenyPolicy
 			}

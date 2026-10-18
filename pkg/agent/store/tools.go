@@ -14,53 +14,97 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/auditor"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
-func LoadToolConfig() (contracts.ToolsConfig, error) {
+type ToolsConfig struct {
+	MCPServers   map[string]contracts.MCPServerConfig
+	HITLPolicies map[string]*auditor.HITLPolicy
+}
+
+type toolsFileConfig struct {
+	MCPServers   map[string]contracts.MCPServerConfig  `json:"mcpServers"`
+	HITLPolicies map[string]contracts.HITLPolicyConfig `json:"hitlPolicies,omitempty"`
+}
+
+func LoadToolConfig() (ToolsConfig, error) {
 	root, err := Root()
 	if err != nil {
-		return contracts.ToolsConfig{}, err
+		return ToolsConfig{}, err
 	}
 	f, err := os.Open(filepath.Join(root, toolsFileName))
 	if os.IsNotExist(err) {
-		return contracts.ToolsConfig{}, nil
+		return ToolsConfig{HITLPolicies: map[string]*auditor.HITLPolicy{auditor.DefaultHITLPolicyName: auditor.NewDefaultHITLPolicy()}}, nil
 	}
 	if err != nil {
 		// A missing file is MCP switched off; a file that cannot be read is a
 		// problem with the file, and the operator needs the reason.
-		return contracts.ToolsConfig{}, fmt.Errorf("store: read %s: %w", toolsFileName, err)
+		return ToolsConfig{}, fmt.Errorf("store: read %s: %w", toolsFileName, err)
 	}
 	defer f.Close()
 
 	decoder := json.NewDecoder(f)
 	decoder.DisallowUnknownFields()
-	var config *contracts.ToolsConfig
+	var config *toolsFileConfig
 	if err := decoder.Decode(&config); err != nil || config == nil {
 		if err == nil {
 			err = errors.New("the file holds no object")
 		}
-		return contracts.ToolsConfig{}, fmt.Errorf("store: invalid %s JSON: %w", toolsFileName, err)
+		return ToolsConfig{}, fmt.Errorf("store: invalid %s JSON: %w", toolsFileName, err)
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
-		return contracts.ToolsConfig{}, fmt.Errorf("store: %s contains trailing JSON or invalid data", toolsFileName)
+		return ToolsConfig{}, fmt.Errorf("store: %s contains trailing JSON or invalid data", toolsFileName)
 	}
 
 	for name := range config.MCPServers {
 		if err := ValidateMCPServer(name, config.MCPServers[name]); err != nil {
-			return contracts.ToolsConfig{}, fmt.Errorf("store: %w", err)
+			return ToolsConfig{}, fmt.Errorf("store: %w", err)
 		}
 	}
-	return *config, nil
+	policies := map[string]*auditor.HITLPolicy{
+		auditor.DefaultHITLPolicyName: auditor.NewDefaultHITLPolicy(),
+	}
+	for name, decisions := range config.HITLPolicies {
+		if name == auditor.DefaultHITLPolicyName {
+			continue
+		}
+		if err := ValidatePolicy(name, decisions); err != nil {
+			return ToolsConfig{}, fmt.Errorf("store: %w", err)
+		}
+		policy, err := auditor.TranslateToHITLPolicy(name, decisions)
+		if err != nil {
+			return ToolsConfig{}, fmt.Errorf("store: %w", err)
+		}
+		policies[name] = policy
+	}
+	return ToolsConfig{MCPServers: config.MCPServers, HITLPolicies: policies}, nil
 }
 
 // SaveToolConfig replaces tools.json. Every server is validated first, so a
 // rejected edit leaves the file exactly as it was.
-func SaveToolConfig(config contracts.ToolsConfig) error {
+func SaveToolConfig(config ToolsConfig) error {
 	for name := range config.MCPServers {
 		if err := ValidateMCPServer(name, config.MCPServers[name]); err != nil {
 			return fmt.Errorf("store: %w", err)
 		}
+	}
+	disk := toolsFileConfig{MCPServers: config.MCPServers, HITLPolicies: make(map[string]contracts.HITLPolicyConfig)}
+	for name, policy := range config.HITLPolicies {
+		if name == auditor.DefaultHITLPolicyName {
+			continue
+		}
+		if policy == nil {
+			return fmt.Errorf("store: policy %q is nil", name)
+		}
+		decisions := make(contracts.HITLPolicyConfig, len(policy.ToolMappings))
+		for tool, decision := range policy.ToolMappings {
+			decisions[string(tool)] = decision.String()
+		}
+		if err := ValidatePolicy(name, decisions); err != nil {
+			return fmt.Errorf("store: %w", err)
+		}
+		disk.HITLPolicies[name] = decisions
 	}
 
 	root, err := Root()
@@ -72,7 +116,7 @@ func SaveToolConfig(config contracts.ToolsConfig) error {
 		return err
 	}
 
-	data, err := json.MarshalIndent(config, "", "  ")
+	data, err := json.MarshalIndent(disk, "", "  ")
 	if err != nil {
 		return fmt.Errorf("store: marshal tools config: %w", err)
 	}
@@ -82,6 +126,20 @@ func SaveToolConfig(config contracts.ToolsConfig) error {
 	// owner-only.
 	if err := atomicWrite(path, data, 0o600); err != nil {
 		return fmt.Errorf("store: write %s: %w", toolsFileName, err)
+	}
+	return nil
+}
+
+func ValidatePolicy(name string, pc contracts.HITLPolicyConfig) error {
+	if !serverName.MatchString(name) {
+		return fmt.Errorf("policy %q: name must contain only ASCII letters, digits, underscores or hyphens", name)
+	}
+	for tool, decision := range pc {
+		switch decision {
+		case string(auditor.DenyPolicy), string(auditor.AllowPolicy), string(auditor.HumanPolicy):
+		default:
+			return fmt.Errorf("policy %q, tool %q: decision must be allow, human, or deny (got %q)", name, tool, decision)
+		}
 	}
 	return nil
 }

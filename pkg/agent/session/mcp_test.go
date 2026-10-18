@@ -59,7 +59,9 @@ func configureSessionMCPTest(t *testing.T) map[string]contracts.MCPServerConfig 
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := contracts.ToolsConfig{MCPServers: map[string]contracts.MCPServerConfig{
+	config := struct {
+		MCPServers map[string]contracts.MCPServerConfig `json:"mcpServers"`
+	}{MCPServers: map[string]contracts.MCPServerConfig{
 		"local": {
 			Transport: "stdio", Command: executable,
 			Args: []string{"-test.run=^TestSessionMCPServerProcess$"},
@@ -94,7 +96,7 @@ func newMCPRuntimeTestSession(t *testing.T, kind contracts.AgentKind, mcpServers
 	if err := hub.RegisterSessionAgent(base.meta.ID); err != nil {
 		t.Fatal(err)
 	}
-	s, err := newRuntimeSession(context.Background(), base.l, base.model, base.meta, nil, base.timeline, base.store, base.agentMailbox, hub.NewSessionAgentComms(base.meta.ID), nil, mcpServers)
+	s, err := newRuntimeSession(context.Background(), base.l, base.model, base.meta, nil, base.timeline, base.store, base.agentMailbox, hub.NewSessionAgentComms(base.meta.ID), nil, mcpServers, auditor.NewDefaultHITLPolicy())
 	if err != nil {
 		_ = base.timeline.Close()
 		t.Fatal(err)
@@ -110,7 +112,7 @@ func sessionMCPTestCall(t *testing.T, s *InfaiAgentSession, id, mode, marker str
 		t.Fatalf("MCP tools = %d, want 1", len(tools))
 	}
 	name := contracts.ToolType(tools[0].Name)
-	if got := s.auditorPolicy.Check(name); got != auditor.HumanPolicy {
+	if got := s.policyDecision(name); got != auditor.HumanPolicy {
 		t.Fatalf("MCP policy = %v, want HumanPolicy despite read-only annotation", got)
 	}
 	found := false

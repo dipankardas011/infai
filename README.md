@@ -194,6 +194,7 @@ the limit. Hosts without delegation run the provider unconstrained.
 | `infaiw server` | Run the agent server in the foreground (the service runs this) |
 | `infaiw provider list \| login \| logout` | Manage model provider credentials |
 | `infaiw mcp list \| add \| edit \| remove \| refresh` | Manage MCP servers and their authorization |
+| `infaiw hitl_policy list \| add \| remove` | Manage human-in-the-loop tool policies |
 
 ### Keys
 

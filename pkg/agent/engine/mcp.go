@@ -61,10 +61,10 @@ func (e *InfaiAgentEngine) ListMCPServers(ctx context.Context) ([]glue.MCPServer
 
 // AddMCPServer stores a new server. An existing name is ErrMCPExists.
 func (e *InfaiAgentEngine) AddMCPServer(ctx context.Context, input glue.MCPServerInput) (glue.MCPServerView, error) {
-	if !e.mcpMu.TryLock() {
+	if !e.toolsConfigMu.TryLock() {
 		return glue.MCPServerView{}, ErrMCPOperation
 	}
-	defer e.mcpMu.Unlock()
+	defer e.toolsConfigMu.Unlock()
 	config, err := store.LoadToolConfig()
 	if err != nil {
 		return glue.MCPServerView{}, err
@@ -92,10 +92,10 @@ func (e *InfaiAgentEngine) AddMCPServer(ctx context.Context, input glue.MCPServe
 // client never reads a credential back and an empty field therefore means
 // "unchanged". Clearing one means removing and re-adding the server.
 func (e *InfaiAgentEngine) EditMCPServer(ctx context.Context, input glue.MCPServerInput) (glue.MCPServerView, error) {
-	if !e.mcpMu.TryLock() {
+	if !e.toolsConfigMu.TryLock() {
 		return glue.MCPServerView{}, ErrMCPOperation
 	}
-	defer e.mcpMu.Unlock()
+	defer e.toolsConfigMu.Unlock()
 	config, err := store.LoadToolConfig()
 	if err != nil {
 		return glue.MCPServerView{}, err
@@ -190,10 +190,10 @@ func sameMCPOAuthClient(a, b contracts.MCPOAuthConfig) bool {
 // RemoveMCPServer deletes a server and its stored authorization. A missing name
 // is ErrMCPNotFound.
 func (e *InfaiAgentEngine) RemoveMCPServer(ctx context.Context, name string) error {
-	if !e.mcpMu.TryLock() {
+	if !e.toolsConfigMu.TryLock() {
 		return ErrMCPOperation
 	}
-	defer e.mcpMu.Unlock()
+	defer e.toolsConfigMu.Unlock()
 	config, err := store.LoadToolConfig()
 	if err != nil {
 		return err
@@ -289,10 +289,10 @@ func (e *InfaiAgentEngine) LoginMCPServer(ctx context.Context, input glue.MCPLog
 	if err := e.MCPLoginTarget(input.Server); err != nil {
 		return err
 	}
-	if !e.mcpMu.TryLock() {
+	if !e.toolsConfigMu.TryLock() {
 		return ErrMCPOperation
 	}
-	defer e.mcpMu.Unlock()
+	defer e.toolsConfigMu.Unlock()
 	// One interactive authorization holds the registry for as long as the
 	// operator may take to finish in a browser, which is why it is as short as
 	// an authorization realistically allows.

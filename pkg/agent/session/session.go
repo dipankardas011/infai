@@ -76,7 +76,7 @@ type InfaiAgentSession struct {
 	agentMailbox *contracts.AgentMailbox
 
 	// Capabilities the agent runs with.
-	auditorPolicy   *auditor.AuditorPolicy
+	hitlPolicy      *auditor.HITLPolicy
 	availableTools  []contracts.Tool
 	availableSkills []contracts.Skill
 	fileManager     *actuators.FileManager
@@ -114,6 +114,7 @@ func NewSession(
 	aeComms *comms.ISACChannel,
 	sessionAgentKind contracts.AgentKind,
 	mcpServers map[string]contracts.MCPServerConfig,
+	hitlPolicy *auditor.HITLPolicy,
 ) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(chosenModel)
 	if err != nil {
@@ -165,7 +166,7 @@ func NewSession(
 		return nil, err
 	}
 
-	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc, mcpServers)
+	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc, mcpServers, hitlPolicy)
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -183,6 +184,7 @@ func NewResumedSession(
 	sessionStore *store.SessionStore,
 	aeComms *comms.ISACChannel,
 	mcpServers map[string]contracts.MCPServerConfig,
+	hitlPolicy *auditor.HITLPolicy,
 ) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(chosenModel)
 	if err != nil {
@@ -203,7 +205,7 @@ func NewResumedSession(
 		}
 	}
 
-	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc, mcpServers)
+	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc, mcpServers, hitlPolicy)
 }
 
 func newRuntimeSession(
@@ -218,6 +220,7 @@ func newRuntimeSession(
 	aeComms *comms.ISACChannel,
 	evalFunc func(context.Context) error,
 	mcpServers map[string]contracts.MCPServerConfig,
+	hitlPolicy *auditor.HITLPolicy,
 ) (*InfaiAgentSession, error) {
 	if engineCtx == nil {
 		return nil, errors.New("session: engine context is required")
@@ -228,6 +231,10 @@ func newRuntimeSession(
 	if meta.Conclusion != nil && contracts.IsInConcludedState(meta.AgentKind, meta.Conclusion.Status) {
 		status = meta.Conclusion.Status
 		concluded = true
+	}
+
+	if hitlPolicy == nil {
+		return nil, errors.New("session: a HITL policy is required")
 	}
 
 	ctx, cancel := context.WithCancelCause(engineCtx)
@@ -243,7 +250,7 @@ func newRuntimeSession(
 		model:                        model,
 		timeline:                     timeline,
 		store:                        sessionStore,
-		auditorPolicy:                auditor.NewAuditorPolicy(),
+		hitlPolicy:                   hitlPolicy,
 		taskChecklist:                memory.NewTaskChecklist(),
 		activeTimeline:               append([]contracts.ChatMessage(nil), history...),
 		eventBus:                     make(chan contracts.EventStream, 256),

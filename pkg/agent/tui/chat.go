@@ -25,6 +25,7 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/aymanbagabas/go-udiff"
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/dipankardas011/infai/pkg/agent/auditor"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
@@ -64,10 +65,19 @@ type chatModel struct {
 	contextWindow     uint64
 	thinking          contracts.InfaiThinkingLevel
 	availableThinking []contracts.InfaiThinkingLevel
-	modalities        []contracts.LLMSupportedModality
-	pending           []contracts.ImageInput
-	clipboard         Clipboard
-	used              uint64
+	// activePolicy is the tool policy the engine checks tool calls against;
+	// availablePolicies is every policy the session can switch to, in the
+	// order Shift+Tab cycles them.
+	activePolicy      string
+	availablePolicies []string
+	// policyFlash lights the policy chip for one moment after a switch;
+	// policyFlashID keeps an older timer from clearing a newer flash.
+	policyFlash   bool
+	policyFlashID uint64
+	modalities    []contracts.LLMSupportedModality
+	pending       []contracts.ImageInput
+	clipboard     Clipboard
+	used          uint64
 	// lastUsage is the provider's own accounting for the turn this client saw
 	// finish. It is the live half of what the stats page draws; the session's
 	// saved report covers a client that joined after the turn.
@@ -221,6 +231,10 @@ type modelSetMsg struct {
 	output *glue.SessionOutput
 	err    error
 }
+type policySetMsg struct {
+	output *glue.SessionOutput
+	err    error
+}
 type compactedMsg struct {
 	meta    *store.SessionMeta
 	records []store.Record
@@ -242,6 +256,7 @@ type renamedMsg struct {
 	err  error
 }
 type animationTickMsg struct{}
+type policyFlashMsg struct{ id uint64 }
 type cancelArmTimeoutMsg struct{ id uint64 }
 
 const cancelArmTimeout = 10 * time.Second
@@ -534,13 +549,17 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		// Every event draws as it arrives. A refresh costs one block render
 		// rather than the whole message, because the block in flight is cached
 		// like every other one.
-		m.applySessionEvent(msg.event)
+		eventCmd := m.applySessionEvent(msg.event)
 		m.refreshTranscript(follow)
 		m.reflow()
 		if msg.event.Kind == contracts.EventSubscriberGap {
 			return m, m.startSessionObserver(msg.sessionID)
 		}
-		return m, waitStream(m.ctx, m.sessionStream)
+		cmd := waitStream(m.ctx, m.sessionStream)
+		if eventCmd != nil {
+			cmd = tea.Batch(cmd, eventCmd)
+		}
+		return m, cmd
 	case sessionJoinDoneMsg:
 		if m.sessionCancel != nil && msg.sessionID == m.session.ID && msg.observerID == m.sessionObserverID && msg.err != nil && !errors.Is(msg.err, context.Canceled) {
 			m.appendError(msg.err)
@@ -623,6 +642,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
+		m.activePolicy = msg.output.ActivePolicy
+		m.availablePolicies = msg.output.AvailablePolicies
 		m.modalities = msg.output.InputModalities
 		m.availableSkills = msg.output.Skills
 		m.pending = nil
@@ -720,6 +741,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
+		m.activePolicy = msg.output.ActivePolicy
+		m.availablePolicies = msg.output.AvailablePolicies
 		m.modalities = msg.output.InputModalities
 		m.availableSkills = msg.output.Skills
 		m.pending = nil
@@ -744,6 +767,8 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.contextWindow = msg.output.ContextWindow
 			m.thinking = msg.output.Thinking
 			m.availableThinking = msg.output.AvailableThinking
+			m.activePolicy = msg.output.ActivePolicy
+			m.availablePolicies = msg.output.AvailablePolicies
 			m.modalities = msg.output.InputModalities
 			m.availableSkills = msg.output.Skills
 			m.pending = nil
@@ -752,6 +777,31 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.modal = nil
 		m.refreshTranscript(true)
+		return m, nil
+	case policySetMsg:
+		var flash tea.Cmd
+		if msg.err != nil {
+			m.appendError(msg.err)
+		} else {
+			// The session event may arrive before this response. Whichever gets
+			// here first records the change; the other only refreshes the list.
+			changed := msg.output.ActivePolicy != m.activePolicy
+			m.activePolicy = msg.output.ActivePolicy
+			m.availablePolicies = msg.output.AvailablePolicies
+			if changed {
+				m.blocks = append(m.blocks, block{role: "event", text: "Tool policy: " + msg.output.ActivePolicy})
+				flash = m.flashPolicy()
+			}
+		}
+		// A custom policy adds its name inside the frame, so the composer's
+		// height may change and the layout has to follow it.
+		m.reflow()
+		m.refreshTranscript(true)
+		return m, flash
+	case policyFlashMsg:
+		if msg.id == m.policyFlashID {
+			m.policyFlash = false
+		}
 		return m, nil
 	case compactedMsg:
 		m.working = false
@@ -908,6 +958,9 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// answered, so the composer is not accepting prompts anyway.
 	if model, cmd, handled := m.handleApprovalKey(key); handled {
 		return model, cmd
+	}
+	if key == "shift+tab" && m.session.ID != uuid.Nil {
+		return m, m.cyclePolicy()
 	}
 	if m.working && key == "esc" && m.session.AgentKind != contracts.SidecarLoopAgent {
 		if !m.cancelArmed {
@@ -1143,6 +1196,30 @@ func (m *chatModel) cycleThinking() {
 	}
 	m.thinking = next
 	m.reflow()
+}
+
+// cyclePolicy asks the engine to move to the next tool policy. The switch is
+// the engine's decision to make, so the view updates from its answer rather
+// than optimistically.
+func (m *chatModel) cyclePolicy() tea.Cmd {
+	if len(m.availablePolicies) == 0 {
+		m.showNotice("Tool policy unavailable", "This session reports no tool policies.", false)
+		return nil
+	}
+	next := m.availablePolicies[0]
+	for i, name := range m.availablePolicies {
+		if name != m.activePolicy {
+			continue
+		}
+		if i+1 < len(m.availablePolicies) {
+			next = m.availablePolicies[i+1]
+		}
+		break
+	}
+	if next == m.activePolicy {
+		return nil
+	}
+	return setSessionPolicyCmd(m.ctx, m.client, next)
 }
 
 // handleSessionListKey routes the keys the session list owns: "d" deletes a
@@ -1682,6 +1759,10 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 	m.checklist = view.Checklist
 	m.mcpPrompts = view.Prompts
 	m.mcpResources = view.Resources
+	if view.ActivePolicy != "" {
+		m.activePolicy = view.ActivePolicy
+		m.availablePolicies = view.AvailablePolicies
+	}
 	// A server that contributed no tools is only in the agent's log, which is on
 	// the other side of the API: say it here, where the operator is, with the
 	// reason the manager recorded.
@@ -1728,14 +1809,14 @@ func (m *chatModel) applySessionStatus(status contracts.SessionStatus) {
 	}
 }
 
-func (m *chatModel) applySessionEvent(event contracts.EventStream) {
+func (m *chatModel) applySessionEvent(event contracts.EventStream) tea.Cmd {
 	// Only a message's own tokens keep it in flight. Everything else — the
 	// usage that closes a generate call, a tool call, a status change — ends
 	// it, so the block stops being drawn as plain text and renders its
 	// markdown. Leaving this to the individual cases meant an answer stayed
 	// raw from its tool call until the next step's first token, which for a
 	// long-running tool is the whole tool's lifetime.
-	if !isContentDelta(event.Kind) {
+	if !isContentDelta(event.Kind) && event.Kind != contracts.EventHITLPolicyChanged {
 		m.stopStreaming()
 	}
 	content := ""
@@ -1829,6 +1910,13 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 				m.closeElicitForm()
 			}
 		}
+	case contracts.EventHITLPolicyChanged:
+		if content == "" || content == m.activePolicy {
+			break
+		}
+		m.activePolicy = content
+		m.blocks = append(m.blocks, block{role: "event", text: "Tool policy: " + content})
+		return m.flashPolicy()
 	case contracts.EventCompactionExecuted:
 		if event.Compaction == nil {
 			break
@@ -1853,6 +1941,7 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) {
 	default:
 		m.appendDelta(event.Kind, content)
 	}
+	return nil
 }
 
 func blocksFromMessages(history []contracts.ChatMessage) []block {
@@ -2094,7 +2183,7 @@ func (m *chatModel) runCommand(command string) tea.Cmd {
 		return saveReportCmd(m.ctx, m.client, m.session.ID, m.session.Cwd)
 	case "/help":
 		m.blocks = append(m.blocks, block{role: "system", text: strings.Join([]string{
-			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll · Ctrl+O sessions · Ctrl+N new · Ctrl+T thinking",
+			"Enter sends · Shift+Enter adds a line · PageUp/PageDown scroll · Ctrl+O sessions · Ctrl+N new · Ctrl+T thinking · Shift+Tab policy",
 			"Ctrl+V paste image · Ctrl+U clear images",
 			"Mouse: drag over the transcript to copy it · hold at an edge to scroll · wheel to scroll",
 			"/new · /sessions · /model · /compact · /timeline · /report · /rename · /quit",
@@ -2947,10 +3036,64 @@ func (m *chatModel) taskChecklistView(width int) string {
 }
 
 func (m *chatModel) composerView() string {
+	style := m.styles.composer
 	if m.composerWaiting {
-		return fullWidth(m.styles.composerWaiting, m.width, m.composer.View())
+		style = m.styles.composerWaiting
 	}
-	return fullWidth(m.styles.composer, m.width, m.composer.View())
+	box := fullWidth(style, m.width, m.composer.View())
+	if m.activePolicy == "" {
+		return box
+	}
+	pill := m.styles.policyPill
+	switch {
+	case m.policyFlash:
+		pill = m.styles.policyPillFlash
+	case m.isCustomPolicy():
+		pill = m.styles.policyPillCustom
+	}
+	edge := m.styles.composerEdge
+	if m.composerWaiting {
+		edge = m.styles.composerEdgeWait
+	}
+	return composerTopLabel(box, m.width, "HITL "+m.activePolicy, pill, edge)
+}
+
+// composerTopLabel replaces the top border of a rendered composer with one that
+// carries the policy chip near the right corner. Lipgloss draws a plain border,
+// so the line is rebuilt at the same width; only the first line is touched.
+func composerTopLabel(box string, width int, label string, labelStyle, edge lipgloss.Style) string {
+	if width < 8 {
+		return box
+	}
+	maxText := width - 7 // corners, one left dash, two right dashes, chip padding
+	if maxText < 1 {
+		return box
+	}
+	label = xansi.Truncate(label, maxText, "…")
+	rendered := labelStyle.Render(label)
+	left := width - 4 - xansi.StringWidth(rendered)
+	if left < 1 {
+		return box
+	}
+	top := edge.Render("╭"+strings.Repeat("─", left)) + rendered + edge.Render("──╮")
+	if i := strings.IndexByte(box, '\n'); i >= 0 {
+		return top + box[i:]
+	}
+	return top
+}
+
+func (m *chatModel) isCustomPolicy() bool {
+	return m.activePolicy != "" && m.activePolicy != auditor.DefaultHITLPolicyName
+}
+
+// flashPolicy lights the policy chip for one moment after a switch. It returns
+// a single tick rather than a repeating animation: the chip only has to catch
+// the eye once.
+func (m *chatModel) flashPolicy() tea.Cmd {
+	m.policyFlash = true
+	m.policyFlashID++
+	id := m.policyFlashID
+	return tea.Tick(350*time.Millisecond, func(time.Time) tea.Msg { return policyFlashMsg{id: id} })
 }
 
 func (m *chatModel) commandMenuView() string {
@@ -4391,6 +4534,13 @@ func renameSessionCmd(ctx context.Context, client Client, id uuid.UUID, name str
 	return func() tea.Msg {
 		meta, err := client.RenameSession(ctx, id, name)
 		return renamedMsg{meta: meta, err: err}
+	}
+}
+
+func setSessionPolicyCmd(ctx context.Context, client Client, policy string) tea.Cmd {
+	return func() tea.Msg {
+		output, err := client.SetSessionPolicy(ctx, policy)
+		return policySetMsg{output: output, err: err}
 	}
 }
 

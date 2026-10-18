@@ -80,6 +80,7 @@ type Client interface {
 	ListSessions(ctx context.Context) ([]contracts.SessionSummary, error)
 	ListAllProviderModels(ctx context.Context) ([]glue.ListModelOutput, error)
 	SetSessionModel(ctx context.Context, provider, model string) (*glue.SessionOutput, error)
+	SetSessionPolicy(ctx context.Context, policy string) (*glue.SessionOutput, error)
 	Compact(ctx context.Context) (*store.SessionMeta, error)
 	RenderMCPPrompt(ctx context.Context, id uuid.UUID, server, name string, arguments map[string]string) ([]contracts.ChatMessage, error)
 	GetTimeline(ctx context.Context, id uuid.UUID) (*TimelineView, error)

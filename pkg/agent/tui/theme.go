@@ -70,11 +70,17 @@ type harnessStyles struct {
 	headerMeta lipgloss.Style
 	composer   lipgloss.Style
 	// composerWaiting frames the composer while it cannot take input: it keeps
-	// the palette's plain grey, so a green frame means typing goes in.
-	composerWaiting lipgloss.Style
-	status          lipgloss.Style
-	statusBusy      lipgloss.Style
-	statusWaiting   lipgloss.Style
+	// the palette's plain grey, so a green frame means typing goes in. The
+	// policy chip keeps its own colour either way.
+	composerWaiting  lipgloss.Style
+	composerEdge     lipgloss.Style
+	composerEdgeWait lipgloss.Style
+	policyPill       lipgloss.Style
+	policyPillCustom lipgloss.Style
+	policyPillFlash  lipgloss.Style
+	status           lipgloss.Style
+	statusBusy       lipgloss.Style
+	statusWaiting    lipgloss.Style
 	// statusOpen is a session the engine holds and is not working on: it is
 	// ready for a prompt, which reads as "go", not as "wait".
 	statusOpen      lipgloss.Style
@@ -142,15 +148,20 @@ func (s harnessStyles) heading(section string, background color.Color) string {
 
 func newHarnessStyles() harnessStyles {
 	return harnessStyles{
-		app:             lipgloss.NewStyle().Background(everforest.Background).Foreground(everforest.Text),
-		header:          lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Padding(0, 1),
-		brand:           lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
-		headerMeta:      lipgloss.NewStyle().Foreground(everforest.Muted),
-		composer:        lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.Green).Padding(0, 1),
-		composerWaiting: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
-		status:          lipgloss.NewStyle().Foreground(everforest.Muted),
-		statusBusy:      lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
-		statusWaiting:   lipgloss.NewStyle().Foreground(everforest.Orange).Bold(true),
+		app:              lipgloss.NewStyle().Background(everforest.Background).Foreground(everforest.Text),
+		header:           lipgloss.NewStyle().Background(everforest.Surface).Foreground(everforest.Text).Padding(0, 1),
+		brand:            lipgloss.NewStyle().Foreground(everforest.Green).Bold(true),
+		headerMeta:       lipgloss.NewStyle().Foreground(everforest.Muted),
+		composer:         lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.Green).Padding(0, 1),
+		composerWaiting:  lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(everforest.SurfaceAlt).Padding(0, 1),
+		composerEdge:     lipgloss.NewStyle().Foreground(everforest.Green),
+		composerEdgeWait: lipgloss.NewStyle().Foreground(everforest.SurfaceAlt),
+		policyPill:       lipgloss.NewStyle().Background(everforest.Blue).Foreground(everforest.Background).Bold(true).Padding(0, 1),
+		policyPillCustom: lipgloss.NewStyle().Background(everforest.Orange).Foreground(everforest.Background).Bold(true).Padding(0, 1),
+		policyPillFlash:  lipgloss.NewStyle().Background(everforest.Yellow).Foreground(everforest.Background).Bold(true).Padding(0, 1),
+		status:           lipgloss.NewStyle().Foreground(everforest.Muted),
+		statusBusy:       lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
+		statusWaiting:    lipgloss.NewStyle().Foreground(everforest.Orange).Bold(true),
 		// A session the engine holds and is not working on reads as "go", so it
 		// takes the palette's go colour; one that has ended takes the quieter
 		// aqua, which keeps "open and waiting" from reading as "finished".

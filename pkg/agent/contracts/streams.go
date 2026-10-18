@@ -61,6 +61,9 @@ const (
 	EventApprovalRequested EventStreamKind = "approval_requested"
 	EventApprovalResolved  EventStreamKind = "approval_resolved"
 
+	// EventHITLPolicyChanged
+	EventHITLPolicyChanged EventStreamKind = "hitl_policy_changed"
+
 	/// MCP Elicitation
 	EventElicitationRequested EventStreamKind = "elicitation_requested"
 	EventElicitationResolved  EventStreamKind = "elicitation_resolved"

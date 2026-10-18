@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/auditor"
 	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/config"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -32,10 +33,13 @@ type InfaiAgentEngine struct {
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
 
-	providerMu   sync.Mutex
-	mcpMu        sync.Mutex // serializes MCP registry read-modify-writes and interactive logins
-	providers    contracts.LLMProviders
-	sessionStore *store.SessionStore
+	providerMu    sync.Mutex
+	toolsConfigMu sync.Mutex
+	providers     contracts.LLMProviders
+	sessionStore  *store.SessionStore
+
+	policyMu     sync.RWMutex
+	hitlPolicies map[string]*auditor.HITLPolicy
 
 	mu                  sync.Mutex
 	activeSessionAgents map[uuid.UUID]*session.InfaiAgentSession
@@ -90,6 +94,15 @@ func NewInfaiAgentEngine(parent context.Context, bgLogger *slog.Logger, cfg *con
 			return nil, errChan
 		}
 	}
+
+	toolConfig, err := store.LoadToolConfig()
+	if err != nil {
+		engine.cancel(err)
+		engine.aseComms.Close()
+		bgLogger.ErrorContext(ctx, "failed to load toolconfig from configuration", "error", err)
+		return nil, fmt.Errorf("load tool policies: %w", err)
+	}
+	engine.hitlPolicies = toolConfig.HITLPolicies
 
 	go engine.watchManagedProviderCatalogs()
 
@@ -192,6 +205,11 @@ func (e *InfaiAgentEngine) createSidecarSession(parentID uuid.UUID, request comm
 		return uuid.Nil, fmt.Errorf("engine: model %q not configured for provider %q", parentMeta.Model, parentMeta.Provider)
 	}
 
+	// The sidecar inherits the policy its parent is running under at spawn time.
+	activePolicy, err := e.resolvePolicyName(parent.ActivePolicyName())
+	if err != nil {
+		return uuid.Nil, err
+	}
 	toolConfig, err := store.LoadToolConfig()
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("load MCP config: %w", err)
@@ -231,6 +249,7 @@ func (e *InfaiAgentEngine) createSidecarSession(parentID uuid.UUID, request comm
 		e.aseComms.NewSessionAgentComms(id),
 		contracts.SidecarLoopAgent,
 		toolConfig.MCPServers,
+		activePolicy,
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(id)
@@ -344,6 +363,11 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	if !ok {
 		return nil, fmt.Errorf("engine: model %q not configured for provider %q", opts.Model, opts.Provider)
 	}
+
+	activePolicy, err := e.resolvePolicyName(auditor.DefaultHITLPolicyName)
+	if err != nil {
+		return nil, err
+	}
 	toolConfig, err := store.LoadToolConfig()
 	if err != nil {
 		return nil, fmt.Errorf("load MCP config: %w", err)
@@ -353,6 +377,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 	if err != nil {
 		return nil, err
 	}
+
 	if err := e.aseComms.RegisterSessionAgent(sessID); err != nil {
 		return nil, err
 	}
@@ -379,6 +404,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		e.aseComms.NewSessionAgentComms(sessID),
 		opts.AgentKind,
 		toolConfig.MCPServers,
+		activePolicy,
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(sessID)
@@ -446,6 +472,12 @@ func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgent
 	if !ok {
 		return nil, fmt.Errorf("engine: model %q not configured for provider %q", meta.Model, meta.Provider)
 	}
+	activePolicy, err := e.resolvePolicyName(auditor.DefaultHITLPolicyName)
+	if err != nil {
+		_ = timeline.Close()
+		return nil, err
+	}
+
 	toolConfig, err := store.LoadToolConfig()
 	if err != nil {
 		_ = timeline.Close()
@@ -471,6 +503,7 @@ func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgent
 		meta, history, timeline, e.sessionStore,
 		e.aseComms.NewSessionAgentComms(sessionID),
 		toolConfig.MCPServers,
+		activePolicy,
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(sessionID)
@@ -533,6 +566,24 @@ func (e *InfaiAgentEngine) SetSessionModel(id uuid.UUID, providerName, modelId s
 	}
 
 	e.bgLogger.Info("session model set", "session_id", id, "provider", providerName, "model", modelId)
+	return sess, nil
+}
+
+func (e *InfaiAgentEngine) SetSessionPolicy(id uuid.UUID, name string) (*session.InfaiAgentSession, error) {
+	e.mu.Lock()
+	sess, ok := e.activeSessionAgents[id]
+	e.mu.Unlock()
+	if !ok {
+		return nil, harnessErr.ErrSessionNotFound
+	}
+	policy, err := e.resolvePolicyName(name)
+	if err != nil {
+		return nil, err
+	}
+	if err := sess.SetHITLPolicy(policy); err != nil {
+		return nil, err
+	}
+	e.bgLogger.Info("session policy set", "session_id", id, "policy", name)
 	return sess, nil
 }
 
@@ -616,7 +667,12 @@ func (e *InfaiAgentEngine) SubscribeEvents(id uuid.UUID) (glue.SessionView, <-ch
 	if !ok {
 		return glue.SessionView{}, nil, nil, harnessErr.ErrSessionNotFound
 	}
-	return sess.JoinSessionEvents()
+	view, events, cancel, err := sess.JoinSessionEvents()
+	if err != nil {
+		return glue.SessionView{}, nil, nil, err
+	}
+	view.AvailablePolicies = e.PolicyNames()
+	return view, events, cancel, nil
 }
 
 func (e *InfaiAgentEngine) ResolveApproval(id uuid.UUID, approvalID uuid.UUID, decision contracts.ApprovalConclusion) error {

@@ -58,7 +58,10 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/providers/logout", s.handleProviderLogout)
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
 
-	// MCP server management
+	// HITL policies and MCP servers.
+	mux.HandleFunc("GET /v1/policies", s.handleListPolicies)
+	mux.HandleFunc("POST /v1/policies", s.handleCreatePolicy)
+	mux.HandleFunc("DELETE /v1/policies/{name}", s.handleDeletePolicy)
 	mux.HandleFunc("GET /v1/mcp/servers", s.handleListMCPServers)
 	mux.HandleFunc("POST /v1/mcp/servers", s.handleAddMCPServer)
 	mux.HandleFunc("PUT /v1/mcp/servers/{name}", s.handleEditMCPServer)
@@ -78,6 +81,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/sessions/{id}/load", s.handleLoadSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/rename", s.handleRenameSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/model", s.handleSetSessionModel)
+	mux.HandleFunc("POST /v1/sessions/{id}/policy", s.handleSetSessionPolicy)
 	mux.HandleFunc("GET /v1/sessions/{id}/join-stream", s.handleJoinSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/chat", s.handleChat)
 	mux.HandleFunc("POST /v1/sessions/{id}/cancel", s.handleCancelTurn)
@@ -486,10 +490,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.writeJSON(w, http.StatusCreated, sessionOutput(sess))
+	s.writeJSON(w, http.StatusCreated, s.sessionOutput(sess))
 }
 
-func sessionOutput(sess *session.InfaiAgentSession) glue.SessionOutput {
+func (s *Server) sessionOutput(sess *session.InfaiAgentSession) glue.SessionOutput {
 	return glue.SessionOutput{
 		SessionMeta:       sess.Meta(),
 		ContextWindow:     sess.CurrentSessionModelContextWindow(),
@@ -498,7 +502,49 @@ func sessionOutput(sess *session.InfaiAgentSession) glue.SessionOutput {
 		InputModalities:   sess.SupportedInputModalities(),
 		OutputModalities:  sess.SupportedOutputModalities(),
 		Skills:            sess.AvailableSkills(),
+		ActivePolicy:      sess.ActivePolicyName(),
+		AvailablePolicies: s.engine.PolicyNames(),
 		MCP:               sess.MCPStatus(),
+	}
+}
+
+func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, http.StatusOK, s.engine.ListPolicies())
+}
+
+func (s *Server) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
+	var req glue.CreateHITLPolicyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Policy == nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("policy is required"))
+		return
+	}
+	if err := s.engine.CreatePolicy(req.Name, req.Policy); err != nil {
+		s.writePolicyError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusCreated, s.engine.ListPolicies())
+}
+
+func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request) {
+	if err := s.engine.DeletePolicy(r.PathValue("name")); err != nil {
+		s.writePolicyError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, s.engine.ListPolicies())
+}
+
+func (s *Server) writePolicyError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, engine.ErrPolicyNotFound):
+		s.writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, engine.ErrPolicyExists):
+		s.writeError(w, http.StatusConflict, err)
+	default:
+		s.writeError(w, http.StatusBadRequest, err)
 	}
 }
 
@@ -639,7 +685,7 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, sessionOutput(sess))
+	s.writeJSON(w, http.StatusOK, s.sessionOutput(sess))
 }
 
 func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
@@ -694,7 +740,35 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, sessionOutput(sess))
+	s.writeJSON(w, http.StatusOK, s.sessionOutput(sess))
+}
+
+func (s *Server) handleSetSessionPolicy(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, errors.New("invalid session id"))
+		return
+	}
+	var req glue.SetHITLPolicyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Policy == "" {
+		s.writeError(w, http.StatusBadRequest, errors.New("policy is required"))
+		return
+	}
+
+	sess, err := s.engine.SetSessionPolicy(id, req.Policy)
+	if err != nil {
+		if errors.Is(err, harnessErr.ErrSessionNotFound) {
+			s.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, s.sessionOutput(sess))
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {

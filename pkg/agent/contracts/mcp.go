@@ -2,12 +2,7 @@ package contracts
 
 import "time"
 
-// ToolsConfig is the harness's tool configuration, keyed by server name. The
-// name is what tool names and error messages use; it is never repeated inside
-// the server's own entry.
-type ToolsConfig struct {
-	MCPServers map[string]MCPServerConfig `json:"mcpServers"`
-}
+type HITLPolicyConfig map[string]string
 
 type MCPServerConfig struct {
 	Transport      string            `json:"type"`

@@ -45,7 +45,7 @@ func TestLoadMCPConfigMissing(t *testing.T) {
 }
 
 func TestLoadMCPConfigValid(t *testing.T) {
-	want := contracts.ToolsConfig{MCPServers: map[string]contracts.MCPServerConfig{
+	want := toolsFileConfig{MCPServers: map[string]contracts.MCPServerConfig{
 		"Local_1-test": {Transport: "stdio", Command: "tool", Args: []string{"--flag"}, Env: map[string]string{"STATIC": "value"}},
 		"remote":       {Transport: "streamable-http", URL: "https://example.com/mcp?version=1", Headers: map[string]string{"X-Token": "secret"}, BearerToken: "resolved-secret", TimeoutSeconds: 120},
 		"remote-oauth": {Transport: "streamable-http", URL: "https://example.com/mcp", OAuth: &contracts.MCPOAuthConfig{RedirectURL: "http://127.0.0.1:6000/oauth/callback", ClientID: "harness", ClientSecret: "client-secret", Scopes: []string{"mcp.read"}}},
@@ -59,7 +59,7 @@ func TestLoadMCPConfigValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, want) {
+	if !reflect.DeepEqual(got.MCPServers, want.MCPServers) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
 	after, err := os.ReadFile(path)
@@ -142,7 +142,7 @@ func TestLoadMCPConfigInvalidServer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server := tt.base
 			tt.edit(&server)
-			data, err := json.Marshal(contracts.ToolsConfig{MCPServers: map[string]contracts.MCPServerConfig{tt.key: server}})
+			data, err := json.Marshal(toolsFileConfig{MCPServers: map[string]contracts.MCPServerConfig{tt.key: server}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -163,11 +163,11 @@ func TestLoadMCPConfigInvalidServer(t *testing.T) {
 
 func TestSaveToolConfigRoundTrip(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	want := contracts.ToolsConfig{MCPServers: map[string]contracts.MCPServerConfig{
+	want := toolsFileConfig{MCPServers: map[string]contracts.MCPServerConfig{
 		"local":  {Transport: "stdio", Command: "tool", Args: []string{"--flag"}, Env: map[string]string{"STATIC": "value"}},
 		"remote": {Transport: "streamable-http", URL: "https://example.com/mcp", BearerToken: "stored-secret", TimeoutSeconds: 30},
 	}}
-	if err := SaveToolConfig(want); err != nil {
+	if err := SaveToolConfig(ToolsConfig{MCPServers: want.MCPServers}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -175,7 +175,7 @@ func TestSaveToolConfigRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, want) {
+	if !reflect.DeepEqual(got.MCPServers, want.MCPServers) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
 
@@ -199,22 +199,22 @@ func TestSaveToolConfigRejectsBeforeWriting(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "tools.json")
-	invalid := contracts.ToolsConfig{MCPServers: map[string]contracts.MCPServerConfig{
+	invalid := toolsFileConfig{MCPServers: map[string]contracts.MCPServerConfig{
 		"bad": {Transport: "carrier-pigeon", Command: "tool"},
 	}}
 
 	// Nothing is on disk yet: a rejected save must not create the file.
-	if err := SaveToolConfig(invalid); err == nil {
+	if err := SaveToolConfig(ToolsConfig{MCPServers: invalid.MCPServers}); err == nil {
 		t.Fatal("expected a validation error")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("rejected save created tools.json: %v", err)
 	}
 
-	valid := contracts.ToolsConfig{MCPServers: map[string]contracts.MCPServerConfig{
+	valid := toolsFileConfig{MCPServers: map[string]contracts.MCPServerConfig{
 		"local": {Transport: "stdio", Command: "tool"},
 	}}
-	if err := SaveToolConfig(valid); err != nil {
+	if err := SaveToolConfig(ToolsConfig{MCPServers: valid.MCPServers}); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(path)
@@ -223,7 +223,7 @@ func TestSaveToolConfigRejectsBeforeWriting(t *testing.T) {
 	}
 
 	// A valid file is present: a rejected save must leave it byte-identical.
-	if err := SaveToolConfig(invalid); err == nil {
+	if err := SaveToolConfig(ToolsConfig{MCPServers: invalid.MCPServers}); err == nil {
 		t.Fatal("expected a validation error")
 	}
 	after, err := os.ReadFile(path)

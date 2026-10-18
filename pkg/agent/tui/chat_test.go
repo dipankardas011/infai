@@ -3082,6 +3082,9 @@ func (stubChatClient) ListAllProviderModels(context.Context) ([]glue.ListModelOu
 func (stubChatClient) SetSessionModel(context.Context, string, string) (*glue.SessionOutput, error) {
 	return &glue.SessionOutput{}, nil
 }
+func (stubChatClient) SetSessionPolicy(context.Context, string) (*glue.SessionOutput, error) {
+	return &glue.SessionOutput{}, nil
+}
 func (stubChatClient) Compact(context.Context) (*store.SessionMeta, error) {
 	return &store.SessionMeta{}, nil
 }

@@ -618,6 +618,55 @@ func (c *RemoteClient) SetSessionModel(ctx context.Context, provider, model stri
 	return &out, err
 }
 
+func (c *RemoteClient) ListHITLPolicies(ctx context.Context) (glue.HITLPoliciesOutput, error) {
+	var output glue.HITLPoliciesOutput
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/policies", nil)
+	if err != nil {
+		return output, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return output, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return output, readAPIError(resp)
+	}
+	err = json.NewDecoder(resp.Body).Decode(&output)
+	return output, err
+}
+
+func (c *RemoteClient) CreateHITLPolicy(ctx context.Context, name string, decisions contracts.HITLPolicyConfig) error {
+	var output glue.HITLPoliciesOutput
+	return c.postJSONInto(ctx, "/v1/policies", glue.CreateHITLPolicyRequest{Name: name, Policy: decisions}, http.StatusCreated, &output)
+}
+
+func (c *RemoteClient) RemoveHITLPolicy(ctx context.Context, name string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/policies/"+url.PathEscape(name), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return readAPIError(resp)
+	}
+	return nil
+}
+
+func (c *RemoteClient) SetSessionPolicy(ctx context.Context, policy string) (*glue.SessionOutput, error) {
+	id := c.SessionID()
+	if id == uuid.Nil {
+		return nil, ErrNoSession
+	}
+	var out glue.SessionOutput
+	err := c.postJSONInto(ctx, "/v1/sessions/"+id.String()+"/policy", glue.SetHITLPolicyRequest{Policy: policy}, http.StatusOK, &out)
+	return &out, err
+}
+
 func (c *RemoteClient) Compact(ctx context.Context) (*store.SessionMeta, error) {
 	id := c.SessionID()
 	if id == uuid.Nil {

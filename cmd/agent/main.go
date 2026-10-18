@@ -53,6 +53,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newServerCmd())
 	cmd.AddCommand(newProviderCmd())
 	cmd.AddCommand(newMCPCmd())
+	cmd.AddCommand(newHITLPolicyCmd())
 	return cmd
 }
 

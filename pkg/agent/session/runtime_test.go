@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/agent"
+	"github.com/dipankardas011/infai/pkg/agent/auditor"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 	"github.com/dipankardas011/infai/pkg/agent/memory"
@@ -88,6 +89,7 @@ func newBareRuntimeSession(t *testing.T, model contracts.InfaiModelAdaptor, time
 		model:            model,
 		timeline:         timeline,
 		store:            sessionStore,
+		hitlPolicy:       auditor.NewDefaultHITLPolicy(),
 		taskChecklist:    memory.NewTaskChecklist(),
 		activeTimeline:   append([]contracts.ChatMessage(nil), history...),
 		eventBus:         make(chan contracts.EventStream, 256),

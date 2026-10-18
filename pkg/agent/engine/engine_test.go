@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/auditor"
 	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/session"
@@ -168,12 +169,15 @@ func TestSidecarNameIsPersistedOnCreation(t *testing.T) {
 		providers:           contracts.LLMProviders{Providers: map[string]contracts.LLMProviderConfiguration{"test": provider}},
 		activeSessionAgents: make(map[uuid.UUID]*session.InfaiAgentSession),
 		children:            make(map[uuid.UUID]map[uuid.UUID]comms.AgentCommKind), stopCh: make(chan struct{}),
+		hitlPolicies: map[string]*auditor.HITLPolicy{
+			auditor.DefaultHITLPolicyName: auditor.NewDefaultHITLPolicy(),
+		},
 	}
 	// An interactive session carries no turn limit: the engine passes nil for
 	// one, and the loop falls back to the session default.
 	parent, err := session.NewSession(e.ctx, parentID, uuid.Nil, "", logger, nil, nil, nil,
 		contracts.NewProvisionedModel(provider.Id, "test", provider.BaseEndpoint, provider.APIType, provider.Auth, model),
-		t.TempDir(), ss, hub.NewSessionAgentComms(parentID), contracts.InteractiveAgent, nil)
+		t.TempDir(), ss, hub.NewSessionAgentComms(parentID), contracts.InteractiveAgent, nil, auditor.NewDefaultHITLPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +239,7 @@ func TestEngineNamesTheSessionsTheIdsBelongTo(t *testing.T) {
 	}
 	resident, err := session.NewSession(e.ctx, residentID, uuid.Nil, "Orchestrator", logger, nil, nil, nil,
 		contracts.NewProvisionedModel(provider.Id, "test", provider.BaseEndpoint, provider.APIType, provider.Auth, model),
-		t.TempDir(), ss, hub.NewSessionAgentComms(residentID), contracts.InteractiveAgent, nil)
+		t.TempDir(), ss, hub.NewSessionAgentComms(residentID), contracts.InteractiveAgent, nil, auditor.NewDefaultHITLPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
