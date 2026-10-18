@@ -93,7 +93,7 @@ func TestFileManagerGlobSupportsRecursivePatterns(t *testing.T) {
 		}
 	}
 	m := mustManager(t, root)
-	matches, err := m.glob("**/*.go")
+	matches, _, err := m.glob(globArguments{Pattern: "**/*.go"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,23 +154,29 @@ func TestFileManagerRejectsNoOpEdit(t *testing.T) {
 	}
 }
 
-func TestFileToolExecutionsReturnJSON(t *testing.T) {
+func TestFileToolExecutionsReturnOutput(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("needle\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	m := mustManager(t, root)
 	ctx := context.Background()
+
+	listOut, err := m.ListExecution(ctx, contracts.ToolCall{Function: contracts.Function{Name: contracts.ListTool, Arguments: `{}`}})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var listValue any
+	if err := json.Unmarshal([]byte(listOut), &listValue); err != nil {
+		t.Fatalf("list output = %q: %v", listOut, err)
+	}
+
 	for _, call := range []contracts.ToolCall{
-		{Function: contracts.Function{Name: contracts.ListTool, Arguments: `{}`}},
 		{Function: contracts.Function{Name: contracts.GlobTool, Arguments: `{"pattern":"*.txt"}`}},
 		{Function: contracts.Function{Name: contracts.SearchTool, Arguments: `{"pattern":"needle"}`}},
 	} {
 		var out string
-		var err error
 		switch call.Function.Name {
-		case contracts.ListTool:
-			out, err = m.ListExecution(ctx, call)
 		case contracts.GlobTool:
 			out, err = m.GlobExecution(ctx, call)
 		case contracts.SearchTool:
@@ -179,9 +185,8 @@ func TestFileToolExecutionsReturnJSON(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", call.Function.Name, err)
 		}
-		var value any
-		if err := json.Unmarshal([]byte(out), &value); err != nil {
-			t.Fatalf("%s output = %q: %v", call.Function.Name, out, err)
+		if strings.TrimSpace(out) == "" {
+			t.Fatalf("%s returned no output", call.Function.Name)
 		}
 	}
 }

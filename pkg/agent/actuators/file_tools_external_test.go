@@ -146,11 +146,11 @@ func TestGlobListAndSearchToolBehavior(t *testing.T) {
 	writeFile(t, root, ".hidden", "needle\n")
 	m := manager(t, root)
 
-	var matches []string
-	if err := json.Unmarshal([]byte(execute(t, m, contracts.GlobTool, map[string]any{
+	globOut := execute(t, m, contracts.GlobTool, map[string]any{
 		"pattern": "**/*.go",
-	})), &matches); err != nil || len(matches) != 2 {
-		t.Fatalf("glob matches = %v, error = %v", matches, err)
+	})
+	if matches := strings.Split(globOut, "\n"); len(matches) != 2 {
+		t.Fatalf("glob matches = %v", matches)
 	}
 
 	var entries []map[string]any
@@ -161,11 +161,11 @@ func TestGlobListAndSearchToolBehavior(t *testing.T) {
 		t.Fatal("list returned no entries")
 	}
 
-	var results []map[string]any
-	if err := json.Unmarshal([]byte(execute(t, m, contracts.SearchTool, map[string]any{
+	searchOut := execute(t, m, contracts.SearchTool, map[string]any{
 		"pattern": "needle", "path": ".",
-	})), &results); err != nil || len(results) != 2 {
-		t.Fatalf("search results = %v, error = %v", results, err)
+	})
+	if results := strings.Split(searchOut, "\n"); len(results) != 2 {
+		t.Fatalf("search results = %v", results)
 	}
 }
 
@@ -207,13 +207,13 @@ func TestFileToolsRejectInvisibleOutputCharacters(t *testing.T) {
 	}
 }
 
-func TestFileToolsReturnEmptyArraysForNoMatches(t *testing.T) {
+func TestFileToolsReturnNoMatches(t *testing.T) {
 	m := manager(t, t.TempDir())
-	if output := execute(t, m, contracts.GlobTool, map[string]any{"pattern": "*.missing"}); output != "[]" {
-		t.Fatalf("glob output = %q, want []", output)
+	if output := execute(t, m, contracts.GlobTool, map[string]any{"pattern": "*.missing"}); output != "no matches" {
+		t.Fatalf("glob output = %q, want no matches", output)
 	}
-	if output := execute(t, m, contracts.SearchTool, map[string]any{"pattern": "missing"}); output != "[]" {
-		t.Fatalf("search output = %q, want []", output)
+	if output := execute(t, m, contracts.SearchTool, map[string]any{"pattern": "missing"}); output != "no matches" {
+		t.Fatalf("search output = %q, want no matches", output)
 	}
 }
 
