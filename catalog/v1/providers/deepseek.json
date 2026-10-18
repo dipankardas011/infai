@@ -27,34 +27,6 @@
         },
         "default_thinking": "high"
     },
-    "deepseek-flash-1017": {
-        "provider": "deepseek",
-        "base_url": "https://api.deepseek.com",
-        "api_type": "openai-completions",
-        "id": "deepseek-flash-1017",
-        "name": "DeepSeek V4.1 Flash 1017",
-        "max_context_window": 1000000,
-        "max_output_tokens": 384000,
-        "default_temperature": null,
-        "input_modality": [
-            "text",
-            "image"
-        ],
-        "output_modality": [
-            "text"
-        ],
-        "available_thinking": true,
-        "thinking_levels": {
-            "off": "none",
-            "minimal": null,
-            "low": "low",
-            "medium": null,
-            "high": "high",
-            "xhigh": null,
-            "max": "max"
-        },
-        "default_thinking": "high"
-    },
     "deepseek-v4-pro": {
         "provider": "deepseek",
         "base_url": "https://api.deepseek.com",
