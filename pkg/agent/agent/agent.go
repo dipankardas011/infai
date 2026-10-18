@@ -182,11 +182,13 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 
 	lastHadToolCalls := false
 	lastEvalResPass := false
+	evalAttempt := 0
+	evalPassed := false
 	if a.evalFunc == nil {
 		lastEvalResPass = true // Short-circuit
 	}
 
-	for iter := uint64(1); iter <= a.MaxQ; iter++ {
+	for iter := uint64(1); ; iter++ {
 		unreadMessages := a.mailbox.ConsumeAllFromInbox(ctx)
 
 		if !lastHadToolCalls && len(unreadMessages) == 0 && lastEvalResPass {
@@ -206,6 +208,11 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 					unreadMessages = append(unreadMessages, message)
 				}
 			}
+		}
+
+		if iter > a.MaxQ {
+			a.updateState(ctx, contracts.SessionMaxIterationExhausted)
+			return
 		}
 
 		if !a.updateState(ctx, contracts.SessionBusy) {
@@ -343,11 +350,29 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 				lastHadToolCalls = false
 				continue
 			}
+
+			evalAttempt++
+			evalResult := &contracts.EvalResult{Passed: err == nil, Attempt: evalAttempt}
 			if err != nil {
-				messages = append(messages, contracts.NewUserMessage(fmt.Sprintf("evaluation status: FAIL => %v", err.Error())))
-				lastEvalResPass = false
-			} else {
-				lastEvalResPass = true
+				evalResult.Output = err.Error()
+			}
+			// This branch runs only for a reply with no tool calls, so the reply
+			// is the assistant answer the gate just graded. Attaching the result
+			// to it keeps the per-attempt history in the existing message record.
+			reply.Eval = evalResult
+			messages[0] = reply
+			if !a.publishEvent(ctx, contracts.EventStream{
+				Kind:      contracts.EventEvalResult,
+				Timestamp: time.Now().UTC(),
+				Eval:      evalResult,
+			}) {
+				return
+			}
+
+			evalPassed = evalResult.Passed
+			lastEvalResPass = evalPassed
+			if !evalPassed {
+				messages = append(messages, contracts.NewUserMessage(contracts.AcceptanceScriptPrefix+"failure] "+err.Error()))
 			}
 		}
 
@@ -356,7 +381,7 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 		}
 		a.workingHistory.Append(messages...)
 
-		if a.shouldAutoCompact != nil && a.shouldAutoCompact(usage) {
+		if a.shouldAutoCompact != nil && !evalPassed && a.shouldAutoCompact(usage) {
 			content := fmt.Sprintf("Used: %d against Total: %d", usage.TotalTokens, a.modelClient().GetModelSpecs().Model().MaxContextLength)
 			if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventAutoCompactionTriggered, Timestamp: time.Now().UTC(), Content: &content}) {
 				return
@@ -384,6 +409,4 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 			iter = 0
 		}
 	}
-
-	a.updateState(ctx, contracts.SessionMaxIterationExhausted)
 }

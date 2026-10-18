@@ -633,7 +633,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 						return
 					}
 					call := foregroundCalls[idx]
-					content, err := delegate.Answer(response)
+					content, err := delegate.SidecarLoopRespAsToolCallResult(response)
 					result := contracts.ToolExecutionResult{
 						Status:   contracts.ToolExecutionSuccess,
 						CallID:   call.ID,
@@ -660,7 +660,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 
 				if response, ok := answers[sidecarID]; ok {
 					var err error
-					content, err = delegate.Answer(response)
+					content, err = delegate.SidecarLoopRespAsToolCallResult(response)
 					if err != nil {
 						status = contracts.ToolExecutionError
 						content = err.Error()

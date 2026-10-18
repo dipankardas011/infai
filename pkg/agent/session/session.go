@@ -685,6 +685,32 @@ func (s *InfaiAgentSession) summaryMessageFromSidecarLoop() string {
 	return ""
 }
 
+// lastEvalResult is the gate outcome carried by the most recent graded answer
+// in the committed timeline. Reading it there keeps the message the single
+// source of truth, including across a resume.
+func (s *InfaiAgentSession) lastEvalResult() *contracts.EvalResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, message := range slices.Backward(s.activeTimeline) {
+		if message.Eval != nil {
+			return message.Eval
+		}
+	}
+	return nil
+}
+
+func (s *InfaiAgentSession) taskChecklistSnapshot() *contracts.TaskChecklistState {
+	checklist, err := getLatestTaskChecklist(s.timeline, s.timeline.CurrentHeadEventID())
+	if err != nil {
+		s.l.Warn("read sidecar task checklist", "session_id", s.meta.ID, "error", err)
+		return nil
+	}
+	if len(checklist.Items) == 0 {
+		return nil
+	}
+	return &checklist
+}
+
 // moveStatusLocked is how an event moves the session's status. It is the only
 // writer while the session is live, so the rule lives in contracts.IsInConcludedState
 // rather than in each reader: a status a session has concluded on is final, and
@@ -764,6 +790,7 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			contracts.EventSkillLoad,
 			contracts.EventMessageFromAgentInbox,
 			contracts.EventArtifact,
+			contracts.EventEvalResult,
 			contracts.EventSidecarStatus:
 			s.mu.Lock()
 			s.inFlight = append(s.inFlight, event)
@@ -806,18 +833,31 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			s.reportStatusToParent(current)
 
 			// The loop is not coming back from here, so this is how the session
-			// ended. The status says why on its own, so no reason is recorded.
+			// ended.
 			if eventStatus == contracts.SessionCompleted || eventStatus == contracts.SessionMaxIterationExhausted {
-				s.recordSessionConclusion(eventStatus, "")
+				lastEval := s.lastEvalResult()
+
+				reason := ""
+				if eventStatus == contracts.SessionMaxIterationExhausted && lastEval != nil && !lastEval.Passed {
+					reason = lastEval.Output
+				}
+				s.recordSessionConclusion(eventStatus, reason)
+
 				if s.meta.AgentKind == contracts.SidecarLoopAgent {
-					response := comms.DelegatedTaskResponse{From: s.meta.ID, Status: eventStatus}
-					if eventStatus == contracts.SessionMaxIterationExhausted {
+					response := comms.DelegatedTaskResponse{
+						From:          s.meta.ID,
+						Status:        eventStatus,
+						Eval:          lastEval,
+						Summary:       s.summaryMessageFromSidecarLoop(),
+						TaskChecklist: s.taskChecklistSnapshot(),
+					}
+					switch {
+					case lastEval != nil && !lastEval.Passed:
+						response.Error = fmt.Sprintf("acceptance script failed after %d attempt(s): %s", lastEval.Attempt, lastEval.Output)
+					case eventStatus == contracts.SessionMaxIterationExhausted:
 						response.Error = "sidecar exhausted its turn budget"
-					} else {
-						response.Summary = s.summaryMessageFromSidecarLoop()
-						if response.Summary == "" {
-							response.Error = "sidecar completed without an answer"
-						}
+					case response.Summary == "":
+						response.Error = "sidecar completed without an answer"
 					}
 					s.sendSidecarLoopResult(ctx, response)
 				}
@@ -937,7 +977,14 @@ func (s *InfaiAgentSession) handlerForSessionEvents(ctx context.Context) {
 			s.notifySubscribers(event)
 			s.mu.Unlock()
 			if s.meta.AgentKind == contracts.SidecarLoopAgent {
-				s.sendSidecarLoopResult(ctx, comms.DelegatedTaskResponse{From: s.meta.ID, Status: contracts.SessionTombstone, Error: reason})
+				s.sendSidecarLoopResult(ctx, comms.DelegatedTaskResponse{
+					From:          s.meta.ID,
+					Status:        contracts.SessionTombstone,
+					Error:         reason,
+					Summary:       s.summaryMessageFromSidecarLoop(),
+					Eval:          s.lastEvalResult(),
+					TaskChecklist: s.taskChecklistSnapshot(),
+				})
 			}
 			// Before the cancel: a report sent after it has no live session to
 			// carry it.
@@ -1049,7 +1096,7 @@ func (s *InfaiAgentSession) subscribeForAgentMessages() {
 			return
 		}
 		if err := s.agentMailbox.SendMessage(s.ctx, contracts.NewSidecarAgentResponse(
-			delegate.AnswerText(response),
+			delegate.SidecarLoopRespAsNonToolCallResult(response),
 			delegate.SidecarAttribution(response.Name, response.From),
 		)); err != nil {
 			s.mu.Unlock()
@@ -1093,7 +1140,7 @@ func (s *InfaiAgentSession) settleBackgroundSidecars() {
 
 	for id, name := range s.pendingBackgroundSidecarLoop {
 		message := contracts.NewSidecarAgentResponse(
-			delegate.AnswerText(comms.DelegatedTaskResponse{From: id, Name: name, Status: contracts.SessionTombstone, Error: "session closed"}),
+			delegate.SidecarLoopRespAsNonToolCallResult(comms.DelegatedTaskResponse{From: id, Name: name, Status: contracts.SessionTombstone, Error: "session closed"}),
 			delegate.SidecarAttribution(name, id),
 		)
 		if _, err := s.timeline.AppendToHead(store.Record{Kind: store.KindMessage, Timestamp: time.Now().UTC(), Message: &message}); err != nil {

@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -213,29 +214,68 @@ func SidecarAttribution(name string, id uuid.UUID) string {
 	return fmt.Sprintf("%s (%s)", name, id)
 }
 
-// Answer is what a foreground call returns to the model.
-func Answer(response comms.DelegatedTaskResponse) (string, error) {
-	label := SidecarAttribution(response.Name, response.From)
+func SidecarLoopRespAsToolCallResult(response comms.DelegatedTaskResponse) (string, error) {
+	text := sidecarAnswerText(response)
 	if strings.TrimSpace(response.Error) != "" {
-		return "", fmt.Errorf("sidecar_loop %s ended %s: %s", label, response.Status, response.Error)
+		return "", errors.New(text)
 	}
-	summary := strings.TrimSpace(response.Summary)
-	if summary == "" {
-		return "", fmt.Errorf("sidecar_loop %s ended %s without an answer", label, response.Status)
-	}
-	return fmt.Sprintf("[sidecar_loop %s]\n%s", label, summary), nil
+	return text, nil
 }
 
-func AnswerText(response comms.DelegatedTaskResponse) string {
+// From Bg sidecar to status updates for the parent session.
+func SidecarLoopRespAsNonToolCallResult(response comms.DelegatedTaskResponse) string {
+	return sidecarAnswerText(response)
+}
+
+func sidecarAnswerText(response comms.DelegatedTaskResponse) string {
 	label := SidecarAttribution(response.Name, response.From)
-	switch {
-	case strings.TrimSpace(response.Error) != "":
-		return fmt.Sprintf("[sidecar_loop %s %s] %s", label, response.Status, response.Error)
-	case strings.TrimSpace(response.Summary) == "":
-		return fmt.Sprintf("[sidecar_loop %s %s] no answer", label, response.Status)
-	default:
-		return fmt.Sprintf("[sidecar_loop %s %s]\n%s", label, response.Status, strings.TrimSpace(response.Summary))
+	header := fmt.Sprintf("[sidecar_loop %s %s]", label, response.Status)
+
+	lines := []string{header}
+	if line := acceptanceLine(response.Eval); line != "" {
+		lines = append(lines, line)
 	}
+	if errorText := strings.TrimSpace(response.Error); errorText != "" {
+		lines = append(lines, errorText)
+		if summary := strings.TrimSpace(response.Summary); summary != "" {
+			lines = append(lines, "last answer:\n"+summary)
+		}
+	} else if summary := strings.TrimSpace(response.Summary); summary != "" {
+		lines = append(lines, summary)
+	} else {
+		lines = append(lines, "no answer")
+	}
+	if checklist := formatTaskChecklist(response.TaskChecklist); checklist != "" {
+		lines = append(lines, checklist)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func acceptanceLine(eval *contracts.EvalResult) string {
+	switch {
+	case eval == nil:
+		return ""
+	case eval.Passed:
+		return contracts.AcceptanceScriptPrefix + "success]"
+	default:
+		return contracts.AcceptanceScriptPrefix + "failure]"
+	}
+}
+
+func formatTaskChecklist(state *contracts.TaskChecklistState) string {
+	if state == nil || len(state.Items) == 0 {
+		return ""
+	}
+	var out strings.Builder
+	out.WriteString("Task checklist:")
+	for _, item := range state.Items {
+		fmt.Fprintf(&out, "\n- [%s] %s", item.Status, item.Title)
+		if description := strings.TrimSpace(item.Description); description != "" {
+			out.WriteString(": ")
+			out.WriteString(description)
+		}
+	}
+	return out.String()
 }
 
 type spawnArgs struct {

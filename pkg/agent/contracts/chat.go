@@ -18,7 +18,22 @@ type ChatMessage struct {
 	ToolCallID         string              `json:"tool_call_id,omitempty"`
 	ToolCalls          []ToolCall          `json:"tool_calls,omitempty"`
 	Status             ToolExecutionStatus `json:"status,omitempty"`
+	Eval               *EvalResult         `json:"eval,omitempty"`
 }
+
+// EvalResult is the outcome of running a sidecar's acceptance script against
+// one assistant answer. It rides on that message, so the timeline keeps the
+// per-attempt history without a separate record kind.
+type EvalResult struct {
+	Passed  bool   `json:"passed"`
+	Attempt int    `json:"attempt,omitempty"`
+	Output  string `json:"output,omitempty"`
+}
+
+// AcceptanceScriptPrefix opens the chip line that reports an acceptance-script
+// outcome. Success and failure share it, so the transcript recognizes the gate
+// without a second marker and the model reads the same label the reader sees.
+const AcceptanceScriptPrefix = "[acceptance_script "
 
 // Artifact is a non-text payload the model produced, such as a generated
 // image. Unlike Images it is never replayed to a provider.

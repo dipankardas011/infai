@@ -48,6 +48,7 @@ type block struct {
 	toolName      string
 	toolArgs      string
 	toolDetail    string
+	evalPassed    bool
 	rendered      string
 	renderedWidth int
 	renderedLines int
@@ -1878,6 +1879,10 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) tea.Cmd {
 		if event.Sidecar != nil {
 			m.upsertSidecar(*event.Sidecar)
 		}
+	case contracts.EventEvalResult:
+		if event.Eval != nil {
+			m.blocks = append(m.blocks, block{role: "eval", evalPassed: event.Eval.Passed, text: event.Eval.Output})
+		}
 	case contracts.EventSkillLoad:
 		name := string(contracts.ReadSkillTool)
 		if event.ToolResult != nil {
@@ -3172,6 +3177,21 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 		}
 	case "skill":
 		content = renderChatMarker("✦", m.styles.skill, m.styles.skill, entry.text, width)
+	case "eval":
+		label, style := contracts.AcceptanceScriptPrefix+"failure]", m.styles.evalFailBadge
+		if entry.evalPassed {
+			label, style = contracts.AcceptanceScriptPrefix+"success]", m.styles.evalPassBadge
+		}
+		content = style.Render(xansi.Truncate(label, width, "…"))
+		if !entry.evalPassed {
+			if output := strings.TrimRight(entry.text, "\n"); output != "" {
+				lines := strings.Split(lipgloss.Wrap(output, width, ""), "\n")
+				for i := range lines {
+					lines[i] = m.styles.error.Render(lines[i])
+				}
+				content += "\n" + strings.Join(lines, "\n")
+			}
+		}
 	case "tool":
 		content = m.renderToolBlock(entry, width)
 	}
@@ -3232,11 +3252,8 @@ func (m *chatModel) renderToolResult(entry *block, width int) string {
 		style = m.styles.error
 	}
 	var lines []string
-	if isSidecarTool(entry.toolName) && !failed {
-		// A sidecar answers in markdown: its summary is written for the caller
-		// to read, not shown as raw text. Its attribution line becomes a chip,
-		// so the answer starts with the summary itself.
-		lines = strings.Split(m.renderMarkdownMessage(detail, max(width-indent, 1)), "\n")
+	if isSidecarTool(entry.toolName) {
+		lines = strings.Split(m.renderSidecarMessage(detail, max(width-indent, 1), failed), "\n")
 	} else {
 		lines = strings.Split(lipgloss.Wrap(detail, max(width-indent, 1), ""), "\n")
 		for i := range lines {
@@ -3906,16 +3923,57 @@ func (m *chatModel) renderStyledMarkdown(markdown string, width int, style ansi.
 // attribution line. That line is a header, so it takes a chip of its own, and
 // the answer below it is markdown like any other message the reader gets.
 func (m *chatModel) renderMarkdownMessage(text string, width int) string {
+	if _, body, ok := splitSidecarAnswer(text); ok {
+		failed := false
+		if chip, _, ok := splitAcceptanceLine(body); ok {
+			failed = strings.HasPrefix(chip, contracts.AcceptanceScriptPrefix+"failure")
+		}
+		return m.renderSidecarMessage(text, width, failed)
+	}
+	return trimBlankRows(m.renderMarkdown(text, width))
+}
+
+// renderSidecarMessage draws a sidecar result the same way whether it arrived
+// as a tool result or as an inbox message: attribution chip, acceptance chip,
+// then the answer (markdown on success, failure-coloured text on failure).
+func (m *chatModel) renderSidecarMessage(text string, width int, failed bool) string {
 	header, body, ok := splitSidecarAnswer(text)
 	if !ok {
+		if failed {
+			return m.renderRedText(text, width)
+		}
 		return trimBlankRows(m.renderMarkdown(text, width))
 	}
+
 	rendered := m.styles.sidecarBadge.Render(xansi.Truncate(header, max(width-2, 1), "…"))
-	answer := trimBlankRows(m.renderMarkdown(body, width))
-	if answer == "" {
-		return rendered
+	if chip, rest, ok := splitAcceptanceLine(body); ok {
+		rendered += "\n" + m.renderAcceptanceChip(chip, width)
+		body = rest
 	}
-	return rendered + "\n" + answer
+	if body != "" {
+		if failed {
+			rendered += "\n" + m.renderRedText(body, width)
+		} else if answer := trimBlankRows(m.renderMarkdown(body, width)); answer != "" {
+			rendered += "\n" + answer
+		}
+	}
+	return rendered
+}
+
+func (m *chatModel) renderRedText(text string, width int) string {
+	lines := strings.Split(lipgloss.Wrap(text, width, ""), "\n")
+	for i := range lines {
+		lines[i] = m.styles.error.Render(lines[i])
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *chatModel) renderAcceptanceChip(line string, width int) string {
+	style := m.styles.evalFailBadge
+	if strings.HasPrefix(line, contracts.AcceptanceScriptPrefix+"success") {
+		style = m.styles.evalPassBadge
+	}
+	return style.Render(xansi.Truncate(line, max(width-2, 1), "…"))
 }
 
 // trimBlankRows drops the empty rows a markdown renderer pads around a
@@ -3952,6 +4010,29 @@ func splitSidecarAnswer(text string) (header, body string, ok bool) {
 		body += rest
 	}
 	return header, body, true
+}
+
+// splitAcceptanceLine separates the acceptance-script chip from the text after
+// it. A failed gate may carry its reason on the same line, so only the bracket
+// becomes the chip.
+func splitAcceptanceLine(text string) (line, rest string, ok bool) {
+	first, tail, _ := strings.Cut(text, "\n")
+	if !strings.HasPrefix(first, contracts.AcceptanceScriptPrefix) {
+		return "", text, false
+	}
+	end := strings.IndexByte(first, ']')
+	if end < 0 {
+		return "", text, false
+	}
+	line = first[:end+1]
+	rest = strings.TrimSpace(first[end+1:])
+	if tail = strings.TrimLeft(tail, "\n"); tail != "" {
+		if rest != "" {
+			rest += "\n"
+		}
+		rest += tail
+	}
+	return line, rest, true
 }
 
 // spinnerFrames sweeps a bar up and down. Every frame is one cell wide and from
@@ -4712,6 +4793,11 @@ func blocksFromRecords(records []store.Record) []block {
 			message := record.Message
 			switch message.Role {
 			case "user":
+				// The eval feedback is what the sidecar model reads. The chip on
+				// the graded answer already shows the same failure to the reader.
+				if strings.HasPrefix(message.Text(), contracts.AcceptanceScriptPrefix+"failure] ") {
+					continue
+				}
 				blocks = append(blocks, block{role: "user", text: message.Text(), imageCount: len(message.Images)})
 			case "assistant":
 				if message.ReasoningContent != "" {
@@ -4719,6 +4805,9 @@ func blocksFromRecords(records []store.Record) []block {
 				}
 				if message.Text() != "" || message.HasArtifacts() {
 					blocks = append(blocks, block{role: "assistant", text: message.Text(), artifactCount: len(message.Artifacts), artifacts: message.Artifacts})
+				}
+				if message.Eval != nil {
+					blocks = append(blocks, block{role: "eval", evalPassed: message.Eval.Passed, text: message.Eval.Output})
 				}
 				for _, call := range message.ToolCalls {
 					toolName := string(call.Function.Name)

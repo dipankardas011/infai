@@ -28,4 +28,7 @@ type DelegatedTaskResponse struct {
 	Status  contracts.SessionStatus `json:"status,omitempty"`
 	Summary string                  `json:"summary,omitempty"`
 	Error   string                  `json:"error,omitempty"`
+
+	Eval          *contracts.EvalResult         `json:"eval,omitempty"`
+	TaskChecklist *contracts.TaskChecklistState `json:"task_checklist,omitempty"`
 }

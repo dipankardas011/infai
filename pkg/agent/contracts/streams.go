@@ -50,6 +50,10 @@ const (
 	// SkillLoaded
 	EventSkillLoad EventStreamKind = "skill_load"
 
+	// EventEvalResult reports the outcome of a sidecar's acceptance script for
+	// the answer it just graded.
+	EventEvalResult EventStreamKind = "eval_result"
+
 	/// User Prompt
 	EventMessageFromAgentInbox EventStreamKind = "message_from_agent_inbox"
 
@@ -90,6 +94,8 @@ type EventStream struct {
 	Compaction *CompactionResult `json:"compaction,omitempty"`
 
 	Sidecar *SidecarStatus `json:"sidecar,omitempty"`
+
+	Eval *EvalResult `json:"eval,omitempty"`
 
 	Elicitation       *ElicitationRequest    `json:"elicitation"`
 	ElicitationResult *ElicitationConclusion `json:"elicitation_result"`
