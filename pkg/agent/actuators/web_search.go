@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -18,6 +19,10 @@ import (
 // It is a var so tests can point it at a local server.
 var exaMCPEndpoint = "https://mcp.exa.ai/mcp"
 
+// ddgEndpoint is the keyless DuckDuckGo Instant Answer API. Like exaMCPEndpoint
+// it is fixed; only the query is model-controlled.
+var ddgEndpoint = "https://api.duckduckgo.com/"
+
 const (
 	exaMCPTimeout        = 30 * time.Second
 	exaMCPMaxBody        = 1 << 20
@@ -28,6 +33,19 @@ const (
 	exaMCPMaxResults     = 10
 	exaMCPSearchToolName = "web_search_exa"
 	exaMCPSessionHeader  = "Mcp-Session-Id"
+
+	// ddgTimeout bounds only the fallback attempt, so a slow primary search
+	// still leaves time to try DuckDuckGo.
+	ddgTimeout = 10 * time.Second
+	ddgMaxBody = 1 << 20
+	// DuckDuckGo's API terms require a descriptive t= parameter and attribution
+	// in the response. § https://duckduckgo.com/api
+	ddgAppName = "infai"
+	// The default Go user agent is answered with 202 instead of 200.
+	ddgUserAgent = "infai-websearch/1.0"
+	// DuckDuckGo throttles high request rates. Pause before the fallback so a
+	// burst of failed Exa calls does not turn into a burst against DDG.
+	ddgRequestPause = 2 * time.Second
 )
 
 func WebSearchTool() contracts.Tool {
@@ -67,12 +85,29 @@ func (m *FileManager) WebSearchExecution(ctx context.Context, tc contracts.ToolC
 		return "", wrapToolError(contracts.WebSearchTool, err, "invalid_arguments", "websearch arguments are invalid")
 	}
 
-	return contracts.RunBounded(ctx, contracts.WebSearchTool, exaMCPTimeout+5*time.Second, func() (string, error) {
+	return contracts.RunBounded(ctx, contracts.WebSearchTool, exaMCPTimeout+ddgTimeout+5*time.Second, func() (string, error) {
 		output, err := exaSearch(ctx, args)
-		if err != nil {
+		if err == nil {
+			return output, nil
+		}
+		// A canceled session must not start a second request.
+		if ctx.Err() != nil {
 			return "", wrapToolError(contracts.WebSearchTool, err, "search_failed", "the search could not be completed")
 		}
-		return output, nil
+
+		pause := time.NewTimer(ddgRequestPause)
+		select {
+		case <-ctx.Done():
+			pause.Stop()
+			return "", wrapToolError(contracts.WebSearchTool, err, "search_failed", "the search could not be completed")
+		case <-pause.C:
+		}
+
+		fallback, fallbackErr := ddgSearch(ctx, args)
+		if fallbackErr != nil {
+			return "", wrapToolError(contracts.WebSearchTool, errors.Join(err, fallbackErr), "search_failed", "the search could not be completed by either search service")
+		}
+		return fallback, nil
 	})
 }
 
@@ -258,4 +293,172 @@ func exaMCPText(result json.RawMessage) (string, error) {
 		return "", errors.New("no text content")
 	}
 	return strings.Join(parts, "\n"), nil
+}
+
+type ddgInstantAnswer struct {
+	Heading          string     `json:"Heading"`
+	AbstractText     string     `json:"AbstractText"`
+	AbstractSource   string     `json:"AbstractSource"`
+	AbstractURL      string     `json:"AbstractURL"`
+	Answer           string     `json:"Answer"`
+	Definition       string     `json:"Definition"`
+	DefinitionSource string     `json:"DefinitionSource"`
+	DefinitionURL    string     `json:"DefinitionURL"`
+	Redirect         string     `json:"Redirect"`
+	Results          []ddgTopic `json:"Results"`
+	RelatedTopics    []ddgTopic `json:"RelatedTopics"`
+}
+
+type ddgTopic struct {
+	Text     string     `json:"Text"`
+	FirstURL string     `json:"FirstURL"`
+	Topics   []ddgTopic `json:"Topics"`
+}
+
+// ddgSearch queries DuckDuckGo's Instant Answer API. It returns summaries,
+// instant answers and related topics rather than a full result listing; that is
+// the only public DuckDuckGo API, and it is the fallback when Exa is unavailable
+// or rate-limited.
+func ddgSearch(ctx context.Context, args webSearchArguments) (string, error) {
+	endpoint, err := url.Parse(ddgEndpoint)
+	if err != nil {
+		return "", filesystemErr("search_failed", "the search service could not be reached", contracts.ResponsibilityEnvironment, err)
+	}
+	query := endpoint.Query()
+	query.Set("q", args.Query)
+	query.Set("format", "json")
+	query.Set("no_html", "1")
+	// Return !bang destinations in the body instead of following an HTTP redirect.
+	query.Set("no_redirect", "1")
+	query.Set("t", ddgAppName)
+	endpoint.RawQuery = query.Encode()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return "", filesystemErr("search_failed", "the search request could not be built", contracts.ResponsibilityEnvironment, err)
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", ddgUserAgent)
+
+	client := &http.Client{
+		Timeout: ddgTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", filesystemErr("search_failed", "the search service could not be reached", contracts.ResponsibilityEnvironment, err)
+	}
+	defer response.Body.Close()
+
+	raw, _, err := readCapped(response.Body, ddgMaxBody)
+	if err != nil {
+		return "", filesystemErr("search_failed", "the search response could not be read", contracts.ResponsibilityEnvironment, err)
+	}
+	// DuckDuckGo also answers with 202 while still returning a valid payload, so
+	// the JSON decode below is the real check.
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusAccepted {
+		return "", filesystemErr("search_failed", fmt.Sprintf("the search service responded %s", response.Status), contracts.ResponsibilityEnvironment, nil)
+	}
+
+	var answer ddgInstantAnswer
+	if err := json.Unmarshal(raw, &answer); err != nil {
+		return "", filesystemErr("search_failed", "the search service returned an invalid response", contracts.ResponsibilityEnvironment, err)
+	}
+
+	text := formatDDGAnswer(answer, args)
+	if text == "" {
+		return "", filesystemErr("search_failed", "the search returned no usable result", contracts.ResponsibilityEnvironment, nil)
+	}
+	return clipWebContent(text, maxToolContentBytes), nil
+}
+
+func formatDDGAnswer(answer ddgInstantAnswer, args webSearchArguments) string {
+	limit := exaMCPDefaultResults
+	if args.NumResults != nil {
+		limit = *args.NumResults
+	}
+
+	var out strings.Builder
+	seen := make(map[string]bool)
+	results := 0
+	hasContent := false
+
+	addEntry := func(text, firstURL string) {
+		text = strings.TrimSpace(text)
+		firstURL = strings.TrimSpace(firstURL)
+		if results >= limit || text == "" || firstURL == "" || seen[firstURL] {
+			return
+		}
+		seen[firstURL] = true
+		fmt.Fprintf(&out, "- [%s](%s)\n", text, firstURL)
+		results++
+		hasContent = true
+	}
+
+	if text := strings.TrimSpace(answer.AbstractText); text != "" {
+		if heading := strings.TrimSpace(answer.Heading); heading != "" {
+			fmt.Fprintf(&out, "### %s\n\n", heading)
+		}
+		out.WriteString(text)
+		out.WriteString("\n")
+		if abstractURL := strings.TrimSpace(answer.AbstractURL); abstractURL != "" {
+			seen[abstractURL] = true
+			source := strings.TrimSpace(answer.AbstractSource)
+			if source == "" {
+				source = "source"
+			}
+			fmt.Fprintf(&out, "\nSource: [%s](%s)\n", source, abstractURL)
+		}
+		out.WriteString("\n")
+		hasContent = true
+	}
+
+	if value := strings.TrimSpace(answer.Answer); value != "" {
+		fmt.Fprintf(&out, "**Answer:** %s\n\n", value)
+		hasContent = true
+	}
+	if value := strings.TrimSpace(answer.Definition); value != "" {
+		if definitionURL := strings.TrimSpace(answer.DefinitionURL); definitionURL != "" {
+			source := strings.TrimSpace(answer.DefinitionSource)
+			if source == "" {
+				source = "source"
+			}
+			fmt.Fprintf(&out, "**Definition:** %s — [%s](%s)\n\n", value, source, definitionURL)
+		} else {
+			fmt.Fprintf(&out, "**Definition:** %s\n\n", value)
+		}
+		hasContent = true
+	}
+	if redirect := strings.TrimSpace(answer.Redirect); redirect != "" {
+		fmt.Fprintf(&out, "Redirect: %s\n\n", redirect)
+		hasContent = true
+	}
+
+	for _, result := range answer.Results {
+		addEntry(result.Text, result.FirstURL)
+	}
+	// Related topics are a flat list, or grouped under a topic with its own
+	// Topics slice; walk the groups so every leaf link is considered.
+	var walk func([]ddgTopic)
+	walk = func(topics []ddgTopic) {
+		for _, topic := range topics {
+			if len(topic.Topics) > 0 {
+				walk(topic.Topics)
+				continue
+			}
+			addEntry(topic.Text, topic.FirstURL)
+		}
+	}
+	walk(answer.RelatedTopics)
+
+	if !hasContent {
+		return ""
+	}
+
+	// DuckDuckGo's API terms require attribution in every place its results are
+	// shown; the abstract also names its underlying source above.
+	fmt.Fprintf(&out, "\nResults from [DuckDuckGo](https://duckduckgo.com/?q=%s)\n", url.QueryEscape(args.Query))
+	return strings.TrimSpace(out.String()) + "\n"
 }
