@@ -3137,7 +3137,10 @@ func (m *chatModel) renderBlock(entry *block, width int, streaming bool) string 
 	var content string
 	switch entry.role {
 	case "user":
-		content = renderChatMarker("●", m.styles.userMarker, m.styles.assistant, renderResourceBlocks(renderSkillReferences(renderFileReferences(entry.text))), width)
+		text := renderResourceBlocks(renderSkillReferences(renderFileReferences(entry.text)))
+		// The markdown renderer colours its own text; painting the whole block
+		// again would reset those colours at every span.
+		content = renderChatMarker("●", m.styles.userMarker, lipgloss.NewStyle(), m.renderMarkdownMessage(text, max(width-2, 1)), width)
 		if badges := m.renderImageBadges(entry.imageCount, "Image", m.styles.imageBadge); badges != "" {
 			content += "\n" + strings.Repeat(" ", lipgloss.Width("●")+1) + badges
 		}
@@ -3224,12 +3227,24 @@ func (m *chatModel) renderToolResult(entry *block, width int) string {
 	marker, _ := m.toolMarker(entry)
 	indent := lipgloss.Width(marker) + 1
 	style := m.styles.tool
-	if entry.toolStatus != "" && entry.toolStatus != string(contracts.ToolExecutionSuccess) {
+	failed := entry.toolStatus != "" && entry.toolStatus != string(contracts.ToolExecutionSuccess)
+	if failed {
 		style = m.styles.error
 	}
-	lines := strings.Split(lipgloss.Wrap(detail, max(width-indent, 1), ""), "\n")
+	var lines []string
+	if isSidecarTool(entry.toolName) && !failed {
+		// A sidecar answers in markdown: its summary is written for the caller
+		// to read, not shown as raw text. Its attribution line becomes a chip,
+		// so the answer starts with the summary itself.
+		lines = strings.Split(m.renderMarkdownMessage(detail, max(width-indent, 1)), "\n")
+	} else {
+		lines = strings.Split(lipgloss.Wrap(detail, max(width-indent, 1), ""), "\n")
+		for i := range lines {
+			lines[i] = style.Render(lines[i])
+		}
+	}
 	for i := range lines {
-		lines[i] = strings.Repeat(" ", indent) + style.Render(lines[i])
+		lines[i] = strings.Repeat(" ", indent) + lines[i]
 	}
 	return "\n" + strings.Join(lines, "\n")
 }
@@ -3885,6 +3900,58 @@ func (m *chatModel) renderStyledMarkdown(markdown string, width int, style ansi.
 		return fallback.Width(width).Render(markdown)
 	}
 	return output
+}
+
+// renderMarkdownMessage draws a message that may open with a sidecar's
+// attribution line. That line is a header, so it takes a chip of its own, and
+// the answer below it is markdown like any other message the reader gets.
+func (m *chatModel) renderMarkdownMessage(text string, width int) string {
+	header, body, ok := splitSidecarAnswer(text)
+	if !ok {
+		return trimBlankRows(m.renderMarkdown(text, width))
+	}
+	rendered := m.styles.sidecarBadge.Render(xansi.Truncate(header, max(width-2, 1), "…"))
+	answer := trimBlankRows(m.renderMarkdown(body, width))
+	if answer == "" {
+		return rendered
+	}
+	return rendered + "\n" + answer
+}
+
+// trimBlankRows drops the empty rows a markdown renderer pads around a
+// document, so a message that opens with a list starts on its first bullet.
+func trimBlankRows(rendered string) string {
+	lines := strings.Split(rendered, "\n")
+	for len(lines) > 0 && strings.TrimSpace(xansi.Strip(lines[0])) == "" {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && strings.TrimSpace(xansi.Strip(lines[len(lines)-1])) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// splitSidecarAnswer separates the attribution line a sidecar puts ahead of its
+// answer from the answer itself. The line reads `[sidecar_loop <name> (<id>)
+// <status>]`; anything after its closing bracket belongs to the answer.
+func splitSidecarAnswer(text string) (header, body string, ok bool) {
+	first, rest, _ := strings.Cut(text, "\n")
+	if !strings.HasPrefix(first, "[sidecar_loop ") {
+		return "", text, false
+	}
+	end := strings.IndexByte(first, ']')
+	if end < 0 {
+		return "", text, false
+	}
+	header = first[:end+1]
+	body = strings.TrimSpace(first[end+1:])
+	if rest = strings.TrimLeft(rest, "\n"); rest != "" {
+		if body != "" {
+			body += "\n"
+		}
+		body += rest
+	}
+	return header, body, true
 }
 
 // spinnerFrames sweeps a bar up and down. Every frame is one cell wide and from

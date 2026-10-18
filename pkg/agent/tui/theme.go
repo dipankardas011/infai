@@ -104,17 +104,20 @@ type harnessStyles struct {
 	assistant        lipgloss.Style
 	imageBadge       lipgloss.Style
 	artifactBadge    lipgloss.Style
-	thinking         lipgloss.Style
-	system           lipgloss.Style
-	event            lipgloss.Style
-	error            lipgloss.Style
-	tool             lipgloss.Style
-	skill            lipgloss.Style
-	modalBody        lipgloss.Style
-	screenTitle      lipgloss.Style
-	screenBody       lipgloss.Style
-	screenRow        lipgloss.Style
-	screenSel        lipgloss.Style
+	// sidecarBadge carries the attribution line a sidecar writes ahead of its
+	// answer: a chip reads as a header, where the raw brackets read as text.
+	sidecarBadge lipgloss.Style
+	thinking     lipgloss.Style
+	system       lipgloss.Style
+	event        lipgloss.Style
+	error        lipgloss.Style
+	tool         lipgloss.Style
+	skill        lipgloss.Style
+	modalBody    lipgloss.Style
+	screenTitle  lipgloss.Style
+	screenBody   lipgloss.Style
+	screenRow    lipgloss.Style
+	screenSel    lipgloss.Style
 	// selection is the band a mouse selection sits on. It is a background-only
 	// style, so the text under it keeps whatever foreground the terminal would
 	// have given it, and it reuses the list cursor's colour: the harness has one
@@ -192,6 +195,7 @@ func newHarnessStyles() harnessStyles {
 		// A model-produced image gets the warmer chip, so it reads as produced
 		// rather than attached.
 		artifactBadge: lipgloss.NewStyle().Background(everforest.Orange).Foreground(everforest.Background).Bold(true),
+		sidecarBadge:  lipgloss.NewStyle().Background(everforest.Blue).Foreground(everforest.Background).Bold(true).Padding(0, 1),
 		thinking:      lipgloss.NewStyle().Foreground(everforest.Muted).Italic(true),
 		system:        lipgloss.NewStyle().Foreground(everforest.Purple),
 		event:         lipgloss.NewStyle().Foreground(everforest.Orange),
