@@ -85,11 +85,11 @@ func (c *claudeCLI) resolveBinary() (string, error) {
 	return resolveClaudeBinary(c.binary)
 }
 
-func (c *claudeCLI) attempts(ctx context.Context, systemPrompt, transcript, schema string, allowed claudeTools, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
+func (c *claudeCLI) attempts(ctx context.Context, systemPrompt, stdin string, streamJSON bool, schema string, allowed claudeTools, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
 	var last claudeStreamResult
 	var err error
 	for attempt := 1; attempt <= claudeMaxAttempts; attempt++ {
-		last, err = c.run(ctx, systemPrompt, transcript, schema, allowed, opts)
+		last, err = c.run(ctx, systemPrompt, stdin, streamJSON, schema, allowed, opts)
 		if err == nil || !last.Retryable || attempt == claudeMaxAttempts {
 			return last, err
 		}
@@ -122,7 +122,9 @@ func (c *claudeCLI) Generate(ctx context.Context, messages []contracts.ChatMessa
 	if err != nil {
 		return contracts.ChatMessage{}, nil, err
 	}
-	result, err := c.attempts(ctx, claudeSystemPrompt(messages), claudeTranscriptText(messages), schema, allowed, opts)
+	transcript, images := claudeTranscriptParts(messages)
+	stdin, streamJSON := claudeStdin(transcript, images)
+	result, err := c.attempts(ctx, claudeSystemPrompt(messages), stdin, streamJSON, schema, allowed, opts)
 	if err != nil {
 		return contracts.ChatMessage{}, result.Usage, err
 	}

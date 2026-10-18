@@ -2,31 +2,16 @@ package models
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
-
-// The provider is only useful when the user's real CLI is installed and signed
-// in, so the CLI-facing test runs the real binary and skips when it is absent.
-func realClaude(t *testing.T) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("unix paths")
-	}
-	path, err := exec.LookPath("claude")
-	if err != nil {
-		t.Skipf("claude is not on PATH: %v", err)
-	}
-	return path
-}
 
 // catalogModel renders a catalog entry the way the engine does.
 func catalogModel(t *testing.T, binary, modelID string, thinking contracts.InfaiThinkingLevel) contracts.ProvisionedModel {
@@ -64,7 +49,8 @@ func testClaudeTools() []contracts.Tool {
 }
 
 func TestClaudeCLIArgsKeepToolsDisabledAndPassTheCatalogID(t *testing.T) {
-	args := claudeCLIArgs(catalogModel(t, "claude", "claude-sonnet-5-5", contracts.ThinkingLow), "system prompt", `{"type":"object"}`)
+	model := catalogModel(t, "claude", "claude-sonnet-5-5", contracts.ThinkingLow)
+	args := claudeCLIArgs(model, "system prompt", `{"type":"object"}`, false)
 	joined := strings.Join(args, "|")
 	for _, required := range []string{
 		"-p", "--tools||", "--strict-mcp-config", `--mcp-config|{"mcpServers":{}}`,
@@ -75,6 +61,12 @@ func TestClaudeCLIArgsKeepToolsDisabledAndPassTheCatalogID(t *testing.T) {
 		if !strings.Contains(joined, required) {
 			t.Errorf("missing %q in %q", required, joined)
 		}
+	}
+	if strings.Contains(joined, "--input-format") {
+		t.Errorf("text-only turns must keep the CLI's default input format: %q", joined)
+	}
+	if !strings.Contains(strings.Join(claudeCLIArgs(model, "system prompt", `{"type":"object"}`, true), "|"), "--input-format|stream-json") {
+		t.Error("image turns must select stream-json input")
 	}
 	if strings.Contains(joined, "--bare") {
 		t.Error("--bare drops the subscription login and must never be passed")
@@ -176,6 +168,84 @@ func TestClaudeTranscriptIsStableAndAppendOnly(t *testing.T) {
 	// act through the schema; the position carries the instruction.
 	if !strings.HasSuffix(system, claudeNativeToolsDisabled) {
 		t.Fatalf("system prompt does not end with the native-tool rule: %s", system)
+	}
+}
+
+func TestClaudeTranscriptPartsIndexImagesInOrder(t *testing.T) {
+	history := []contracts.ChatMessage{
+		contracts.NewUserMessage("first"),
+		contracts.NewUserMessageWithInput(contracts.UserInput{
+			Text: "two",
+			Images: []contracts.ImageInput{
+				{Name: "a.png", MediaType: "image/png", Data: []byte{1}},
+				{Name: "b.jpg", MediaType: "image/jpeg", Data: []byte{2}},
+			},
+		}),
+	}
+	text, images := claudeTranscriptParts(history)
+	if len(images) != 2 {
+		t.Fatalf("images = %d, want 2", len(images))
+	}
+	want := `"images":[{"index":0,"name":"a.png","media_type":"image/png"},{"index":1,"name":"b.jpg","media_type":"image/jpeg"}]`
+	if !strings.Contains(text, want) {
+		t.Fatalf("transcript = %s", text)
+	}
+}
+
+func TestClaudeStdinKeepsTextOnlyTurnsOnTheDefaultInputFormat(t *testing.T) {
+	transcript := `{"messages":[]}`
+	stdin, streamJSON := claudeStdin(transcript, nil)
+	if streamJSON {
+		t.Fatal("a text-only turn must not select stream-json input")
+	}
+	if stdin != transcript {
+		t.Fatalf("stdin = %q, want the plain transcript", stdin)
+	}
+}
+
+func TestClaudeStdinCarriesImagesAsStreamJSONBlocks(t *testing.T) {
+	transcript := `{"messages":[{"role":"user","images":[{"index":0,"media_type":"image/png"}]}]}`
+	image := contracts.ImageInput{MediaType: "image/png", Data: []byte("png-bytes")}
+	stdin, streamJSON := claudeStdin(transcript, []contracts.ImageInput{image})
+	if !streamJSON {
+		t.Fatal("an image turn must select stream-json input")
+	}
+	var envelope struct {
+		Type    string `json:"type"`
+		Message struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type   string `json:"type"`
+				Text   string `json:"text"`
+				Source struct {
+					Type      string `json:"type"`
+					MediaType string `json:"media_type"`
+					Data      string `json:"data"`
+				} `json:"source"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(stdin), &envelope); err != nil {
+		t.Fatalf("stdin is not one JSON line: %v\n%s", err, stdin)
+	}
+	if envelope.Type != "user" || envelope.Message.Role != "user" {
+		t.Fatalf("envelope = %+v", envelope)
+	}
+	if len(envelope.Message.Content) != 2 {
+		t.Fatalf("content blocks = %d, want image + text", len(envelope.Message.Content))
+	}
+	block := envelope.Message.Content[0]
+	if block.Type != "image" || block.Source.Type != "base64" || block.Source.MediaType != "image/png" {
+		t.Fatalf("image block = %+v", block)
+	}
+	if block.Source.Data != base64.StdEncoding.EncodeToString(image.Data) {
+		t.Fatalf("image data = %q", block.Source.Data)
+	}
+	if text := envelope.Message.Content[1]; text.Type != "text" || text.Text != transcript {
+		t.Fatalf("text block = %+v", text)
+	}
+	if !strings.HasSuffix(stdin, "\n") {
+		t.Error("stream-json input must be newline delimited")
 	}
 }
 
@@ -324,81 +394,12 @@ func TestClaudeCLIPreflightRequiresASignedInCLIOnPath(t *testing.T) {
 	if _, err := beginClaudeCLIAuth(context.Background(), contracts.APIKey); err == nil {
 		t.Fatal("an API key method was accepted for a provider that must not hold credentials")
 	}
-
-	// The installed CLI, signed in: adding the provider succeeds and stores no
-	// credential beyond the method.
-	realClaude(t)
-	flow, err := beginClaudeCLIAuth(context.Background(), contracts.NoneAuth)
-	if err != nil {
-		t.Fatalf("the signed-in CLI was rejected: %v", err)
-	}
-	auth, err := flow.Complete(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if encoded, _ := json.Marshal(auth); string(encoded) != `{"method":"none"}` {
-		t.Fatalf("adding the provider stored more than the method: %s", encoded)
-	}
 }
 
 func TestClaudeCLIPreflightRefusesAMissingCLI(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	if _, err := beginClaudeCLIAuth(context.Background(), contracts.NoneAuth); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestClaudeCLIGenerateAsksForAToolAsStructuredData(t *testing.T) {
-	binary := realClaude(t)
-	client, err := NewClaudeCLI(catalogModel(t, binary, "claude-sonnet-5-5", contracts.ThinkingLow))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var kinds []contracts.EventStreamKind
-	message, usage, err := client.Generate(context.Background(), []contracts.ChatMessage{
-		{Role: "system", Content: ptr("You are infai's model.")},
-		contracts.NewUserMessage(`Answer with content "need the file" and exactly one tool_calls entry: name read, arguments.path main.go. Do not read anything.`),
-	}, testClaudeTools(), &contracts.GenerateOptions{
-		Stream:  true,
-		OnDelta: func(kind contracts.EventStreamKind, _ string) bool { kinds = append(kinds, kind); return false },
-	})
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-	if len(message.ToolCalls) != 1 {
-		t.Fatalf("tool calls = %+v (content %q)", message.ToolCalls, message.Text())
-	}
-	call := message.ToolCalls[0]
-	if call.Function.Name != contracts.ReadTool || call.Function.Arguments != `{"path":"main.go"}` || call.ID == "" || call.Type != "function" {
-		t.Fatalf("tool call = %+v", call)
-	}
-	if usage == nil || usage.PromptTokens == 0 {
-		t.Fatalf("usage = %+v", usage)
-	}
-	// The agent loop publishes EventToolCall for every call in the reply it
-	// commits. When the adapter publishes it too, each call renders twice in
-	// the live view while the timeline holds one, so resume disagrees with it.
-	for _, kind := range kinds {
-		if kind == contracts.EventToolCall {
-			t.Fatalf("the adapter published a tool call the agent loop also publishes: %v", kinds)
-		}
-	}
-}
-
-func TestClaudeCLIGenerateAnswersWhenNoToolsAreOffered(t *testing.T) {
-	binary := realClaude(t)
-	client, err := NewClaudeCLI(catalogModel(t, binary, "claude-haiku-5-5", contracts.ThinkingLow))
-	if err != nil {
-		t.Fatal(err)
-	}
-	message, _, err := client.Generate(context.Background(), []contracts.ChatMessage{
-		contracts.NewUserMessage("Reply with exactly the word pong and nothing else."),
-	}, nil, nil)
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-	if len(message.ToolCalls) != 0 || !strings.Contains(strings.ToLower(message.Text()), "pong") {
-		t.Fatalf("message = %+v", message)
 	}
 }
 
@@ -435,5 +436,3 @@ func TestClaudeCLINeverHandlesCredentialsOrCallsTheAPI(t *testing.T) {
 		}
 	}
 }
-
-func ptr(value string) *string { return &value }

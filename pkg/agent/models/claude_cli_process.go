@@ -57,7 +57,7 @@ func claudeCLIWorkDir() (string, error) {
 // claudeCLIArgs builds the argument list. Built-in tools stay disabled and MCP
 // is strictly empty: the CLI must not run anything of its own. Do not add
 // --bare, which drops the subscription login this provider relies on.
-func claudeCLIArgs(model contracts.ProvisionedModel, systemPrompt, schema string) []string {
+func claudeCLIArgs(model contracts.ProvisionedModel, systemPrompt, schema string, streamJSON bool) []string {
 	args := []string{
 		"-p",
 		"--tools", "",
@@ -73,13 +73,16 @@ func claudeCLIArgs(model contracts.ProvisionedModel, systemPrompt, schema string
 		"--verbose",
 		"--include-partial-messages",
 	}
+	if streamJSON {
+		args = append(args, "--input-format", "stream-json")
+	}
 	if effort, ok := model.ThinkingLevelValue(); ok {
 		args = append(args, "--effort", effort)
 	}
 	return args
 }
 
-func (c *claudeCLI) run(ctx context.Context, systemPrompt, transcript, schema string, allowed claudeTools, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
+func (c *claudeCLI) run(ctx context.Context, systemPrompt, stdin string, streamJSON bool, schema string, allowed claudeTools, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
 	binary, err := c.resolveBinary()
 	if err != nil {
 		return claudeStreamResult{}, err
@@ -87,13 +90,13 @@ func (c *claudeCLI) run(ctx context.Context, systemPrompt, transcript, schema st
 	if err := c.checkVersion(ctx, binary); err != nil {
 		return claudeStreamResult{}, err
 	}
-	cmd := exec.Command(binary, claudeCLIArgs(c.model, systemPrompt, schema)...)
+	cmd := exec.Command(binary, claudeCLIArgs(c.model, systemPrompt, schema, streamJSON)...)
 	cmd.Dir = c.opts.workDir
 	// Inherit the environment unchanged: the CLI finds its own login. infai
 	// neither injects nor logs an auth variable.
 	cmd.Env = os.Environ()
 	configureClaudeProcess(cmd)
-	cmd.Stdin = strings.NewReader(transcript)
+	cmd.Stdin = strings.NewReader(stdin)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

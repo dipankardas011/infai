@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -45,10 +46,21 @@ type claudeTranscript struct {
 type claudeTranscriptMessage struct {
 	Role       string                     `json:"role"`
 	Content    *string                    `json:"content,omitempty"`
+	Images     []claudeTranscriptImage    `json:"images,omitempty"`
 	ToolCalls  []claudeTranscriptToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string                     `json:"tool_call_id,omitempty"`
 	Name       *string                    `json:"name,omitempty"`
 	Status     string                     `json:"status,omitempty"`
+}
+
+// claudeTranscriptImage points at an image content block carried outside the
+// transcript JSON. Image bytes cannot travel inside a text block, so the
+// transcript names each block's position and the CLI receives the blocks
+// themselves in the same order.
+type claudeTranscriptImage struct {
+	Index     int    `json:"index"`
+	Name      string `json:"name,omitempty"`
+	MediaType string `json:"media_type"`
 }
 
 // claudeTranscriptToolCall mirrors the CLI's native tool_use block: a name and
@@ -82,7 +94,15 @@ func claudeTranscriptToolCalls(calls []contracts.ToolCall) []claudeTranscriptToo
 // carries no timestamps, no random identifiers and no map iteration, so two
 // turns that share a prefix produce a byte-identical shared prefix.
 func claudeTranscriptText(messages []contracts.ChatMessage) string {
+	text, _ := claudeTranscriptParts(messages)
+	return text
+}
+
+// claudeTranscriptParts returns the serialized conversation and the images it
+// references, in transcript order.
+func claudeTranscriptParts(messages []contracts.ChatMessage) (string, []contracts.ImageInput) {
 	conversation := make([]claudeTranscriptMessage, 0, len(messages))
+	images := make([]contracts.ImageInput, 0)
 	for _, message := range messages {
 		entry := claudeTranscriptMessage{
 			Role:       message.Role,
@@ -90,6 +110,14 @@ func claudeTranscriptText(messages []contracts.ChatMessage) string {
 			ToolCalls:  claudeTranscriptToolCalls(message.ToolCalls),
 			ToolCallID: message.ToolCallID,
 			Name:       message.Name,
+		}
+		for _, image := range message.Images {
+			entry.Images = append(entry.Images, claudeTranscriptImage{
+				Index:     len(images),
+				Name:      image.Name,
+				MediaType: image.MediaType,
+			})
+			images = append(images, image)
 		}
 		if message.Status != "" {
 			entry.Status = string(message.Status)
@@ -102,5 +130,66 @@ func claudeTranscriptText(messages []contracts.ChatMessage) string {
 		// marshal; reaching here means the contract changed under us.
 		panic(fmt.Sprintf("claude cli: serialize transcript: %v", err))
 	}
-	return string(raw)
+	return string(raw), images
+}
+
+// claudeStreamUserMessage is one line of the CLI's stream-json input. The CLI
+// rejects image blocks in its default text mode, so a turn carrying images
+// switches to this NDJSON envelope.
+type claudeStreamUserMessage struct {
+	Type            string              `json:"type"`
+	Message         claudeStreamMessage `json:"message"`
+	ParentToolUseID any                 `json:"parent_tool_use_id"`
+	SessionID       string              `json:"session_id"`
+}
+
+type claudeStreamMessage struct {
+	Role    string `json:"role"`
+	Content []any  `json:"content"`
+}
+
+type claudeImageBlock struct {
+	Type   string            `json:"type"`
+	Source claudeImageSource `json:"source"`
+}
+
+type claudeImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
+type claudeTextBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// claudeStdin returns the bytes for the CLI's stdin and whether stream-json
+// input is required. A text-only turn keeps the plain transcript because that
+// is the CLI's default and cheapest input mode.
+func claudeStdin(transcript string, images []contracts.ImageInput) (string, bool) {
+	if len(images) == 0 {
+		return transcript, false
+	}
+	content := make([]any, 0, len(images)+1)
+	for _, image := range images {
+		content = append(content, claudeImageBlock{
+			Type: "image",
+			Source: claudeImageSource{
+				Type:      "base64",
+				MediaType: image.MediaType,
+				Data:      base64.StdEncoding.EncodeToString(image.Data),
+			},
+		})
+	}
+	// Anthropic recommends images before the text they accompany.
+	content = append(content, claudeTextBlock{Type: "text", Text: transcript})
+	raw, err := json.Marshal(claudeStreamUserMessage{
+		Type:    "user",
+		Message: claudeStreamMessage{Role: "user", Content: content},
+	})
+	if err != nil {
+		panic(fmt.Sprintf("claude cli: serialize stream-json input: %v", err))
+	}
+	return string(raw) + "\n", true
 }
