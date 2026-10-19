@@ -182,7 +182,7 @@ func (c *RemoteClient) Chat(ctx context.Context, input contracts.UserInput, thin
 				var usage contracts.TokenUsage
 				if json.Unmarshal([]byte(content), &usage) == nil {
 					reply.Usage = &usage
-					reply.ContextTokens = usage.TotalTokens
+					reply.ContextTokens = usage.ContextWindowTokens()
 				}
 			case contracts.EventCompactionExecuted:
 				if onDelta == nil || event.Compaction == nil {

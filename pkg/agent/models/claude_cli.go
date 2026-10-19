@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 )
@@ -39,21 +41,29 @@ func beginClaudeCLIAuth(ctx context.Context, method contracts.LLMProviderAuthMet
 
 // claudeCLI runs the user's own, unmodified Claude Code CLI once per model
 // turn. infai owns the agent loop, the history, tool execution and approvals;
-// the CLI is used only as a stateless completion engine that answers inside a
-// JSON Schema infai supplies, so tool requests come back as structured data.
+// the CLI answers inside a JSON Schema infai supplies, so tool requests come
+// back as structured data.
+//
+// The CLI keeps its own copy of the conversation. Each turn resumes that copy
+// and appends only the new entries, which is what keeps the prompt prefix
+// identical and lets the CLI's message-level cache breakpoint hit.
 type claudeCLI struct {
 	model  contracts.ProvisionedModel
 	binary string
 	// opts override the defaults in claudeCLIOptions; tests set them.
 	opts claudeCLIOptions
+	// conversation is the CLI session this adaptor appends to. An adaptor is
+	// created per infai session, so the state has exactly one owner.
+	conversation claudeResumeState
 }
 
 type claudeCLIOptions struct {
-	// workDir is the empty, infai-owned directory the CLI runs in. It must
-	// never be the user's repository: the CLI would otherwise pull CLAUDE.md
-	// and git status into the prompt.
-	workDir    string
-	minVersion string
+	// workspace is the session's working directory. The CLI reports its
+	// process cwd to the model in its environment block, so running it here
+	// keeps that report in sync with infai's system prompt. --system-prompt
+	// keeps CLAUDE.md and git status out of the request, so the real
+	// directory is safe.
+	workspace  string
 	retryDelay time.Duration
 	// memoryMax and pidsMax bound each CLI turn when the unit delegated a
 	// cgroup subtree to this process. Zero means no limit of that kind.
@@ -61,21 +71,18 @@ type claudeCLIOptions struct {
 	pidsMax   int
 }
 
-func NewClaudeCLI(model contracts.ProvisionedModel) (*claudeCLI, error) {
+func NewClaudeCLI(model contracts.ProvisionedModel, workspace string, sessionID uuid.UUID) (*claudeCLI, error) {
 	binary := strings.TrimSpace(model.BaseEndpoint())
 	if binary == "" {
 		binary = "claude"
 	}
-	workDir, err := claudeCLIWorkDir()
-	if err != nil {
-		return nil, err
-	}
-	return &claudeCLI{model: model, binary: binary, opts: claudeCLIOptions{
-		workDir:    workDir,
-		minVersion: claudeCLIMinVersion,
-		memoryMax:  claudeCLIMemoryMax,
-		pidsMax:    claudeCLIPidsMax,
-	}}, nil
+	client := &claudeCLI{model: model, binary: binary, opts: claudeCLIOptions{
+		workspace: workspace,
+		memoryMax: claudeCLIMemoryMax,
+		pidsMax:   claudeCLIPidsMax,
+	}}
+	client.conversation.id = sessionID.String()
+	return client, nil
 }
 
 func (c *claudeCLI) GetModelSpecs() contracts.ProvisionedModel { return c.model }
@@ -85,16 +92,16 @@ func (c *claudeCLI) resolveBinary() (string, error) {
 	return resolveClaudeBinary(c.binary)
 }
 
-func (c *claudeCLI) attempts(ctx context.Context, systemPrompt, stdin string, streamJSON bool, schema string, allowed claudeTools, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
+func (c *claudeCLI) attempts(ctx context.Context, systemPrompt string, turn claudeTurn, schema string, allowed claudeTools, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
 	var last claudeStreamResult
 	var err error
 	for attempt := 1; attempt <= claudeMaxAttempts; attempt++ {
-		last, err = c.run(ctx, systemPrompt, stdin, streamJSON, schema, allowed, opts)
+		last, err = c.run(ctx, systemPrompt, turn, attempt, schema, allowed, opts)
 		if err == nil || !last.Retryable || attempt == claudeMaxAttempts {
 			return last, err
 		}
 		if opts != nil && opts.OnDelta != nil {
-			notice := fmt.Sprintf("Claude is overloaded; retrying (attempt %d/%d)", attempt+1, claudeMaxAttempts)
+			notice := fmt.Sprintf("Claude is retrying (attempt %d/%d)", attempt+1, claudeMaxAttempts)
 			if opts.OnDelta(contracts.EventProviderEvent, notice) {
 				return last, harnessErr.ErrTurnCanceled
 			}
@@ -122,15 +129,34 @@ func (c *claudeCLI) Generate(ctx context.Context, messages []contracts.ChatMessa
 	if err != nil {
 		return contracts.ChatMessage{}, nil, err
 	}
-	transcript, images := claudeTranscriptParts(messages)
-	stdin, streamJSON := claudeStdin(transcript, images)
-	result, err := c.attempts(ctx, claudeSystemPrompt(messages), stdin, streamJSON, schema, allowed, opts)
+	systemPrompt := claudeSystemPrompt(messages)
+	history := claudeConversation(messages)
+
+	// The session state and the CLI turn are one critical section: a second
+	// Generate (compaction) must not append to or replace the same CLI
+	// conversation while this one is in flight.
+	c.conversation.mu.Lock()
+	defer c.conversation.mu.Unlock()
+
+	turn := c.planTurn(history, systemPrompt)
+	result, err := c.attempts(ctx, systemPrompt, turn, schema, allowed, opts)
 	if err != nil {
+		c.recordFailure()
 		return contracts.ChatMessage{}, result.Usage, err
 	}
 	reply, err := claudeMessage(result, allowed)
 	if err != nil {
+		c.recordFailure()
 		return contracts.ChatMessage{}, result.Usage, err
+	}
+	if result.NativeTool != nil {
+		// infai terminated the process before the CLI could finish the turn,
+		// so its conversation now ends on a tool_use with no tool_result.
+		c.recordFailure()
+	} else {
+		// The CLI stored this turn. The next delta skips the assistant reply,
+		// which the CLI already holds, and carries the tool results.
+		c.recordSuccess(result.SessionID, history, systemPrompt, reply)
 	}
 	if opts != nil && opts.OnDelta != nil {
 		// The validated object only exists once the turn is complete, so the
@@ -141,6 +167,9 @@ func (c *claudeCLI) Generate(ctx context.Context, messages []contracts.ChatMessa
 		// publishing in both places renders each call twice in the live view.
 		if reply.Content != nil && *reply.Content != "" {
 			if opts.OnDelta(contracts.DeltaContent, *reply.Content) {
+				// The caller will not commit this reply, so the stored CLI
+				// conversation no longer lines up with infai's history.
+				c.recordFailure()
 				return contracts.ChatMessage{}, result.Usage, harnessErr.ErrTurnCanceled
 			}
 		}

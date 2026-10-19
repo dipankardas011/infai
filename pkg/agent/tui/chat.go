@@ -357,7 +357,7 @@ func (m *chatModel) contextUsed() uint64 {
 		return m.used
 	}
 	if last := m.session.LastTurnMeta; last != nil {
-		return last.Usage.PromptTokens + last.Usage.CompletionTokens
+		return last.Usage.ContextWindowTokens()
 	}
 	return 0
 }
@@ -1941,7 +1941,7 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) tea.Cmd {
 			// The report is kept whole, not just the total the status row shows:
 			// the stats page reads its parts.
 			m.lastUsage = &usage
-			m.used = usage.TotalTokens
+			m.used = usage.ContextWindowTokens()
 		}
 	default:
 		m.appendDelta(event.Kind, content)

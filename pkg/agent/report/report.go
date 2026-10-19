@@ -635,9 +635,10 @@ func usageOf(meta *store.LastTurnMeta) usageProgressView {
 		return usageProgressView{PromptLabel: "0 prompt / 0 context", CompletionLabel: "0 completion", WindowLabel: "0"}
 	}
 	u := meta.Usage
+	context := u.ContextWindowTokens()
 	view := usageProgressView{
 		Present: true, Prompt: u.PromptTokens, Completion: u.CompletionTokens, Total: u.TotalTokens, Window: meta.ContextWindow,
-		PromptLabel:     fmt.Sprintf("%d prompt / %d context", u.PromptTokens, meta.ContextWindow),
+		PromptLabel:     fmt.Sprintf("%d used / %d context", context, meta.ContextWindow),
 		CompletionLabel: fmt.Sprintf("%d completion", u.CompletionTokens), WindowLabel: fmt.Sprint(meta.ContextWindow),
 	}
 	if u.PromptTokensDetails != nil {
@@ -648,9 +649,9 @@ func usageOf(meta *store.LastTurnMeta) usageProgressView {
 		view.Reasoning = u.CompletionTokensDetails.ReasoningTokens
 	}
 	if meta.ContextWindow > 0 {
-		view.PromptPercent = cappedPercent(u.PromptTokens, meta.ContextWindow)
+		view.PromptPercent = cappedPercent(context, meta.ContextWindow)
 		view.CompletionPercent = cappedPercent(u.CompletionTokens, meta.ContextWindow)
-		view.Overflow = u.PromptTokens > meta.ContextWindow
+		view.Overflow = context > meta.ContextWindow
 	}
 	return view
 }

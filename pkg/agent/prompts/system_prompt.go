@@ -25,7 +25,7 @@ type basicPromptData struct {
 	IsGitRepo       bool
 	OS              string
 	DateUTC         string
-	LocalTime       string
+	LocalDate       string
 	Skills          []contracts.Skill
 	Tools           []contracts.Tool
 	HasSidecarTools bool
@@ -37,8 +37,12 @@ func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd 
 		Cwd:       cwd,
 		IsGitRepo: isGitRepo(cwd),
 		OS:        runtime.GOOS,
-		DateUTC:   time.Now().UTC().Format(time.RFC3339),
-		LocalTime: time.Now().Local().Format(time.RFC3339),
+		// Date only: the prompt is built once per session, and a
+		// second-resolution timestamp would change the system block for every
+		// new session, turning a cache read into a cache write. The agent runs
+		// `date` when it needs the exact time.
+		DateUTC:   time.Now().UTC().Format("2006-01-02"),
+		LocalDate: time.Now().Format("2006-01-02 MST"),
 		Skills:    skills,
 		Tools:     tools,
 	}
@@ -127,7 +131,7 @@ Use delegate_sidecar_loop by default when delegating: it waits and returns the r
 - Is a git repository: {{if .IsGitRepo}}yes{{else}}no{{end}}
 - OS: {{.OS}}
 - Today's date (UTC): {{.DateUTC}}
-- Local time: {{.LocalTime}}
+- Local date: {{.LocalDate}}
 </environment>
 
 <tools>

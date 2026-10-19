@@ -219,3 +219,26 @@ func TestRenderLinksToolResultsToCalls(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageProgressMeasuresTheWindowNotTheCumulativeTurn(t *testing.T) {
+	event := messageEvent(uuid.Nil, contracts.NewAssistantMessage("answer"))
+	meta := store.SessionMeta{ID: uuid.New(), Name: "usage", LastTurnMeta: &store.LastTurnMeta{
+		Usage: contracts.TokenUsage{
+			PromptTokens: 60000, CompletionTokens: 5000, TotalTokens: 65000, ContextTokens: 32000,
+		},
+		ContextWindow: 100000,
+	}}
+	page, err := Render(meta, []store.Event{event}, event.ID)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := string(page)
+	for _, want := range []string{"32000 used / 100000 context", `style="width:32.00%"`, "60000", "65000"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage display missing %q", want)
+		}
+	}
+	if strings.Contains(out, "exceeds window") {
+		t.Error("the cumulative turn was used as the window measurement")
+	}
+}

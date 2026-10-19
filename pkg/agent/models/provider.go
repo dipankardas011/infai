@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
+	"github.com/google/uuid"
 )
 
 func ProviderAuthMethods(providerID contracts.ProviderSlug) ([]contracts.ProviderAuthMethod, error) {
@@ -44,6 +45,8 @@ func RefreshProviderAuth(ctx context.Context, providerID contracts.ProviderSlug,
 
 func ProvisionModelClient(
 	m contracts.ProvisionedModel,
+	workspace string,
+	sessionID uuid.UUID,
 ) (contracts.InfaiModelAdaptor, error) {
 	switch m.ProviderSlug() {
 	case contracts.DeepSeek:
@@ -51,7 +54,7 @@ func ProvisionModelClient(
 	case contracts.Codex:
 		return NewOpenAICodexResponsesAPI(m)
 	case contracts.ClaudeCLI:
-		return NewClaudeCLI(m)
+		return NewClaudeCLI(m, workspace, sessionID)
 	case contracts.OpenAIGeneric:
 		return NewOpenAICompatableAPI(m)
 	default:

@@ -9,28 +9,18 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
-const claudeTranscriptInstruction = "The JSON in the user message is the conversation so far, oldest first. " +
-	"Reply only as the next assistant turn, answering through the supplied output schema."
-
-// claudeNativeToolsDisabled closes what the output schema cannot: the CLI also
-// exposes a native tool channel, and it is disabled (--tools ""). A model that
-// reaches for it receives "No such tool available" and, without this rule,
-// concludes that no tool exists at all. It goes last because the model weighs
-// the final instruction most.
 const claudeNativeToolsDisabled = "The native tool channel is disabled. " +
 	"Do not emit native tool calls: they fail with \"No such tool available\". " +
 	"Every action must be requested in the tool_calls array of the output object; leave it empty when no tool is needed."
 
-// claudeSystemPrompt joins infai's own system messages with the instruction that
-// frames the transcript. Tool definitions travel in the output schema, not here.
 func claudeSystemPrompt(messages []contracts.ChatMessage) string {
-	parts := make([]string, 0, 2)
+	var parts []string
 	for _, message := range messages {
 		if message.Role == "system" && message.Content != nil && *message.Content != "" {
 			parts = append(parts, *message.Content)
 		}
 	}
-	parts = append(parts, claudeTranscriptInstruction, claudeNativeToolsDisabled)
+	parts = append(parts, claudeNativeToolsDisabled)
 	return strings.Join(parts, "\n\n")
 }
 
@@ -90,16 +80,25 @@ func claudeTranscriptToolCalls(calls []contracts.ToolCall) []claudeTranscriptToo
 	return projected
 }
 
+func claudeConversation(messages []contracts.ChatMessage) []contracts.ChatMessage {
+	conversation := make([]contracts.ChatMessage, 0, len(messages))
+	for _, message := range messages {
+		if message.Role == "system" {
+			continue
+		}
+		conversation = append(conversation, message)
+	}
+	return conversation
+}
+
 // claudeTranscriptText serializes the conversation as JSON. It deliberately
 // carries no timestamps, no random identifiers and no map iteration, so two
 // turns that share a prefix produce a byte-identical shared prefix.
 func claudeTranscriptText(messages []contracts.ChatMessage) string {
-	text, _ := claudeTranscriptParts(messages)
+	text, _ := claudeTranscriptParts(claudeConversation(messages))
 	return text
 }
 
-// claudeTranscriptParts returns the serialized conversation and the images it
-// references, in transcript order.
 func claudeTranscriptParts(messages []contracts.ChatMessage) (string, []contracts.ImageInput) {
 	conversation := make([]claudeTranscriptMessage, 0, len(messages))
 	images := make([]contracts.ImageInput, 0)

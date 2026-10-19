@@ -77,11 +77,7 @@ func (s *InfaiAgentSession) shouldCompact(usage *contracts.TokenUsage) bool {
 	if window == 0 {
 		return false
 	}
-	used := usage.TotalTokens
-	if used == 0 {
-		used = usage.PromptTokens + usage.CompletionTokens
-	}
-	return float64(used) >= float64(window)*0.8
+	return float64(usage.ContextWindowTokens()) >= float64(window)*0.8
 }
 
 // CompactChat runs a manual compaction. The agent loop is parked while the

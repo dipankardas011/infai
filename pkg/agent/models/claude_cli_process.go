@@ -9,17 +9,15 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
+
+	"github.com/google/uuid"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	harnessErr "github.com/dipankardas011/infai/pkg/agent/errors"
 )
 
 const (
-	claudeCLIMinVersion = "2.1.301"
 	// claudeMaxAttempts bounds retries of a transient provider failure. Auth
 	// and rate-limit failures are never retried.
 	claudeMaxAttempts = 2
@@ -38,26 +36,22 @@ const (
 
 var execLookPath = exec.LookPath
 
-// claudeCLIWorkDir returns the empty, infai-owned directory the CLI runs in.
-func claudeCLIWorkDir() (string, error) {
-	root, err := os.UserCacheDir()
-	if err != nil || root == "" {
-		root = os.TempDir()
-	}
-	dir := filepath.Join(root, "infai", "claude-cli", "empty")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("claude cli: create isolated working directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", fmt.Errorf("claude cli: secure isolated working directory: %w", err)
-	}
-	return dir, nil
+// claudeSessionArg selects the CLI conversation a turn joins. A fresh turn
+// opens a named session; a resumed turn appends to the one the CLI already
+// stored, which keeps its message list append-only and therefore cacheable.
+type claudeSessionArg struct {
+	ID     string
+	Resume bool
 }
 
 // claudeCLIArgs builds the argument list. Built-in tools stay disabled and MCP
 // is strictly empty: the CLI must not run anything of its own. Do not add
 // --bare, which drops the subscription login this provider relies on.
-func claudeCLIArgs(model contracts.ProvisionedModel, systemPrompt, schema string, streamJSON bool) []string {
+//
+// Session persistence stays on: the stored message list is what lets the CLI
+// reuse its prompt cache instead of re-sending the whole transcript as one
+// rewritten user message.
+func claudeCLIArgs(model contracts.ProvisionedModel, systemPrompt, schema string, streamJSON bool, session claudeSessionArg) []string {
 	args := []string{
 		"-p",
 		"--tools", "",
@@ -65,14 +59,20 @@ func claudeCLIArgs(model contracts.ProvisionedModel, systemPrompt, schema string
 		"--mcp-config", `{"mcpServers":{}}`,
 		"--setting-sources", "",
 		"--disable-slash-commands",
-		"--no-session-persistence",
+	}
+	if session.Resume {
+		args = append(args, "--resume", session.ID)
+	} else {
+		args = append(args, "--session-id", session.ID)
+	}
+	args = append(args,
 		"--system-prompt", systemPrompt,
 		"--model", model.Model().Id,
 		"--json-schema", schema,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
-	}
+	)
 	if streamJSON {
 		args = append(args, "--input-format", "stream-json")
 	}
@@ -82,19 +82,34 @@ func claudeCLIArgs(model contracts.ProvisionedModel, systemPrompt, schema string
 	return args
 }
 
-func (c *claudeCLI) run(ctx context.Context, systemPrompt, stdin string, streamJSON bool, schema string, allowed claudeTools, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
+func (c *claudeCLI) run(ctx context.Context, systemPrompt string, turn claudeTurn, attempt int, schema string, allowed claudeTools, opts *contracts.GenerateOptions) (claudeStreamResult, error) {
 	binary, err := c.resolveBinary()
 	if err != nil {
 		return claudeStreamResult{}, err
 	}
-	if err := c.checkVersion(ctx, binary); err != nil {
-		return claudeStreamResult{}, err
+	input := turn.full
+	session := claudeSessionArg{ID: turn.sessionID}
+	switch {
+	case attempt > 1:
+		// The failed attempt may already have created the assigned id, so a
+		// retry opens a new conversation with the full history.
+		session = claudeSessionArg{ID: uuid.NewString()}
+	case turn.resume:
+		input = turn.delta
+		session = claudeSessionArg{ID: turn.sessionID, Resume: true}
 	}
-	cmd := exec.Command(binary, claudeCLIArgs(c.model, systemPrompt, schema, streamJSON)...)
-	cmd.Dir = c.opts.workDir
-	// Inherit the environment unchanged: the CLI finds its own login. infai
-	// neither injects nor logs an auth variable.
-	cmd.Env = os.Environ()
+	stdin, streamJSON := claudeStdin(input.transcript, input.images)
+	cmd := exec.Command(binary, claudeCLIArgs(c.model, systemPrompt, schema, streamJSON, session)...)
+	cmd.Dir = c.opts.workspace
+	// Inherit the environment so the CLI finds its own login; infai neither
+	// injects nor logs an auth variable.
+	//
+	// Auto-memory is off. Now that the CLI runs in the session workspace it
+	// would inject the user's ~/.claude/projects/<slug>/memory/MEMORY.md into
+	// the first user message. That content is not part of this conversation,
+	// and infai already owns memory and skills. Settings are disabled
+	// (--setting-sources ""), so the env var is the lever.
+	cmd.Env = append(os.Environ(), "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1")
 	configureClaudeProcess(cmd)
 	cmd.Stdin = strings.NewReader(stdin)
 
@@ -143,6 +158,7 @@ func (c *claudeCLI) run(ctx context.Context, systemPrompt, stdin string, streamJ
 		}
 	}()
 	result, decodeErr := decodeClaudeStream(turnCtx, stdout, opts, allowed, cancelTurn)
+	result.SessionID = session.ID
 	waitErr := cmd.Wait()
 	close(done)
 
@@ -171,52 +187,22 @@ func (c *claudeCLI) run(ctx context.Context, systemPrompt, stdin string, streamJ
 		if isClaudeAuthError(message) {
 			return result, claudeAuthError()
 		}
+		if session.Resume && isClaudeMissingSession(message) {
+			// The stored conversation is gone (cleanup, or a session file that
+			// never landed). Let the retry open a fresh one.
+			result.Retryable = true
+		}
+		if !session.Resume && isClaudeSessionInUse(message) {
+			// The assigned id already names a conversation from an earlier
+			// process. Retry as a new generation.
+			result.Retryable = true
+		}
 		if message == "" {
 			message = "the CLI exited without a result event"
 		}
 		return result, fmt.Errorf("claude cli: %s", message)
 	}
 	return result, nil
-}
-
-var claudeVersionPattern = regexp.MustCompile(`(\d+)\.(\d+)\.(\d+)`)
-
-func (c *claudeCLI) checkVersion(ctx context.Context, binary string) error {
-	output, err := exec.CommandContext(ctx, binary, "--version").Output()
-	if err != nil {
-		return fmt.Errorf("claude cli: check version: %w", err)
-	}
-	found := claudeVersionPattern.FindString(string(output))
-	if found == "" {
-		return fmt.Errorf("claude cli: could not read a version from %q", strings.TrimSpace(string(output)))
-	}
-	if compareClaudeVersions(found, c.opts.minVersion) < 0 {
-		return fmt.Errorf("Claude Code %s or newer is required (found %s). Run `claude update`.", c.opts.minVersion, found)
-	}
-	return nil
-}
-
-func compareClaudeVersions(left, right string) int {
-	parse := func(value string) [3]int {
-		var result [3]int
-		for i, part := range strings.Split(value, ".") {
-			if i >= len(result) {
-				break
-			}
-			result[i], _ = strconv.Atoi(part)
-		}
-		return result
-	}
-	a, b := parse(left), parse(right)
-	for i := range a {
-		switch {
-		case a[i] < b[i]:
-			return -1
-		case a[i] > b[i]:
-			return 1
-		}
-	}
-	return 0
 }
 
 // isClaudeAuthError recognises the CLI's own "you are not signed in" wording.
@@ -232,6 +218,20 @@ func isClaudeAuthError(message string) bool {
 
 func claudeAuthError() error {
 	return errors.New("Claude Code isn't signed in. Run `claude` and use /login, then try again.")
+}
+
+func isClaudeSessionInUse(message string) bool {
+	return strings.Contains(strings.ToLower(message), "already in use")
+}
+
+func isClaudeMissingSession(message string) bool {
+	message = strings.ToLower(message)
+	for _, marker := range []string{"no conversation found", "session not found", "no such session"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isClaudeTransientError(message string) bool {

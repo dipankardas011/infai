@@ -15,9 +15,9 @@ import (
 const claudeCLIPreflightTimeout = 30 * time.Second
 
 // checkClaudeCLIAvailable reports whether this machine can actually use the
-// provider: the CLI is on PATH at a usable version, and it is already signed in.
+// provider: the CLI is on PATH and already signed in.
 //
-// It runs no model turn. `--version` proves the binary is reachable, and
+// It runs no model turn. `--version` proves the binary is runnable, and
 // `auth status` is a local read of the CLI's own login state. Only the login
 // boolean is consumed — the same output also carries an account and an
 // organisation, and infai deliberately discards those.
@@ -29,16 +29,8 @@ func checkClaudeCLIAvailable(ctx context.Context, binary string) error {
 	ctx, cancel := context.WithTimeout(ctx, claudeCLIPreflightTimeout)
 	defer cancel()
 
-	version, err := exec.CommandContext(ctx, resolved, "--version").Output()
-	if err != nil {
+	if _, err := exec.CommandContext(ctx, resolved, "--version").Output(); err != nil {
 		return fmt.Errorf("Claude Code CLI could not be run: %w", err)
-	}
-	found := claudeVersionPattern.FindString(string(version))
-	if found == "" {
-		return fmt.Errorf("could not read a Claude Code version from %q", strings.TrimSpace(string(version)))
-	}
-	if compareClaudeVersions(found, claudeCLIMinVersion) < 0 {
-		return fmt.Errorf("Claude Code %s or newer is required (found %s). Run `claude update`.", claudeCLIMinVersion, found)
 	}
 
 	status, err := exec.CommandContext(ctx, resolved, "auth", "status").Output()

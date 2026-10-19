@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
@@ -50,11 +52,12 @@ func testClaudeTools() []contracts.Tool {
 
 func TestClaudeCLIArgsKeepToolsDisabledAndPassTheCatalogID(t *testing.T) {
 	model := catalogModel(t, "claude", "claude-sonnet-5-5", contracts.ThinkingLow)
-	args := claudeCLIArgs(model, "system prompt", `{"type":"object"}`, false)
+	const sessionID = "11111111-2222-3333-4444-555555555555"
+	args := claudeCLIArgs(model, "system prompt", `{"type":"object"}`, false, claudeSessionArg{ID: sessionID})
 	joined := strings.Join(args, "|")
 	for _, required := range []string{
 		"-p", "--tools||", "--strict-mcp-config", `--mcp-config|{"mcpServers":{}}`,
-		"--setting-sources||", "--disable-slash-commands", "--no-session-persistence",
+		"--setting-sources||", "--disable-slash-commands", "--session-id|" + sessionID,
 		"--system-prompt|system prompt", "--model|claude-sonnet-5-5", `--json-schema|{"type":"object"}`,
 		"--output-format|stream-json", "--verbose", "--include-partial-messages", "--effort|low",
 	} {
@@ -62,10 +65,19 @@ func TestClaudeCLIArgsKeepToolsDisabledAndPassTheCatalogID(t *testing.T) {
 			t.Errorf("missing %q in %q", required, joined)
 		}
 	}
+	if strings.Contains(joined, "--no-session-persistence") {
+		t.Error("the stored conversation is what lets the CLI reuse its prompt cache")
+	}
 	if strings.Contains(joined, "--input-format") {
 		t.Errorf("text-only turns must keep the CLI's default input format: %q", joined)
 	}
-	if !strings.Contains(strings.Join(claudeCLIArgs(model, "system prompt", `{"type":"object"}`, true), "|"), "--input-format|stream-json") {
+	resumed := strings.Join(claudeCLIArgs(model, "system prompt", `{"type":"object"}`, false,
+		claudeSessionArg{ID: sessionID, Resume: true}), "|")
+	if !strings.Contains(resumed, "--resume|"+sessionID) || strings.Contains(resumed, "--session-id") {
+		t.Errorf("resumed turn args = %q", resumed)
+	}
+	if !strings.Contains(strings.Join(claudeCLIArgs(model, "system prompt", `{"type":"object"}`, true,
+		claudeSessionArg{ID: sessionID}), "|"), "--input-format|stream-json") {
 		t.Error("image turns must select stream-json input")
 	}
 	if strings.Contains(joined, "--bare") {
@@ -155,6 +167,11 @@ func TestClaudeTranscriptIsStableAndAppendOnly(t *testing.T) {
 	first := claudeTranscriptText(history)
 	if second := claudeTranscriptText(history); second != first {
 		t.Fatal("the same history serialized differently twice")
+	}
+	// The system prompt travels in --system-prompt. Repeating it here would
+	// put the same bytes in the message prefix that is rewritten every turn.
+	if strings.Contains(first, "you are infai") {
+		t.Fatalf("transcript repeats the system prompt: %s", first)
 	}
 	grown := append(append([]contracts.ChatMessage(nil), history...), contracts.NewUserMessage("next"))
 	if !strings.HasPrefix(claudeTranscriptText(grown), strings.TrimSuffix(first, "]}")) {
@@ -348,9 +365,64 @@ func TestClaudeUsageCountsCacheAsInput(t *testing.T) {
 	event.Usage.CacheCreationInputTokens = 3
 	event.Usage.CacheReadInputTokens = 4
 	event.Usage.OutputTokens = 5
-	want := contracts.TokenUsage{PromptTokens: 9, CompletionTokens: 5, TotalTokens: 14}
-	if usage := claudeUsage(event.Usage); usage == nil || *usage != want {
+	usage := claudeUsage(event.Usage, nil)
+	if usage == nil {
+		t.Fatal("usage = nil")
+	}
+	// Without iterations the top level is the last request too.
+	if usage.PromptTokens != 9 || usage.CompletionTokens != 5 ||
+		usage.TotalTokens != 14 || usage.ContextTokens != 14 {
 		t.Fatalf("usage = %+v", usage)
+	}
+	if usage.PromptTokensDetails == nil ||
+		usage.PromptTokensDetails.CachedTokens != 4 || usage.PromptTokensDetails.CacheWriteTokens != 3 {
+		t.Fatalf("details = %+v", usage.PromptTokensDetails)
+	}
+}
+
+// The CLI sums every request of one -p process into the top level. Only the
+// last iteration is the context window the last API request occupied.
+func TestClaudeUsageSeparatesSpendFromContext(t *testing.T) {
+	event := claudeStreamEvent{}
+	event.Usage.InputTokens = 30
+	event.Usage.CacheCreationInputTokens = 40
+	event.Usage.CacheReadInputTokens = 50
+	event.Usage.OutputTokens = 10
+	event.Usage.Iterations = []claudeTokenUsage{
+		{InputTokens: 1, CacheCreationInputTokens: 2, CacheReadInputTokens: 20, OutputTokens: 3},
+		{InputTokens: 4, CacheCreationInputTokens: 5, CacheReadInputTokens: 60, OutputTokens: 7},
+	}
+	usage := claudeUsage(event.Usage, nil)
+	if usage == nil {
+		t.Fatal("usage = nil")
+	}
+	if usage.PromptTokens != 120 || usage.TotalTokens != 130 {
+		t.Fatalf("spend = %+v", usage)
+	}
+	if usage.ContextTokens != 76 {
+		t.Fatalf("context = %d, want the last iteration (4+5+60+7)", usage.ContextTokens)
+	}
+}
+
+// iterations is optional. When the API omits it, the last assistant message's
+// own usage is the per-step number; the result total stays the spend.
+func TestClaudeUsageFallsBackToTheLastAssistantStep(t *testing.T) {
+	event := claudeStreamEvent{}
+	event.Usage.InputTokens = 100
+	event.Usage.CacheReadInputTokens = 900
+	event.Usage.OutputTokens = 50
+	step := claudeTokenUsage{
+		InputTokens: 5, CacheCreationInputTokens: 10, CacheReadInputTokens: 80, OutputTokens: 2,
+	}
+	usage := claudeUsage(event.Usage, &step)
+	if usage == nil {
+		t.Fatal("usage = nil")
+	}
+	if usage.TotalTokens != 1050 {
+		t.Fatalf("spend = %+v", usage)
+	}
+	if usage.ContextTokens != 97 {
+		t.Fatalf("context = %d, want the last step (5+10+80+2)", usage.ContextTokens)
 	}
 }
 
@@ -404,7 +476,7 @@ func TestClaudeCLIPreflightRefusesAMissingCLI(t *testing.T) {
 }
 
 func TestClaudeCLIMissingBinaryIsActionable(t *testing.T) {
-	client, err := NewClaudeCLI(catalogModel(t, "definitely-not-installed-claude", "claude-sonnet-5-5", contracts.ThinkingLow))
+	client, err := NewClaudeCLI(catalogModel(t, "definitely-not-installed-claude", "claude-sonnet-5-5", contracts.ThinkingLow), t.TempDir(), uuid.MustParse("11111111-2222-3333-4444-555555555555"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,5 +506,123 @@ func TestClaudeCLINeverHandlesCredentialsOrCallsTheAPI(t *testing.T) {
 				t.Fatalf("%s references %q", file, value)
 			}
 		}
+	}
+}
+
+func TestClaudeConversationResumesWithOnlyTheDelta(t *testing.T) {
+	const assignedID = "11111111-2222-3333-4444-555555555555"
+	client := &claudeCLI{}
+	client.conversation.id = assignedID
+	const system = "system prompt"
+	history := claudeConversation([]contracts.ChatMessage{
+		contracts.NewSystemMessage(system),
+		contracts.NewUserMessage("first"),
+	})
+
+	client.conversation.mu.Lock()
+	first := client.planTurn(history, system)
+	client.conversation.mu.Unlock()
+	if first.resume || first.sessionID != assignedID {
+		t.Fatalf("the first fresh turn must use the infai session id: %+v", first)
+	}
+
+	reply := contracts.NewAssistantMessage("answer")
+	client.conversation.mu.Lock()
+	client.recordSuccess("session-id", history, system, reply)
+	client.conversation.mu.Unlock()
+
+	next := append(append([]contracts.ChatMessage{}, history...),
+		reply,
+		contracts.NewUserMessage("second"),
+	)
+	client.conversation.mu.Lock()
+	turn := client.planTurn(next, system)
+	client.conversation.mu.Unlock()
+	if !turn.resume || turn.sessionID != "session-id" {
+		t.Fatalf("turn = %+v", turn)
+	}
+	// The CLI stored its own copy of the reply, so the delta carries only the
+	// tool results or the next user message.
+	if strings.Contains(turn.delta.transcript, `"first"`) || strings.Contains(turn.delta.transcript, `"answer"`) {
+		t.Fatalf("delta repeats the stored conversation: %s", turn.delta.transcript)
+	}
+	if !strings.Contains(turn.delta.transcript, `"second"`) {
+		t.Fatalf("delta = %s", turn.delta.transcript)
+	}
+	if !strings.Contains(turn.full.transcript, `"first"`) {
+		t.Fatalf("full transcript = %s", turn.full.transcript)
+	}
+
+	// A branch switch can put a different assistant reply at the same
+	// position. The CLI holds the old one, so this must start fresh.
+	branch := append(append([]contracts.ChatMessage{}, history...),
+		contracts.NewAssistantMessage("other branch"),
+		contracts.NewUserMessage("second"),
+	)
+	client.conversation.mu.Lock()
+	turn = client.planTurn(branch, system)
+	client.conversation.mu.Unlock()
+	if turn.resume {
+		t.Fatal("a different assistant reply at the pending position must start fresh")
+	}
+}
+
+func TestClaudeConversationStartsFreshWhenTheHistoryDiverges(t *testing.T) {
+	client := &claudeCLI{}
+	const system = "system prompt"
+	history := claudeConversation([]contracts.ChatMessage{contracts.NewUserMessage("first")})
+
+	client.conversation.mu.Lock()
+	client.recordSuccess("session-id", history, system, contracts.NewAssistantMessage("answer"))
+	client.conversation.mu.Unlock()
+
+	compacted := []contracts.ChatMessage{contracts.NewUserMessage("summary of the conversation")}
+	client.conversation.mu.Lock()
+	turn := client.planTurn(compacted, system)
+	client.conversation.mu.Unlock()
+	if turn.resume {
+		t.Fatal("a rewritten history must not append to the stored CLI conversation")
+	}
+
+	client.conversation.mu.Lock()
+	client.recordFailure()
+	client.conversation.mu.Unlock()
+	client.conversation.mu.Lock()
+	turn = client.planTurn(history, system)
+	client.conversation.mu.Unlock()
+	if turn.resume {
+		t.Fatal("a dirty conversation must start fresh")
+	}
+}
+
+// The result event is cumulative and iterations is optional, so the last
+// assistant message is the per-step fallback for the context measurement.
+func TestClaudeStreamUsesTheLastAssistantStepForContext(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"working"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":4,"cache_read_input_tokens":5,"output_tokens":1}}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"done"}],"usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":20,"output_tokens":1}}}`,
+		`{"type":"result","usage":{"input_tokens":100,"cache_creation_input_tokens":200,"cache_read_input_tokens":300,"output_tokens":40},"structured_output":{"content":"answer","tool_calls":[]}}`,
+	}, "\n")
+	result, err := decodeClaudeStream(context.Background(), strings.NewReader(stream), nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage == nil {
+		t.Fatal("usage = nil")
+	}
+	if result.Usage.TotalTokens != 640 {
+		t.Fatalf("spend = %+v", result.Usage)
+	}
+	if result.Usage.ContextTokens != 24 {
+		t.Fatalf("context = %d, want the last assistant step (1+2+20+1)", result.Usage.ContextTokens)
+	}
+}
+
+func TestClaudeCLIRecognisesAnInUseSession(t *testing.T) {
+	if !isClaudeSessionInUse("Error: Session ID 11111111-2222-3333-4444-555555555555 is already in use.") {
+		t.Error("an already used session id must start a new generation")
+	}
+	if isClaudeSessionInUse("some other failure") {
+		t.Error("unrelated failures must not be treated as a used session id")
 	}
 }

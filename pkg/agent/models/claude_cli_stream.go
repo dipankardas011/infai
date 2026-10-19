@@ -33,6 +33,14 @@ type claudeStreamResult struct {
 	ResultSeen bool
 	Retryable  bool
 	RateLimit  string
+	// SessionID is the CLI conversation this process used. A fresh turn names
+	// a new one; a resumed turn reports the one it appended to.
+	SessionID string
+	// StepUsage is the last assistant message's own usage. The result event
+	// is cumulative for the whole process, and iterations is optional, so
+	// this is the fallback for measuring the context window.
+	StepUsage    claudeTokenUsage
+	HasStepUsage bool
 	// NativeTool is a call the model made through the CLI's own tool channel
 	// instead of the output schema. The channel is disabled, so the CLI answers
 	// "No such tool available"; infai still honours the call because it names a
@@ -83,6 +91,10 @@ type claudeTokenUsage struct {
 	CacheCreationInputTokens uint64 `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     uint64 `json:"cache_read_input_tokens"`
 	OutputTokens             uint64 `json:"output_tokens"`
+	// Iterations are the requests of the last API call. The top level sums
+	// every request in one -p process, so it reports what the turn cost, not
+	// how full the context window was.
+	Iterations []claudeTokenUsage `json:"iterations"`
 }
 
 // decodeClaudeStream consumes the CLI's newline-delimited JSON for one turn.
@@ -124,6 +136,10 @@ func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.G
 				return result, harnessErr.ErrTurnCanceled
 			}
 		case "assistant":
+			if !claudeUsageEmpty(event.Message.Usage) {
+				result.StepUsage = event.Message.Usage
+				result.HasStepUsage = true
+			}
 			for _, block := range event.Message.Content {
 				switch block.Type {
 				case "thinking":
@@ -141,7 +157,7 @@ func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.G
 					result.NativeTool = &claudeNativeToolCall{Name: block.Name, Input: block.Input}
 					// No result event follows a stopped turn, so the cost of
 					// the call that produced this tool_use is read here.
-					result.Usage = claudeUsage(event.Message.Usage)
+					result.Usage = claudeUsage(event.Message.Usage, nil)
 					result.Reasoning = reasoning.String()
 					if stop != nil {
 						stop()
@@ -158,7 +174,11 @@ func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.G
 			}
 		case "result":
 			result.ResultSeen = true
-			result.Usage = claudeUsage(event.Usage)
+			var step *claudeTokenUsage
+			if result.HasStepUsage {
+				step = &result.StepUsage
+			}
+			result.Usage = claudeUsage(event.Usage, step)
 			if event.IsError || strings.HasPrefix(event.Subtype, "error") {
 				return result, claudeResultError(event, &result)
 			}
@@ -178,16 +198,38 @@ func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.G
 
 // claudeUsage reports what the turn cost. Cache reads and writes are input the
 // model had to read, so they count towards the prompt side.
-func claudeUsage(usage claudeTokenUsage) *contracts.TokenUsage {
+func claudeUsage(usage claudeTokenUsage, step *claudeTokenUsage) *contracts.TokenUsage {
 	prompt := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
 	if prompt == 0 && usage.OutputTokens == 0 {
 		return nil
 	}
-	return &contracts.TokenUsage{
+	total := &contracts.TokenUsage{
 		PromptTokens:     prompt,
 		CompletionTokens: usage.OutputTokens,
 		TotalTokens:      prompt + usage.OutputTokens,
+		ContextTokens:    prompt + usage.OutputTokens,
 	}
+	switch {
+	case len(usage.Iterations) > 0:
+		last := usage.Iterations[len(usage.Iterations)-1]
+		total.ContextTokens = last.InputTokens + last.CacheCreationInputTokens +
+			last.CacheReadInputTokens + last.OutputTokens
+	case step != nil:
+		total.ContextTokens = step.InputTokens + step.CacheCreationInputTokens +
+			step.CacheReadInputTokens + step.OutputTokens
+	}
+	if usage.CacheReadInputTokens > 0 || usage.CacheCreationInputTokens > 0 {
+		total.PromptTokensDetails = &contracts.PromptTokensDetails{
+			CachedTokens:     usage.CacheReadInputTokens,
+			CacheWriteTokens: usage.CacheCreationInputTokens,
+		}
+	}
+	return total
+}
+
+func claudeUsageEmpty(usage claudeTokenUsage) bool {
+	return usage.InputTokens == 0 && usage.CacheCreationInputTokens == 0 &&
+		usage.CacheReadInputTokens == 0 && usage.OutputTokens == 0
 }
 
 // claudeResultError turns a failed result event into an actionable error,

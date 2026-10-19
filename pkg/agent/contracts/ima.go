@@ -84,6 +84,8 @@ type TokenUsage struct {
 	CompletionTokens uint64 `json:"completion_tokens"`
 	TotalTokens      uint64 `json:"total_tokens"`
 
+	ContextTokens uint64 `json:"context_tokens,omitempty"`
+
 	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
@@ -93,6 +95,16 @@ func (u TokenUsage) UncachedPromptTokens() uint64 {
 		return u.PromptTokens
 	}
 	return u.PromptTokens - u.PromptTokensDetails.CachedTokens
+}
+
+func (u TokenUsage) ContextWindowTokens() uint64 {
+	if u.ContextTokens > 0 {
+		return u.ContextTokens
+	}
+	if u.TotalTokens > 0 {
+		return u.TotalTokens
+	}
+	return u.PromptTokens + u.CompletionTokens
 }
 
 type PromptTokensDetails struct {

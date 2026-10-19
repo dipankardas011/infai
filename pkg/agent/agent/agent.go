@@ -382,7 +382,7 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 		a.workingHistory.Append(messages...)
 
 		if a.shouldAutoCompact != nil && !evalPassed && a.shouldAutoCompact(usage) {
-			content := fmt.Sprintf("Used: %d against Total: %d", usage.TotalTokens, a.modelClient().GetModelSpecs().Model().MaxContextLength)
+			content := fmt.Sprintf("Used: %d against Total: %d", usage.ContextWindowTokens(), a.modelClient().GetModelSpecs().Model().MaxContextLength)
 			if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventAutoCompactionTriggered, Timestamp: time.Now().UTC(), Content: &content}) {
 				return
 			}

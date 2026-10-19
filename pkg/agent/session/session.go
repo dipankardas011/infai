@@ -116,7 +116,7 @@ func NewSession(
 	mcpServers map[string]contracts.MCPServerConfig,
 	hitlPolicy *auditor.HITLPolicy,
 ) (*InfaiAgentSession, error) {
-	model, err := models.ProvisionModelClient(chosenModel)
+	model, err := models.ProvisionModelClient(chosenModel, cwd, id)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +186,7 @@ func NewResumedSession(
 	mcpServers map[string]contracts.MCPServerConfig,
 	hitlPolicy *auditor.HITLPolicy,
 ) (*InfaiAgentSession, error) {
-	model, err := models.ProvisionModelClient(chosenModel)
+	model, err := models.ProvisionModelClient(chosenModel, meta.Cwd, meta.ID)
 	if err != nil {
 		return nil, err
 	}
