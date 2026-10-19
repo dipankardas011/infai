@@ -300,6 +300,12 @@
       "date": "2026-10-17",
       "text": "stabalized claude subs and also added /report for infaiw",
       "url": "https://x.com/DipankarDas011/status/2111523020569518369"
+    },
+    {
+      "day": "48",
+      "date": "2026-10-19",
+      "text": "🧵infaiw v0.22.0: the agent's search/glob tools now do regex, include/exclude, context lines and paging — so it stops shelling out to grep and find.",
+      "url": "https://x.com/DipankarDas011/status/2112014257223238033"
     }
   ],
   "releases": [
