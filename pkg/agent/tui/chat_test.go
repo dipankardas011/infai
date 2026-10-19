@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"image/color"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3173,5 +3176,252 @@ func TestAPendingDecisionDoesNotMoveTheReader(t *testing.T) {
 	_, cmd = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	if cmd == nil || m.approval != nil {
 		t.Fatal("the decision could not be answered in the chat")
+	}
+}
+
+// recordingChatClient keeps what the composer dispatched, so a test can check
+// the text the model would have received.
+type recordingChatClient struct {
+	stubChatClient
+	sent []contracts.UserInput
+}
+
+func (c *recordingChatClient) SendMessage(_ context.Context, input contracts.UserInput, _ contracts.InfaiThinkingLevel) error {
+	c.sent = append(c.sent, input)
+	return nil
+}
+
+// runCmd runs a command, including a batch, so a test can observe what it
+// produced. Commands in this package never wait on anything but a timer.
+func runCmd(t *testing.T, cmd tea.Cmd) []tea.Msg {
+	t.Helper()
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		var messages []tea.Msg
+		for _, inner := range batch {
+			messages = append(messages, runCmd(t, inner)...)
+		}
+		return messages
+	}
+	return []tea.Msg{msg}
+}
+
+// deliver feeds every message a command produced back to the model, returning
+// the commands those updates asked for.
+func deliver(t *testing.T, m *chatModel, cmd tea.Cmd) tea.Cmd {
+	t.Helper()
+	var next tea.Cmd
+	for _, msg := range runCmd(t, cmd) {
+		_, follow := m.Update(msg)
+		next = tea.Batch(next, follow)
+	}
+	return next
+}
+
+func workspaceFixture(t *testing.T, cwd string) {
+	t.Helper()
+	for _, name := range []string{"a.go", "pkg/b.go"} {
+		path := filepath.Join(cwd, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSubmitDoesNotWalkTheWorkspaceWithoutAFileReference(t *testing.T) {
+	client := &recordingChatClient{}
+	m := newChatModel(context.Background(), client, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.session = store.SessionMeta{ID: uuid.New(), Cwd: "/workspace", Model: "test-model"}
+	m.scanFiles = func(string, func([]string) bool) {
+		t.Fatal("a prompt without @ walked the workspace")
+	}
+	m.composer.SetValue("hello there")
+
+	cmd := m.submit()
+	if cmd == nil {
+		t.Fatal("submit did not dispatch")
+	}
+	runCmd(t, cmd)
+
+	if len(client.sent) != 1 {
+		t.Fatalf("sent=%d messages, want 1", len(client.sent))
+	}
+	if got, want := client.sent[0].Text, "hello there"; got != want {
+		t.Fatalf("sent text=%q want %q", got, want)
+	}
+}
+
+func TestSubmitResolvesFileReferencesWithAStat(t *testing.T) {
+	cwd := t.TempDir()
+	workspaceFixture(t, cwd)
+
+	client := &recordingChatClient{}
+	m := newChatModel(context.Background(), client, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.session = store.SessionMeta{ID: uuid.New(), Cwd: cwd, Model: "test-model"}
+	m.scanFiles = func(string, func([]string) bool) {
+		t.Fatal("submitting a file reference walked the workspace")
+	}
+	m.composer.SetValue("compare @a.go and @pkg/b.go")
+
+	cmd := m.submit()
+	if cmd == nil {
+		t.Fatal("submit did not dispatch")
+	}
+	runCmd(t, cmd)
+
+	if len(client.sent) != 1 {
+		t.Fatalf("sent=%d messages, want 1", len(client.sent))
+	}
+	if got, want := client.sent[0].Text, "compare [file:a.go] and [file:pkg/b.go]"; got != want {
+		t.Fatalf("sent text=%q want %q", got, want)
+	}
+}
+
+func TestSubmitLeavesUnresolvedReferencesAlone(t *testing.T) {
+	cwd := t.TempDir()
+	workspaceFixture(t, cwd)
+	if err := os.MkdirAll(filepath.Join(cwd, "secret"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "secret", "s.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &recordingChatClient{}
+	m := newChatModel(context.Background(), client, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.session = store.SessionMeta{ID: uuid.New(), Cwd: cwd, Model: "test-model"}
+	m.composer.SetValue("ask @missing.go and @../secret/s.txt and @secret")
+
+	runCmd(t, m.submit())
+
+	const want = "ask @missing.go and @../secret/s.txt and @secret"
+	if len(client.sent) != 1 || client.sent[0].Text != want {
+		t.Fatalf("sent=%+v want %q", client.sent, want)
+	}
+}
+
+func TestAtSignStreamsThePickerOffTheUpdateLoop(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.session = store.SessionMeta{ID: uuid.New(), Cwd: "/workspace"}
+	var scans atomic.Int32
+	m.scanFiles = func(_ string, emit func([]string) bool) {
+		scans.Add(1)
+		emit([]string{"a.go", "b.go"})
+	}
+
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: '@', Text: "@"}))
+	if m.filePicker == nil {
+		t.Fatal("@ did not open the picker")
+	}
+	if len(m.files) != 0 || len(m.filePicker.matches) != 0 {
+		t.Fatalf("the picker was filled synchronously: files=%v matches=%v", m.files, m.filePicker.matches)
+	}
+	if cmd == nil {
+		t.Fatal("@ did not start a stream")
+	}
+
+	next := deliver(t, m, cmd)
+	for i := 0; i < 10 && len(m.filePicker.matches) == 0; i++ {
+		if next == nil {
+			break
+		}
+		next = deliver(t, m, next)
+	}
+	if scans.Load() != 1 {
+		t.Fatalf("scans=%d, want 1", scans.Load())
+	}
+	if len(m.files) != 2 {
+		t.Fatalf("files=%v", m.files)
+	}
+	if len(m.filePicker.matches) != 2 || m.filePicker.matches[0] != "a.go" {
+		t.Fatalf("matches=%v", m.filePicker.matches)
+	}
+}
+
+func TestClosingThePickerStopsTheWalkAndReleasesTheListing(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.session = store.SessionMeta{ID: uuid.New(), Cwd: "/workspace"}
+	m.filePicker = &filePicker{start: 0}
+	m.files = []string{"a.go"}
+	m.matchRunning = true
+
+	m.closeFilePicker()
+
+	if m.filePicker != nil || m.files != nil || m.matchRunning {
+		t.Fatalf("picker state survived close: picker=%v files=%v running=%v", m.filePicker, m.files, m.matchRunning)
+	}
+}
+
+func TestAStaleMatchCannotReplaceANewerOne(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.modal = nil
+	m.filePicker = &filePicker{}
+	m.files = []string{"alpha.go", "beta.go"}
+
+	first := m.requestMatch("a")
+	if first == nil || !m.matchRunning {
+		t.Fatal("the first match did not start")
+	}
+	// A keystroke while the first match runs coalesces into one follow-up.
+	if cmd := m.requestMatch("b"); cmd != nil || !m.matchDirty {
+		t.Fatalf("a mid-scan request did not coalesce: cmd=%v dirty=%v", cmd, m.matchDirty)
+	}
+	stale := first()
+	if matches, ok := stale.(fileMatchesMsg); !ok || matches.gen == m.matchGen {
+		t.Fatalf("the running match was not superseded: %+v", stale)
+	}
+	_, follow := m.Update(stale)
+	if follow == nil || !strings.Contains(m.filePicker.query, "b") {
+		t.Fatalf("the follow-up match did not start: query=%q cmd=%v", m.filePicker.query, follow)
+	}
+	deliver(t, m, follow)
+	if len(m.filePicker.matches) != 1 || m.filePicker.matches[0] != "beta.go" {
+		t.Fatalf("matches=%v", m.filePicker.matches)
+	}
+}
+
+func TestWorkspaceChunkForAnotherWorkspaceIsDropped(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.modal = nil
+	m.session = store.SessionMeta{ID: uuid.New(), Cwd: "/new"}
+	m.filePicker = &filePicker{}
+	m.filesScan = "/old"
+
+	_, _ = m.Update(workspaceFilesChunkMsg{cwd: "/old", files: []string{"a.go"}})
+
+	if len(m.files) != 0 {
+		t.Fatalf("a listing for another workspace was collected: files=%v", m.files)
+	}
+}
+
+func TestFuzzyEmptyQueryTakesTheHeadWithoutSorting(t *testing.T) {
+	files := make([]string, workspaceMaxFiles)
+	for i := range files {
+		files[i] = fmt.Sprintf("f%06d.go", i)
+	}
+	got := fuzzyFileMatches(files, "", workspacePickLimit)
+	if len(got) != workspacePickLimit || got[0] != files[0] {
+		t.Fatalf("matches=%v", got)
 	}
 }

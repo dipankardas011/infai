@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,9 +12,9 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
-func TestScanWorkspaceFilesIncludesHiddenAndExcludesGit(t *testing.T) {
+func TestScanWorkspaceFilesIncludesHiddenAndExcludesGitAndNodeModules(t *testing.T) {
 	root := t.TempDir()
-	for _, name := range []string{"main.go", ".hidden/config", ".git/config"} {
+	for _, name := range []string{"main.go", ".hidden/config", ".git/config", "node_modules/pkg/index.js"} {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -25,6 +26,47 @@ func TestScanWorkspaceFilesIncludesHiddenAndExcludesGit(t *testing.T) {
 	want := []string{".hidden/config", "main.go"}
 	if got := scanWorkspaceFiles(root); !reflect.DeepEqual(got, want) {
 		t.Fatalf("files=%v want %v", got, want)
+	}
+}
+
+func TestWalkWorkspaceFilesStreamsBatches(t *testing.T) {
+	root := t.TempDir()
+	total := workspaceBatchSize + 3
+	for i := 0; i < total; i++ {
+		path := filepath.Join(root, fmt.Sprintf("f%05d.go", i))
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var batches []int
+	walkWorkspaceFiles(root, func(batch []string) bool {
+		batches = append(batches, len(batch))
+		return true
+	})
+
+	if len(batches) != 2 || batches[0] != workspaceBatchSize || batches[1] != 3 {
+		t.Fatalf("batches=%v", batches)
+	}
+}
+
+func TestWalkWorkspaceFilesStopsWhenTheConsumerDoes(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < workspaceBatchSize*2; i++ {
+		path := filepath.Join(root, fmt.Sprintf("f%05d.go", i))
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var batches []int
+	walkWorkspaceFiles(root, func(batch []string) bool {
+		batches = append(batches, len(batch))
+		return false
+	})
+
+	if len(batches) != 1 {
+		t.Fatalf("walk kept going after the consumer stopped: %v", batches)
 	}
 }
 
@@ -103,12 +145,28 @@ func TestEncodeAndRenderSkillReferences(t *testing.T) {
 }
 
 func TestEncodeAndRenderFileReferences(t *testing.T) {
-	got := encodeFileReferences("compare @a.go and @pkg/b.go", []string{"a.go", "pkg/b.go"})
+	root := t.TempDir()
+	for _, name := range []string{"a.go", "pkg/b.go"} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := encodeFileReferences("compare @a.go and @pkg/b.go", root)
 	if want := "compare [file:a.go] and [file:pkg/b.go]"; got != want {
 		t.Fatalf("encoded %q want %q", got, want)
 	}
 	got = renderFileReferences(got)
 	if want := "compare @a.go and @pkg/b.go"; got != want {
 		t.Fatalf("rendered %q want %q", got, want)
+	}
+
+	got = encodeFileReferences("read @a.go, then @pkg/b.go.", root)
+	if want := "read [file:a.go], then [file:pkg/b.go]."; got != want {
+		t.Fatalf("encoded punctuation %q want %q", got, want)
 	}
 }

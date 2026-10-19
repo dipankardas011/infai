@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -145,6 +146,23 @@ type chatModel struct {
 	availableSkills         []contracts.Skill
 	filePicker              *filePicker
 	resourcePicker          *resourcePicker
+	// files is the workspace listing the @ picker is filled from. The walk
+	// streams it in batches off the update loop, and it lives only as long as
+	// the picker is open: submit resolves references with a stat, not a listing.
+	files       []string
+	filesScan   string
+	filesStream <-chan []string
+	filesCancel context.CancelFunc
+	scanFiles   func(string, func([]string) bool)
+	// matchRunning and matchDirty coalesce picker matching: one scan runs at a
+	// time, and an input that arrives mid-scan re-runs it once with the newest
+	// listing and query. matchCancel stops a scan whose answer is already stale,
+	// and matchGen is the only generation a result may carry: it spans pickers,
+	// so a scan from a closed picker cannot land on a newer one.
+	matchRunning bool
+	matchDirty   bool
+	matchCancel  *atomic.Bool
+	matchGen     uint64
 
 	working           bool
 	workBegan         time.Time
@@ -197,6 +215,17 @@ type clipboardImageMsg struct {
 type editorDoneMsg struct {
 	text string
 	err  error
+}
+
+type workspaceFilesChunkMsg struct {
+	cwd   string
+	files []string
+	done  bool
+}
+
+type fileMatchesMsg struct {
+	gen     uint64
+	matches []string
 }
 
 type mcpPromptRenderedMsg struct {
@@ -304,6 +333,7 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 		viewport:       view,
 		composer:       input,
 		clipboard:      defaultClipboard(),
+		scanFiles:      walkWorkspaceFiles,
 		turnTextBlock:  -1,
 		toolCallBlocks: make(map[string]int),
 		skillNames:     make(map[string]string),
@@ -608,6 +638,44 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateCommandMenu()
 		m.reflow()
 		return m, nil
+	case workspaceFilesChunkMsg:
+		// A listing for a workspace this session no longer has, or one the
+		// picker stopped waiting for, is dropped. Its walk is cancelled by
+		// closeFilePicker, and the walk's own emit check ends the stream.
+		if msg.cwd != m.session.Cwd || m.filePicker == nil {
+			return m, nil
+		}
+		if msg.done {
+			if m.filesScan == msg.cwd {
+				m.filesScan = ""
+			}
+			m.filesCancel, m.filesStream = nil, nil
+			return m, nil
+		}
+		m.files = append(m.files, msg.files...)
+		var next tea.Cmd
+		if m.filesStream != nil {
+			next = waitWorkspaceFiles(msg.cwd, m.filesStream)
+		}
+		// An empty query only shows the head, which the first batch already
+		// decided; a typed query is re-run over the growing listing.
+		if m.filePicker.query != "" || len(m.filePicker.matches) == 0 {
+			next = tea.Batch(next, m.requestMatch(m.filePicker.query))
+		}
+		return m, next
+	case fileMatchesMsg:
+		m.matchRunning = false
+		if m.filePicker != nil && msg.gen == m.matchGen {
+			m.filePicker.matches = msg.matches
+			m.filePicker.selected = min(m.filePicker.selected, max(len(msg.matches)-1, 0))
+			m.reflow()
+		}
+		if m.matchDirty && m.filePicker != nil {
+			m.matchDirty = false
+			return m, m.requestMatch(m.filePicker.query)
+		}
+		m.matchDirty = false
+		return m, nil
 	case mcpPromptRenderedMsg:
 		// The form put up a loading modal on submit; dismiss it on both the
 		// success and the error path.
@@ -655,7 +723,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.approvalDraft = ""
 		m.stopStreaming()
 		m.commandMenu = false
-		m.filePicker = nil
+		m.closeFilePicker()
 		m.toolCallBlocks = make(map[string]int)
 		m.skillNames = make(map[string]string)
 		m.client.SetSession(msg.output.ID)
@@ -736,7 +804,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.approvalDraft = ""
 		m.stopStreaming()
 		m.commandMenu = false
-		m.filePicker = nil
+		m.closeFilePicker()
 		m.toolCallBlocks = make(map[string]int)
 		m.skillNames = make(map[string]string)
 		m.contextWindow = msg.output.ContextWindow
@@ -1099,7 +1167,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.composer.SetValue(value[:m.filePicker.start] + "@" + path + value[m.filePicker.start+1+len(m.filePicker.query):])
 				m.composer.CursorEnd()
 			}
-			m.filePicker = nil
+			m.closeFilePicker()
 			m.reflow()
 			return m, nil
 		}
@@ -1120,7 +1188,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.filePicker != nil {
 		switch key {
 		case "esc":
-			m.filePicker = nil
+			m.closeFilePicker()
 			m.reflow()
 			return m, nil
 		case "up":
@@ -1147,19 +1215,21 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	var cmd tea.Cmd
+	var cmd, pickerCmd tea.Cmd
 	before := m.composer.Value()
 	m.composer, cmd = m.composer.Update(msg)
 	value := m.composer.Value()
 	if m.filePicker != nil {
 		if len(value) < m.filePicker.start || !strings.HasPrefix(value[m.filePicker.start:], "@") || strings.ContainsAny(value[m.filePicker.start+1:], " \t\n") {
-			m.filePicker = nil
+			m.closeFilePicker()
 		} else {
-			m.filePicker.filter(value[m.filePicker.start+1:])
+			pickerCmd = m.requestMatch(value[m.filePicker.start+1:])
 		}
 	} else if value == before+"@" && m.session.Cwd != "" {
-		m.filePicker = &filePicker{files: scanWorkspaceFiles(m.session.Cwd), start: len(before)}
-		m.filePicker.filter("")
+		// The picker opens empty and fills as batches arrive; neither the walk
+		// nor the match runs on this goroutine.
+		m.filePicker = &filePicker{start: len(before)}
+		pickerCmd = m.workspaceFilesCmd()
 	}
 	if m.resourcePicker != nil {
 		if len(value) < m.resourcePicker.start || !strings.HasPrefix(value[m.resourcePicker.start:], "#") || strings.ContainsAny(value[m.resourcePicker.start+1:], " \t\n") {
@@ -1177,7 +1247,7 @@ func (m *chatModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	m.updateCommandMenu()
 	m.reflow()
-	return m, cmd
+	return m, tea.Batch(cmd, pickerCmd)
 }
 
 func (m *chatModel) cycleThinking() {
@@ -1585,11 +1655,108 @@ func (m *chatModel) activateModal(index int) tea.Cmd {
 	return nil
 }
 
-func (m *chatModel) filePickerFiles() []string {
-	if m.session.Cwd == "" {
+// workspaceFilesCmd streams the session's workspace off the update loop. A scan
+// already in flight for the same cwd is left alone: its chunks are on their way.
+func (m *chatModel) workspaceFilesCmd() tea.Cmd {
+	cwd := m.session.Cwd
+	if cwd == "" || m.filesScan == cwd {
 		return nil
 	}
-	return scanWorkspaceFiles(m.session.Cwd)
+	if m.filesCancel != nil {
+		m.filesCancel()
+	}
+	scan := m.scanFiles
+	if scan == nil {
+		scan = walkWorkspaceFiles
+	}
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.filesCancel = cancel
+	m.filesScan = cwd
+	m.files = nil
+	stream := make(chan []string, 4)
+	m.filesStream = stream
+	go func() {
+		defer close(stream)
+		scan(cwd, func(batch []string) bool {
+			select {
+			case stream <- batch:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		})
+	}()
+	return waitWorkspaceFiles(cwd, stream)
+}
+
+func waitWorkspaceFiles(cwd string, stream <-chan []string) tea.Cmd {
+	return func() tea.Msg {
+		files, ok := <-stream
+		if !ok {
+			return workspaceFilesChunkMsg{cwd: cwd, done: true}
+		}
+		return workspaceFilesChunkMsg{cwd: cwd, files: files}
+	}
+}
+
+// requestMatch starts, or coalesces, the picker's fuzzy match. The listing is
+// read on the update loop and captured by the command; the backing array is
+// append-only, so the command never races with it. One scan runs at a time, and
+// a request that arrives mid-scan re-runs it once when it returns.
+func (m *chatModel) requestMatch(query string) tea.Cmd {
+	p := m.filePicker
+	if p == nil {
+		return nil
+	}
+	if p.query != query {
+		p.query = query
+		p.selected = 0
+	}
+	if len(m.files) == 0 {
+		p.matches = nil
+		return nil
+	}
+	if m.matchRunning {
+		if m.matchCancel != nil {
+			m.matchCancel.Store(true)
+		}
+		m.matchDirty = true
+		m.matchGen++
+		return nil
+	}
+	m.matchRunning = true
+	m.matchGen++
+	gen := m.matchGen
+	if m.matchCancel != nil {
+		m.matchCancel.Store(true)
+	}
+	cancel := &atomic.Bool{}
+	m.matchCancel = cancel
+	files := m.files
+	return func() tea.Msg {
+		return fileMatchesMsg{gen: gen, matches: fuzzyFileMatchesCancelable(files, query, workspacePickLimit, cancel)}
+	}
+}
+
+// closeFilePicker drops the picker and everything its listing held: the walk is
+// cancelled and the paths are released, so a closed picker costs nothing.
+func (m *chatModel) closeFilePicker() {
+	m.filePicker = nil
+	m.resetWorkspaceFiles()
+}
+
+func (m *chatModel) resetWorkspaceFiles() {
+	if m.filesCancel != nil {
+		m.filesCancel()
+		m.filesCancel = nil
+	}
+	if m.matchCancel != nil {
+		m.matchCancel.Store(true)
+		m.matchCancel = nil
+	}
+	m.files, m.filesScan, m.filesStream = nil, "", nil
+	m.matchRunning, m.matchDirty = false, false
+	m.matchGen++
 }
 
 func (m *chatModel) submit() tea.Cmd {
@@ -1625,7 +1792,9 @@ func (m *chatModel) submit() tea.Cmd {
 	m.commandMenu = false
 	m.reflow()
 
-	input := contracts.UserInput{Text: encodeSkillReferences(encodeFileReferences(prompt, m.filePickerFiles())), Images: images}
+	// File references are resolved against the workspace inside the send
+	// command: one stat per @token, so submitting never walks the tree.
+	promptText, cwd := prompt, m.session.Cwd
 	// A prompt sent while a turn is running is queued by the session and served
 	// next. The turn already in flight owns the status, so it is left as the
 	// events reported it.
@@ -1642,6 +1811,7 @@ func (m *chatModel) submit() tea.Cmd {
 	// Attachments are consumed only once dispatch has successfully begun.
 	m.pending = nil
 	return tea.Batch(func() tea.Msg {
+		input := contracts.UserInput{Text: encodeSkillReferences(encodeFileReferences(promptText, cwd)), Images: images}
 		return messageSentMsg{ownsWork: ownsWork, err: m.client.SendMessage(m.ctx, input, thinking)}
 	}, animationTickCmd())
 }

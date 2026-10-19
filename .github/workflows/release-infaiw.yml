@@ -165,7 +165,7 @@ jobs:
               run [opt_bin/"infaiw", "server"]
               keep_alive true
               working_dir Dir.home
-              environment_variables PATH: std_service_path_env
+              environment_variables PATH: "#{Dir.home}/.local/bin:#{std_service_path_env}"
               log_path var/"log/infaiw.log"
               error_log_path var/"log/infaiw.log"
             end
