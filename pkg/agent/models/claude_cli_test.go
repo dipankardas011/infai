@@ -626,3 +626,131 @@ func TestClaudeCLIRecognisesAnInUseSession(t *testing.T) {
 		t.Error("unrelated failures must not be treated as a used session id")
 	}
 }
+
+func TestClaudeStreamStreamsTheStructuredAnswer(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":"StructuredOutput"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"content\": \"hel"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"lo\", \"tool_calls\": []}"}}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"StructuredOutput","input":{"content":"hello","tool_calls":[]}}]}}`,
+		`{"type":"result","subtype":"success","structured_output":{"content":"hello","tool_calls":[]}}`,
+	}, "\n")
+	var deltas []string
+	result, err := decodeClaudeStream(context.Background(), strings.NewReader(stream), &contracts.GenerateOptions{
+		Stream: true,
+		OnDelta: func(kind contracts.EventStreamKind, text string) bool {
+			deltas = append(deltas, string(kind)+":"+text)
+			return false
+		},
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := strings.Join(deltas, "|"), "content:hel|content:lo"; got != want {
+		t.Fatalf("deltas=%q want %q", got, want)
+	}
+	if !result.ContentStreamed || result.StreamedContent != "hello" {
+		t.Fatalf("streamed=%v content=%q", result.ContentStreamed, result.StreamedContent)
+	}
+	if result.Output == nil || result.Output.Content == nil || *result.Output.Content != "hello" {
+		t.Fatalf("output=%+v", result.Output)
+	}
+}
+
+// A native tool's input is JSON too. Only the StructuredOutput block is the
+// answer, so its input must not be published as text.
+func TestClaudeStreamDoesNotReadANativeToolInputAsTheAnswer(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"edit"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"content\":\"SECRET\"}"}}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"edit","input":{"path":"main.go"}}]}}`,
+	}, "\n")
+	var deltas []string
+	result, err := decodeClaudeStream(context.Background(), strings.NewReader(stream), &contracts.GenerateOptions{
+		Stream: true,
+		OnDelta: func(kind contracts.EventStreamKind, text string) bool {
+			deltas = append(deltas, string(kind)+":"+text)
+			return false
+		},
+	}, claudeTools{"edit": {Name: "edit"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 0 {
+		t.Fatalf("a native tool input was streamed: %v", deltas)
+	}
+	if result.ContentStreamed {
+		t.Fatal("a native tool input was reported as the answer")
+	}
+	if result.NativeTool == nil || result.NativeTool.Name != "edit" {
+		t.Fatalf("native tool = %+v", result.NativeTool)
+	}
+}
+
+func TestClaudeGenerateStreamsAndDoesNotRepeatTheAnswer(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "claude")
+	stream := strings.Join([]string{
+		`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":"StructuredOutput"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"content\": \"hel"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"lo\", \"tool_calls\": []}"}}}`,
+		`{"type":"result","subtype":"success","structured_output":{"content":"hello","tool_calls":[]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat <<'STREAM'\n"+stream+"STREAM\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &claudeCLI{
+		model:  catalogModel(t, script, "claude-sonnet-5-5", ""),
+		binary: script,
+		opts:   claudeCLIOptions{workspace: dir},
+	}
+	client.conversation.id = uuid.NewString()
+
+	var deltas []string
+	reply, _, err := client.Generate(context.Background(), []contracts.ChatMessage{
+		contracts.NewUserMessage("say hello"),
+	}, nil, &contracts.GenerateOptions{
+		Stream: true,
+		OnDelta: func(kind contracts.EventStreamKind, text string) bool {
+			deltas = append(deltas, string(kind)+":"+text)
+			return false
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "provider_event:Claude Code is working|content:hel|content:lo"
+	if got := strings.Join(deltas, "|"); got != want {
+		t.Fatalf("deltas=%q want %q", got, want)
+	}
+	if reply.Content == nil || *reply.Content != "hello" {
+		t.Fatalf("reply=%+v", reply)
+	}
+}
+
+func TestClaudeStreamedContentIsNotRepeated(t *testing.T) {
+	tests := []struct {
+		streamed  string
+		validated string
+		want      string
+	}{
+		{"", "hello", "hello"},
+		{"hello", "hello", ""},
+		{"hel", "hello", "lo"},
+		{"other", "hello", ""},
+		{"", "", ""},
+	}
+	for _, test := range tests {
+		var got string
+		emitClaudeStreamedContent(test.streamed, test.validated, func(text string) bool {
+			got += text
+			return false
+		})
+		if got != test.want {
+			t.Fatalf("streamed=%q validated=%q emitted=%q want %q", test.streamed, test.validated, got, test.want)
+		}
+	}
+}

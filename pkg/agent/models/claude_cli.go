@@ -96,6 +96,14 @@ func (c *claudeCLI) attempts(ctx context.Context, systemPrompt string, turn clau
 	var last claudeStreamResult
 	var err error
 	for attempt := 1; attempt <= claudeMaxAttempts; attempt++ {
+		// The CLI can spend seconds before its first token, and it emits no
+		// event of its own to say so. One notice per generation step gives the
+		// client something to show while it waits.
+		if attempt == 1 && opts != nil && opts.OnDelta != nil {
+			if opts.OnDelta(contracts.EventProviderEvent, "Claude Code is working") {
+				return last, harnessErr.ErrTurnCanceled
+			}
+		}
 		last, err = c.run(ctx, systemPrompt, turn, attempt, schema, allowed, opts)
 		if err == nil || !last.Retryable || attempt == claudeMaxAttempts {
 			return last, err
@@ -159,20 +167,51 @@ func (c *claudeCLI) Generate(ctx context.Context, messages []contracts.ChatMessa
 		c.recordSuccess(result.SessionID, history, systemPrompt, reply)
 	}
 	if opts != nil && opts.OnDelta != nil {
-		// The validated object only exists once the turn is complete, so the
-		// visible answer is published in one piece rather than token by token.
-		//
 		// Tool calls are deliberately not published here: the agent loop
 		// publishes EventToolCall for every call in the reply it commits, and
 		// publishing in both places renders each call twice in the live view.
-		if reply.Content != nil && *reply.Content != "" {
-			if opts.OnDelta(contracts.DeltaContent, *reply.Content) {
-				// The caller will not commit this reply, so the stored CLI
-				// conversation no longer lines up with infai's history.
-				c.recordFailure()
-				return contracts.ChatMessage{}, result.Usage, harnessErr.ErrTurnCanceled
-			}
+		content := ""
+		if reply.Content != nil {
+			content = *reply.Content
+		}
+		var canceled bool
+		if result.NativeTool != nil {
+			// The model left the structured channel, so its native text was
+			// never streamed; publish it whole.
+			canceled = content != "" && opts.OnDelta(contracts.DeltaContent, content)
+		} else {
+			canceled = emitClaudeStreamedContent(result.StreamedContent, content, func(text string) bool {
+				return opts.OnDelta(contracts.DeltaContent, text)
+			})
+		}
+		if canceled {
+			// The caller will not commit this reply, so the stored CLI
+			// conversation no longer lines up with infai's history.
+			c.recordFailure()
+			return contracts.ChatMessage{}, result.Usage, harnessErr.ErrTurnCanceled
 		}
 	}
 	return reply, result.Usage, nil
+}
+
+// emitClaudeStreamedContent publishes what the live stream has not already
+// delivered. The validated answer is not repeated when it matches the stream;
+// only a missing tail is sent, so a client that watched the turn draw is not
+// handed the same text twice.
+func emitClaudeStreamedContent(streamed, validated string, emit func(string) bool) bool {
+	switch {
+	case validated == "":
+		return false
+	case streamed == "":
+		return emit(validated)
+	case streamed == validated:
+		return false
+	case strings.HasPrefix(validated, streamed):
+		return emit(validated[len(streamed):])
+	default:
+		// The stream and the validated answer disagree. The committed message
+		// carries the validated text; repeating all of it would duplicate what
+		// the client already drew.
+		return false
+	}
 }

@@ -48,6 +48,11 @@ type claudeStreamResult struct {
 	// tool expects. NativeText is what the model said in that same turn.
 	NativeTool *claudeNativeToolCall
 	NativeText string
+	// StreamedContent is the answer text delivered while the turn ran, and
+	// ContentStreamed says whether any was. Generate publishes only the part the
+	// stream did not already deliver.
+	StreamedContent string
+	ContentStreamed bool
 }
 
 type claudeNativeToolCall struct {
@@ -63,10 +68,16 @@ type claudeStreamEvent struct {
 	Error            json.RawMessage `json:"error"`
 	StructuredOutput json.RawMessage `json:"structured_output"`
 	Event            struct {
-		Type  string `json:"type"`
+		Type         string `json:"type"`
+		ContentBlock struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"content_block"`
 		Delta struct {
-			Type     string `json:"type"`
-			Thinking string `json:"thinking"`
+			Type        string `json:"type"`
+			Thinking    string `json:"thinking"`
+			PartialJSON string `json:"partial_json"`
+			Text        string `json:"text"`
 		} `json:"delta"`
 	} `json:"event"`
 	Message struct {
@@ -99,24 +110,34 @@ type claudeTokenUsage struct {
 
 // decodeClaudeStream consumes the CLI's newline-delimited JSON for one turn.
 //
-// The visible answer and any tool request are carried by the final result
-// event's validated object, so they are not emitted here: streaming only
-// forwards reasoning and provider status. The raw structured JSON that streams
-// in between must never reach the client, which is why nothing else is
-// forwarded.
+// The answer is generated as a JSON object validated against the schema, so
+// the partial deltas are JSON fragments. claudeContentStream reads the
+// top-level "content" string out of them and it is forwarded as it grows; the
+// rest of the JSON (the tool_calls and the syntax around the answer) is never
+// forwarded. The final result event remains authoritative for the committed
+// reply.
 //
-// A tool_use block for a tool in allowed is not forwarded either: it is the
-// model skipping the schema for the CLI's native channel, which is disabled.
-// The call is captured and stop ends the turn before the CLI can reject it and
-// the model starts retrying.
-func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.GenerateOptions, allowed claudeTools, stop func()) (claudeStreamResult, error) {
+// A tool_use block for a tool in allowed is not forwarded: it is the model
+// skipping the schema for the CLI's native channel, which is disabled. The call
+// is captured and stop ends the turn before the CLI can reject it and the model
+// starts retrying.
+func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.GenerateOptions, allowed claudeTools, stop func()) (result claudeStreamResult, err error) {
 	scanner := claudeScanner(reader)
 	var reasoning strings.Builder
-	var result claudeStreamResult
 
 	emit := func(kind contracts.EventStreamKind, text string) bool {
 		return text != "" && opts != nil && opts.OnDelta != nil && opts.OnDelta(kind, text)
 	}
+	// Only the structured-output block is the answer; a native tool's input is
+	// JSON too, and must not be read as one.
+	content := newClaudeContentStream(func(text string) bool {
+		return emit(contracts.DeltaContent, text)
+	})
+	defer func() {
+		result.StreamedContent = content.Content()
+		result.ContentStreamed = content.Streamed()
+	}()
+	streamingContent := false
 
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
@@ -128,12 +149,27 @@ func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.G
 		}
 		switch event.Type {
 		case "stream_event":
-			if event.Event.Type != "content_block_delta" || event.Event.Delta.Type != "thinking_delta" || event.Event.Delta.Thinking == "" {
-				continue
-			}
-			reasoning.WriteString(event.Event.Delta.Thinking)
-			if emit(contracts.DeltaReasoning, event.Event.Delta.Thinking) {
-				return result, harnessErr.ErrTurnCanceled
+			switch event.Event.Type {
+			case "content_block_start":
+				streamingContent = event.Event.ContentBlock.Type == "tool_use" &&
+					event.Event.ContentBlock.Name == "StructuredOutput"
+			case "content_block_stop":
+				streamingContent = false
+			case "content_block_delta":
+				switch event.Event.Delta.Type {
+				case "thinking_delta":
+					if event.Event.Delta.Thinking == "" {
+						continue
+					}
+					reasoning.WriteString(event.Event.Delta.Thinking)
+					if emit(contracts.DeltaReasoning, event.Event.Delta.Thinking) {
+						return result, harnessErr.ErrTurnCanceled
+					}
+				case "input_json_delta":
+					if streamingContent && content.Feed(event.Event.Delta.PartialJSON) {
+						return result, harnessErr.ErrTurnCanceled
+					}
+				}
 			}
 		case "assistant":
 			if !claudeUsageEmpty(event.Message.Usage) {
