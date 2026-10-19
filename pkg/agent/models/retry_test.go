@@ -117,6 +117,35 @@ func TestProviderRequestsRetryTransientFailures(t *testing.T) {
 	}
 }
 
+// TestRetryPolicyDoesNotRetryExhaustedQuota pins the difference between a rate
+// limit and a spent plan allowance: the latter names its reset, and every
+// attempt before then is answered the same way.
+func TestRetryPolicyDoesNotRetryExhaustedQuota(t *testing.T) {
+	const body = `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_at":1792445415,"resets_in_seconds":14950}}`
+
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	policy := retryPolicy{maxAttempts: 5, base: time.Millisecond, maxDelay: time.Minute}
+	_, err := policy.send(context.Background(), "openai codex responses api", server.Client(), nil, func() (*http.Request, error) {
+		return http.NewRequest(http.MethodPost, server.URL, nil)
+	})
+	if err == nil {
+		t.Fatal("send succeeded, want the exhausted quota")
+	}
+	if !strings.Contains(err.Error(), "usage_limit_reached") || !strings.Contains(err.Error(), "usage resets in") {
+		t.Fatalf("error = %q, want the quota marker and its reset", err)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("attempts = %d, want 1: an exhausted quota must not be retried", got)
+	}
+}
+
 func TestRetryPolicyReturnsPermanentStatusWithoutRetrying(t *testing.T) {
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

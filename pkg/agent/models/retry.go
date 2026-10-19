@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -85,11 +86,11 @@ func (p retryPolicy) send(ctx context.Context, label string, client *http.Client
 				return nil, err
 			}
 		case resp.StatusCode != http.StatusOK:
-			statusErr, retryAfter := readProviderError(label, resp)
-			if attempt == p.maxAttempts || !isRetryableStatus(resp.StatusCode) {
-				return nil, statusErr
+			failure := readProviderError(label, resp)
+			if attempt == p.maxAttempts || failure.permanent || !isRetryableStatus(resp.StatusCode) {
+				return nil, failure.err
 			}
-			if err := p.wait(ctx, attempt, retryAfter, opts); err != nil {
+			if err := p.wait(ctx, attempt, failure.retryAfter, opts); err != nil {
 				return nil, err
 			}
 		default:
@@ -132,21 +133,78 @@ func (p retryPolicy) wait(ctx context.Context, attempt int, retryAfter time.Dura
 	}
 }
 
+// providerFailure is a non-200 response: the error a caller should see, the
+// delay the provider asked for through Retry-After, and whether the body says
+// no retry can help because a plan's allowance is spent.
+type providerFailure struct {
+	err        error
+	retryAfter time.Duration
+	permanent  bool
+}
+
 // readProviderError drains and closes a non-200 response, returning the error a
-// caller should see and the delay the provider asked for through Retry-After.
-func readProviderError(label string, resp *http.Response) (error, time.Duration) {
+// caller should see, the delay the provider asked for through Retry-After, and
+// whether the response describes an exhausted plan allowance.
+func readProviderError(label string, resp *http.Response) providerFailure {
 	retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	closeErr := resp.Body.Close()
+	text := strings.TrimSpace(string(body))
 
-	statusErr := fmt.Errorf("%s: status %d: %s", label, resp.StatusCode, strings.TrimSpace(string(body)))
+	statusErr := fmt.Errorf("%s: status %d: %s", label, resp.StatusCode, text)
 	if readErr != nil {
 		statusErr = fmt.Errorf("%w: read response body: %v", statusErr, readErr)
 	}
 	if closeErr != nil {
 		statusErr = fmt.Errorf("%w: close response body: %v", statusErr, closeErr)
 	}
-	return statusErr, retryAfter
+
+	failure := providerFailure{err: statusErr, retryAfter: retryAfter}
+	if reset, exhausted := quotaExhausted(text); exhausted {
+		failure.permanent = true
+		if reset > 0 {
+			failure.err = fmt.Errorf("%w (usage resets in %s)", statusErr, reset.Round(time.Minute))
+		}
+	}
+	return failure
+}
+
+// quotaExhausted reports whether a provider error body says the account's plan
+// allowance is spent. That is a wall, not a rate limit: the provider states
+// when it will lift, and until then every attempt is answered the same way.
+func quotaExhausted(body string) (time.Duration, bool) {
+	var payload struct {
+		Error struct {
+			Type            string `json:"type"`
+			Code            string `json:"code"`
+			ResetsInSeconds *int64 `json:"resets_in_seconds"`
+			ResetsAt        *int64 `json:"resets_at"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return 0, false
+	}
+	if !isQuotaExhaustedKind(payload.Error.Type) && !isQuotaExhaustedKind(payload.Error.Code) {
+		return 0, false
+	}
+	if payload.Error.ResetsInSeconds != nil && *payload.Error.ResetsInSeconds > 0 {
+		return time.Duration(*payload.Error.ResetsInSeconds) * time.Second, true
+	}
+	if payload.Error.ResetsAt != nil {
+		if reset := time.Until(time.Unix(*payload.Error.ResetsAt, 0)); reset > 0 {
+			return reset, true
+		}
+	}
+	return 0, true
+}
+
+func isQuotaExhaustedKind(kind string) bool {
+	switch kind {
+	case "usage_limit_reached", "insufficient_quota":
+		return true
+	default:
+		return false
+	}
 }
 
 func isRetryableStatus(status int) bool {

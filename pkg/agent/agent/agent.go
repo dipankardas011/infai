@@ -280,6 +280,11 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 			if ctx.Err() != nil {
 				return
 			}
+			if a.Kind == contracts.SidecarLoopAgent || a.Kind == contracts.SingleLoopAgent {
+				reason := err.Error()
+				a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventSessionFatal, Timestamp: time.Now().UTC(), Content: &reason})
+				return
+			}
 			message := err.Error()
 			if !a.publishEvent(ctx, contracts.EventStream{Kind: contracts.EventProviderEvent, Timestamp: time.Now().UTC(), Content: &message}) {
 				return
