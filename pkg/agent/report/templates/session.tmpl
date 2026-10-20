@@ -1,0 +1,43 @@
+{{define "session-panel"}}
+<article class="session-panel{{if .Root}} active{{end}}" id="{{.DOMID}}" data-session-index="{{.Index}}">
+  {{template "session-hero" .}}
+  {{template "session-overview" .}}
+  {{with .UsageProgress}}{{template "usage-progress" .}}{{end}}
+  {{if .TaskChecklist}}{{template "task-checklist-panel" .}}{{end}}
+  <h2 class="timeline-heading">Branch timeline</h2>
+  <p class="timeline-note"><span class="tl-cursor">*</span> marks the current event. <span class="tl-fork">⎇</span> marks a fork. Click any line to open its full payload.</p>
+  <div class="tl-tools" role="search">
+    <input type="search" data-filter-text placeholder="filter events…  ( / )" aria-label="Filter events by text">
+    <button type="button" class="chip" data-filter-role="user" aria-pressed="true">▸ user</button>
+    <button type="button" class="chip" data-filter-role="assistant" aria-pressed="true">◆ assistant</button>
+    <button type="button" class="chip" data-filter-role="thinking" aria-pressed="true">thinking</button>
+    <button type="button" class="chip" data-filter-role="tools" aria-pressed="true">⚙ tools</button>
+    <span class="tl-count" data-filter-count></span>
+    <button type="button" class="chip" data-filter-reset hidden>reset</button>
+  </div>
+  <div class="timeline">{{range .Events}}{{template "timeline-event" .}}{{end}}</div>
+</article>
+{{end}}
+
+{{define "session-hero"}}
+<section class="hero">
+  <div class="eyebrow">{{if .Root}}root session{{else}}offspring session{{end}} · {{.Kind}}</div>
+  <h1>{{.Title}}</h1>
+  <div class="counts">{{range .Counts}}<span class="count">{{.Key}}: {{.Value}}</span>{{end}}</div>
+</section>
+{{end}}
+
+{{define "session-overview"}}
+<div class="overview">
+  <section class="panel">
+    <h2>Session details</h2>
+    <dl class="facts">{{range .Meta}}<dt>{{.Key}}</dt><dd>{{.Value}}</dd>{{end}}</dl>
+  </section>
+  <section class="panel">
+    <h2>Field guide</h2>
+    <p>Each event expands into the lines it produced: <span class="tl-role thinking">thinking:</span>, <span class="tl-role assistant">assistant:</span>, <span class="tl-role tool_call">tool_call:</span>, <span class="tl-role tool_result">tool_result:</span>.</p>
+    <p class="dim"><span class="tl-cursor">*</span> marks the current event. <span class="tl-fork">⎇</span> marks a branch arm. Click a line to open the full payload.</p>
+    <p class="dim">Keys: <kbd>j</kbd> <kbd>k</kbd> move between events · <kbd>Enter</kbd> open · <kbd>/</kbd> filter · <kbd>Esc</kbd> close.</p>
+  </section>
+</div>
+{{end}}

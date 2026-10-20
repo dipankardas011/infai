@@ -1,0 +1,173 @@
+{{define "scripts"}}<script>
+{{template "scripts-init"}}
+{{template "scripts-interaction"}}
+{{template "scripts-keyboard"}}
+</script>{{end}}
+{{define "scripts-init"}}
+(function(){
+'use strict';
+const body=document.body,
+panels=[...document.querySelectorAll('.session-panel')],
+buttons=[...document.querySelectorAll('[data-session-target]')],
+outlines=[...document.querySelectorAll('[data-outline-for]')],
+menu=document.querySelector('.menu'),
+topTitle=document.querySelector('[data-top-title]'),
+pos=document.querySelector('[data-pos]'),
+bar=document.querySelector('[data-progress]'),
+filters=new Map(),
+groupOf={user:'user',assistant:'assistant',thinking:'thinking',tool_call:'tools',tool_result:'tools'};
+let currentRow=null,cursor=null,cursorAt=0,raf=0;
+const header=document.querySelector('.topbar');
+new ResizeObserver(()=>document.documentElement.style.setProperty('--topbar',header.getBoundingClientRect().height+'px')).observe(header);
+function activePanel(){return document.querySelector('.session-panel.active')}
+function visibleRows(p){return [...p.querySelectorAll('.tl-row:not([hidden])')]}
+function selectSession(id){
+  let title='';
+  panels.forEach(p=>{const on=p.id===id;p.classList.toggle('active',on);if(on){const h=p.querySelector('h1');if(h)title=h.textContent}});
+  buttons.forEach(b=>{const on=b.dataset.sessionTarget===id;b.classList.toggle('active',on);b.setAttribute('aria-pressed',String(on))});
+  outlines.forEach(o=>{const on=o.dataset.outlineFor===id;o.classList.toggle('active',on);o.hidden=!on});
+  if(title)topTitle.textContent=title;
+  body.classList.remove('nav-open');menu.setAttribute('aria-expanded','false');
+  window.scrollTo({top:0,behavior:'instant'});cursor=null;sync();
+}
+buttons.forEach(b=>b.addEventListener('click',()=>selectSession(b.dataset.sessionTarget)));
+// An event or call inside a closed <details> is unreachable until its ancestors open.
+function openAncestors(el){for(let n=el.parentElement;n;n=n.parentElement){if(n.tagName==='DETAILS')n.open=true}}
+function jump(id){
+  const el=document.getElementById(id);if(!el)return false;
+  const panel=el.closest('.session-panel'),row=el.closest('.tl-row');
+  if(panel&&!panel.classList.contains('active'))selectSession(panel.id);
+  if(row&&row.hidden&&panel&&filters.has(panel))filters.get(panel).reset();
+  openAncestors(el);
+  el.scrollIntoView({behavior:'smooth',block:'center'});
+  if(row){row.classList.remove('flash');void row.offsetWidth;row.classList.add('flash')}
+  document.querySelectorAll('.tree-link.selected').forEach(n=>n.classList.remove('selected'));
+  document.querySelectorAll('[data-scroll-event="'+CSS.escape(id)+'"]').forEach(n=>n.classList.add('selected'));
+  body.classList.remove('nav-open');
+  return true;
+}
+document.querySelectorAll('[data-scroll-event]').forEach(el=>el.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();jump(el.dataset.scrollEvent)}));
+document.addEventListener('click',e=>{
+  const a=e.target.closest('a[href^="#"]');
+  if(!a||a.dataset.scrollEvent)return;
+  let id='';try{id=decodeURIComponent(a.getAttribute('href').slice(1))}catch(x){return}
+  if(id&&jump(id))e.preventDefault();
+});
+menu.addEventListener('click',e=>{const open=body.classList.toggle('nav-open');e.currentTarget.setAttribute('aria-expanded',String(open))});
+document.addEventListener('click',e=>{if(body.classList.contains('nav-open')&&!e.target.closest('.sidebar')&&!e.target.closest('.menu'))body.classList.remove('nav-open')});
+// Expanding opens the event boxes only; the raw payloads inside stay shut so the page stays readable.
+document.querySelectorAll('[data-details]').forEach(b=>b.addEventListener('click',()=>{
+  const open=b.dataset.details==='open',p=activePanel();if(!p)return;
+  p.querySelectorAll('.tl-row:not([hidden]) .tl-box').forEach(d=>d.open=open);
+  if(!open)p.querySelectorAll('.tl-row .tl-detail details').forEach(d=>d.open=false);
+}));
+{{end}}
+{{define "scripts-interaction"}}
+// Filter: free text over each event's whole box, plus role chips.
+panels.forEach(p=>{
+  const input=p.querySelector('[data-filter-text]'),chips=[...p.querySelectorAll('[data-filter-role]')],
+  count=p.querySelector('[data-filter-count]'),resetBtn=p.querySelector('[data-filter-reset]'),
+  rows=[...p.querySelectorAll('.tl-row')],seps=[...p.querySelectorAll('.tl-sep')],cache=new WeakMap();
+  if(!input)return;
+  function haystack(r){let t=cache.get(r);if(t===undefined){t=r.querySelector('.tl-box').textContent.toLowerCase();cache.set(r,t)}return t}
+  function apply(){
+    const q=input.value.trim().toLowerCase(),on={};
+    chips.forEach(c=>{on[c.dataset.filterRole]=c.getAttribute('aria-pressed')==='true'});
+    let shown=0;
+    rows.forEach(r=>{
+      const groups=r.dataset.roles.trim().split(/\s+/).map(x=>groupOf[x]||'other');
+      const show=groups.some(g=>g==='other'||on[g])&&(!q||haystack(r).indexOf(q)>=0);
+      r.hidden=!show;if(show)shown++;
+    });
+    seps.forEach(s=>{const n=s.nextElementSibling;s.hidden=!!(n&&n.hidden)});
+    count.textContent=shown===rows.length?rows.length+' events':shown+' of '+rows.length+' events';
+    resetBtn.hidden=!q&&chips.every(c=>c.getAttribute('aria-pressed')==='true');
+    sync();
+  }
+  function reset(){input.value='';chips.forEach(c=>c.setAttribute('aria-pressed','true'));apply()}
+  input.addEventListener('input',apply);
+  chips.forEach(c=>c.addEventListener('click',()=>{c.setAttribute('aria-pressed',String(c.getAttribute('aria-pressed')!=='true'));apply()}));
+  resetBtn.addEventListener('click',reset);
+  filters.set(p,{apply:apply,reset:reset});
+  apply();
+});
+// Where am I: current event, scroll progress, and the matching entry in the sidebar jump list.
+function sync(){
+  raf=0;
+  const p=activePanel();if(!p)return;
+  const max=document.documentElement.scrollHeight-window.innerHeight;
+  bar.style.width=(max>0?Math.min(100,window.scrollY/max*100):0)+'%';
+  const rows=visibleRows(p);
+  if(!rows.length){pos.textContent='no matching events';currentRow=null;return}
+  let cur=rows[0];
+  for(const r of rows){if(r.getBoundingClientRect().top<=140)cur=r;else break}
+  currentRow=cur;
+  pos.textContent='#'+cur.dataset.index+' / '+p.querySelectorAll('.tl-row').length;
+  document.querySelectorAll('[data-outline-for="'+p.id+'"] ul').forEach(ul=>{
+    let here=null;
+    ul.querySelectorAll('.tree-link').forEach(l=>{
+      const t=document.getElementById(l.dataset.scrollEvent);
+      if(t&&(t===cur||(t.compareDocumentPosition(cur)&Node.DOCUMENT_POSITION_FOLLOWING)))here=l;
+    });
+    ul.querySelectorAll('.tree-link').forEach(l=>l.classList.toggle('here',l===here));
+  });
+}
+window.addEventListener('scroll',()=>{if(!raf)raf=requestAnimationFrame(sync)},{passive:true});
+window.addEventListener('resize',()=>{if(!raf)raf=requestAnimationFrame(sync)});
+{{end}}
+{{define "scripts-keyboard"}}
+// Keyboard: j/k walk the visible events and focus the row, so Enter/Space opens it natively.
+function step(dir){
+  const p=activePanel();if(!p)return;
+  const rows=visibleRows(p);if(!rows.length)return;
+  const base=(cursor&&Date.now()-cursorAt<700&&rows.includes(cursor))?cursor:currentRow;
+  let i=rows.indexOf(base);
+  i=i<0?0:Math.max(0,Math.min(rows.length-1,i+dir));
+  cursor=rows[i];cursorAt=Date.now();
+  jump(cursor.id);
+  const s=cursor.querySelector('summary');if(s)s.focus({preventScroll:true});
+}
+// Copy buttons on commands, outputs, code blocks and raw payloads.
+function copyText(text){
+  if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(text);
+  return new Promise((resolve,reject)=>{
+    const a=document.createElement('textarea');a.value=text;a.style.position='fixed';a.style.opacity='0';
+    document.body.appendChild(a);a.select();
+    try{document.execCommand('copy')?resolve():reject()}catch(x){reject(x)}
+    a.remove();
+  });
+}
+document.querySelectorAll('.tl-detail pre').forEach(pre=>{
+  const wrap=document.createElement('div'),btn=document.createElement('button');
+  wrap.className='copyable';btn.type='button';btn.className='copy';btn.textContent='copy';btn.setAttribute('aria-label','Copy to clipboard');
+  btn.addEventListener('click',()=>{
+    const text=pre.classList.contains('command')?pre.textContent.replace(/^\$ /,''):pre.textContent;
+    copyText(text).then(()=>{btn.textContent='copied';btn.classList.add('done')},()=>{btn.textContent='failed'}).then(()=>setTimeout(()=>{btn.textContent='copy';btn.classList.remove('done')},1200));
+  });
+  pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);wrap.appendChild(btn);
+});
+const box=document.querySelector('.lightbox'),boxImg=box.querySelector('img');
+function closeBox(){box.classList.remove('open');boxImg.removeAttribute('src')}
+document.querySelectorAll('img[data-lightbox]').forEach(img=>img.addEventListener('click',()=>{boxImg.src=img.src;boxImg.alt=img.alt;box.classList.add('open');box.focus()}));
+box.addEventListener('click',e=>{if(e.target===box||e.target.closest('button'))closeBox()});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){
+    closeBox();body.classList.remove('nav-open');
+    const f=document.activeElement;if(f&&f.matches&&f.matches('[data-filter-text]'))f.blur();
+    return;
+  }
+  if(e.metaKey||e.ctrlKey||e.altKey)return;
+  const t=e.target;
+  if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable))return;
+  if(box.classList.contains('open'))return;
+  if(e.key==='/'){const p=activePanel(),i=p&&p.querySelector('[data-filter-text]');if(i){e.preventDefault();i.focus();i.select()}}
+  else if(e.key==='j')step(1);
+  else if(e.key==='k')step(-1);
+});
+if(location.hash.length>1){
+  let id='';try{id=decodeURIComponent(location.hash.slice(1))}catch(x){}
+  if(id)setTimeout(()=>jump(id),0);
+}
+sync();
+})();
+{{end}}

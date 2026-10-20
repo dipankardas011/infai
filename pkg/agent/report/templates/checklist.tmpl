@@ -1,0 +1,19 @@
+{{define "checklist-item"}}
+<div class="checklist-item {{.Class}}">
+  <span class="checklist-icon">{{.Icon}}</span>
+  <div>
+    <div class="checklist-text-title">{{.Title}}</div>
+    <div class="checklist-text-desc">{{.Description}}</div>
+  </div>
+</div>
+{{end}}
+
+{{define "task-checklist-panel"}}
+<section class="panel" data-feature="task-checklist">
+  <h2>Task checklist</h2>
+  <div class="checklist">
+    <div class="checklist-title">☑ last known state</div>
+    {{range .TaskChecklist}}{{template "checklist-item" .}}{{end}}
+  </div>
+</section>
+{{end}}

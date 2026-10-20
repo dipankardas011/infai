@@ -1,0 +1,57 @@
+{{define "sidebar"}}
+<aside class="sidebar" id="sidebar">
+  <div class="brand">
+    <div class="brand-lockup">
+      <svg class="brand-mark" viewBox="0 0 512 512" aria-hidden="true" focusable="false">
+        <rect width="512" height="512" rx="113" fill="#11171a"/>
+        <path fill="#d3c6aa" d="M96 192h64v64h-64zM352 192h64v64h-64zM96 256h64v64h-64zM224 256h64v64h-64zM352 256h64v64h-64zM96 320h64v64h-64zM224 320h64v64h-64zM352 320h64v64h-64zM96 384h320v64h-320z"/>
+        <path fill="#83c092" d="M96 64h64v64h-64zM352 64h64v64h-64zM224 128h64v64h-64z"/>
+      </svg>
+      <strong>infaiw</strong>
+    </div>
+    <span>branch timeline · {{.Generated}}</span>
+  </div>
+  <div class="side-scroll">
+    <h2 class="side-title">Sessions</h2>
+    <nav class="session-switcher" aria-label="Session switcher">
+      {{range .Sessions}}
+      <button class="session-button{{if .Root}} active{{end}}" type="button" data-session-target="{{.DOMID}}" aria-pressed="{{if .Root}}true{{else}}false{{end}}">
+        <span class="session-icon">{{.Icon}}</span>
+        <span><span class="session-name">{{.Title}}</span><span class="session-kind">{{if .Root}}root · {{else}}offspring · {{end}}{{.Kind}}</span></span>
+      </button>
+      {{end}}
+    </nav>
+    <h2 class="side-title">Jump to</h2>
+    {{range .Sessions}}
+    <div class="branch-outline{{if .Root}} active{{end}}" data-outline-for="{{.DOMID}}"{{if not .Root}} hidden{{end}}>
+      <div class="side-subtitle">user turns</div>
+      <ul>
+        {{range .Jumps}}
+        <li><button type="button" class="tree-link{{if .Event.Active}} active{{else}} off{{end}}{{if .Event.Head}} head{{end}}{{if .Event.Fork}} fork{{end}}" data-scroll-event="{{.Event.DOMID}}" title="{{.Event.Label}} {{.Event.ShortID}}"><span class="tree-dot"></span><span class="tree-label">{{with index .Event.Displays 0}}{{.Text}}{{end}}</span></button></li>
+        {{end}}
+      </ul>
+      <div class="side-subtitle">graph landmarks</div>
+      <ul>
+        {{range .Tree}}
+        <li><button type="button" class="tree-link{{if .Event.Active}} active{{else}} off{{end}}{{if .Event.Head}} head{{end}}{{if .Event.Fork}} fork{{end}}" data-scroll-event="{{.Event.DOMID}}" title="{{.Event.Label}} {{.Event.ShortID}}"><span class="tree-dot"></span><span>{{.Event.Icon}}</span><span class="tree-label">{{.Event.Label}}{{if .Event.ForkPoint}} · {{.Event.ChildCount}} arms{{end}}{{if .Event.Head}} · HEAD{{end}}</span></button></li>
+        {{end}}
+      </ul>
+    </div>
+    {{end}}
+  </div>
+</aside>
+{{end}}
+
+{{define "topbar"}}
+<header class="topbar">
+  <button class="menu" type="button" aria-controls="sidebar" aria-expanded="false">☰ sessions</button>
+  <span class="top-title" data-top-title>{{.Title}}</span>
+  <span class="generated">complete branch report</span>
+  <span class="pos" data-pos></span>
+  <span class="actions">
+    <button type="button" data-details="open">expand all</button>
+    <button type="button" data-details="close">collapse all</button>
+  </span>
+  <span class="progress" aria-hidden="true"><i data-progress></i></span>
+</header>
+{{end}}

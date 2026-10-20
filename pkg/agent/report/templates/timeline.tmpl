@@ -1,0 +1,100 @@
+{{define "timeline-event"}}
+{{if .Enter}}
+<div class="tl-sep{{if not .Fork}} main{{end}}" style="--depth:{{.Depth}}">
+  <div class="tl-sep-rail">{{range .Guides}}<span class="tl-guide" style="--level:{{.}}"></span>{{end}}</div>
+  <div class="tl-sep-main">
+    <span class="tl-sep-pill"><b>⎇</b>{{if .Fork}}branch<i>fork of {{.ForkFrom}}</i>{{else}}main<i>continues</i>{{end}}</span>
+    <span class="tl-sep-wave" aria-hidden="true"></span>
+  </div>
+</div>
+{{end}}
+<div class="tl-row {{.Class}}{{if not .Active}} off{{end}}{{if .Head}} head{{end}}{{if .Fork}} fork{{end}}" id="{{.DOMID}}" data-event-id="{{.ID}}" data-parent-id="{{.ParentID}}" data-index="{{.Index}}" data-roles="{{range .Displays}}{{.Role}} {{end}}" style="--depth:{{.Depth}}">
+  <div class="tl-rail">
+    <span class="tl-stem"></span>{{range .Guides}}<span class="tl-guide" style="--level:{{.}}"></span>{{end}}{{if .Enter}}<span class="tl-elbow"></span>{{end}}<span class="tl-node"></span>
+  </div>
+  <details class="tl-box">
+    <summary class="tl-summary">{{range .Displays}}<span class="tl-line"><span class="tl-cursor">{{if .Current}}*{{end}}</span><span class="tl-body">{{range .Badges}}<span class="badge {{.}}">{{.}}</span> {{end}}<span class="tl-role {{.Role}}">{{.Role}}:</span> <span class="tl-text">{{.Text}}</span></span></span>{{end}}</summary>
+    <div class="tl-detail">
+      {{template "event-detail" .}}
+    </div>
+  </details>
+</div>
+{{end}}
+
+{{define "event-detail"}}
+<div class="tl-meta">
+  {{if .Head}}<span class="badge head">HEAD</span>{{end}}
+  {{if not .Active}}<span class="badge off">off branch</span>{{end}}
+  {{if .Fork}}<span class="badge fork">⌁ fork of {{.ForkFrom}}</span>{{end}}
+  {{if .Status}}<span class="badge {{if eq .Status "success"}}ok{{else}}err{{end}}">{{.Status}}</span>{{end}}
+  {{if .ParentID}}<a href="#{{.ParentDOMID}}" data-scroll-event="{{.ParentDOMID}}">parent {{.ParentShort}}</a>{{end}}
+  {{if .BlobHash}}<span>blob {{.BlobHash}}</span>{{end}}
+  {{if .ForkPoint}}<span>{{.ChildCount}} arms leave this event</span>{{end}}
+</div>
+{{if .Unresolved}}<div class="dim">payload unavailable — showing the stored preview only</div>{{end}}
+{{if .Reasoning}}<div class="markdown thinking">{{.Reasoning}}</div>{{end}}
+{{if and .Text (not .Result)}}<div class="markdown">{{.Text}}</div>{{end}}
+{{if .Summary}}<div class="markdown">{{.Summary}}</div>{{end}}
+{{with .Eval}}
+<div class="eval {{if .Passed}}pass{{else}}fail{{end}}">
+  <div class="eval-head">
+    <span class="eval-icon">{{if .Passed}}✓ PASS{{else}}✗ FAIL{{end}}</span>
+    <span class="eval-label">acceptance script · attempt {{.Attempt}}</span>
+  </div>
+  {{if .Output}}<pre class="eval-output">{{.Output}}</pre>{{end}}
+</div>
+{{end}}
+{{if .TaskChecklistItems}}
+<div class="checklist">
+  <div class="checklist-title">☑ task checklist</div>
+  {{range .TaskChecklistItems}}{{template "checklist-item" .}}{{end}}
+</div>
+{{end}}
+{{if .Checklist}}<details><summary>task checklist · raw JSON</summary><pre>{{.Checklist}}</pre></details>{{end}}
+{{with .Result}}
+<div class="tool-result">
+  {{if .ExitCode}}<span class="badge {{if .Failed}}err{{else}}ok{{end}}">exit {{.ExitCode}}</span>{{end}}
+  <pre class="tool-output">{{.Output}}</pre>
+  {{range .Rows}}<div class="arg"><span class="arg-key">{{.Key}}</span><span class="arg-value">{{.Value}}</span></div>{{end}}
+</div>
+{{end}}
+{{if .ToolOutput}}<div class="tool-result"><pre class="tool-output">{{.ToolOutput}}</pre></div>{{end}}
+{{range .ToolCalls}}
+<div class="call" id="{{.Anchor}}">
+  <div class="call-head">
+    <b>⚙ {{.Name}}</b>
+    {{if .Badge}}<span class="badge {{.Badge}}">{{.Badge}}</span>{{end}}
+    <span class="dim">{{.ID}}</span>
+  </div>
+  {{if .Command}}<pre class="command"><span class="prompt">$</span> {{.Command}}</pre>{{end}}
+  {{if .ArgRows}}<dl class="args">{{range .ArgRows}}<dt>{{.Key}}</dt><dd>{{.Value}}</dd>{{end}}</dl>{{end}}
+  <details><summary>raw arguments</summary><pre>{{.Args}}</pre></details>
+  {{with .Result}}
+  <div class="tool-result">
+    {{if .ExitCode}}<span class="badge {{if .Failed}}err{{else}}ok{{end}}">exit {{.ExitCode}}</span>{{end}}
+    <pre class="tool-output">{{.Output}}</pre>
+    {{range .Rows}}<div class="arg"><span class="arg-key">{{.Key}}</span><span class="arg-value">{{.Value}}</span></div>{{end}}
+  </div>
+  {{end}}
+  {{if .Output}}<div class="tool-result"><pre class="tool-output">{{.Output}}</pre></div>{{end}}
+  {{if .TaskChecklistItems}}
+  <div class="checklist">
+    <div class="checklist-title">☑ task checklist</div>
+    {{range .TaskChecklistItems}}{{template "checklist-item" .}}{{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}
+{{if .ToolCallID}}<div class="dim">answers call {{if .CallLink}}<a href="#{{.CallLink}}">{{.ToolCallID}}</a>{{else}}{{.ToolCallID}}{{end}}</div>{{end}}
+{{if .Images}}
+<div class="media-grid">
+  {{range .Images}}
+  <div class="media">
+    {{if .Src}}<img src="{{.Src}}" alt="{{.Name}}" loading="lazy" data-lightbox>{{end}}
+    <div class="media-meta">{{.Name}} · {{.MediaType}} · {{.Size}} bytes{{if .Width}} · {{.Width}}×{{.Height}}{{end}}{{if .Prompt}} · prompt: {{.Prompt}}{{end}}</div>
+  </div>
+  {{end}}
+</div>
+{{end}}
+<details><summary>full payload · raw JSON</summary><pre>{{.Raw}}</pre></details>
+{{end}}

@@ -1,0 +1,25 @@
+{{define "usage-progress"}}
+<section class="usage usage-progress-panel" data-feature="usage-progress" data-usage-progress>
+  <h2 class="side-title">Last-turn usage</h2>
+  {{if not .Present}}<p class="dim">No last-turn token usage was recorded for this session.</p>{{end}}
+  <div class="usage-numbers">
+    <div class="metric"><strong>{{.Prompt}}</strong><span>prompt</span></div>
+    <div class="metric"><strong>{{.Completion}}</strong><span>completion</span></div>
+    <div class="metric"><strong>{{.Total}}</strong><span>total</span></div>
+    <div class="metric"><strong>{{.Window}}</strong><span>context window</span></div>
+  </div>
+  <div class="bar-row">
+    <span>prompt / context</span>
+    <div class="usage-progress-bar prompt-context-progress" role="progressbar" aria-label="Prompt context usage progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{printf "%.1f" .PromptPercent}}"><span class="usage-progress-fill usage-fill" style="width:{{printf "%.2f" .PromptPercent}}%"></span></div>
+    <progress class="usage-progress sr-only" max="100" value="{{printf "%.2f" .PromptPercent}}">{{printf "%.1f" .PromptPercent}}%</progress>
+    <span class="bar-label{{if .Overflow}} overflow{{end}}">{{.PromptLabel}}{{if .Overflow}} · exceeds window{{end}}</span>
+  </div>
+  <div class="bar-row">
+    <span>completion</span>
+    <div class="usage-progress-bar completion-progress" role="progressbar" aria-label="Completion usage progress relative to context window" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{printf "%.1f" .CompletionPercent}}"><span class="usage-progress-fill completion" style="width:{{printf "%.2f" .CompletionPercent}}%"></span></div>
+    <progress class="usage-progress sr-only" max="100" value="{{printf "%.2f" .CompletionPercent}}">{{printf "%.1f" .CompletionPercent}}%</progress>
+    <span class="bar-label">{{.CompletionLabel}}</span>
+  </div>
+  <div class="dim">cached {{.Cached}} · cache write {{.CacheWrite}} · reasoning {{.Reasoning}}</div>
+</section>
+{{end}}

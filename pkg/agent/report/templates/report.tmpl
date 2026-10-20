@@ -1,0 +1,22 @@
+{{define "report"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>infai report · {{.Title}}</title>
+{{template "styles"}}
+
+</head>
+<body>
+<div class="shell">
+{{template "sidebar" .}}
+<div class="content">
+{{template "topbar" .}}
+<main>
+{{range .Sessions}}{{template "session-panel" .}}{{end}}
+</main></div></div>
+{{template "lightbox"}}
+{{template "scripts"}}
+</body></html>
+{{end}}
