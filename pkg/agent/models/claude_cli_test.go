@@ -53,12 +53,13 @@ func testClaudeTools() []contracts.Tool {
 func TestClaudeCLIArgsKeepToolsDisabledAndPassTheCatalogID(t *testing.T) {
 	model := catalogModel(t, "claude", "claude-sonnet-5-5", contracts.ThinkingLow)
 	const sessionID = "11111111-2222-3333-4444-555555555555"
-	args := claudeCLIArgs(model, "system prompt", `{"type":"object"}`, false, claudeSessionArg{ID: sessionID})
+	args := claudeCLIArgs(model, claudeSessionArg{ID: sessionID})
 	joined := strings.Join(args, "|")
 	for _, required := range []string{
 		"-p", "--tools||", "--strict-mcp-config", `--mcp-config|{"mcpServers":{}}`,
 		"--setting-sources||", "--disable-slash-commands", "--session-id|" + sessionID,
-		"--system-prompt|system prompt", "--model|claude-sonnet-5-5", `--json-schema|{"type":"object"}`,
+		"--model|claude-sonnet-5-5",
+		"--input-format|stream-json", "--await-initialize",
 		"--output-format|stream-json", "--verbose", "--include-partial-messages", "--effort|low",
 	} {
 		if !strings.Contains(joined, required) {
@@ -68,17 +69,16 @@ func TestClaudeCLIArgsKeepToolsDisabledAndPassTheCatalogID(t *testing.T) {
 	if strings.Contains(joined, "--no-session-persistence") {
 		t.Error("the stored conversation is what lets the CLI reuse its prompt cache")
 	}
-	if strings.Contains(joined, "--input-format") {
-		t.Errorf("text-only turns must keep the CLI's default input format: %q", joined)
+	// One argument at 128 KiB fails exec with E2BIG, so no payload may travel
+	// in argv: the prompt and the schema go on stdin.
+	for _, payload := range []string{"--system-prompt|", "--json-schema|"} {
+		if strings.Contains(joined, payload) {
+			t.Errorf("argv carries a payload (%q): %q", payload, joined)
+		}
 	}
-	resumed := strings.Join(claudeCLIArgs(model, "system prompt", `{"type":"object"}`, false,
-		claudeSessionArg{ID: sessionID, Resume: true}), "|")
+	resumed := strings.Join(claudeCLIArgs(model, claudeSessionArg{ID: sessionID, Resume: true}), "|")
 	if !strings.Contains(resumed, "--resume|"+sessionID) || strings.Contains(resumed, "--session-id") {
 		t.Errorf("resumed turn args = %q", resumed)
-	}
-	if !strings.Contains(strings.Join(claudeCLIArgs(model, "system prompt", `{"type":"object"}`, true,
-		claudeSessionArg{ID: sessionID}), "|"), "--input-format|stream-json") {
-		t.Error("image turns must select stream-json input")
 	}
 	if strings.Contains(joined, "--bare") {
 		t.Error("--bare drops the subscription login and must never be passed")
@@ -209,23 +209,70 @@ func TestClaudeTranscriptPartsIndexImagesInOrder(t *testing.T) {
 	}
 }
 
-func TestClaudeStdinKeepsTextOnlyTurnsOnTheDefaultInputFormat(t *testing.T) {
-	transcript := `{"messages":[]}`
-	stdin, streamJSON := claudeStdin(transcript, nil)
-	if streamJSON {
-		t.Fatal("a text-only turn must not select stream-json input")
+// The prompt and the schema must ride the initialize control request, not argv:
+// one argument at 128 KiB fails exec with E2BIG, and two MCP servers serialize
+// a schema past that.
+func TestClaudeStdinSendsThePromptAndSchemaOnTheInitializeLine(t *testing.T) {
+	const schema = `{"type":"object","properties":{"content":{"type":"string"}}}`
+	stdin := claudeStdin(claudeStdinInput{
+		SystemPrompt: "you are infai",
+		Schema:       schema,
+		RequestID:    "req-1",
+		SessionID:    "session-1",
+		Transcript:   `{"messages":[]}`,
+	})
+	lines := strings.Split(strings.TrimSuffix(stdin, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stdin has %d lines, want initialize + user:\n%s", len(lines), stdin)
 	}
-	if stdin != transcript {
-		t.Fatalf("stdin = %q, want the plain transcript", stdin)
+	var init struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+		Request   struct {
+			Subtype      string          `json:"subtype"`
+			SystemPrompt string          `json:"systemPrompt"`
+			JSONSchema   json.RawMessage `json:"jsonSchema"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &init); err != nil {
+		t.Fatalf("initialize line: %v\n%s", err, lines[0])
+	}
+	if init.Type != "control_request" || init.Request.Subtype != "initialize" || init.RequestID != "req-1" {
+		t.Fatalf("initialize envelope = %+v", init)
+	}
+	if init.Request.SystemPrompt != "you are infai" {
+		t.Fatalf("systemPrompt = %q", init.Request.SystemPrompt)
+	}
+	if string(init.Request.JSONSchema) != schema {
+		t.Fatalf("jsonSchema = %s", init.Request.JSONSchema)
+	}
+	var user struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &user); err != nil {
+		t.Fatalf("user line: %v\n%s", err, lines[1])
+	}
+	if user.Type != "user" || len(user.Message.Content) != 1 || user.Message.Content[0].Text != `{"messages":[]}` {
+		t.Fatalf("user envelope = %+v", user)
+	}
+	if !strings.HasSuffix(stdin, "\n") {
+		t.Error("stream-json input must be newline delimited")
 	}
 }
 
 func TestClaudeStdinCarriesImagesAsStreamJSONBlocks(t *testing.T) {
 	transcript := `{"messages":[{"role":"user","images":[{"index":0,"media_type":"image/png"}]}]}`
 	image := contracts.ImageInput{MediaType: "image/png", Data: []byte("png-bytes")}
-	stdin, streamJSON := claudeStdin(transcript, []contracts.ImageInput{image})
-	if !streamJSON {
-		t.Fatal("an image turn must select stream-json input")
+	stdin := claudeStdin(claudeStdinInput{Transcript: transcript, Images: []contracts.ImageInput{image}})
+	lines := strings.Split(strings.TrimSuffix(stdin, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stdin has %d lines, want initialize + user:\n%s", len(lines), stdin)
 	}
 	var envelope struct {
 		Type    string `json:"type"`
@@ -242,8 +289,8 @@ func TestClaudeStdinCarriesImagesAsStreamJSONBlocks(t *testing.T) {
 			} `json:"content"`
 		} `json:"message"`
 	}
-	if err := json.Unmarshal([]byte(stdin), &envelope); err != nil {
-		t.Fatalf("stdin is not one JSON line: %v\n%s", err, stdin)
+	if err := json.Unmarshal([]byte(lines[1]), &envelope); err != nil {
+		t.Fatalf("user line is not JSON: %v\n%s", err, lines[1])
 	}
 	if envelope.Type != "user" || envelope.Message.Role != "user" {
 		t.Fatalf("envelope = %+v", envelope)

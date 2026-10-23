@@ -60,9 +60,9 @@ type claudeCLI struct {
 type claudeCLIOptions struct {
 	// workspace is the session's working directory. The CLI reports its
 	// process cwd to the model in its environment block, so running it here
-	// keeps that report in sync with infai's system prompt. --system-prompt
-	// keeps CLAUDE.md and git status out of the request, so the real
-	// directory is safe.
+	// keeps that report in sync with infai's system prompt. The system prompt
+	// on the initialize request replaces the CLI's own, so CLAUDE.md and git
+	// status stay out of the request and the real directory is safe.
 	workspace  string
 	retryDelay time.Duration
 	// memoryMax and pidsMax bound each CLI turn when the unit delegated a

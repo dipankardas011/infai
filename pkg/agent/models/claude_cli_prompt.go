@@ -132,9 +132,10 @@ func claudeTranscriptParts(messages []contracts.ChatMessage) (string, []contract
 	return string(raw), images
 }
 
-// claudeStreamUserMessage is one line of the CLI's stream-json input. The CLI
-// rejects image blocks in its default text mode, so a turn carrying images
-// switches to this NDJSON envelope.
+// claudeStreamUserMessage is the second line of the CLI's stream-json input.
+// Every turn uses this envelope: the first line is the initialize control
+// request, and control requests exist only in stream-json mode. It is also the
+// only mode that accepts image blocks.
 type claudeStreamUserMessage struct {
 	Type            string              `json:"type"`
 	Message         claudeStreamMessage `json:"message"`
@@ -163,15 +164,57 @@ type claudeTextBlock struct {
 	Text string `json:"text"`
 }
 
-// claudeStdin returns the bytes for the CLI's stdin and whether stream-json
-// input is required. A text-only turn keeps the plain transcript because that
-// is the CLI's default and cheapest input mode.
-func claudeStdin(transcript string, images []contracts.ImageInput) (string, bool) {
-	if len(images) == 0 {
-		return transcript, false
+// claudeStdinInput is everything one turn writes to the CLI's stdin, in wire
+// order: the initialize control request, then the user message.
+type claudeStdinInput struct {
+	// SystemPrompt and Schema ride the initialize request because argv cannot
+	// carry them (§ claudeCLIArgs).
+	SystemPrompt string
+	Schema       string
+	RequestID    string
+	SessionID    string
+	Transcript   string
+	Images       []contracts.ImageInput
+}
+
+// claudeStreamInit is the CLI's control request envelope. The initialize
+// subtype is the only channel that carries a system prompt and an output
+// schema without an argument.
+type claudeStreamInit struct {
+	Type      string            `json:"type"`
+	RequestID string            `json:"request_id"`
+	Request   claudeInitRequest `json:"request"`
+}
+
+type claudeInitRequest struct {
+	Subtype      string          `json:"subtype"`
+	SystemPrompt string          `json:"systemPrompt,omitempty"`
+	JSONSchema   json.RawMessage `json:"jsonSchema,omitempty"`
+}
+
+// claudeStdin returns the newline-delimited stdin for one turn.
+func claudeStdin(in claudeStdinInput) string {
+	schema := json.RawMessage(nil)
+	if in.Schema != "" {
+		schema = json.RawMessage(in.Schema)
 	}
-	content := make([]any, 0, len(images)+1)
-	for _, image := range images {
+	initLine, err := json.Marshal(claudeStreamInit{
+		Type:      "control_request",
+		RequestID: in.RequestID,
+		Request: claudeInitRequest{
+			Subtype:      "initialize",
+			SystemPrompt: in.SystemPrompt,
+			JSONSchema:   schema,
+		},
+	})
+	if err != nil {
+		// The schema is JSON already (claudeToolSchema marshalled it); reaching
+		// here means the contract changed under us.
+		panic(fmt.Sprintf("claude cli: serialize the initialize request: %v", err))
+	}
+
+	content := make([]any, 0, len(in.Images)+1)
+	for _, image := range in.Images {
 		content = append(content, claudeImageBlock{
 			Type: "image",
 			Source: claudeImageSource{
@@ -182,13 +225,15 @@ func claudeStdin(transcript string, images []contracts.ImageInput) (string, bool
 		})
 	}
 	// Anthropic recommends images before the text they accompany.
-	content = append(content, claudeTextBlock{Type: "text", Text: transcript})
-	raw, err := json.Marshal(claudeStreamUserMessage{
-		Type:    "user",
-		Message: claudeStreamMessage{Role: "user", Content: content},
+	content = append(content, claudeTextBlock{Type: "text", Text: in.Transcript})
+	userLine, err := json.Marshal(claudeStreamUserMessage{
+		Type:            "user",
+		Message:         claudeStreamMessage{Role: "user", Content: content},
+		ParentToolUseID: nil,
+		SessionID:       in.SessionID,
 	})
 	if err != nil {
 		panic(fmt.Sprintf("claude cli: serialize stream-json input: %v", err))
 	}
-	return string(raw) + "\n", true
+	return string(initLine) + "\n" + string(userLine) + "\n"
 }
