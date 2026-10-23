@@ -312,6 +312,12 @@
       "date": "2026-10-20",
       "text": "noticed some claude code integration issues and streaming tokens in infaiw",
       "url": "https://x.com/DipankarDas011/status/2112250794464649240"
+    },
+    {
+      "day": "50",
+      "date": "2026-10-24",
+      "text": "fixed the claude max arg length bug in infaiw check the new release which is out",
+      "url": "https://x.com/DipankarDas011/status/2113709080670003470"
     }
   ],
   "releases": [
