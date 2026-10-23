@@ -39,6 +39,17 @@ func beginClaudeCLIAuth(ctx context.Context, method contracts.LLMProviderAuthMet
 	return staticAuthFlow{auth: contracts.LLMProviderAuth{Method: contracts.NoneAuth}}, nil
 }
 
+// ClaudeConversationStore is where the claude-cli adaptor keeps the CLI session
+// it is appending to. The adaptor is rebuilt on a model or thinking-level
+// change, and the CLI refuses a --session-id it already holds, so the
+// bookkeeping has to outlive the adaptor or every switch would start a second
+// CLI session and re-send the whole history.
+type ClaudeConversationStore interface {
+	// LoadClaudeConversation returns nil when nothing has been stored yet.
+	LoadClaudeConversation() ([]byte, error)
+	SaveClaudeConversation([]byte) error
+}
+
 // claudeCLI runs the user's own, unmodified Claude Code CLI once per model
 // turn. infai owns the agent loop, the history, tool execution and approvals;
 // the CLI answers inside a JSON Schema infai supplies, so tool requests come
@@ -65,23 +76,29 @@ type claudeCLIOptions struct {
 	// status stay out of the request and the real directory is safe.
 	workspace  string
 	retryDelay time.Duration
+	// conversations persists the CLI conversation across adaptor rebuilds. A
+	// nil store keeps the state in memory only, which recreates the CLI
+	// session on every switch.
+	conversations ClaudeConversationStore
 	// memoryMax and pidsMax bound each CLI turn when the unit delegated a
 	// cgroup subtree to this process. Zero means no limit of that kind.
 	memoryMax uint64
 	pidsMax   int
 }
 
-func NewClaudeCLI(model contracts.ProvisionedModel, workspace string, sessionID uuid.UUID) (*claudeCLI, error) {
+func NewClaudeCLI(model contracts.ProvisionedModel, workspace string, sessionID uuid.UUID, conversations ClaudeConversationStore) (*claudeCLI, error) {
 	binary := strings.TrimSpace(model.BaseEndpoint())
 	if binary == "" {
 		binary = "claude"
 	}
 	client := &claudeCLI{model: model, binary: binary, opts: claudeCLIOptions{
-		workspace: workspace,
-		memoryMax: claudeCLIMemoryMax,
-		pidsMax:   claudeCLIPidsMax,
+		workspace:     workspace,
+		conversations: conversations,
+		memoryMax:     claudeCLIMemoryMax,
+		pidsMax:       claudeCLIPidsMax,
 	}}
 	client.conversation.id = sessionID.String()
+	client.restoreConversation()
 	return client, nil
 }
 

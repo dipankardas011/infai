@@ -43,18 +43,39 @@ func RefreshProviderAuth(ctx context.Context, providerID contracts.ProviderSlug,
 	}
 }
 
+// ProvisionOption carries state an adaptor needs but cannot derive. Only the
+// claude-cli adaptor currently uses one.
+type ProvisionOption func(*provisionOptions)
+
+type provisionOptions struct {
+	claudeConversation ClaudeConversationStore
+}
+
+// WithClaudeConversation hands the claude-cli adaptor a place to keep the CLI
+// conversation it is appending to. SetModel and SetThinkingPattern build a new
+// adaptor, and without this the CLI session is recreated — one failed start and
+// a full-history re-send — on every model switch. Other providers ignore it.
+func WithClaudeConversation(store ClaudeConversationStore) ProvisionOption {
+	return func(o *provisionOptions) { o.claudeConversation = store }
+}
+
 func ProvisionModelClient(
 	m contracts.ProvisionedModel,
 	workspace string,
 	sessionID uuid.UUID,
+	opts ...ProvisionOption,
 ) (contracts.InfaiModelAdaptor, error) {
+	var options provisionOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	switch m.ProviderSlug() {
 	case contracts.DeepSeek:
 		return NewDeepSeekAPI(m)
 	case contracts.Codex:
 		return NewOpenAICodexResponsesAPI(m)
 	case contracts.ClaudeCLI:
-		return NewClaudeCLI(m, workspace, sessionID)
+		return NewClaudeCLI(m, workspace, sessionID, options.claudeConversation)
 	case contracts.OpenAIGeneric:
 		return NewOpenAICompatableAPI(m)
 	default:

@@ -523,7 +523,7 @@ func TestClaudeCLIPreflightRefusesAMissingCLI(t *testing.T) {
 }
 
 func TestClaudeCLIMissingBinaryIsActionable(t *testing.T) {
-	client, err := NewClaudeCLI(catalogModel(t, "definitely-not-installed-claude", "claude-sonnet-5-5", contracts.ThinkingLow), t.TempDir(), uuid.MustParse("11111111-2222-3333-4444-555555555555"))
+	client, err := NewClaudeCLI(catalogModel(t, "definitely-not-installed-claude", "claude-sonnet-5-5", contracts.ThinkingLow), t.TempDir(), uuid.MustParse("11111111-2222-3333-4444-555555555555"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -799,5 +799,101 @@ func TestClaudeStreamedContentIsNotRepeated(t *testing.T) {
 		if got != test.want {
 			t.Fatalf("streamed=%q validated=%q emitted=%q want %q", test.streamed, test.validated, got, test.want)
 		}
+	}
+}
+
+// inMemoryConversationStore stands in for the session's file so the rebuild
+// below can be exercised without touching disk.
+type inMemoryConversationStore struct{ raw []byte }
+
+func (s *inMemoryConversationStore) LoadClaudeConversation() ([]byte, error) {
+	return s.raw, nil
+}
+
+func (s *inMemoryConversationStore) SaveClaudeConversation(raw []byte) error {
+	s.raw = append([]byte(nil), raw...)
+	return nil
+}
+
+// SetModel builds a new adaptor. The CLI conversation must survive that: a
+// second adaptor has to resume it and send only the delta, otherwise every
+// model switch collides on --session-id and re-sends the whole history.
+func TestClaudeConversationSurvivesAnAdaptorRebuild(t *testing.T) {
+	model := catalogModel(t, "claude", "claude-sonnet-5-5", contracts.ThinkingLow)
+	store := &inMemoryConversationStore{}
+	sessionID := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	workspace := t.TempDir()
+
+	first, err := NewClaudeCLI(model, workspace, sessionID, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	system := "you are infai"
+	history := []contracts.ChatMessage{contracts.NewUserMessage("first")}
+	reply := contracts.NewAssistantMessage("first reply")
+	first.recordSuccess(sessionID.String(), history, system, reply)
+
+	second, err := NewClaudeCLI(model, workspace, sessionID, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grown := append(append(append([]contracts.ChatMessage(nil), history...), reply), contracts.NewUserMessage("second"))
+	turn := second.planTurn(grown, system)
+
+	if !turn.resume {
+		t.Fatal("a rebuilt adaptor recreated the CLI conversation instead of resuming it")
+	}
+	if turn.sessionID != sessionID.String() {
+		t.Fatalf("resumed session = %q, want %q", turn.sessionID, sessionID)
+	}
+	// The reply is the CLI's own copy, so only the new user message is a delta.
+	want, _ := claudeTranscriptParts([]contracts.ChatMessage{contracts.NewUserMessage("second")})
+	if turn.delta.transcript != want {
+		t.Fatalf("delta = %s, want %s", turn.delta.transcript, want)
+	}
+
+	// A different system prompt means a different request: start over.
+	if other := second.planTurn(grown, "different prompt"); other.resume {
+		t.Fatal("resumed a conversation whose system prompt changed")
+	}
+}
+
+// A turn that did not finish may have left the CLI's stored list mid-message, so
+// a rebuilt adaptor must not resume it.
+func TestClaudeConversationDoesNotResumeAfterAFailedTurn(t *testing.T) {
+	model := catalogModel(t, "claude", "claude-sonnet-5-5", contracts.ThinkingLow)
+	store := &inMemoryConversationStore{}
+	sessionID := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	workspace := t.TempDir()
+
+	first, err := NewClaudeCLI(model, workspace, sessionID, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := []contracts.ChatMessage{contracts.NewUserMessage("first")}
+	first.recordSuccess(sessionID.String(), history, "you are infai", contracts.NewAssistantMessage("first reply"))
+	first.recordFailure()
+
+	second, err := NewClaudeCLI(model, workspace, sessionID, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grown := []contracts.ChatMessage{contracts.NewUserMessage("second")}
+	if turn := second.planTurn(grown, "you are infai"); turn.resume {
+		t.Fatal("resumed a conversation a failed turn may have left inconsistent")
+	}
+}
+
+// An unreadable record is not a reason to fail a turn.
+func TestClaudeConversationIgnoresACorruptRecord(t *testing.T) {
+	model := catalogModel(t, "claude", "claude-sonnet-5-5", contracts.ThinkingLow)
+	store := &inMemoryConversationStore{raw: []byte("{not json")}
+	client, err := NewClaudeCLI(model, t.TempDir(), uuid.MustParse("11111111-2222-3333-4444-555555555555"), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn := client.planTurn([]contracts.ChatMessage{contracts.NewUserMessage("first")}, "you are infai")
+	if turn.resume {
+		t.Fatal("resumed from a corrupt record")
 	}
 }

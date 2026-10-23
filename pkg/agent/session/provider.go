@@ -50,7 +50,7 @@ func (s *InfaiAgentSession) CurrentThinkingPattern() contracts.InfaiThinkingLeve
 // SetModel rebuilds the session's model adapter for the given provider and
 // model and records the change in the session meta.
 func (s *InfaiAgentSession) SetModel(choosenModel contracts.ProvisionedModel) error {
-	model, err := models.ProvisionModelClient(choosenModel, s.meta.Cwd, s.meta.ID)
+	model, err := models.ProvisionModelClient(choosenModel, s.meta.Cwd, s.meta.ID, models.WithClaudeConversation(s.claudeConversationStore()))
 	if err != nil {
 		return err
 	}
@@ -92,7 +92,7 @@ func (s *InfaiAgentSession) SetThinkingPattern(pattern contracts.InfaiThinkingLe
 	if err != nil {
 		return err
 	}
-	model, err := models.ProvisionModelClient(provisioned, s.meta.Cwd, s.meta.ID)
+	model, err := models.ProvisionModelClient(provisioned, s.meta.Cwd, s.meta.ID, models.WithClaudeConversation(s.claudeConversationStore()))
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func (s *InfaiAgentSession) SetProviderAuth(providerName string, auth contracts.
 			return err
 		}
 	}
-	model, err := models.ProvisionModelClient(provisioned, s.meta.Cwd, s.meta.ID)
+	model, err := models.ProvisionModelClient(provisioned, s.meta.Cwd, s.meta.ID, models.WithClaudeConversation(s.claudeConversationStore()))
 	if err != nil {
 		return err
 	}

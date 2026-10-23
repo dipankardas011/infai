@@ -2,6 +2,8 @@ package models
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"sync"
 
 	"github.com/google/uuid"
@@ -110,6 +112,88 @@ func (c *claudeCLI) planTurn(history []contracts.ChatMessage, systemPrompt strin
 	}
 }
 
+// claudeConversationRecord is the on-disk shape of claudeResumeState. Hashes are
+// hex so the file stays stable and readable.
+type claudeConversationRecord struct {
+	ID          string `json:"id"`
+	Sent        int    `json:"sent"`
+	Prefix      string `json:"prefix"`
+	System      string `json:"system"`
+	Pending     bool   `json:"pending"`
+	PendingHash string `json:"pending_hash"`
+	Dirty       bool   `json:"dirty"`
+}
+
+// restoreConversation seeds the adaptor from the store. Anything missing or
+// malformed is treated as absent: starting a new CLI conversation is always
+// correct, only slower, so a bad file must never block a turn.
+func (c *claudeCLI) restoreConversation() {
+	if c.opts.conversations == nil {
+		return
+	}
+	raw, err := c.opts.conversations.LoadClaudeConversation()
+	if err != nil || len(raw) == 0 {
+		return
+	}
+	var record claudeConversationRecord
+	if json.Unmarshal(raw, &record) != nil || record.ID == "" || record.Sent < 0 {
+		return
+	}
+	prefix, ok := claudeHashFromHex(record.Prefix)
+	if !ok {
+		return
+	}
+	system, ok := claudeHashFromHex(record.System)
+	if !ok {
+		return
+	}
+	pendingHash, ok := claudeHashFromHex(record.PendingHash)
+	if !ok {
+		return
+	}
+	c.conversation.id = record.ID
+	c.conversation.sent = record.Sent
+	c.conversation.prefix = prefix
+	c.conversation.system = system
+	c.conversation.pending = record.Pending
+	c.conversation.pendingHash = pendingHash
+	c.conversation.dirty = record.Dirty
+}
+
+// persistConversation writes the state back. A failed save costs a re-sent
+// history on the next rebuild, never correctness, so it is not surfaced: the
+// turn it describes has already been committed.
+func (c *claudeCLI) persistConversation() {
+	if c.opts.conversations == nil {
+		return
+	}
+	raw, err := json.Marshal(claudeConversationRecord{
+		ID:          c.conversation.id,
+		Sent:        c.conversation.sent,
+		Prefix:      claudeHashHex(c.conversation.prefix),
+		System:      claudeHashHex(c.conversation.system),
+		Pending:     c.conversation.pending,
+		PendingHash: claudeHashHex(c.conversation.pendingHash),
+		Dirty:       c.conversation.dirty,
+	})
+	if err != nil {
+		return
+	}
+	_ = c.opts.conversations.SaveClaudeConversation(raw)
+}
+
+func claudeHashHex(hash [32]byte) string { return hex.EncodeToString(hash[:]) }
+
+func claudeHashFromHex(value string) ([32]byte, bool) {
+	var hash [32]byte
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != len(hash) {
+		return hash, false
+	}
+	copy(hash[:], decoded)
+	return hash, true
+}
+
 // recordSuccess remembers the conversation the CLI just appended to. history
 // is what this turn sent, so the reply the CLI produced sits at history[len].
 // The caller holds conversation.mu.
@@ -122,12 +206,14 @@ func (c *claudeCLI) recordSuccess(sessionID string, history []contracts.ChatMess
 	conversation.pending = true
 	conversation.pendingHash = claudeHashMessage(reply)
 	conversation.dirty = false
+	c.persistConversation()
 }
 
 // recordFailure makes the next turn start a new CLI session. The caller holds
 // conversation.mu.
 func (c *claudeCLI) recordFailure() {
 	c.conversation.dirty = true
+	c.persistConversation()
 }
 
 func claudeHashText(text string) [32]byte {
