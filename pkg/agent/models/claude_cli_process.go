@@ -48,10 +48,16 @@ type claudeSessionArg struct {
 // is strictly empty: the CLI must not run anything of its own. Do not add
 // --bare, which drops the subscription login this provider relies on.
 //
+// No payload travels in argv. Linux fails the whole exec with E2BIG when one
+// argument reaches 128 KiB (MAX_ARG_STRLEN, 32 pages, counted with its NUL), and
+// the tool schema alone passes that with two MCP servers: 158 tools serialize
+// to ~150 KB. The system prompt and the schema therefore go on stdin, on the
+// initialize control request, where no such limit applies (§ claudeStdin).
+//
 // Session persistence stays on: the stored message list is what lets the CLI
 // reuse its prompt cache instead of re-sending the whole transcript as one
 // rewritten user message.
-func claudeCLIArgs(model contracts.ProvisionedModel, systemPrompt, schema string, streamJSON bool, session claudeSessionArg) []string {
+func claudeCLIArgs(model contracts.ProvisionedModel, session claudeSessionArg) []string {
 	args := []string{
 		"-p",
 		"--tools", "",
@@ -66,16 +72,16 @@ func claudeCLIArgs(model contracts.ProvisionedModel, systemPrompt, schema string
 		args = append(args, "--session-id", session.ID)
 	}
 	args = append(args,
-		"--system-prompt", systemPrompt,
 		"--model", model.Model().Id,
-		"--json-schema", schema,
+		"--input-format", "stream-json",
+		// --await-initialize makes the control request the first thing the CLI
+		// reads, so the schema and the prompt are in place for the first API
+		// request rather than racing the user message.
+		"--await-initialize",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
 	)
-	if streamJSON {
-		args = append(args, "--input-format", "stream-json")
-	}
 	if effort, ok := model.ThinkingLevelValue(); ok {
 		args = append(args, "--effort", effort)
 	}
@@ -98,8 +104,15 @@ func (c *claudeCLI) run(ctx context.Context, systemPrompt string, turn claudeTur
 		input = turn.delta
 		session = claudeSessionArg{ID: turn.sessionID, Resume: true}
 	}
-	stdin, streamJSON := claudeStdin(input.transcript, input.images)
-	cmd := exec.Command(binary, claudeCLIArgs(c.model, systemPrompt, schema, streamJSON, session)...)
+	stdin := claudeStdin(claudeStdinInput{
+		SystemPrompt: systemPrompt,
+		Schema:       schema,
+		RequestID:    uuid.NewString(),
+		SessionID:    session.ID,
+		Transcript:   input.transcript,
+		Images:       input.images,
+	})
+	cmd := exec.Command(binary, claudeCLIArgs(c.model, session)...)
 	cmd.Dir = c.opts.workspace
 	// Inherit the environment so the CLI finds its own login; infai neither
 	// injects nor logs an auth variable.
