@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>infai — The control plane for local LLM inference</title>
+  <meta name="description" content="infai is a terminal control plane for local LLM inference. Discover GGUF and SafeTensors models, download from Hugging Face, configure llama.cpp or vLLM profiles, and monitor every run from one pane of glass.">
+  <meta name="keywords" content="llama.cpp, GGUF, local LLM, local inference, inference engine, vLLM, terminal UI, model launcher, launch profiles, macOS, Linux">
+  <meta name="robots" content="index,follow,max-image-preview:large">
+  <meta name="author" content="Dipankar Das">
+  <link rel="canonical" href="https://infai.dipankar-das.com/infai/">
+  <meta property="og:title" content="infai — The control plane for local LLM inference">
+  <meta property="og:description" content="Discover GGUF and SafeTensors models, download from Hugging Face, configure llama.cpp or vLLM profiles, and monitor every local inference run from one pane of glass.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://infai.dipankar-das.com/infai/">
+  <meta property="og:image" content="https://infai.dipankar-das.com/runningmodel.webp">
+  <meta property="og:image:alt" content="infai run screen with live logs and system/model metrics">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="infai — The control plane for local LLM inference">
+  <meta name="twitter:description" content="Discover models, download from Hugging Face, get hardware-fit recommendations, and launch llama.cpp or vLLM profiles from one local control plane.">
+  <meta name="twitter:image" content="https://infai.dipankar-das.com/runningmodel.webp">
+  <meta name="theme-color" content="#11171a">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="apple-touch-icon" href="../apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Doto:wght@900&family=Pixelify+Sans:wght@600&family=Geist+Mono:wght@300;400;500;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lite-youtube-embed@0.3.3/src/lite-yt-embed.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/lite-youtube-embed@0.3.3/src/lite-yt-embed.js"></script>
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "infai",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux",
+      "description": "A terminal control plane for local LLM inference. Profiles bundle model + engine + configuration; infai handles launching, port collisions, live logs, telemetry, and running multiple models at once.",
+      "url": "https://infai.dipankar-das.com/infai/",
+      "downloadUrl": "https://github.com/dipankardas011/infai/releases",
+      "softwareVersion": "latest",
+      "license": "https://github.com/dipankardas011/infai/blob/main/LICENSE",
+      "isAccessibleForFree": true,
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "sameAs": ["https://github.com/dipankardas011/infai"]
+    }
+  </script>
+</head>
+<body>
+
+  <div class="noise" aria-hidden="true"></div>
+
+  <!-- OPS STRIP -->
+  <div class="ops-strip">
+    <span class="ops-dot" aria-hidden="true"></span>
+    <span>ALL SYSTEMS LOCAL</span>
+    <span class="ops-sep" aria-hidden="true">/</span>
+    <a href="../infaiw/#buildlog" class="ops-link">NEW · INFAIW, BUILT IN PUBLIC · DAY <span data-bl="day">44</span></a>
+    <span class="ops-sep" aria-hidden="true">/</span>
+    <span>NO CLOUD · NO TELEMETRY · APACHE-2.0</span>
+  </div>
+
+  <!-- NAV -->
+  <nav>
+    <div class="nav-inner">
+      <a href="#" class="logo" aria-label="infai home">
+        <span class="logo-mark">▸</span>infai<span class="logo-cursor">_</span>
+      </a>
+      <div class="nav-links">
+        <a href="#profiles">profiles</a>
+        <a href="#glass">runs</a>
+        <a href="#demo">demo</a>
+        <a href="#features">features</a>
+        <a href="#install">install</a>
+        <a href="#roadmap">roadmap</a>
+        <a href="../infaiw/" class="nav-w">infaiw ↗</a>
+        <a href="https://github.com/dipankardas011/infai" class="btn-nav" target="_blank" rel="noopener">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <header class="hero">
+    <div class="hero-glow" aria-hidden="true"></div>
+    <div class="hero-copy">
+      <p class="kicker reveal-up" style="--d:0">[ local inference control plane ]</p>
+      <h1>
+        <span class="h1-line reveal-line" style="--d:1">Flags are not</span>
+        <span class="h1-line reveal-line" style="--d:2">a workflow.</span>
+        <span class="h1-line h1-accent reveal-line" style="--d:3">Profiles are.</span>
+      </h1>
+      <p class="hero-sub reveal-up" style="--d:4">
+        Every inference engine speaks its own dialect of flag soup. infai gives them all
+        one predictable structure — a <strong>profile</strong>: model&nbsp;+&nbsp;engine&nbsp;+&nbsp;config.
+        Discover or download a model, get a hardware-fit recommendation, press <kbd>enter</kbd>,
+        and watch every run from a single pane of glass.
+      </p>
+      <div class="hero-actions reveal-up" style="--d:5">
+        <a href="#demo" class="btn-solid"><span class="btn-spark" aria-hidden="true">✨</span>Experience infai</a>
+        <a href="https://github.com/dipankardas011/infai" class="btn-line btn-icon" target="_blank" rel="noopener" aria-label="View infai on GitHub" title="View infai on GitHub">
+          <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        </a>
+      </div>
+      <p class="hero-fine reveal-up" style="--d:6">llama.cpp · vLLM · one Go binary, zero daemons</p>
+    </div>
+
+    <!-- LIVE RUNS DASHBOARD MOCK -->
+    <div class="panel reveal-up" style="--d:7" role="img" aria-label="infai runs dashboard showing three models running concurrently with live telemetry">
+      <div class="panel-chrome">
+        <span class="panel-title"><img class="panel-icon" src="../favicon.svg" width="22" height="22" alt="infai"></span>
+        <div class="panel-tabs" aria-hidden="true">
+          <span>Profiles</span><span class="tab-active">Runs</span><span>Models</span><span>Engines</span>
+        </div>
+        <span class="panel-hint" aria-hidden="true">tab: switch · q: quit</span>
+      </div>
+      <div class="panel-body" aria-hidden="true">
+        <div class="run-table">
+          <div class="run-head">
+            <span>RUN</span><span>STATUS</span><span>PROFILE</span><span>MODEL</span><span>UPTIME</span><span>TPS</span>
+          </div>
+          <div class="run-rule"></div>
+          <div class="run-row is-selected">
+            <span>#1</span>
+            <span class="st-run"><i class="pulse"></i>running</span>
+            <span>qwen-coder-fast</span>
+            <span class="cell-model">Qwen3.5-9B-Q5_K_M</span>
+            <span class="cell-up" data-uptime="8062"></span>
+            <span class="cell-tps" data-tps="48.2">48.2</span>
+          </div>
+          <div class="run-row">
+            <span>#2</span>
+            <span class="st-run"><i class="pulse"></i>running</span>
+            <span>gemma-vision</span>
+            <span class="cell-model">gemma-4-E4B-it-Q5_K_XL</span>
+            <span class="cell-up" data-uptime="1873"></span>
+            <span class="cell-tps" data-tps="36.7">36.7</span>
+          </div>
+          <div class="run-row">
+            <span>#3</span>
+            <span class="st-run"><i class="pulse"></i>running</span>
+            <span>embed-server</span>
+            <span class="cell-model">nomic-embed-v2-Q8_0</span>
+            <span class="cell-up" data-uptime="521404"></span>
+            <span class="cell-tps" data-tps="112.4">112.4</span>
+          </div>
+          <div class="run-row is-dim">
+            <span>#4</span>
+            <span class="st-stop">■ stopped</span>
+            <span>llama70b-nightly</span>
+            <span class="cell-model">Llama-3.3-70B-Q2_K</span>
+            <span>—</span>
+            <span>—</span>
+          </div>
+        </div>
+        <div class="run-rule"></div>
+        <div class="res-block">
+          <p class="res-title">Resources</p>
+          <div class="res-row"><span class="res-label">cpu</span><span class="res-bar" data-pct="23"><i></i></span><span class="res-val">23%</span></div>
+          <div class="res-row"><span class="res-label">ram</span><span class="res-bar" data-pct="42"><i></i></span><span class="res-val">12.9/30.5&thinsp;GiB</span></div>
+          <div class="res-row"><span class="res-label">vram</span><span class="res-bar warn" data-pct="80"><i></i></span><span class="res-val">6.4/8.0&thinsp;GiB</span></div>
+        </div>
+        <div class="panel-footline">s stop · enter logs · ←/→ page · <span class="ft-accent">3 running</span></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- BAND / RIBBON -->
+  <section class="band" aria-hidden="true">
+    <div class="band-track">
+      <span>0 YAML files to maintain</span><i>◆</i><span>1 SQLite file backs it all</span><i>◆</i><span>1 keypress launches any model</span><i>◆</i><span>∞ relaunches with zero friction</span><i>◆</i><span>llama.cpp · vLLM · one pane of glass</span><i>◆</i>
+      <span>0 YAML files to maintain</span><i>◆</i><span>1 SQLite file backs it all</span><i>◆</i><span>1 keypress launches any model</span><i>◆</i><span>∞ relaunches with zero friction</span><i>◆</i><span>llama.cpp · vLLM · one pane of glass</span><i>◆</i>
+    </div>
+  </section>
+
+  <!-- DEMO -->
+  <section class="demo" id="demo">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ watch it in action ]</p>
+      <h2 class="reveal-up">See infai take<br>the wheel.</h2>
+      <p class="sec-sub reveal-up">A quick tour of the control plane for local inference.</p>
+    </div>
+    <div class="demo-frame reveal-up">
+      <lite-youtube videoid="Jl94kSYvOlU" playlabel="Play the infai demo"></lite-youtube>
+    </div>
+  </section>
+
+  <!-- FLAG SOUP -->
+  <section class="soup" id="soup">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 01 / the problem ]</p>
+      <h2 class="reveal-up">Three engines.<br>Three dialects of flag&nbsp;soup.</h2>
+      <p class="sec-sub reveal-up">Every runtime reinvents its own switches. Your shell history is not a configuration system.</p>
+    </div>
+    <div class="soup-grid">
+      <div class="soup-stack reveal-up">
+        <div class="soup-card">
+          <p class="soup-tag">llama.cpp</p>
+          <pre><code><span class="c-dim">$</span> llama-server -m ~/models/qwen3.5-9b-q5_k_m.gguf \
+    --ctx-size 65536 --n-gpu-layers 99 --flash-attn on \
+    --cache-type-k bf16 --cache-type-v bf16 --jinja \
+    --batch-size 2048 --ubatch-size 512 --temp 0.6 \
+    --host 0.0.0.0 --port 8000</code></pre>
+        </div>
+        <div class="soup-card">
+          <p class="soup-tag">vLLM</p>
+          <pre><code><span class="c-dim">$</span> vllm serve Qwen/Qwen3.5-9B --max-model-len 65536 \
+    --gpu-memory-utilization 0.92 --max-num-seqs 128 \
+    --enable-prefix-caching --port 8000</code></pre>
+        </div>
+        <p class="soup-caption">Same model. Same machine. Two incompatible vocabularies you're expected to memorize.</p>
+      </div>
+      <div class="soup-arrow reveal-up" aria-hidden="true">
+        <span>collapses<br>into</span>
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none"><path d="M8 24h28m0 0-10-10m10 10-10 10" stroke="currentColor" stroke-width="2.5" stroke-linecap="square"/></svg>
+      </div>
+      <div class="soup-after reveal-up">
+        <div class="soup-card soup-card-good">
+          <p class="soup-tag soup-tag-good">infai</p>
+          <pre><code><span class="c-dim">$</span> infai
+<span class="c-green">▸</span> qwen-coder-fast    <span class="c-dim">Qwen3.5-9B  :8000</span>
+  gemma-vision       <span class="c-dim">gemma-4-E4B :8001</span>
+  embed-server       <span class="c-dim">nomic-v2    :8002</span>
+<span class="c-dim">enter: launch · e: edit · d: delete</span></code></pre>
+        </div>
+        <p class="soup-caption soup-caption-good">One muscle memory, whatever the engine underneath. That's the whole point.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- THE PROFILE EQUATION -->
+  <section class="equation" id="profiles">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 02 / the structure ]</p>
+      <h2 class="reveal-up">One predictable shape<br>for every launch.</h2>
+      <p class="sec-sub reveal-up">A profile is the whole idea. Define it once — infai handles everything downstream: the command line, the port, the process, the logs.</p>
+    </div>
+    <div class="eq-board reveal-up">
+      <div class="eq-row" id="eq">
+        <div class="eq-term">
+          <p class="eq-label">profile</p>
+          <p class="eq-value" data-slot="name">qwen-coder-fast</p>
+        </div>
+        <span class="eq-op">=</span>
+        <div class="eq-term">
+          <p class="eq-label">model</p>
+          <p class="eq-value" data-slot="model">Qwen3.5-9B-Q5_K_M.gguf</p>
+        </div>
+        <span class="eq-op">+</span>
+        <div class="eq-term">
+          <p class="eq-label">engine</p>
+          <p class="eq-value" data-slot="engine">llama.cpp</p>
+        </div>
+        <span class="eq-op">+</span>
+        <div class="eq-term">
+          <p class="eq-label">config</p>
+          <p class="eq-value" data-slot="config">ctx 64K · ngl auto · fa on · temp 0.6</p>
+        </div>
+      </div>
+      <div class="eq-dots" role="tablist" aria-label="example profiles">
+        <button class="eq-dot is-on" aria-label="example 1"></button>
+        <button class="eq-dot" aria-label="example 2"></button>
+        <button class="eq-dot" aria-label="example 3"></button>
+      </div>
+    </div>
+    <div class="eq-points">
+      <div class="eq-point reveal-up" style="--d:0">
+        <span class="pt-num">a</span>
+        <div><h3>Saved, not typed</h3><p>Profiles live in one SQLite database. No dotfiles, no YAML, no shell aliases rotting in your rc file.</p></div>
+      </div>
+      <div class="eq-point reveal-up" style="--d:1">
+        <span class="pt-num">b</span>
+        <div><h3>Engine-agnostic by design</h3>        <p>The structure doesn't change when the engine does. vLLM landed — your workflow didn't.</p></div>
+      </div>
+      <div class="eq-point reveal-up" style="--d:2">
+        <span class="pt-num">c</span>
+        <div><h3>Collision-aware launches</h3><p>infai knows what's already running and on which port before it starts anything. No zombie servers, no address-in-use surprises.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SINGLE PANE OF GLASS -->
+  <section class="glass" id="glass">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 03 / the glass ]</p>
+      <h2 class="reveal-up">Many models.<br>One pane of glass.</h2>
+      <p class="sec-sub reveal-up">A coder model on :8000, a vision model on :8001, embeddings on :8002 — all launched, monitored, and stopped from one screen. These are real screenshots, not mockups.</p>
+    </div>
+
+    <div class="show-item reveal-up">
+      <div class="show-text">
+        <span class="show-num">3.1</span>
+        <h3>Configure once,<br>launch forever</h3>
+        <p>Context size, GPU layers, KV-cache types, flash attention, sampling, extra flags — the editor exposes every knob with smart pickers, then remembers all of it. Relaunch is one keypress.</p>
+        <p class="show-keys"><kbd>tab</kbd> navigate · <kbd>space</kbd> toggle · <kbd>ctrl+s</kbd> save</p>
+      </div>
+      <figure class="show-img">
+        <img src="../profile-create.webp" alt="infai profile editor with context size, GPU layers, cache types, flash attention and sampling fields" loading="lazy" width="2055" height="1687">
+      </figure>
+    </div>
+
+    <div class="show-item show-flip reveal-up">
+      <div class="show-text">
+        <span class="show-num">3.2</span>
+        <h3>Watch inference<br>happen live</h3>
+        <p>Per-run status, endpoint, uptime, and tokens-per-second. System and per-model CPU, RAM, and VRAM telemetry. Scrollable server logs. No tmux splits, no second monitor.</p>
+        <p class="show-keys"><kbd>s</kbd> stop · <kbd>c</kbd> clear logs · <kbd>esc</kbd> back</p>
+      </div>
+      <figure class="show-img">
+        <img src="../runningmodel.webp" alt="infai run screen streaming llama.cpp server logs with live system and model resource metrics" loading="lazy" width="2181" height="1527">
+      </figure>
+    </div>
+
+    <div class="glass-features">
+      <div class="glass-feature reveal-up" style="--d:0">
+        <span class="show-num">3.3</span>
+        <h3>Find and import<br>the right model</h3>
+        <p>Search Hugging Face, choose a quantization, or scan local GGUF and SafeTensors files. Provenance and metadata stay attached.</p>
+      </div>
+      <div class="glass-feature reveal-up" style="--d:1">
+        <span class="show-num">3.4</span>
+        <h3>Know the fit<br>before launch</h3>
+        <p>infai reads your hardware and estimates memory fit, context limits, and engine requirements before starting a server.</p>
+      </div>
+      <div class="glass-feature reveal-up" style="--d:2">
+        <span class="show-num">3.5</span>
+        <h3>One profile,<br>any engine</h3>
+        <p>Engine-aware options keep llama.cpp and vLLM settings in the same workflow, without memorizing a new flag dialect.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section class="features" id="features">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 04 / instrumentation ]</p>
+      <h2 class="reveal-up">Everything on board.</h2>
+    </div>
+    <div class="feat-grid">
+      <div class="feat reveal-up" style="--d:0">
+        <span class="feat-id">F-01</span>
+        <h3>Multi-run dashboard</h3>
+        <p>Run several models concurrently. The Runs tab shows every process with status, profile, engine, uptime, and live TPS.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:1">
+        <span class="feat-id">F-02</span>
+        <h3>Model intelligence</h3>
+        <p>GGUF and SafeTensors files are indexed with metadata, quantization, architecture, context limits, and multimodal projector detection.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:2">
+        <span class="feat-id">F-03</span>
+        <h3>Live telemetry</h3>
+        <p>System and per-model CPU, RAM, and VRAM, sampled in real time, rendered as meters right in the terminal.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:3">
+        <span class="feat-id">F-04</span>
+        <h3>Engine management</h3>
+        <p>A dedicated Engines tab manages your inference-engine binaries and paths. Centralized, versioned, swappable.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:4">
+        <span class="feat-id">F-05</span>
+        <h3>Engine-aware editors</h3>
+        <p>Each profile exposes the right options for llama.cpp or vLLM, with hardware-fit recommendations before launch and explainable warnings.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:5">
+        <span class="feat-id">F-06</span>
+        <h3>One SQLite file</h3>
+        <p>Profiles, paths, and settings in a single local database. Back it up with <code>cp</code>. Nothing phones home.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:6">
+        <span class="feat-id">F-07</span>
+        <h3>11+ terminal themes</h3>
+        <p>Tokyonight, Everforest, Gruvbox, Rose Pine, One Dark and more — match the rest of your terminal.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:7">
+        <span class="feat-id">F-08</span>
+        <h3>Single Go binary</h3>
+        <p>No runtime, no daemon, no Docker. Install it, type <code>infai</code>, and you're looking at your models.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:8">
+        <span class="feat-id">F-09</span>
+        <h3>Hugging Face imports</h3>
+        <p>Search the Hub, choose a GGUF quantization, and download models directly into your library with resumable, atomic transfers.</p>
+      </div>
+      <div class="feat reveal-up" style="--d:9">
+        <span class="feat-id">F-10</span>
+        <h3>Explainable fit checks</h3>
+        <p>Typed hardware inventory and memory estimates show whether a model fits, why, and which launch settings will work best.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- INSTALL -->
+  <section class="install" id="install">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 05 / deployment ]</p>
+      <h2 class="reveal-up">Sixty seconds to first launch.</h2>
+    </div>
+    <div class="install-grid">
+      <div class="inst-card inst-hot reveal-up" style="--d:0">
+        <p class="inst-method">Homebrew <span class="inst-tag">recommended</span></p>
+        <button class="inst-cmd" data-copy="brew install dipankardas011/tap/infai">
+          <code>brew install dipankardas011/tap/infai</code>
+          <span class="inst-copy">copy</span>
+        </button>
+        <p class="inst-note">macOS &amp; Linux · pre-compiled · zero dependencies</p>
+      </div>
+      <div class="inst-card inst-hot reveal-up" style="--d:1">
+        <p class="inst-method">Linux package manager <span class="inst-tag">recommended</span></p>
+        <p class="inst-text">Add the <a href="https://software.opensuse.org/download.html?project=home%3Adipankardas%3Ainfai&amp;package=infai" target="_blank" rel="noopener">infai package repository</a> for your distribution.</p>
+        <div class="distro-list" aria-label="Supported Linux distributions">
+          <span><img src="https://cdn.simpleicons.org/debian/A81D33" alt="" width="16" height="16">Debian</span>
+          <span><img src="https://cdn.simpleicons.org/ubuntu/E95420" alt="" width="16" height="16">Ubuntu</span>
+          <span><img src="https://cdn.simpleicons.org/fedora/51A2DA" alt="" width="16" height="16">Fedora</span>
+          <span><img src="https://cdn.simpleicons.org/opensuse/73BA25" alt="" width="16" height="16">openSUSE</span>
+        </div>
+      </div>
+      <div class="inst-card inst-wide reveal-up" style="--d:2">
+        <p class="inst-method">Install script</p>
+        <button class="inst-cmd" data-copy="curl -sL https://raw.githubusercontent.com/dipankardas011/infai/main/install.sh | bash">
+          <code>curl -sL https://raw.githubusercontent.com/dipankardas011/infai/main/install.sh | bash</code>
+          <span class="inst-copy">copy</span>
+        </button>
+        <p class="inst-note">Linux · installs to /usr/local/bin</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ROADMAP -->
+  <section class="roadmap" id="roadmap">
+    <div class="sec-head">
+      <p class="kicker reveal-up">[ 06 / shipped ]</p>
+      <h2 class="reveal-up">The whole local workflow.<br>Already on board.</h2>
+      <p class="sec-sub reveal-up">From finding a model to launching a fit-checked profile, infai keeps the work in one predictable control plane.</p>
+    </div>
+    <div class="rm-timeline">
+      <div class="rm-line" aria-hidden="true"></div>
+      <div class="rm-node done reveal-up" style="--d:0">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>llama.cpp engine</h3>
+        <p>GGUF auto-detection, launch profiles, live logs, engine &amp; path management.</p>
+      </div>
+      <div class="rm-node done reveal-up" style="--d:1">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>Runs dashboard</h3>
+        <p>Multiple concurrent models with per-run status, uptime, and live tokens-per-second — the single pane of glass.</p>
+      </div>
+      <div class="rm-node done reveal-up" style="--d:2">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>Resource telemetry</h3>
+        <p>System and per-model CPU, RAM, and GPU/VRAM meters, live in the run screen.</p>
+      </div>
+      <div class="rm-node done reveal-up" style="--d:3">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>vLLM backend</h3>
+        <p>Production-grade batched inference under the exact same profile structure. Your workflow didn't change; the engine did.</p>
+      </div>
+      <div class="rm-node done reveal-up" style="--d:4">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>Hugging Face model imports</h3>
+        <p>Search repositories, select quantizations, and download GGUF or SafeTensors models with resumable and atomic transfers.</p>
+      </div>
+      <div class="rm-node done reveal-up" style="--d:5">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>Typed model intelligence</h3>
+        <p>Model metadata, provenance, architecture details, and hardware-fit estimates turn a file on disk into a launch-ready profile.</p>
+      </div>
+      <div class="rm-node done reveal-up" style="--d:6">
+        <div class="rm-dot"></div>
+        <span class="rm-status">shipped</span>
+        <h3>Hardware-fit recommendations</h3>
+        <p>infai reads model metadata and your hardware, estimates memory fit, and proposes a launch configuration with context and engine guidance before you start.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta">
+    <div class="cta-inner reveal-up">
+      <h2>Your GPU is idle<br><em>right now.</em></h2>
+      <div class="hero-actions">
+        <a href="#install" class="btn-solid"><span class="btn-prompt">$</span>brew install infai</a>
+        <a href="https://github.com/dipankardas011/infai" class="btn-line" target="_blank" rel="noopener">Star it on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer>
+    <div class="footer-inner">
+      <div class="footer-left">
+        <span class="logo-sm"><span class="logo-mark">▸</span>infai</span>
+        <span class="footer-meta">Apache-2.0 · made for people who run models on their own metal</span>
+      </div>
+      <div class="footer-links">
+        <a href="../infaiw/">infaiw</a>
+        <a href="https://github.com/dipankardas011/infai" target="_blank" rel="noopener">github</a>
+        <a href="https://github.com/dipankardas011/infai/releases" target="_blank" rel="noopener">releases</a>
+        <a href="https://github.com/dipankardas011/infai/issues" target="_blank" rel="noopener">issues</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // ── Scroll reveals ──
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) { e.target.classList.add('revealed'); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+    document.querySelectorAll('.reveal-up, .reveal-line').forEach(el => {
+      // reveal immediately if already in the initial viewport — observer
+      // delivery is throttled in hidden/background tabs
+      if (el.getBoundingClientRect().top < window.innerHeight) el.classList.add('revealed');
+      else io.observe(el);
+    });
+
+    // ── Copy-to-clipboard ──
+    document.querySelectorAll('.inst-cmd').forEach(btn => {
+      btn.addEventListener('click', () => {
+        navigator.clipboard.writeText(btn.dataset.copy).then(() => {
+          const tag = btn.querySelector('.inst-copy');
+          tag.textContent = 'copied';
+          tag.classList.add('copied');
+          setTimeout(() => { tag.textContent = 'copy'; tag.classList.remove('copied'); }, 2000);
+        });
+      });
+    });
+
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // ── Live dashboard: ticking uptimes + jittering TPS ──
+    function fmtUptime(s) {
+      if (s >= 86400) return Math.floor(s / 86400) + 'd' + String(Math.floor((s % 86400) / 3600)).padStart(2, '0') + 'h';
+      if (s >= 3600) return Math.floor(s / 3600) + 'h' + String(Math.floor((s % 3600) / 60)).padStart(2, '0') + 'm';
+      return Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's';
+    }
+    const upCells = document.querySelectorAll('.cell-up');
+    const tpsCells = document.querySelectorAll('.cell-tps');
+    upCells.forEach(c => { c.textContent = fmtUptime(+c.dataset.uptime); });
+    if (!reduceMotion) {
+      setInterval(() => {
+        upCells.forEach(c => {
+          const s = +c.dataset.uptime + 1;
+          c.dataset.uptime = s;
+          c.textContent = fmtUptime(s);
+        });
+        tpsCells.forEach(c => {
+          const base = +c.dataset.tps;
+          c.textContent = (base + (Math.random() - 0.5) * base * 0.06).toFixed(1);
+        });
+      }, 1000);
+      // resource bars breathe gently
+      setInterval(() => {
+        document.querySelectorAll('.res-bar').forEach(bar => {
+          const base = +bar.dataset.pct;
+          const pct = Math.max(2, Math.min(97, base + (Math.random() - 0.5) * 7));
+          bar.querySelector('i').style.width = pct + '%';
+        });
+      }, 1600);
+    }
+    document.querySelectorAll('.res-bar').forEach(bar => {
+      bar.querySelector('i').style.width = bar.dataset.pct + '%';
+    });
+
+    // ── Profile equation: cycling examples ──
+    const EXAMPLES = [
+      { name: 'qwen-coder-fast', model: 'Qwen3.5-9B-Q5_K_M.gguf', engine: 'llama.cpp', config: 'ctx 64K · ngl auto · fa on · temp 0.6' },
+      { name: 'qwen-coder-vllm', model: 'Qwen/Qwen3.5-9B', engine: 'vLLM', config: 'gpu 0.92 · max-seqs 128 · prefix-cache' },
+      { name: 'llama70b-nightly', model: 'Llama-3.3-70B-Q2_K.gguf', engine: 'llama.cpp', config: 'ctx 32K · ngl 48 · batch 2048' }
+    ];
+    const eq = document.getElementById('eq');
+    const dots = document.querySelectorAll('.eq-dot');
+    let eqIdx = 0, eqTimer = null;
+    function showExample(i) {
+      eqIdx = i;
+      const ex = EXAMPLES[i];
+      eq.classList.add('eq-swap');
+      setTimeout(() => {
+        eq.querySelectorAll('[data-slot]').forEach(el => { el.textContent = ex[el.dataset.slot]; });
+        eq.classList.remove('eq-swap');
+      }, 180);
+      dots.forEach((d, j) => d.classList.toggle('is-on', j === i));
+    }
+    function armCycle() {
+      if (reduceMotion) return;
+      clearInterval(eqTimer);
+      eqTimer = setInterval(() => showExample((eqIdx + 1) % EXAMPLES.length), 3600);
+    }
+    dots.forEach((d, i) => d.addEventListener('click', () => { showExample(i); armCycle(); }));
+    armCycle();
+
+    // ── infaiw build-in-public day counter (full log lives on /infaiw/) ──
+    fetch('../buildlog.json', { cache: 'no-cache' })
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(log => {
+        const day = Math.max(...log.entries.map(e => +e.day.split('-').pop()));
+        document.querySelectorAll('[data-bl="day"]').forEach(el => { el.textContent = String(day); });
+      })
+      .catch(() => {});
+  </script>
+</body>
+</html>
