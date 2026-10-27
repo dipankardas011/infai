@@ -324,6 +324,12 @@
       "date": "2026-10-24",
       "text": "will be researching and thinking on how to get first class workflow support in infaiw",
       "url": "https://x.com/DipankarDas011/status/2113989148118077518"
+    },
+    {
+      "day": "52",
+      "date": "2026-10-28",
+      "text": "Got session details include tools, mcp, skills, task checklist in infaiw 0.28.0 release",
+      "url": "https://x.com/DipankarDas011/status/2115152152423432511"
     }
   ],
   "releases": [
@@ -498,6 +504,10 @@
     {
       "tag": "v0.28.0",
       "date": "2026-10-27"
+    },
+    {
+      "tag": "v0.29.0",
+      "date": "2026-10-28"
     }
   ]
 }
