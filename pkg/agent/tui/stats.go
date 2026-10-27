@@ -29,6 +29,7 @@ type sessionStats struct {
 	mcpPrompts    []contracts.MCPPrompt
 	mcpResources  []contracts.MCPResource
 	mcpStatus     []contracts.MCPServerStatus
+	checklist     contracts.TaskChecklistState
 	// parent and children are the sessions this one hangs off and owns, drawn
 	// with the tree the chat row draws them with. relativeErr is why the engine
 	// could not name them, when it could not.
@@ -101,6 +102,7 @@ func (s sessionStats) lines(width int, styles harnessStyles) []string {
 	for _, section := range [][]string{
 		s.identityLines(width, styles),
 		s.treeLines(width, styles),
+		s.checklistLines(width, styles),
 		s.contextLines(width, styles),
 		s.lastTurnLines(width, styles),
 		s.toolLines(width, styles),
@@ -259,6 +261,36 @@ func statsRelativeRow(tree string, relative statsRelative, width int, styles har
 	}
 	room := max(width-lipgloss.Width(prefix)-lipgloss.Width(kind)-lipgloss.Width(status), 1)
 	return ansi.Truncate(prefix+kind+nameStyle.Render(truncateLine(name, room))+status, width, "…")
+}
+
+func (s sessionStats) checklistLines(width int, styles harnessStyles) []string {
+	if len(s.checklist.Items) == 0 {
+		return nil
+	}
+	completed := 0
+	for _, item := range s.checklist.Items {
+		if item.Status == contracts.TaskCompleted {
+			completed++
+		}
+	}
+	lines := []string{statsHeading("TASK CHECKLIST", styles.status.Render(fmt.Sprintf("%d/%d complete", completed, len(s.checklist.Items))), width, styles)}
+	for _, item := range s.checklist.Items {
+		marker := "○"
+		markerStyle := styles.inactive
+		switch item.Status {
+		case contracts.TaskInProgress:
+			marker, markerStyle = "◐", lipgloss.NewStyle().Foreground(everforest.Yellow)
+		case contracts.TaskCompleted:
+			marker, markerStyle = "✓", lipgloss.NewStyle().Foreground(everforest.Green)
+		}
+		text := item.Title
+		if item.Description != "" {
+			text += " — " + item.Description
+		}
+		line := "  " + markerStyle.Render(marker) + " " + styles.screenRow.Render(singleLine(text))
+		lines = append(lines, ansi.Truncate(line, width, "…"))
+	}
+	return lines
 }
 
 func statsCapabilityRow(name, description string, width int, styles harnessStyles) string {

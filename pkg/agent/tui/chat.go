@@ -423,6 +423,7 @@ func (m *chatModel) sessionStats() sessionStats {
 		mcpPrompts:    m.mcpPrompts,
 		mcpResources:  m.mcpResources,
 		mcpStatus:     m.mcpStatus,
+		checklist:     m.checklist,
 		relativeErr:   m.relativeIdentityErr,
 	}
 	last := m.session.LastTurnMeta

@@ -87,9 +87,15 @@ func TestStatsPageShowsSessionCapabilities(t *testing.T) {
 	m.mcpPrompts = []contracts.MCPPrompt{{Server: "grafana", Name: "triage", Description: "Triage an incident"}}
 	m.mcpResources = []contracts.MCPResource{{Server: "docs", URI: "docs://runbook", Description: "Operations runbook"}}
 	m.mcpStatus = []contracts.MCPServerStatus{{Server: "broken", Reason: "connection refused"}}
+	m.checklist = contracts.TaskChecklistState{Items: []contracts.TaskChecklistItem{
+		{Title: "Inspect", Description: "trace the stats data", Status: contracts.TaskCompleted},
+		{Title: "Render", Description: "show every capability", Status: contracts.TaskInProgress},
+		{Title: "Release", Description: "publish the change", Status: contracts.TaskPending},
+	}}
 
 	page := ansi.Strip(strings.Join(m.sessionStats().lines(120, m.styles), "\n"))
 	for _, want := range []string{
+		"TASK CHECKLIST  1/3 complete", "✓ Inspect — trace the stats data", "◐ Render — show every capability", "○ Release — publish the change",
 		"TOOLS  1 available", "read  ·  Read a UTF-8 text file",
 		"SKILLS  1 available", "release  ·  Prepare a release",
 		"MCP  1 tools  ·  1 prompts  ·  1 resources", "tool mcp_grafana_search", "prompt grafana/triage", "resource docs docs://runbook",
