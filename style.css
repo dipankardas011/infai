@@ -44,25 +44,31 @@
    Re-points every token, so shared components inherit paper + aqua ink.
    Also used on the infaiw card on `/` to preview the other product. */
 .is-w {
-  --bg: #f2eee3;
-  --bg-deep: #e8e2d3;
-  --surface: #f9f6ee;
-  --surface-2: #ebe5d6;
-  --border: #d9d1be;
-  --border-hi: #b5ac96;
-  --text: #1b2420;
-  --text-2: #48534d;
-  --muted: #5c645c;
+  --bg: #e3ecdc;
+  --bg-deep: #d6e1ce;
+  --surface: #eef4e9;
+  --surface-2: #d9e4d1;
+  --border: #c6d4bc;
+  --border-hi: #a3b597;
+  --text: #18231c;
+  --text-2: #3f4f44;
+  --muted: #4f5d53;
   --green: #1d6b55;
   --green-dim: rgba(29, 107, 85, 0.08);
   --green-glow: rgba(29, 107, 85, 0.22);
-  --hl: #9fd3ae;
+  --hl: #8cc79c;
   --hl-ink: #1b2420;
   --pink: #a83f63;
-  --yellow: #9a6f12;
+  --yellow: #7d5a0e;
   --orange: #a9431f;
   --red: #b3363a;
-  --ink-shadow: #1b2420;
+  --ink-shadow: #18231c;
+  /* option 3, engineering pad: fine graph paper with a heavier line every fifth square */
+  --paper: linear-gradient(rgba(29, 107, 85, 0.11) 1px, transparent 1px),
+           linear-gradient(90deg, rgba(29, 107, 85, 0.11) 1px, transparent 1px),
+           linear-gradient(rgba(29, 107, 85, 0.055) 1px, transparent 1px),
+           linear-gradient(90deg, rgba(29, 107, 85, 0.055) 1px, transparent 1px);
+  --paper-size: 110px 110px, 110px 110px, 22px 22px, 22px 22px;
   --display: 'Pixelify Sans', 'Geist Mono', monospace;
   --display-w: 600;
   --body: 'Newsreader', Georgia, serif;
@@ -102,10 +108,9 @@ body {
   overflow-x: hidden;
 }
 body.is-w {
-  background:
-    radial-gradient(circle, rgba(27, 36, 32, 0.13) 1px, transparent 1.3px),
-    var(--bg);
-  background-size: 22px 22px, auto;
+  background-color: var(--bg);
+  background-image: var(--paper);
+  background-size: var(--paper-size);
 }
 
 ::selection { background: var(--hl); color: var(--hl-ink); }
@@ -257,7 +262,7 @@ nav {
   backdrop-filter: blur(16px) saturate(1.3);
   border-bottom: 1px solid var(--border);
 }
-body.is-w nav { background: rgba(242, 238, 227, 0.9); border-bottom-color: var(--text); }
+body.is-w nav { background: color-mix(in srgb, var(--bg) 90%, transparent); border-bottom-color: var(--text); }
 .nav-inner {
   max-width: var(--max-w);
   margin: 0 auto;
@@ -1449,10 +1454,9 @@ body.home { background: var(--bg-deep); }
   animation: fromLeft 0.9s var(--ease) both;
 }
 .half-w {
-  background:
-    radial-gradient(circle, rgba(27, 36, 32, 0.13) 1px, transparent 1.3px),
-    var(--bg);
-  background-size: 22px 22px, auto;
+  background-color: var(--bg);
+  background-image: var(--paper);
+  background-size: var(--paper-size);
   border-left: 1px solid #1b2420;
   animation: fromRight 0.9s var(--ease) both;
 }
