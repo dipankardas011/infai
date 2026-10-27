@@ -6,9 +6,10 @@ import (
 )
 
 type ChatRequest struct {
-	Prompt   string                       `json:"prompt"`
-	Images   []contracts.ImageInput       `json:"images,omitempty"`
-	Thinking contracts.InfaiThinkingLevel `json:"thinking"`
+	ClientMessageID string                       `json:"client_message_id,omitempty"`
+	Prompt          string                       `json:"prompt"`
+	Images          []contracts.ImageInput       `json:"images,omitempty"`
+	Thinking        contracts.InfaiThinkingLevel `json:"thinking"`
 }
 
 type ChatResponse struct {

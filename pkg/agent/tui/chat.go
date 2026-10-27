@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +33,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/store"
 	"github.com/dipankardas011/infai/pkg/agent/vision"
+	"github.com/dipankardas011/infai/pkg/ds"
 	"github.com/google/uuid"
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
@@ -79,7 +82,13 @@ type chatModel struct {
 	modalities    []contracts.LLMSupportedModality
 	pending       []contracts.ImageInput
 	clipboard     Clipboard
-	used          uint64
+	// pendingSends holds the client-message ids this client has sent but not
+	// yet seen the session take from its inbox. The session owns the queue, so
+	// the count is the only thing the client can honestly say about it: one is
+	// added before the request leaves and one is retired by the id the inbox
+	// echo carries back.
+	pendingSends *ds.Set[string]
+	used         uint64
 	// lastUsage is the provider's own accounting for the turn this client saw
 	// finish. It is the live half of what the stats page draws; the session's
 	// saved report covers a client that joined after the turn.
@@ -204,8 +213,9 @@ type sessionJoinDoneMsg struct {
 }
 
 type messageSentMsg struct {
-	ownsWork bool
-	err      error
+	clientMessageID string
+	ownsWork        bool
+	err             error
 }
 type turnCanceledMsg struct{ err error }
 
@@ -339,6 +349,7 @@ func newChatModel(ctx context.Context, client Client, sessions []contracts.Sessi
 		turnTextBlock:  -1,
 		toolCallBlocks: make(map[string]int),
 		skillNames:     make(map[string]string),
+		pendingSends:   ds.NewSet[string](),
 	}
 	if opts.SessionID != uuid.Nil {
 		m.modal = loadingModal("Opening session", "the session, its transcripts, its MCP servers and the model it runs on")
@@ -607,6 +618,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case messageSentMsg:
 		if msg.err != nil {
+			// A prompt the session refused will never be taken from its inbox,
+			// so the row it drew is retired here.
+			m.pendingSends.Remove(msg.clientMessageID)
 			// Only a send that opened the turn may close it; a refused queued
 			// prompt leaves the running turn's status alone.
 			if msg.ownsWork {
@@ -736,6 +750,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.closeFilePicker()
 		m.toolCallBlocks = make(map[string]int)
 		m.skillNames = make(map[string]string)
+		m.pendingSends = ds.NewSet[string]()
 		m.client.SetSession(msg.output.ID)
 		m.replaceBlocks(blocksFromRecords(msg.records))
 		m.checklist = taskChecklistFromRecords(msg.records)
@@ -817,6 +832,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.closeFilePicker()
 		m.toolCallBlocks = make(map[string]int)
 		m.skillNames = make(map[string]string)
+		m.pendingSends = ds.NewSet[string]()
 		m.contextWindow = msg.output.ContextWindow
 		m.thinking = msg.output.Thinking
 		m.availableThinking = msg.output.AvailableThinking
@@ -1824,10 +1840,29 @@ func (m *chatModel) submit() tea.Cmd {
 	thinking := m.thinking
 	// Attachments are consumed only once dispatch has successfully begun.
 	m.pending = nil
+
+	clientMessageID := newClientMessageID()
+	m.pendingSends.Add(clientMessageID)
 	return tea.Batch(func() tea.Msg {
-		input := contracts.UserInput{Text: encodeSkillReferences(encodeFileReferences(promptText, cwd)), Images: images}
-		return messageSentMsg{ownsWork: ownsWork, err: m.client.SendMessage(m.ctx, input, thinking)}
+		input := contracts.UserInput{
+			ClientMessageID: clientMessageID,
+			Text:            encodeSkillReferences(encodeFileReferences(promptText, cwd)),
+			Images:          images,
+		}
+		return messageSentMsg{clientMessageID: clientMessageID, ownsWork: ownsWork, err: m.client.SendMessage(m.ctx, input, thinking)}
 	}, animationTickCmd())
+}
+
+// newClientMessageID names one queued prompt. It has to be unique per send
+// rather than derived from the text: the session rewrites the message before it
+// reaches the inbox (skill and file references are resolved, MCP resources are
+// read into the body), and the same prompt can be sent twice.
+func newClientMessageID() string {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return uuid.NewString()
+	}
+	return "msg_" + hex.EncodeToString(raw[:])
 }
 
 func cancelTurnCmd(ctx context.Context, client Client, id uuid.UUID) tea.Cmd {
@@ -1940,6 +1975,11 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 		m.sidecarsSession = view.Meta.ID
 	}
 	m.session = view.Meta
+	for _, message := range view.History {
+		if message.ClientMessageID != "" {
+			m.pendingSends.Remove(message.ClientMessageID)
+		}
+	}
 	m.reapplyBlocks(blocksFromMessages(view.History))
 	m.checklist = view.Checklist
 	m.mcpPrompts = view.Prompts
@@ -2023,6 +2063,9 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) tea.Cmd {
 	case contracts.EventSubscriberGap:
 		m.appendError(errors.New(content))
 	case contracts.EventMessageFromAgentInbox:
+		if event.ClientMessageID != "" {
+			m.pendingSends.Remove(event.ClientMessageID)
+		}
 		images := 0
 		if event.Attachments != nil {
 			images = event.Attachments.ImageCount
@@ -3231,41 +3274,80 @@ func (m *chatModel) composerView() string {
 		style = m.styles.composerWaiting
 	}
 	box := fullWidth(style, m.width, m.composer.View())
-	if m.activePolicy == "" {
-		return box
-	}
+	queued := m.queuedLabel()
+	policy := ""
 	pill := m.styles.policyPill
-	switch {
-	case m.policyFlash:
-		pill = m.styles.policyPillFlash
-	case m.isCustomPolicy():
-		pill = m.styles.policyPillCustom
+	if m.activePolicy != "" {
+		policy = "HITL " + m.activePolicy
+		switch {
+		case m.policyFlash:
+			pill = m.styles.policyPillFlash
+		case m.isCustomPolicy():
+			pill = m.styles.policyPillCustom
+		}
+	}
+	if queued == "" && policy == "" {
+		return box
 	}
 	edge := m.styles.composerEdge
 	if m.composerWaiting {
 		edge = m.styles.composerEdgeWait
 	}
-	return composerTopLabel(box, m.width, "HITL "+m.activePolicy, pill, edge)
+	return composerTopLabel(box, m.width, queued, policy, m.styles.queuePill, pill, edge)
+}
+
+// queuedLabel is how many prompts this client has sent that the session has not
+// yet taken from its inbox. It is drawn as a count and a single-cell glyph: the
+// session owns the queue, so a number is all a client can honestly say about it.
+func (m *chatModel) queuedLabel() string {
+	if m.pendingSends == nil {
+		return ""
+	}
+	queued := m.pendingSends.Size()
+	if queued == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d ↥", queued)
 }
 
 // composerTopLabel replaces the top border of a rendered composer with one that
-// carries the policy chip near the right corner. Lipgloss draws a plain border,
-// so the line is rebuilt at the same width; only the first line is touched.
-func composerTopLabel(box string, width int, label string, labelStyle, edge lipgloss.Style) string {
+// carries the queued count near the left corner and the policy chip near the
+// right. Lipgloss draws a plain border, so the line is rebuilt at the same
+// width; only the first line is touched. A label that does not fit is dropped
+// rather than crowding out the other.
+func composerTopLabel(box string, width int, left, right string, leftStyle, rightStyle, edge lipgloss.Style) string {
 	if width < 8 {
 		return box
 	}
-	maxText := width - 7 // corners, one left dash, two right dashes, chip padding
-	if maxText < 1 {
+	// Corners and the two dashes that close the right corner are the edge's own
+	// room; the labels take what is left and the dashes are what remains.
+	rightText, rightWidth := "", 0
+	if right != "" {
+		rightText = rightStyle.Render(xansi.Truncate(right, width-7, "…"))
+		rightWidth = xansi.StringWidth(rightText)
+	}
+	leftText, leftWidth := "", 0
+	if left != "" {
+		leftText = leftStyle.Render(left)
+		leftWidth = xansi.StringWidth(leftText)
+	}
+	dashes := width - 4 - rightWidth - leftWidth
+	// Both chips carry their own padding, so each sits flush against a dash and
+	// needs one dash of room to sit in; the left one is the one that goes
+	// without.
+	if leftText != "" && dashes < 2 {
+		dashes += leftWidth
+		leftText, leftWidth = "", 0
+	}
+	if dashes < 1 || (leftText == "" && rightText == "") {
 		return box
 	}
-	label = xansi.Truncate(label, maxText, "…")
-	rendered := labelStyle.Render(label)
-	left := width - 4 - xansi.StringWidth(rendered)
-	if left < 1 {
-		return box
+	head := "╭"
+	if leftText != "" {
+		head += "─" + leftText
+		dashes--
 	}
-	top := edge.Render("╭"+strings.Repeat("─", left)) + rendered + edge.Render("──╮")
+	top := edge.Render(head+strings.Repeat("─", dashes)) + rightText + edge.Render("──╮")
 	if i := strings.IndexByte(box, '\n'); i >= 0 {
 		return top + box[i:]
 	}

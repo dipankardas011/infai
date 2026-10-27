@@ -9,6 +9,7 @@ type ChatOptions struct {
 // NOTE: Adapters remove harness-only fields such as Status before sending the OpenAI wire format.
 type ChatMessage struct {
 	Role               string              `json:"role"`
+	ClientMessageID    string              `json:"client_message_id,omitempty"`
 	Content            *string             `json:"content,omitempty"`
 	Images             []ImageInput        `json:"images,omitempty"`
 	Artifacts          []Artifact          `json:"artifacts,omitempty"`
@@ -66,11 +67,12 @@ func NewUserMessage(content string) ChatMessage {
 	return ChatMessage{Role: "user", Content: &content}
 }
 
-// NewUserMessageWithInput builds a user message carrying text and image
-// attachments. Image bytes stay in canonical form; adapters translate them.
+// NewUserMessageWithInput builds a user message carrying text, image
+// attachments, and the client's own id for the turn. Image bytes stay in
+// canonical form; adapters translate them, and the id never reaches a provider.
 func NewUserMessageWithInput(input UserInput) ChatMessage {
 	content := input.Text
-	return ChatMessage{Role: "user", Content: &content, Images: input.Images}
+	return ChatMessage{Role: "user", ClientMessageID: input.ClientMessageID, Content: &content, Images: input.Images}
 }
 
 func NewAssistantMessage(content string) ChatMessage {

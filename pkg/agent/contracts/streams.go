@@ -80,6 +80,8 @@ type EventStream struct {
 	Kind      EventStreamKind `json:"delta_kind,omitempty"`
 	Timestamp time.Time       `json:"ts"`
 
+	ClientMessageID string `json:"client_message_id,omitempty"`
+
 	Content     *string           `json:"content"`
 	Attachments *EventAttachments `json:"attachments,omitempty"`
 	// Artifacts carries the non-text payload the model produced in this turn.

@@ -226,7 +226,12 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 			// sent after its own commit would reach that client twice.
 			for _, message := range unreadMessages {
 				text := message.Text()
-				echo := contracts.EventStream{Kind: contracts.EventMessageFromAgentInbox, Timestamp: time.Now().UTC(), Content: &text}
+				echo := contracts.EventStream{
+					Kind:            contracts.EventMessageFromAgentInbox,
+					Timestamp:       time.Now().UTC(),
+					ClientMessageID: message.ClientMessageID,
+					Content:         &text,
+				}
 				if images := len(message.Images); images > 0 {
 					echo.Attachments = &contracts.EventAttachments{ImageCount: images}
 				}

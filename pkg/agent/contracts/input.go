@@ -10,8 +10,9 @@ import (
 // empty when the turn carries at least one image; images are raw encoded bytes
 // and are translated into provider wire formats only inside adapters.
 type UserInput struct {
-	Text   string       `json:"text,omitempty"`
-	Images []ImageInput `json:"images,omitempty"`
+	ClientMessageID string       `json:"client_message_id,omitempty"`
+	Text            string       `json:"text,omitempty"`
+	Images          []ImageInput `json:"images,omitempty"`
 }
 
 // ImageInput is one image attached to a user turn. Data holds the encoded

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image/color"
 	"os"
@@ -3312,6 +3313,116 @@ func TestSubmitLeavesUnresolvedReferencesAlone(t *testing.T) {
 	const want = "ask @missing.go and @../secret/s.txt and @secret"
 	if len(client.sent) != 1 || client.sent[0].Text != want {
 		t.Fatalf("sent=%+v want %q", client.sent, want)
+	}
+}
+
+// A prompt is queued by the session, so the composer says how many this client
+// is still waiting on. The id travels with the send and comes back on the inbox
+// echo, which is what retires the one row it names — the text cannot, because
+// the session rewrites the message before it reaches the inbox.
+func TestQueuedPromptIsCountedUntilItsEcho(t *testing.T) {
+	client := &recordingChatClient{}
+	m := newChatModel(context.Background(), client, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.session = store.SessionMeta{ID: uuid.New(), Cwd: "/workspace", Model: "test-model"}
+
+	m.composer.SetValue("same words")
+	runCmd(t, m.submit())
+	m.composer.SetValue("same words")
+	runCmd(t, m.submit())
+	if len(client.sent) != 2 {
+		t.Fatalf("sent=%d messages, want 2", len(client.sent))
+	}
+	first, second := client.sent[0].ClientMessageID, client.sent[1].ClientMessageID
+	if first == "" || second == "" || first == second {
+		t.Fatalf("client message ids are not unique: %q and %q", first, second)
+	}
+	if page := ansi.Strip(m.composerView()); !strings.Contains(page, "2 ↥") {
+		t.Fatalf("the composer does not count the queued prompts:\n%s", page)
+	}
+
+	// The echo names the message it took, so retrying the same text retires the
+	// row of the send that was taken and leaves the other one queued.
+	echo := contracts.EventStream{Kind: contracts.EventMessageFromAgentInbox, ClientMessageID: first, Content: ptr("same words")}
+	m.applySessionEvent(echo)
+	if page := ansi.Strip(m.composerView()); !strings.Contains(page, "1 ↥") {
+		t.Fatalf("the echo did not retire the send it named:\n%s", page)
+	}
+
+	// A send the session refused never reaches the inbox, so the refusal is what
+	// retires it.
+	_, _ = m.Update(messageSentMsg{clientMessageID: second, ownsWork: true, err: errors.New("session is closed")})
+	if page := ansi.Strip(m.composerView()); strings.Contains(page, "↥") {
+		t.Fatalf("a refused send is still counted:\n%s", page)
+	}
+}
+
+// A client that joins after its prompt was committed never saw the echo, so the
+// history it is handed is the other place a queued row can be answered.
+func TestJoiningReconcilesQueuedPromptsAgainstTheHistory(t *testing.T) {
+	m := newChatModel(context.Background(), &recordingChatClient{}, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.session = store.SessionMeta{ID: uuid.New(), Cwd: "/workspace", Model: "test-model"}
+	m.composer.SetValue("already committed")
+	runCmd(t, m.submit())
+	if page := ansi.Strip(m.composerView()); !strings.Contains(page, "1 ↥") {
+		t.Fatalf("the composer does not count the queued prompt:\n%s", page)
+	}
+
+	m.applySessionView(glue.SessionView{
+		Meta: m.session,
+		History: []contracts.ChatMessage{
+			{Role: "user", ClientMessageID: "msg_other", Content: ptr("someone else's")},
+			{Role: "user", ClientMessageID: m.pendingSends.ToSlice()[0], Content: ptr("already committed")},
+		},
+	})
+	if page := ansi.Strip(m.composerView()); strings.Contains(page, "↥") {
+		t.Fatalf("the joined history left a committed prompt queued:\n%s", page)
+	}
+}
+
+// The queued count and the policy chip share the composer's top edge, and the
+// edge stays exactly as wide as the composer it draws. The count is a chip in
+// its own right — its own colour on its own background, like the policy's —
+// rather than a word borrowed from the edge.
+func TestComposerEdgeCarriesTheQueueAndThePolicy(t *testing.T) {
+	m := newChatModel(context.Background(), &recordingChatClient{}, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	m.session = store.SessionMeta{ID: uuid.New(), Cwd: "/workspace", Model: "test-model"}
+	m.activePolicy = "full"
+	m.composer.SetValue("queued")
+	runCmd(t, m.submit())
+
+	for _, width := range []int{80, 44, 24, 20} {
+		m.width = width
+		m.reflow()
+		top := strings.Split(ansi.Strip(m.composerView()), "\n")[0]
+		if got := lipgloss.Width(top); got != width {
+			t.Fatalf("width %d: the top edge is %d cells: %q", width, got, top)
+		}
+	}
+
+	m.width = 44
+	m.reflow()
+	edge := strings.Split(m.composerView(), "\n")[0]
+	if !strings.Contains(ansi.Strip(edge), "1 ↥") || !strings.Contains(ansi.Strip(edge), "HITL full") {
+		t.Fatalf("the top edge does not carry both chips: %q", ansi.Strip(edge))
+	}
+	if !strings.Contains(edge, m.styles.queuePill.Render("1 ↥")) {
+		t.Fatalf("the queued count is not drawn as its own chip: %q", ansi.Strip(edge))
+	}
+
+	// The count is what gives way on a terminal too narrow for both chips: the
+	// policy is what the composer is asking, the count is how many are waiting.
+	m.width = 20
+	m.reflow()
+	if top := ansi.Strip(m.composerView()); strings.Contains(top, "↥") || !strings.Contains(top, "HITL full") {
+		t.Fatalf("a narrow composer kept the wrong chip: %q", top)
 	}
 }
 

@@ -78,6 +78,7 @@ type harnessStyles struct {
 	policyPill       lipgloss.Style
 	policyPillCustom lipgloss.Style
 	policyPillFlash  lipgloss.Style
+	queuePill        lipgloss.Style
 	status           lipgloss.Style
 	statusBusy       lipgloss.Style
 	statusWaiting    lipgloss.Style
@@ -166,6 +167,7 @@ func newHarnessStyles() harnessStyles {
 		policyPill:       lipgloss.NewStyle().Background(everforest.Blue).Foreground(everforest.Background).Bold(true).Padding(0, 1),
 		policyPillCustom: lipgloss.NewStyle().Background(everforest.Orange).Foreground(everforest.Background).Bold(true).Padding(0, 1),
 		policyPillFlash:  lipgloss.NewStyle().Background(everforest.Yellow).Foreground(everforest.Background).Bold(true).Padding(0, 1),
+		queuePill:        lipgloss.NewStyle().Background(everforest.Purple).Foreground(everforest.Background).Bold(true).Padding(0, 1),
 		status:           lipgloss.NewStyle().Foreground(everforest.Muted),
 		statusBusy:       lipgloss.NewStyle().Foreground(everforest.Yellow).Bold(true),
 		statusWaiting:    lipgloss.NewStyle().Foreground(everforest.Orange).Bold(true),

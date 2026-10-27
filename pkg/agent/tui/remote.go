@@ -62,10 +62,11 @@ func (c *RemoteClient) SendMessage(ctx context.Context, input contracts.UserInpu
 		return ErrNoSession
 	}
 	payload := struct {
-		Prompt   string                       `json:"prompt"`
-		Images   []contracts.ImageInput       `json:"images,omitempty"`
-		Thinking contracts.InfaiThinkingLevel `json:"thinking"`
-	}{Prompt: input.Text, Images: input.Images, Thinking: thinking}
+		ClientMessageID string                       `json:"client_message_id,omitempty"`
+		Prompt          string                       `json:"prompt"`
+		Images          []contracts.ImageInput       `json:"images,omitempty"`
+		Thinking        contracts.InfaiThinkingLevel `json:"thinking"`
+	}{ClientMessageID: input.ClientMessageID, Prompt: input.Text, Images: input.Images, Thinking: thinking}
 	return c.postJSON(ctx, "/v1/sessions/"+sessionID.String()+"/chat", payload, http.StatusAccepted)
 }
 

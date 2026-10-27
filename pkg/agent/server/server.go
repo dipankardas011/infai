@@ -789,7 +789,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	input := contracts.UserInput{Text: req.Prompt, Images: req.Images}
+	input := contracts.UserInput{ClientMessageID: req.ClientMessageID, Text: req.Prompt, Images: req.Images}
 	if input.Empty() {
 		s.writeError(w, http.StatusBadRequest, errors.New("prompt is required"))
 		return
