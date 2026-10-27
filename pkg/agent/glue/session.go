@@ -29,6 +29,7 @@ type SessionOutput struct {
 	AvailableThinking []contracts.InfaiThinkingLevel   `json:"available_thinking"`
 	InputModalities   []contracts.LLMSupportedModality `json:"input_modalities"`
 	OutputModalities  []contracts.LLMSupportedModality `json:"output_modalities"`
+	Tools             []contracts.Tool                 `json:"tools,omitempty"`
 	Skills            []contracts.Skill                `json:"skills,omitempty"`
 
 	ActivePolicy      string   `json:"active_policy,omitempty"`

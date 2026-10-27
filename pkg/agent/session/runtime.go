@@ -16,6 +16,10 @@ const (
 	SUBSCRIBER_BUFFER = 64
 )
 
+func (s *InfaiAgentSession) AvailableTools() []contracts.Tool {
+	return append([]contracts.Tool(nil), s.availableTools...)
+}
+
 func (s *InfaiAgentSession) AvailableSkills() []contracts.Skill {
 	return append([]contracts.Skill(nil), s.availableSkills...)
 }

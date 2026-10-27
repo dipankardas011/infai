@@ -501,6 +501,7 @@ func (s *Server) sessionOutput(sess *session.InfaiAgentSession) glue.SessionOutp
 		AvailableThinking: sess.AvailableThinkingPatterns(),
 		InputModalities:   sess.SupportedInputModalities(),
 		OutputModalities:  sess.SupportedOutputModalities(),
+		Tools:             sess.AvailableTools(),
 		Skills:            sess.AvailableSkills(),
 		ActivePolicy:      sess.ActivePolicyName(),
 		AvailablePolicies: s.engine.PolicyNames(),

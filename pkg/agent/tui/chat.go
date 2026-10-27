@@ -143,6 +143,8 @@ type chatModel struct {
 	commandSelection        int
 	mcpPrompts              []contracts.MCPPrompt
 	mcpResources            []contracts.MCPResource
+	mcpStatus               []contracts.MCPServerStatus
+	availableTools          []contracts.Tool
 	availableSkills         []contracts.Skill
 	filePicker              *filePicker
 	resourcePicker          *resourcePicker
@@ -416,6 +418,11 @@ func (m *chatModel) sessionStats() sessionStats {
 		status:        m.status,
 		contextWindow: m.contextWindowSize(),
 		used:          m.contextUsed(),
+		tools:         m.availableTools,
+		skills:        m.availableSkills,
+		mcpPrompts:    m.mcpPrompts,
+		mcpResources:  m.mcpResources,
+		mcpStatus:     m.mcpStatus,
 		relativeErr:   m.relativeIdentityErr,
 	}
 	last := m.session.LastTurnMeta
@@ -714,7 +721,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.activePolicy = msg.output.ActivePolicy
 		m.availablePolicies = msg.output.AvailablePolicies
 		m.modalities = msg.output.InputModalities
+		m.availableTools = msg.output.Tools
 		m.availableSkills = msg.output.Skills
+		m.mcpStatus = msg.output.MCP
 		m.pending = nil
 		m.approval = nil
 		m.approvalChoice = 0
@@ -813,7 +822,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.activePolicy = msg.output.ActivePolicy
 		m.availablePolicies = msg.output.AvailablePolicies
 		m.modalities = msg.output.InputModalities
+		m.availableTools = msg.output.Tools
 		m.availableSkills = msg.output.Skills
+		m.mcpStatus = msg.output.MCP
 		m.pending = nil
 		m.client.SetSession(msg.output.ID)
 		m.replaceBlocks(nil)
@@ -839,7 +850,9 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.activePolicy = msg.output.ActivePolicy
 			m.availablePolicies = msg.output.AvailablePolicies
 			m.modalities = msg.output.InputModalities
+			m.availableTools = msg.output.Tools
 			m.availableSkills = msg.output.Skills
+			m.mcpStatus = msg.output.MCP
 			m.pending = nil
 			m.reflow()
 			m.blocks = append(m.blocks, block{role: "event", text: "Model switched to " + msg.output.Model + " @ " + msg.output.Provider})
@@ -1572,9 +1585,9 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 // from what is on screen.
 func (m *chatModel) handleStatsKey(key string) (tea.Cmd, bool) {
 	switch key {
-	case "up":
+	case "up", "k":
 		m.modal.scroll = m.clampStatsScroll(m.modal.scroll - 1)
-	case "down":
+	case "down", "j":
 		m.modal.scroll = m.clampStatsScroll(m.modal.scroll + 1)
 	case "pgup":
 		m.modal.scroll = m.clampStatsScroll(m.modal.scroll - max(m.modal.rows, 1))
@@ -1930,6 +1943,7 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 	m.checklist = view.Checklist
 	m.mcpPrompts = view.Prompts
 	m.mcpResources = view.Resources
+	m.mcpStatus = view.MCP
 	if view.ActivePolicy != "" {
 		m.activePolicy = view.ActivePolicy
 		m.availablePolicies = view.AvailablePolicies

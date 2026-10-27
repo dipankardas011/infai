@@ -77,6 +77,30 @@ func TestStatsPageShowsContextAndTheLastTurn(t *testing.T) {
 	}
 }
 
+func TestStatsPageShowsSessionCapabilities(t *testing.T) {
+	m := statsTestModel()
+	m.availableTools = []contracts.Tool{
+		{Name: "read", Description: "Read a UTF-8 text file"},
+		{Name: "mcp_grafana_search", Description: "Search Grafana dashboards"},
+	}
+	m.availableSkills = []contracts.Skill{{Title: "release", Description: "Prepare a release"}}
+	m.mcpPrompts = []contracts.MCPPrompt{{Server: "grafana", Name: "triage", Description: "Triage an incident"}}
+	m.mcpResources = []contracts.MCPResource{{Server: "docs", URI: "docs://runbook", Description: "Operations runbook"}}
+	m.mcpStatus = []contracts.MCPServerStatus{{Server: "broken", Reason: "connection refused"}}
+
+	page := ansi.Strip(strings.Join(m.sessionStats().lines(120, m.styles), "\n"))
+	for _, want := range []string{
+		"TOOLS  1 available", "read  ·  Read a UTF-8 text file",
+		"SKILLS  1 available", "release  ·  Prepare a release",
+		"MCP  1 tools  ·  1 prompts  ·  1 resources", "tool mcp_grafana_search", "prompt grafana/triage", "resource docs docs://runbook",
+		"unavailable broken  ·  connection refused",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("stats page lacks %q:\n%s", want, page)
+		}
+	}
+}
+
 // A session resumed without a live report still shows the turn that filled its
 // context: the report the session saved is what the page falls back to.
 func TestStatsPageFallsBackToTheSavedTurn(t *testing.T) {
@@ -308,11 +332,20 @@ func TestStatsPageScrollsItsWholeContent(t *testing.T) {
 	m.session.EvalBashScript = &script
 
 	page := ansi.Strip(renderStatsPage(m))
-	if !strings.Contains(page, "1-") || !strings.Contains(page, "↑/↓ scroll") {
+	if !strings.Contains(page, "1-") || !strings.Contains(page, "↑/↓ or j/k scroll") {
 		t.Fatalf("a page with more to show did not name its window:\n%s", page)
 	}
 	if strings.Contains(page, last) {
 		t.Fatalf("the first window already showed the last line:\n%s", page)
+	}
+
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'j'}))
+	if m.modal.scroll != 1 {
+		t.Fatalf("j scroll offset=%d want 1", m.modal.scroll)
+	}
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'k'}))
+	if m.modal.scroll != 0 {
+		t.Fatalf("k scroll offset=%d want 0", m.modal.scroll)
 	}
 
 	// Holding down rests on the last line rather than scrolling past it, and the

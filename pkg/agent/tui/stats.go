@@ -24,6 +24,11 @@ type sessionStats struct {
 	usage         *contracts.TokenUsage
 	usageProvider string
 	usageModel    string
+	tools         []contracts.Tool
+	skills        []contracts.Skill
+	mcpPrompts    []contracts.MCPPrompt
+	mcpResources  []contracts.MCPResource
+	mcpStatus     []contracts.MCPServerStatus
 	// parent and children are the sessions this one hangs off and owns, drawn
 	// with the tree the chat row draws them with. relativeErr is why the engine
 	// could not name them, when it could not.
@@ -78,7 +83,7 @@ func renderStatsPanel(m *modalModel, width, height int, styles harnessStyles) st
 
 	footer := "esc back"
 	if len(lines) > rows {
-		footer = fmt.Sprintf("%d-%d of %d  ·  ↑/↓ scroll  ·  esc back", offset+1, offset+len(window), len(lines))
+		footer = fmt.Sprintf("%d-%d of %d  ·  ↑/↓ or j/k scroll  ·  esc back", offset+1, offset+len(window), len(lines))
 	}
 	footerBlock := fullWidth(lipgloss.NewStyle().Padding(0, 2), width, styles.inactive.Render(ansi.Truncate(footer, contentWidth, "…")))
 	bodyBlock := fullWidth(lipgloss.NewStyle().Padding(0, 2), width, strings.Join(window, "\n"))
@@ -98,6 +103,9 @@ func (s sessionStats) lines(width int, styles harnessStyles) []string {
 		s.treeLines(width, styles),
 		s.contextLines(width, styles),
 		s.lastTurnLines(width, styles),
+		s.toolLines(width, styles),
+		s.skillLines(width, styles),
+		s.mcpLines(width, styles),
 		s.scriptLines(width, styles),
 	} {
 		if len(section) > 0 {
@@ -251,6 +259,76 @@ func statsRelativeRow(tree string, relative statsRelative, width int, styles har
 	}
 	room := max(width-lipgloss.Width(prefix)-lipgloss.Width(kind)-lipgloss.Width(status), 1)
 	return ansi.Truncate(prefix+kind+nameStyle.Render(truncateLine(name, room))+status, width, "…")
+}
+
+func statsCapabilityRow(name, description string, width int, styles harnessStyles) string {
+	line := "  " + styles.screenRow.Render(singleLine(name))
+	if description != "" {
+		line += styles.status.Render("  ·  ") + styles.inactive.Render(singleLine(description))
+	}
+	return ansi.Truncate(line, width, "…")
+}
+
+func (s sessionStats) toolLines(width int, styles harnessStyles) []string {
+	count := 0
+	for _, tool := range s.tools {
+		if !contracts.IsMCPTool(tool.Name) {
+			count++
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	lines := []string{statsHeading("TOOLS", styles.status.Render(fmt.Sprintf("%d available", count)), width, styles)}
+	for _, tool := range s.tools {
+		if contracts.IsMCPTool(tool.Name) {
+			continue
+		}
+		lines = append(lines, statsCapabilityRow(tool.Name, tool.Description, width, styles))
+	}
+	return lines
+}
+
+func (s sessionStats) skillLines(width int, styles harnessStyles) []string {
+	if len(s.skills) == 0 {
+		return nil
+	}
+	lines := []string{statsHeading("SKILLS", styles.status.Render(fmt.Sprintf("%d available", len(s.skills))), width, styles)}
+	for _, skill := range s.skills {
+		lines = append(lines, statsCapabilityRow(skill.Title, skill.Description, width, styles))
+	}
+	return lines
+}
+
+func (s sessionStats) mcpLines(width int, styles harnessStyles) []string {
+	toolCount := 0
+	for _, tool := range s.tools {
+		if contracts.IsMCPTool(tool.Name) {
+			toolCount++
+		}
+	}
+	if toolCount == 0 && len(s.mcpPrompts) == 0 && len(s.mcpResources) == 0 && len(s.mcpStatus) == 0 {
+		return nil
+	}
+	tail := fmt.Sprintf("%d tools  ·  %d prompts  ·  %d resources", toolCount, len(s.mcpPrompts), len(s.mcpResources))
+	lines := []string{statsHeading("MCP", styles.status.Render(tail), width, styles)}
+	for _, tool := range s.tools {
+		if contracts.IsMCPTool(tool.Name) {
+			lines = append(lines, statsCapabilityRow("tool "+tool.Name, tool.Description, width, styles))
+		}
+	}
+	for _, prompt := range s.mcpPrompts {
+		name := prompt.Server + "/" + prompt.Name
+		lines = append(lines, statsCapabilityRow("prompt "+name, prompt.Description, width, styles))
+	}
+	for _, resource := range s.mcpResources {
+		name := resource.Server + "  " + resource.URI
+		lines = append(lines, statsCapabilityRow("resource "+name, resource.Description, width, styles))
+	}
+	for _, status := range s.mcpStatus {
+		lines = append(lines, statsCapabilityRow("unavailable "+status.Server, status.Reason, width, styles))
+	}
+	return lines
 }
 
 // scriptLines highlights the acceptance script the session was created with:
