@@ -125,6 +125,15 @@ type modalModel struct {
 	// pendingDelete is the session a first "d" armed for deletion. The second
 	// "d" deletes it; anything else drops the arm.
 	pendingDelete uuid.UUID
+	// sessionQuery and sessionSearching are the session workspace's search: the
+	// name typed so far, and whether the search bar owns the keyboard. The query
+	// narrows the list, so it is also what the bar shows.
+	sessionQuery     string
+	sessionSearching bool
+	// sessionOptions is the session list before the query narrows it, kept so a
+	// cleared query restores every row instead of re-listing from the engine.
+	// The first row is always the new-session row, which no query hides.
+	sessionOptions []modalOption
 	// query, searching, matches and matchIndex are the branch timeline's
 	// search: the text typed so far, the rows it hit, and where the cursor sits
 	// among them. A hit moves the cursor; the list is never filtered, so the
@@ -186,6 +195,40 @@ func (m *modalModel) optionForShortcut(key rune) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// filterSessions narrows the session list to the rows whose name matches the
+// query. The new-session row stands outside the filter: it is how a session is
+// started, not one of the sessions being searched for, so it is always shown.
+// The cursor lands on the first row the query leaves, which is the session the
+// reader was looking for, not the row that starts a new one.
+func (m *modalModel) filterSessions() {
+	needle := strings.ToLower(strings.TrimSpace(m.sessionQuery))
+	matched := make([]modalOption, 0, len(m.sessionOptions))
+	if len(m.sessionOptions) > 0 {
+		matched = append(matched, m.sessionOptions[0])
+		for _, option := range m.sessionOptions[1:] {
+			if strings.Contains(strings.ToLower(option.label), needle) {
+				matched = append(matched, option)
+			}
+		}
+	}
+	// The rows a query leaves are numbered afresh, so a number key names the row
+	// it is shown against.
+	numberSessionOptions(matched)
+	m.options = matched
+	m.selected = clamp(1, 0, max(len(matched)-1, 0))
+}
+
+// sessionOptionIndex is where a session's row sits in a session list, or -1
+// when the list does not hold it.
+func sessionOptionIndex(options []modalOption, id uuid.UUID) int {
+	for i, option := range options {
+		if option.session == id {
+			return i
+		}
+	}
+	return -1
 }
 
 // timelineSearchLine is the branch timeline's search prompt: the query, a caret
@@ -378,7 +421,10 @@ func renderSessionWorkspace(m *modalModel, width, height int, styles harnessStyl
 	header := fullWidth(lipgloss.NewStyle().Padding(1, 2), width,
 		styles.heading("Session workspace", everforest.Background)+"\n"+
 			styles.screenBody.Render("Start fresh, inspect active work, or resume a saved session."))
-	footerText := "n new  ·  ↑/↓ navigate sessions  ·  enter open  ·  c close  ·  d delete"
+	footerText := "n new  ·  / search  ·  ↑/↓ move  ·  enter open  ·  c close  ·  d delete"
+	if m.sessionSearching {
+		footerText = "type to search session names  ·  ↑/↓ move  ·  enter open  ·  esc clear"
+	}
 	if m.pendingDelete != uuid.Nil {
 		footerText = "press d again to permanently delete this session and its sidecars  ·  active work stops  ·  any other key cancels"
 	}
@@ -702,11 +748,24 @@ func renderSessionsPanel(m *modalModel, width, height int, styles harnessStyles)
 	if len(options) > 0 {
 		options = options[1:]
 	}
+	search := renderSessionSearchBar(m, contentWidth, styles)
+	border := everforest.SurfaceAlt
+	if m.selected > 0 {
+		border = everforest.Green
+	}
 	if len(options) == 0 {
-		return renderSessionPanel("SESSIONS", styles.inactive.Render("No saved sessions yet"), width, height, everforest.SurfaceAlt, styles)
+		// A search that found nothing says so; a list with nothing saved yet is
+		// the engine's answer, not the query's.
+		note := "No saved sessions yet"
+		if m.sessionQuery != "" {
+			note = fmt.Sprintf("No session named %q", m.sessionQuery)
+		}
+		return renderSessionPanel("SESSIONS", search+"\n"+styles.inactive.Render(note), width, height, border, styles)
 	}
 	selected := clamp(m.selected-1, 0, len(options)-1)
-	rowCap := max((height-5)/2, 1) // each session takes a name row and a detail row
+	// Each session takes a name row and a detail row; the panel's other rows go
+	// to its frame, the search bar and the count below the list.
+	rowCap := max((height-6)/2, 1)
 	start, end := visibleRange(len(options), selected, rowCap)
 	rows := make([]string, 0, (end-start)*2+1)
 	for i := start; i < end; i++ {
@@ -717,11 +776,42 @@ func renderSessionsPanel(m *modalModel, width, height int, styles harnessStyles)
 	if start > 0 || end < len(options) {
 		rows = append(rows, styles.inactive.Render(fmt.Sprintf("  %d-%d of %d", start+1, end, len(options))))
 	}
+	return renderSessionPanel("SESSIONS", search+"\n"+strings.Join(rows, "\n"), width, height, border, styles)
+}
+
+// renderSessionSearchBar draws the session list's search field: the query being
+// typed with a caret while the bar has the keyboard, and how many sessions it
+// left. It sits inside the sessions panel, so it costs that panel one row
+// rather than a frame of its own.
+func renderSessionSearchBar(m *modalModel, width int, styles harnessStyles) string {
 	border := everforest.SurfaceAlt
-	if m.selected > 0 {
+	if m.sessionSearching {
+		// A green frame is this harness's way of saying typing goes in, the same
+		// way the composer wears one.
 		border = everforest.Green
 	}
-	return renderSessionPanel("SESSIONS", strings.Join(rows, "\n"), width, height, border, styles)
+	text := styles.inactive.Render("search sessions") + styles.hint.Render("  / to type")
+	switch {
+	case m.sessionSearching:
+		text = styles.screenRow.Render(m.sessionQuery) + styles.active.Render("▏")
+	case m.sessionQuery != "":
+		text = styles.screenRow.Render(m.sessionQuery) + styles.hint.Render("  / to edit")
+	}
+	if m.sessionQuery != "" {
+		found := max(len(m.options)-1, 0)
+		if found == 0 {
+			text += "  " + styles.error.Render("no matches")
+		} else {
+			text += "  " + styles.inactive.Render(fmt.Sprintf("%d of %d", found, max(len(m.sessionOptions)-1, 0)))
+		}
+	}
+	inner := max(width-4, 1) // the bar's border and padding take the rest
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(border).
+		Padding(0, 1).
+		Width(width).
+		Render(sessionRow(lipgloss.NewStyle(), text, inner))
 }
 
 func sessionEntryRows(option modalOption, selected, armed bool, width int, styles harnessStyles) []string {

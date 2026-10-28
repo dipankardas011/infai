@@ -1586,6 +1586,165 @@ func TestSessionListAnyOtherKeyCancelsAnArmedDelete(t *testing.T) {
 	}
 }
 
+// sessionSearchFixture opens the session workspace with three named sessions,
+// sized so the whole page renders.
+func sessionSearchFixture(t *testing.T) (*chatModel, uuid.UUID) {
+	t.Helper()
+	deploy, review := uuid.New(), uuid.New()
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{
+		{ID: deploy, Name: "Deploy the cluster", Status: contracts.SessionIdle},
+		{ID: review, Name: "Review the diff", Status: contracts.SessionIdle},
+		{ID: uuid.New(), Name: "scratch", Status: contracts.SessionTombstone},
+	}, false)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	return m, review
+}
+
+func pressSessionKeys(m *chatModel, keys ...tea.KeyPressMsg) {
+	for _, key := range keys {
+		_, _ = m.Update(key)
+	}
+}
+
+func typeSessionQuery(m *chatModel, query string) {
+	for _, r := range query {
+		pressSessionKeys(m, tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)}))
+	}
+}
+
+// The search bar narrows the list to the session names it matches — the name,
+// whatever its case — and the rows it hides come back when the query goes.
+func TestSessionSearchNarrowsTheListByName(t *testing.T) {
+	m, review := sessionSearchFixture(t)
+
+	placeholder := ansi.Strip(m.View().Content)
+	if !strings.Contains(placeholder, "search sessions") {
+		t.Fatalf("session list does not offer a search bar:\n%s", placeholder)
+	}
+
+	pressSessionKeys(m, tea.KeyPressMsg(tea.Key{Code: '/', Text: "/"}))
+	if !m.modal.sessionSearching {
+		t.Fatal("slash did not open the search bar")
+	}
+	typeSessionQuery(m, "REVIEW")
+	if m.modal.sessionQuery != "REVIEW" {
+		t.Fatalf("query=%q want REVIEW", m.modal.sessionQuery)
+	}
+	if len(m.modal.options) != 2 || m.modal.options[1].session != review {
+		t.Fatalf("options=%+v, want the new-session row and Review", m.modal.options)
+	}
+	if m.modal.selected != 1 {
+		t.Fatalf("selection=%d, want the row the query found", m.modal.selected)
+	}
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"REVIEW", "1 of 3", "type to search session names"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("searching list lacks %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "Deploy the cluster") || strings.Contains(content, "scratch") {
+		t.Fatalf("a row the query hides is still drawn:\n%s", content)
+	}
+
+	pressSessionKeys(m, tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc}))
+	if m.modal == nil || m.modal.kind != modalSessions {
+		t.Fatal("esc closed the session page instead of the search")
+	}
+	if m.modal.sessionSearching || m.modal.sessionQuery != "" {
+		t.Fatalf("esc left search state: searching=%v query=%q", m.modal.sessionSearching, m.modal.sessionQuery)
+	}
+	if len(m.modal.options) != 4 {
+		t.Fatalf("options=%d after clearing the query, want every row back", len(m.modal.options))
+	}
+}
+
+// Enter opens the session the query found, so one query and one key reaches it.
+func TestSessionSearchEnterOpensTheMatch(t *testing.T) {
+	m, review := sessionSearchFixture(t)
+	pressSessionKeys(m, tea.KeyPressMsg(tea.Key{Code: '/', Text: "/"}))
+	typeSessionQuery(m, "review")
+	m.modal.selected = 1
+	if m.modal.options[m.modal.selected].session != review {
+		t.Fatal("the query did not select the matching session")
+	}
+
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd == nil {
+		t.Fatal("enter on a match dispatched nothing")
+	}
+	if m.modal != nil && m.modal.kind == modalSessions {
+		t.Fatal("enter left the session list up instead of opening the session")
+	}
+}
+
+// A query that matches nothing must not fall through to the new-session row:
+// enter is the key that starts a session everywhere else on this page.
+func TestSessionSearchMissDoesNotStartASession(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	m.showSessions([]contracts.SessionSummary{{ID: uuid.New(), Name: "scratch"}}, false)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	pressSessionKeys(m, tea.KeyPressMsg(tea.Key{Code: '/', Text: "/"}))
+	typeSessionQuery(m, "zzz")
+
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{`No session named "zzz"`, "no matches"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("missed search lacks %q:\n%s", want, content)
+		}
+	}
+	_, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd != nil || m.modal == nil || m.modal.kind != modalSessions {
+		t.Fatal("enter on an empty result started a session")
+	}
+}
+
+// While the bar has the keyboard its letters are the query, so the list's own
+// shortcuts cannot fire under a name being typed.
+func TestSessionSearchKeepsListShortcutsOutOfTheQuery(t *testing.T) {
+	m, _ := sessionSearchFixture(t)
+	m.modal.selected = 1
+	pressSessionKeys(m, tea.KeyPressMsg(tea.Key{Code: '/', Text: "/"}))
+	typeSessionQuery(m, "dn")
+
+	if m.modal.sessionQuery != "dn" {
+		t.Fatalf("query=%q, want the typed letters", m.modal.sessionQuery)
+	}
+	if m.modal.pendingDelete != uuid.Nil {
+		t.Fatal("d armed a delete while the search bar had the keyboard")
+	}
+	if m.modal == nil || m.modal.kind != modalSessions {
+		t.Fatal("n opened the new-session flow instead of typing into the query")
+	}
+}
+
+// A delete re-lists the sessions while the page is up; the query that narrowed
+// the list survives it, so the reader keeps the search that found the row.
+func TestSessionSearchSurvivesADeleteRelist(t *testing.T) {
+	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})
+	scratch, kept := uuid.New(), uuid.New()
+	m.showSessions([]contracts.SessionSummary{
+		{ID: scratch, Name: "scratch"},
+		{ID: kept, Name: "kept"},
+	}, false)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	pressSessionKeys(m, tea.KeyPressMsg(tea.Key{Code: '/', Text: "/"}))
+	typeSessionQuery(m, "scratch")
+
+	_, _ = m.Update(sessionActionedMsg{action: "delete", id: scratch})
+	_, _ = m.Update(sessionsListedMsg{sessions: []contracts.SessionSummary{{ID: kept, Name: "kept"}}})
+
+	if m.modal.sessionQuery != "scratch" {
+		t.Fatalf("query=%q after the re-list, want it kept", m.modal.sessionQuery)
+	}
+	if len(m.modal.options) != 1 {
+		t.Fatalf("options=%+v, want the new-session row alone", m.modal.options)
+	}
+	if content := ansi.Strip(m.View().Content); !strings.Contains(content, `No session named "scratch"`) {
+		t.Fatalf("the filtered list does not say it is empty:\n%s", content)
+	}
+}
+
 func TestDeleteRefreshesSessionsFromServer(t *testing.T) {
 	parent, child, other := uuid.New(), uuid.New(), uuid.New()
 	m := newChatModel(context.Background(), stubChatClient{}, nil, RunOptions{})

@@ -1323,6 +1323,44 @@ func (m *chatModel) cyclePolicy() tea.Cmd {
 	return setSessionPolicyCmd(m.ctx, m.client, next)
 }
 
+func (m *chatModel) handleSessionSearchKey(msg tea.KeyPressMsg, key string) (tea.Cmd, bool) {
+	modal := m.modal
+	if modal.sessionSearching {
+		switch key {
+		case "esc":
+			modal.sessionQuery = ""
+			modal.filterSessions()
+			modal.sessionSearching = false
+		case "enter":
+			if len(modal.options) < 2 && modal.sessionQuery != "" {
+				return nil, true
+			}
+			return m.activateModal(modal.selected), true
+		case "backspace":
+			if runes := []rune(modal.sessionQuery); len(runes) > 0 {
+				modal.sessionQuery = string(runes[:len(runes)-1])
+				modal.filterSessions()
+			}
+		case "up":
+			modal.move(-1)
+		case "down":
+			modal.move(1)
+		default:
+			if text := msg.Key().Text; text != "" {
+				modal.sessionQuery += text
+				modal.filterSessions()
+			}
+		}
+		return nil, true
+	}
+	if key == "/" {
+		modal.sessionSearching = true
+		modal.pendingDelete = uuid.Nil
+		return nil, true
+	}
+	return nil, false
+}
+
 // handleSessionListKey routes the keys the session list owns: "d" deletes a
 // saved session and "c" closes one the engine is holding. A delete is armed by
 // the first "d" and confirmed by the second, and every other key drops the arm,
@@ -1548,6 +1586,9 @@ func (m *chatModel) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 	if m.modal.kind == modalSessions {
+		if cmd, handled := m.handleSessionSearchKey(msg, key); handled {
+			return cmd
+		}
 		if cmd, handled := m.handleSessionListKey(key); handled {
 			return cmd
 		}
@@ -4325,19 +4366,11 @@ func cancelArmTimeoutCmd(id uint64) tea.Cmd {
 	return tea.Tick(cancelArmTimeout, func(time.Time) tea.Msg { return cancelArmTimeoutMsg{id: id} })
 }
 
-// applySessionAction updates the list in place for a close or a delete, so the
-// row the user was working on stays under the cursor.
 func (m *chatModel) applySessionAction(msg sessionActionedMsg) {
 	if m.modal == nil || m.modal.kind != modalSessions {
 		return
 	}
-	index := -1
-	for i, option := range m.modal.options {
-		if option.session == msg.id {
-			index = i
-			break
-		}
-	}
+	index := sessionOptionIndex(m.modal.options, msg.id)
 	if index < 0 {
 		return
 	}
@@ -4351,6 +4384,9 @@ func (m *chatModel) applySessionAction(msg sessionActionedMsg) {
 		if !sessionConcluded(m.modal.options[index].sessionStatus) {
 			m.modal.options[index].sessionStatus = contracts.SessionTombstone
 		}
+		if hidden := sessionOptionIndex(m.modal.sessionOptions, msg.id); hidden >= 0 {
+			m.modal.sessionOptions[hidden].sessionStatus = m.modal.options[index].sessionStatus
+		}
 		return
 	}
 
@@ -4360,6 +4396,9 @@ func (m *chatModel) applySessionAction(msg sessionActionedMsg) {
 		m.session = store.SessionMeta{}
 		m.client.SetSession(uuid.Nil)
 		m.reflow()
+	}
+	if hidden := sessionOptionIndex(m.modal.sessionOptions, msg.id); hidden >= 0 {
+		m.modal.sessionOptions = append(m.modal.sessionOptions[:hidden], m.modal.sessionOptions[hidden+1:]...)
 	}
 	m.modal.options = append(m.modal.options[:index], m.modal.options[index+1:]...)
 	numberSessionOptions(m.modal.options)
@@ -4435,7 +4474,14 @@ func (m *chatModel) showSessions(sessions []contracts.SessionSummary, required b
 		}
 	}
 	numberSessionOptions(options)
-	m.modal = &modalModel{kind: modalSessions, options: options, required: required}
+	query := ""
+	if m.modal != nil && m.modal.kind == modalSessions {
+		query = m.modal.sessionQuery
+	}
+	m.modal = &modalModel{kind: modalSessions, options: options, sessionOptions: slices.Clone(options), required: required, sessionQuery: query}
+	if query != "" {
+		m.modal.filterSessions()
+	}
 }
 
 // numberSessionOptions gives the new-session row its "n" and each session its
