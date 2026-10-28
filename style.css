@@ -1472,7 +1472,8 @@ body.home { background: var(--bg-deep); }
   margin-bottom: 1.1rem;
 }
 .half-infai .half-head { color: var(--text); text-shadow: 0 0 34px var(--green-glow); }
-.half-w .half-head { letter-spacing: 0; }
+/* Bitcount is wide: "One local stack." is 9.6em, so 4.2vw keeps it on one line in a half */
+.half-w .half-head { letter-spacing: 0; font-size: clamp(2.6rem, 4.2vw, 5.8rem); }
 .half-line {
   font-size: calc(1rem * var(--fs));
   color: var(--green);
@@ -1480,17 +1481,22 @@ body.home { background: var(--bg-deep); }
 /* the middle of each half: infai's chip, infaiw's hands. The art area takes
    whatever height is left and the art scales to fit it, so the first screen
    never overflows. Widths: hands 150 columns x 0.6em = 90em, chip 100 x 0.6em = 60em;
-   heights: 40 rows x 1.3em = 52em, 20 rows x 1.3em = 26em. */
+   heights: 40 rows x 1.3em = 52em, 20 rows x 1.3em = 26em. The art spans the full
+   width; its masked top and bottom fades may be clipped, so the height cap only
+   counts the middle 72% (hands) and 80% (chip). */
 .half-art {
   flex: 1 1 0;
   min-height: 6rem;
   container-type: size;
   display: flex;
   align-items: center;
+  justify-content: center;
+  overflow: hidden;
   margin-block: 1rem;
 }
-.half-art .hands { font-size: min(calc(60cqw / 90), calc(100cqh / 52)); }
-.half-art .chip { font-size: min(calc(60cqw / 60), calc(100cqh / 26)); }
+.half-art .hands, .half-art .chip { flex: none; }
+.half-art .hands { font-size: min(calc(100cqw / 90), calc(100cqh / 37.4)); }
+.half-art .chip { font-size: min(calc(100cqw / 60), calc(100cqh / 20.8)); }
 .chip-base { color: var(--green); opacity: 0.5; }
 /* the forward pass: a glowing copy shown through a band that sweeps left to right */
 .chip-pulse {
