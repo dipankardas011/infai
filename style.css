@@ -69,8 +69,8 @@
            linear-gradient(rgba(29, 107, 85, 0.055) 1px, transparent 1px),
            linear-gradient(90deg, rgba(29, 107, 85, 0.055) 1px, transparent 1px);
   --paper-size: 110px 110px, 110px 110px, 22px 22px, 22px 22px;
-  --display: 'Pixelify Sans', 'Geist Mono', monospace;
-  --display-w: 600;
+  --display: 'Bitcount Grid Single', 'Geist Mono', monospace;
+  --display-w: 400;
   --body: 'Newsreader', Georgia, serif;
   --body-w: 400;
   --fs: 1.16;
@@ -177,7 +177,6 @@ h2 {
   letter-spacing: -0.01em;
   text-wrap: balance;
 }
-.is-w h2 { letter-spacing: 0; line-height: 1.08; }
 
 h3 { font-family: var(--body); }
 
@@ -345,7 +344,6 @@ body.is-w .hero-glow { display: none; }
   letter-spacing: -0.015em;
   margin-bottom: 2.6rem;
 }
-body.is-w .hero h1 { font-size: clamp(2.8rem, 7.6vw, 6.4rem); letter-spacing: 0; line-height: 1.02; }
 .h1-accent { color: var(--green); text-shadow: 0 0 28px var(--green-glow); }
 body.is-w .h1-accent { text-shadow: none; }
 .hero-sub {
