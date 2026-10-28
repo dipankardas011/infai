@@ -3475,6 +3475,31 @@ func TestSubmitLeavesUnresolvedReferencesAlone(t *testing.T) {
 	}
 }
 
+// A prompt on an idle session opens the turn rather than waiting for one, so
+// the composer carries no queue chip while it is in flight — not even for the
+// moment before the session reports the turn it started.
+func TestPromptOnAnIdleSessionIsNotCountedAsQueued(t *testing.T) {
+	client := &recordingChatClient{}
+	m := newChatModel(context.Background(), client, nil, RunOptions{})
+	m.modal = nil
+	_ = m.composer.Focus()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.session = store.SessionMeta{ID: uuid.New(), Cwd: "/workspace", Model: "test-model"}
+	m.applySessionStatus(contracts.SessionIdle)
+
+	m.composer.SetValue("first prompt")
+	runCmd(t, m.submit())
+	if len(client.sent) != 1 {
+		t.Fatalf("sent=%d messages, want 1", len(client.sent))
+	}
+	if page := ansi.Strip(m.composerView()); strings.Contains(page, "↥") {
+		t.Fatalf("an idle prompt was counted as queued:\n%s", page)
+	}
+	if got := m.pendingSends.Size(); got != 0 {
+		t.Fatalf("pendingSends=%d after an idle prompt, want none", got)
+	}
+}
+
 // A prompt is queued by the session, so the composer says how many this client
 // is still waiting on. The id travels with the send and comes back on the inbox
 // echo, which is what retires the one row it names — the text cannot, because
@@ -3486,6 +3511,9 @@ func TestQueuedPromptIsCountedUntilItsEcho(t *testing.T) {
 	_ = m.composer.Focus()
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m.session = store.SessionMeta{ID: uuid.New(), Cwd: "/workspace", Model: "test-model"}
+	// Only a send the session has to hold behind a running turn is queued, so
+	// the turn is already in flight when these two arrive.
+	m.applySessionStatus(contracts.SessionBusy)
 
 	m.composer.SetValue("same words")
 	runCmd(t, m.submit())
@@ -3526,6 +3554,7 @@ func TestJoiningReconcilesQueuedPromptsAgainstTheHistory(t *testing.T) {
 	_ = m.composer.Focus()
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m.session = store.SessionMeta{ID: uuid.New(), Cwd: "/workspace", Model: "test-model"}
+	m.applySessionStatus(contracts.SessionBusy)
 	m.composer.SetValue("already committed")
 	runCmd(t, m.submit())
 	if page := ansi.Strip(m.composerView()); !strings.Contains(page, "1 ↥") {
@@ -3554,6 +3583,7 @@ func TestComposerEdgeCarriesTheQueueAndThePolicy(t *testing.T) {
 	_ = m.composer.Focus()
 	m.session = store.SessionMeta{ID: uuid.New(), Cwd: "/workspace", Model: "test-model"}
 	m.activePolicy = "full"
+	m.applySessionStatus(contracts.SessionBusy)
 	m.composer.SetValue("queued")
 	runCmd(t, m.submit())
 

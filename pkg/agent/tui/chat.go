@@ -82,11 +82,13 @@ type chatModel struct {
 	modalities    []contracts.LLMSupportedModality
 	pending       []contracts.ImageInput
 	clipboard     Clipboard
-	// pendingSends holds the client-message ids this client has sent but not
-	// yet seen the session take from its inbox. The session owns the queue, so
-	// the count is the only thing the client can honestly say about it: one is
-	// added before the request leaves and one is retired by the id the inbox
-	// echo carries back.
+	// pendingSends holds the client-message ids this client has sent while the
+	// session was already working, and has not yet seen it take from its inbox.
+	// A send that opens the turn is queued behind nothing, so it is never
+	// counted: the queue chip would otherwise flash on every idle prompt. The
+	// session owns the queue, so the count is the only thing the client can
+	// honestly say about it: one is added before the request leaves and one is
+	// retired by the id the inbox echo carries back.
 	pendingSends *ds.Set[string]
 	used         uint64
 	// lastUsage is the provider's own accounting for the turn this client saw
@@ -1883,7 +1885,9 @@ func (m *chatModel) submit() tea.Cmd {
 	m.pending = nil
 
 	clientMessageID := newClientMessageID()
-	m.pendingSends.Add(clientMessageID)
+	if !ownsWork {
+		m.pendingSends.Add(clientMessageID)
+	}
 	return tea.Batch(func() tea.Msg {
 		input := contracts.UserInput{
 			ClientMessageID: clientMessageID,
