@@ -64,7 +64,6 @@ func isInvisible(character rune) bool {
 		character,
 		unicode.Cf,
 		unicode.Properties["Other_Default_Ignorable_Code_Point"],
-		unicode.Properties["Variation_Selector"],
 		unicode.Properties["Noncharacter_Code_Point"],
 	)
 }

@@ -125,7 +125,7 @@ func TestFileToolsRejectInvisibleCharacters(t *testing.T) {
 	if !strings.Contains(err, "invisible_character") {
 		t.Fatalf("path error = %s", err)
 	}
-	for _, character := range []string{"\u202e", "\uFE0F", "\U000E0000", "\uFDD0"} {
+	for _, character := range []string{"\u202e", "\U000E0000", "\uFDD0"} {
 		err = executeError(t, m, contracts.WriteTool, map[string]any{
 			"path": "new.txt", "content": "bad" + character + "content",
 		})
@@ -133,6 +133,7 @@ func TestFileToolsRejectInvisibleCharacters(t *testing.T) {
 			t.Fatalf("content %U error = %s", []rune(character)[0], err)
 		}
 	}
+	execute(t, m, contracts.WriteTool, map[string]any{"path": "emoji.txt", "content": "\u26A0\uFE0F warning"})
 	execute(t, m, contracts.WriteTool, map[string]any{"path": "allowed.txt", "content": "line 1\nline 2\tvalue"})
 }
 
