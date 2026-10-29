@@ -3606,6 +3606,23 @@ func TestComposerEdgeCarriesTheQueueAndThePolicy(t *testing.T) {
 		t.Fatalf("the queued count is not drawn as its own chip: %q", ansi.Strip(edge))
 	}
 
+	// A chip ends with a reset, so a single style wrapped around the whole edge
+	// stops applying after the first chip. Every run of dashes between them has
+	// to carry the edge style on its own or it falls back to the terminal's
+	// default foreground.
+	edgePrefix := strings.TrimSuffix(m.styles.composerEdge.Render("─"), "─\x1b[m")
+	if edgePrefix == "" || edgePrefix == "\x1b[m─" {
+		t.Fatalf("cannot derive the edge style from %q", m.styles.composerEdge.Render("─"))
+	}
+	for _, segment := range strings.Split(edge, "\x1b[m") {
+		if !strings.Contains(segment, "─") {
+			continue
+		}
+		if !strings.HasPrefix(segment, edgePrefix) {
+			t.Fatalf("a run of edge dashes lost the edge colour: %q", segment)
+		}
+	}
+
 	// The count is what gives way on a terminal too narrow for both chips: the
 	// policy is what the composer is asking, the count is how many are waiting.
 	m.width = 20

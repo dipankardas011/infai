@@ -3388,11 +3388,15 @@ func composerTopLabel(box string, width int, left, right string, leftStyle, righ
 		return box
 	}
 	head := "╭"
+	top := edge.Render(head)
 	if leftText != "" {
-		head += "─" + leftText
+		top += edge.Render("─") + leftText
 		dashes--
 	}
-	top := edge.Render(head+strings.Repeat("─", dashes)) + rightText + edge.Render("──╮")
+	// Each edge run is styled on its own: a chip renders a reset sequence, so a
+	// single style wrapped around the whole line stops applying after the first
+	// chip and the dashes between the chips would lose the edge colour.
+	top += edge.Render(strings.Repeat("─", dashes)) + rightText + edge.Render("──╮")
 	if i := strings.IndexByte(box, '\n'); i >= 0 {
 		return top + box[i:]
 	}
