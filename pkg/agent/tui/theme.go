@@ -146,6 +146,8 @@ type harnessStyles struct {
 	freshTokens     lipgloss.Style
 	reasoningTokens lipgloss.Style
 	tokenRest       lipgloss.Style
+	scrollTrack     lipgloss.Style
+	scrollThumb     lipgloss.Style
 }
 
 func (s harnessStyles) heading(section string, background color.Color) string {
@@ -229,6 +231,8 @@ func newHarnessStyles() harnessStyles {
 		freshTokens:     lipgloss.NewStyle().Foreground(everforest.Aqua),
 		reasoningTokens: lipgloss.NewStyle().Foreground(everforest.Purple),
 		tokenRest:       lipgloss.NewStyle().Foreground(everforest.SurfaceAlt),
+		scrollTrack:     lipgloss.NewStyle().Background(everforest.SurfaceAlt),
+		scrollThumb:     lipgloss.NewStyle().Background(everforest.Muted),
 	}
 }
 

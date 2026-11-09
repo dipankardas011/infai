@@ -2871,7 +2871,12 @@ func (m *chatModel) View() tea.View {
 		}
 		attachments := m.attachmentsView()
 		composer := m.composerView()
-		parts := []string{header, m.viewport.View(), hitl, checklist, sessionRow, commands, picker, attachments, composer, status}
+		transcript := m.viewport.View()
+		if m.transcriptHeight() > 0 {
+			bar := scrollbar(m.transcriptHeight(), m.scrollPosition(), m.scrollVisible(), m.styles.scrollTrack, m.styles.scrollThumb)
+			transcript = lipgloss.JoinHorizontal(lipgloss.Top, transcript, bar)
+		}
+		parts := []string{header, transcript, hitl, checklist, sessionRow, commands, picker, attachments, composer, status}
 		if len(m.areas) == len(parts) {
 			parts[5] = m.commandMenuViewForHeight(m.areas[5].height)
 			for i := range parts {
@@ -2928,15 +2933,16 @@ func (m *chatModel) reflow() {
 	composer := m.composerView()
 	m.areas = layoutRows(m.width, m.height, intrinsic(header), fill(), intrinsic(hitl), intrinsic(checklist), intrinsic(sessionRow), intrinsic(commands), intrinsic(picker), intrinsic(attachments), intrinsic(composer), intrinsic(status))
 	main := m.areas[1]
-	m.viewport.SetWidth(main.width)
+	vpWidth := max(main.width-1, 1) // reserve 1 col for scrollbar
+	m.viewport.SetWidth(vpWidth)
 	m.viewport.SetHeight(main.height)
 	// A selection names cells of rendered lines, and a new width re-wraps every
 	// one of them, so those cells stop existing. The selection goes with the
 	// width that defined it.
-	if previousViewportWidth != main.width {
+	if previousViewportWidth != vpWidth {
 		m.selection, m.selecting = nil, false
 	}
-	if previousViewportWidth != main.width || previousViewportHeight != main.height {
+	if previousViewportWidth != vpWidth || previousViewportHeight != main.height {
 		m.refreshTranscript(wasAtBottom)
 	}
 }

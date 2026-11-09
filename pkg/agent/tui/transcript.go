@@ -229,6 +229,64 @@ func (m *chatModel) lastBlock(width int) (int, int) {
 	return last, m.blockLines(last, width)
 }
 
+// scrollPosition returns how far the view is through the transcript, 0.0 at the
+// top and 1.0 at the bottom. It uses block indices so it stays O(1) regardless
+// of transcript length.
+func (m *chatModel) scrollPosition() float64 {
+	total := len(m.blocks)
+	if total <= 0 {
+		return 1.0
+	}
+	// Interpolate within the anchor block for a smoother thumb.
+	pos := float64(m.anchor.block)
+	if lines := m.blockLines(m.anchor.block, m.transcriptWidth()); lines > 0 {
+		pos += float64(m.anchor.line) / float64(lines)
+	}
+	// total+1 because the approval tail can be block len(m.blocks).
+	ratio := pos / float64(total)
+	if ratio < 0 {
+		return 0
+	}
+	if ratio > 1 {
+		return 1
+	}
+	return ratio
+}
+
+// scrollVisible returns the fraction of the transcript the viewport shows,
+// estimated from viewport height and the average height of rendered blocks.
+// The average is computed from the current window so it stays O(1) and does
+// not jitter as different blocks enter and leave the window.
+func (m *chatModel) scrollVisible() float64 {
+	total := len(m.blocks)
+	if total <= 0 {
+		return 1.0
+	}
+	height := m.transcriptHeight()
+	if height <= 0 {
+		return 1.0
+	}
+	entries := m.window.entries
+	if len(entries) == 0 {
+		return 1.0
+	}
+	// Average lines per block from the rendered window.
+	windowLines := 0
+	for _, e := range entries {
+		windowLines += e.lines + 1 // +1 for the separator between blocks
+	}
+	avg := float64(windowLines) / float64(len(entries))
+	estimatedTotal := avg * float64(total)
+	if estimatedTotal <= float64(height) {
+		return 1.0
+	}
+	visible := float64(height) / estimatedTotal
+	if visible < 0.05 {
+		return 0.05
+	}
+	return visible
+}
+
 // atBottom reports whether the view shows the newest output. It is what the
 // status row means by "viewing earlier output", and what re-pinning follows.
 func (m *chatModel) atBottom() bool {
