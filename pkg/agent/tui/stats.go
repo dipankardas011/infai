@@ -78,6 +78,11 @@ func renderStatsPanel(m *modalModel, width, height int, styles harnessStyles) st
 	// what makes the drawn window the page's scroll state.
 	rows := layoutRows(width, height, intrinsic(headerBlock), fill(), intrinsic(" "))[1].height
 	lines := m.stats.lines(contentWidth, styles)
+	if len(lines) > rows {
+		// Reserve 1 column for the scrollbar and recompute.
+		contentWidth = max(contentWidth-1, 1)
+		lines = m.stats.lines(contentWidth, styles)
+	}
 	offset := clamp(m.scroll, 0, max(len(lines)-rows, 0))
 	m.scroll, m.rows = offset, rows
 	window := lines[offset:min(offset+rows, len(lines))]
@@ -87,9 +92,20 @@ func renderStatsPanel(m *modalModel, width, height int, styles harnessStyles) st
 		footer = fmt.Sprintf("%d-%d of %d  ·  ↑/↓ or j/k scroll  ·  esc back", offset+1, offset+len(window), len(lines))
 	}
 	footerBlock := fullWidth(lipgloss.NewStyle().Padding(0, 2), width, styles.inactive.Render(ansi.Truncate(footer, contentWidth, "…")))
-	bodyBlock := fullWidth(lipgloss.NewStyle().Padding(0, 2), width, strings.Join(window, "\n"))
+	body := strings.Join(window, "\n")
 
 	tracks := layoutRows(width, height, intrinsic(headerBlock), fill(), intrinsic(footerBlock))
+	if len(lines) > rows {
+		pos := 0.0
+		if maxPos := len(lines) - rows; maxPos > 0 {
+			pos = float64(offset) / float64(maxPos)
+		}
+		vis := float64(rows) / float64(len(lines))
+		bar := scrollbar(tracks[1].height, pos, vis, styles.scrollTrack, styles.scrollThumb)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, body, bar)
+	}
+	bodyBlock := fullWidth(lipgloss.NewStyle().Padding(0, 2), width, body)
+
 	parts := []string{fitArea(tracks[0], headerBlock), fitArea(tracks[1], bodyBlock), fitArea(tracks[2], footerBlock)}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }

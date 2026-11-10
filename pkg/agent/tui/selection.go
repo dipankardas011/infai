@@ -127,6 +127,33 @@ func (m *chatModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.MouseWheelMsg:
+		// Route wheel events to the inline scrollable area the pointer sits on.
+		if len(m.areas) > 3 {
+			cl := m.areas[3]
+			if mouse.Y >= cl.y && mouse.Y < cl.y+cl.height && cl.height > 0 {
+				switch msg.Button {
+				case tea.MouseWheelUp:
+					m.checklistScroll = max(m.checklistScroll-1, 0)
+				case tea.MouseWheelDown:
+					m.checklistScroll++
+				}
+				m.reflow()
+				return m, nil
+			}
+		}
+		if len(m.areas) > 4 {
+			sr := m.areas[4]
+			if mouse.Y >= sr.y && mouse.Y < sr.y+sr.height && sr.height > 0 && len(m.sidecars) > maxSidecarVisible {
+				switch msg.Button {
+				case tea.MouseWheelUp:
+					m.sidecarScroll = max(m.sidecarScroll-1, 0)
+				case tea.MouseWheelDown:
+					m.sidecarScroll++
+				}
+				m.reflow()
+				return m, nil
+			}
+		}
 		if !inTranscript {
 			return m, nil
 		}

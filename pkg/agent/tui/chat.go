@@ -133,10 +133,12 @@ type chatModel struct {
 	// produced image joins that block instead of opening one of its own.
 	turnTextBlock int
 	composer      textarea.Model
-	checklist     contracts.TaskChecklistState
-	status        contracts.SessionStatus
+	checklist      contracts.TaskChecklistState
+	checklistScroll int // first visible item index, default bottom
+	status         contracts.SessionStatus
 	// sidecars is the latest status reported by each session this one
 	sidecars                []contracts.SidecarStatus
+	sidecarScroll           int // first visible sidecar index, default bottom
 	sidecarsSession         uuid.UUID
 	relatedSessionSelection uuid.UUID
 	approval                *Approval
@@ -755,7 +757,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingSends = ds.NewSet[string]()
 		m.client.SetSession(msg.output.ID)
 		m.replaceBlocks(blocksFromRecords(msg.records))
-		m.checklist = taskChecklistFromRecords(msg.records)
+		m.setChecklist(taskChecklistFromRecords(msg.records))
 		m.modal = nil
 		m.reflow()
 		m.refreshTranscript(true)
@@ -847,7 +849,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.pending = nil
 		m.client.SetSession(msg.output.ID)
 		m.replaceBlocks(nil)
-		m.checklist = contracts.TaskChecklistState{}
+		m.setChecklist(contracts.TaskChecklistState{})
 		m.used = 0
 		m.lastUsage = nil
 		m.modal = nil
@@ -917,7 +919,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastUsage = nil
 			m.session.LastTurnMeta = nil
 			m.replaceBlocks(blocksFromRecords(msg.records))
-			m.checklist = taskChecklistFromRecords(msg.records)
+			m.setChecklist(taskChecklistFromRecords(msg.records))
 		}
 		m.refreshTranscript(true)
 		return m, nil
@@ -932,7 +934,7 @@ func (m *chatModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.appendError(msg.err)
 		} else {
-			m.checklist = msg.checklist
+			m.setChecklist(msg.checklist)
 			m.blocks = append(m.blocks, block{role: "event", text: branchSelectionLabel(msg.event)})
 		}
 		m.modal = nil
@@ -2026,7 +2028,7 @@ func (m *chatModel) applySessionView(view glue.SessionView) {
 		}
 	}
 	m.reapplyBlocks(blocksFromMessages(view.History))
-	m.checklist = view.Checklist
+	m.setChecklist(view.Checklist)
 	m.mcpPrompts = view.Prompts
 	m.mcpResources = view.Resources
 	m.mcpStatus = view.MCP
@@ -2143,10 +2145,10 @@ func (m *chatModel) applySessionEvent(event contracts.EventStream) tea.Cmd {
 	case contracts.EventToolTaskCheckList:
 		if event.ToolResult != nil {
 			if state, err := decodeTaskChecklist(event.ToolResult.Output); err == nil {
-				m.checklist = state
+				m.setChecklist(state)
 			}
 		} else if state, err := decodeTaskChecklist(content); err == nil {
-			m.checklist = state
+			m.setChecklist(state)
 		}
 	case contracts.EventSidecarStatus:
 		if event.Sidecar != nil {
@@ -3158,6 +3160,7 @@ func (m *chatModel) upsertSidecar(status contracts.SidecarStatus) {
 		}
 	}
 	m.sidecars = append(m.sidecars, status)
+	m.sidecarScroll = max(len(m.sidecars)-maxSidecarVisible, 0)
 }
 
 // sidecarRowsView lists the sessions this one delegated to, so a caller blocked
@@ -3170,15 +3173,33 @@ func (m *chatModel) sidecarRowsView() string {
 	if len(m.sidecars) == 0 {
 		return ""
 	}
+	total := len(m.sidecars)
+	visible := min(total, maxSidecarVisible)
+
+	// Clamp scroll: default to bottom.
+	maxScroll := max(total-visible, 0)
+	if m.sidecarScroll > maxScroll {
+		m.sidecarScroll = maxScroll
+	}
+	if m.sidecarScroll < 0 {
+		m.sidecarScroll = 0
+	}
+	start := m.sidecarScroll
+	end := min(start+visible, total)
+
+	needsScroll := total > visible
 	inner := max(m.width-2, 1)
-	rows := make([]string, 0, len(m.sidecars))
+	if needsScroll {
+		inner = max(inner-1, 1) // reserve 1 col for scrollbar
+	}
+	rows := make([]string, 0, visible)
 	// The row style carries a right pad for the single-line session row; the
 	// tree is painted through it, so it must not add a column of its own.
 	treeRow := m.styles.statusRow.PaddingRight(0)
-	for i := range m.sidecars {
+	for i := start; i < end; i++ {
 		child := m.sidecars[i]
 		tree := "├─ "
-		if i == len(m.sidecars)-1 {
+		if i == total-1 {
 			tree = "└─ "
 		}
 		kindGlyph, kindStyle := agentKindMark(child.AgentKind, m.styles)
@@ -3194,15 +3215,11 @@ func (m *chatModel) sidecarRowsView() string {
 		}
 		tail := status.glyph + " " + status.label
 		if inner-lipgloss.Width(tree)-lipgloss.Width(kindPrefix)-lipgloss.Width(tail) < 2 {
-			// The words are the first thing to go: the glyph still carries the
-			// status, exactly as the session row drops its words first.
 			tail = status.glyph
 		}
 		nameRoom := max(inner-lipgloss.Width(tree)-lipgloss.Width(kindPrefix)-lipgloss.Width(tail)-1, 0)
 		switch {
 		case nameRoom < 2:
-			// truncateLine keeps the value below two columns, so a name with
-			// less room than that is dropped rather than allowed to overflow.
 			name = ""
 		default:
 			name = truncateLine(name, nameRoom)
@@ -3221,7 +3238,17 @@ func (m *chatModel) sidecarRowsView() string {
 			status.style.Render(tail)+
 			" ")
 	}
-	return strings.Join(rows, "\n")
+	content := strings.Join(rows, "\n")
+	if needsScroll {
+		pos := 0.0
+		if maxScroll > 0 {
+			pos = float64(m.sidecarScroll) / float64(maxScroll)
+		}
+		vis := float64(visible) / float64(total)
+		bar := scrollbar(visible, pos, vis, m.styles.scrollTrack, m.styles.scrollThumb)
+		content = lipgloss.JoinHorizontal(lipgloss.Top, content, bar)
+	}
+	return content
 }
 
 // sessionRowGap is the space kept between the session name and the marks, and
@@ -3281,6 +3308,15 @@ func contextProgressBar(styles harnessStyles, percent, width int) string {
 		styles.tokenRest.Render(strings.Repeat("░", max(width-lipgloss.Width(filled), 0)))
 }
 
+const maxChecklistVisible = 3
+const maxSidecarVisible = 2
+
+// setChecklist updates the checklist and pins the scroll to the bottom.
+func (m *chatModel) setChecklist(state contracts.TaskChecklistState) {
+	m.checklist = state
+	m.checklistScroll = max(len(state.Items)-maxChecklistVisible, 0)
+}
+
 func (m *chatModel) taskChecklistView(width int) string {
 	if len(m.checklist.Items) == 0 {
 		return ""
@@ -3291,9 +3327,31 @@ func (m *chatModel) taskChecklistView(width int) string {
 			completed++
 		}
 	}
-	lines := []string{m.styles.muted.Bold(true).Render(fmt.Sprintf("Task Checklist %d/%d complete", completed, len(m.checklist.Items)))}
-	visible := min(len(m.checklist.Items), 4)
-	for _, item := range m.checklist.Items[:visible] {
+	heading := m.styles.muted.Bold(true).Render(fmt.Sprintf("Task Checklist %d/%d complete", completed, len(m.checklist.Items)))
+
+	total := len(m.checklist.Items)
+	visible := min(total, maxChecklistVisible)
+
+	// Clamp scroll: default to bottom.
+	maxScroll := max(total-visible, 0)
+	if m.checklistScroll > maxScroll {
+		m.checklistScroll = maxScroll
+	}
+	if m.checklistScroll < 0 {
+		m.checklistScroll = 0
+	}
+	start := m.checklistScroll
+	end := min(start+visible, total)
+
+	// Reserve 1 col for scrollbar when items overflow.
+	itemWidth := width
+	needsScroll := total > visible
+	if needsScroll {
+		itemWidth = max(width-1, 1)
+	}
+
+	lines := make([]string, 0, visible)
+	for _, item := range m.checklist.Items[start:end] {
 		marker := "○"
 		markerStyle := m.styles.inactive
 		switch item.Status {
@@ -3306,17 +3364,25 @@ func (m *chatModel) taskChecklistView(width int) string {
 		if item.Description != "" {
 			text += " — " + item.Description
 		}
-		if width <= lipgloss.Width(marker)+1 {
-			lines = append(lines, markerStyle.Render(truncateLine(marker, width)))
+		if itemWidth <= lipgloss.Width(marker)+1 {
+			lines = append(lines, markerStyle.Render(truncateLine(marker, itemWidth)))
 			continue
 		}
-		text = truncateLine(text, width-lipgloss.Width(marker)-1)
+		text = truncateLine(text, itemWidth-lipgloss.Width(marker)-1)
 		lines = append(lines, markerStyle.Render(marker)+" "+m.styles.muted.Render(text))
 	}
-	if len(m.checklist.Items) > visible {
-		lines = append(lines, m.styles.muted.Render(fmt.Sprintf("… %d more", len(m.checklist.Items)-visible)))
+
+	itemsBlock := strings.Join(lines, "\n")
+	if needsScroll {
+		pos := 0.0
+		if maxScroll > 0 {
+			pos = float64(m.checklistScroll) / float64(maxScroll)
+		}
+		vis := float64(visible) / float64(total)
+		bar := scrollbar(visible, pos, vis, m.styles.scrollTrack, m.styles.scrollThumb)
+		itemsBlock = lipgloss.JoinHorizontal(lipgloss.Top, itemsBlock, bar)
 	}
-	return strings.Join(lines, "\n")
+	return heading + "\n" + itemsBlock
 }
 
 func (m *chatModel) composerView() string {

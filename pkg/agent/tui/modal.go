@@ -380,11 +380,16 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 	capacity := max(height-lipgloss.Height(header)-lipgloss.Height(footer)-2, 1)
 	start, end := visibleRange(len(m.options), m.selected, capacity)
 
+	// Reserve 1 column for the scrollbar when the list overflows.
+	rowWidth := contentWidth
+	if len(m.options) > capacity {
+		rowWidth = max(contentWidth-1, 1)
+	}
 	rows := make([]string, 0, end-start)
 	for i := start; i < end; i++ {
 		option := m.options[i]
 		if m.kind == modalTimeline {
-			rows = append(rows, renderTimelineRow(option, i == m.selected, contentWidth, styles))
+			rows = append(rows, renderTimelineRow(option, i == m.selected, rowWidth, styles))
 			continue
 		}
 		rowStyle := styles.screenRow
@@ -393,8 +398,8 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 			rowStyle = styles.screenSel
 			prefix = "› "
 		}
-		line := ansi.Truncate(prefix+option.label, contentWidth, "…")
-		rows = append(rows, rowStyle.Width(contentWidth).Render(line))
+		line := ansi.Truncate(prefix+option.label, rowWidth, "…")
+		rows = append(rows, rowStyle.Width(rowWidth).Render(line))
 	}
 	if start > 0 || end < len(m.options) {
 		footer = styles.inactive.Render(fmt.Sprintf("%d-%d of %d  ·  ", start+1, end, len(m.options))) + footer
@@ -406,6 +411,17 @@ func renderSelectionScreen(m *modalModel, width, height int, styles harnessStyle
 		fill(),
 		intrinsic(fullWidth(lipgloss.NewStyle().Padding(0, 2), width, footer)),
 	)
+	// Add scrollbar when the list overflows.
+	if len(m.options) > capacity {
+		listHeight := tracks[1].height
+		pos := 0.0
+		if maxPos := len(m.options) - capacity; maxPos > 0 {
+			pos = float64(start) / float64(maxPos)
+		}
+		vis := float64(capacity) / float64(len(m.options))
+		bar := scrollbar(listHeight, pos, vis, styles.scrollTrack, styles.scrollThumb)
+		main = lipgloss.JoinHorizontal(lipgloss.Top, main, bar)
+	}
 	parts := []string{
 		fullWidth(lipgloss.NewStyle().Padding(1, 2), width, header),
 		fullWidth(lipgloss.NewStyle().Padding(0, 2), width, main),
