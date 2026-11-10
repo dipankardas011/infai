@@ -2874,9 +2874,10 @@ func (m *chatModel) View() tea.View {
 		attachments := m.attachmentsView()
 		composer := m.composerView()
 		transcript := m.viewport.View()
-		if m.transcriptHeight() > 0 {
+		if m.transcriptHeight() > 0 && len(m.areas) > 1 {
+			vpOut := lipgloss.NewStyle().Width(m.areas[1].width - 1).Render(transcript)
 			bar := scrollbar(m.transcriptHeight(), m.scrollPosition(), m.scrollVisible(), m.styles.scrollTrack, m.styles.scrollThumb)
-			transcript = lipgloss.JoinHorizontal(lipgloss.Top, transcript, bar)
+			transcript = lipgloss.JoinHorizontal(lipgloss.Top, vpOut, bar)
 		}
 		parts := []string{header, transcript, hitl, checklist, sessionRow, commands, picker, attachments, composer, status}
 		if len(m.areas) == len(parts) {
@@ -2999,11 +3000,11 @@ func (m *chatModel) attachmentsView() string {
 // turn state rather than chrome, so it sits with the transcript instead of
 // stacking on top of the input.
 func (m *chatModel) checklistView() string {
-	checklist := m.taskChecklistView(max(m.width-2, 1))
+	checklist := m.taskChecklistView(max(m.width-1, 1))
 	if checklist == "" {
 		return ""
 	}
-	return fullWidth(lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1), m.width, checklist)
+	return fullWidth(lipgloss.NewStyle().PaddingLeft(1), m.width, checklist)
 }
 
 // sessionRowView is the row above the composer: which session this is, what
@@ -3188,7 +3189,9 @@ func (m *chatModel) sidecarRowsView() string {
 	end := min(start+visible, total)
 
 	needsScroll := total > visible
-	inner := max(m.width-2, 1)
+	// The parent sessionRowView wraps with statusRow which has PaddingRight(1),
+	// so the visible content is 1 col narrower than m.width on each side.
+	inner := max(m.width-3, 1)
 	if needsScroll {
 		inner = max(inner-1, 1) // reserve 1 col for scrollbar
 	}
@@ -3240,6 +3243,7 @@ func (m *chatModel) sidecarRowsView() string {
 	}
 	content := strings.Join(rows, "\n")
 	if needsScroll {
+		content = lipgloss.NewStyle().Width(inner + 2).Render(content) // +2 for the 1-space padding each side
 		pos := 0.0
 		if maxScroll > 0 {
 			pos = float64(m.sidecarScroll) / float64(maxScroll)
@@ -3374,6 +3378,7 @@ func (m *chatModel) taskChecklistView(width int) string {
 
 	itemsBlock := strings.Join(lines, "\n")
 	if needsScroll {
+		itemsBlock = lipgloss.NewStyle().Width(itemWidth).Render(itemsBlock)
 		pos := 0.0
 		if maxScroll > 0 {
 			pos = float64(m.checklistScroll) / float64(maxScroll)

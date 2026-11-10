@@ -234,15 +234,19 @@ func (m *chatModel) lastBlock(width int) (int, int) {
 // of transcript length.
 func (m *chatModel) scrollPosition() float64 {
 	total := len(m.blocks)
-	if total <= 0 {
+	if total <= 0 || m.atBottom() {
 		return 1.0
 	}
-	// Interpolate within the anchor block for a smoother thumb.
+	if m.anchor == (transcriptAnchor{}) {
+		return 0
+	}
+	// The anchor is the top of the viewport, so the bottom of the viewport
+	// is what matters for position. Use the anchor's block-index ratio,
+	// offset by the viewport's share of the transcript.
 	pos := float64(m.anchor.block)
 	if lines := m.blockLines(m.anchor.block, m.transcriptWidth()); lines > 0 {
 		pos += float64(m.anchor.line) / float64(lines)
 	}
-	// total+1 because the approval tail can be block len(m.blocks).
 	ratio := pos / float64(total)
 	if ratio < 0 {
 		return 0
