@@ -42,6 +42,7 @@ type openAIChatRequest struct {
 	MaxTokens       uint64               `json:"max_tokens,omitempty"`
 	Temperature     *float64             `json:"temperature,omitempty"`
 	ReasoningEffort string               `json:"reasoning_effort,omitempty"`
+	Seed            *int                 `json:"seed,omitempty"`
 	Stream          bool                 `json:"stream,omitempty"`
 	StreamOptions   *openAIStreamOptions `json:"stream_options,omitempty"`
 	Tools           []openAITool         `json:"tools,omitempty"`
@@ -155,6 +156,7 @@ func (o *genericOpenAICompatableAPI) buildRequest(messages []contracts.ChatMessa
 			reqBody.Stream = true
 			reqBody.StreamOptions = &openAIStreamOptions{IncludeUsage: true}
 		}
+		reqBody.Seed = opts.Seed
 	}
 	return json.Marshal(reqBody)
 }

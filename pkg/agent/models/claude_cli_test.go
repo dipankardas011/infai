@@ -769,7 +769,7 @@ func TestClaudeGenerateStreamsAndDoesNotRepeatTheAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := "provider_event:Claude Code is working|content:hel|content:lo"
+	want := "content:hel|content:lo"
 	if got := strings.Join(deltas, "|"); got != want {
 		t.Fatalf("deltas=%q want %q", got, want)
 	}

@@ -122,6 +122,7 @@ func (s *InfaiAgentSession) recordLastTurnUsage(usage contracts.TokenUsage) {
 		Provider:      specs.ProviderName(),
 		Model:         specs.Model().Id,
 	}
+	s.snapshotProviderState()
 	meta := s.meta
 	s.mu.Unlock()
 

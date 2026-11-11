@@ -2,6 +2,7 @@ package models
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"sync"
 
 	"github.com/google/uuid"
@@ -142,4 +143,55 @@ func claudeHashHistory(history []contracts.ChatMessage) [32]byte {
 func claudeHashMessage(message contracts.ChatMessage) [32]byte {
 	text, _ := claudeTranscriptParts([]contracts.ChatMessage{message})
 	return claudeHashText(text)
+}
+
+// ExportCLIMeta snapshots the resume state for persistence in session.json.
+func (c *claudeCLI) ExportCLIMeta() *contracts.ClaudeCLIMeta {
+	c.conversation.mu.Lock()
+	defer c.conversation.mu.Unlock()
+
+	conv := &c.conversation
+	if conv.id == "" || conv.dirty {
+		return nil
+	}
+	return &contracts.ClaudeCLIMeta{
+		ConversationID: conv.id,
+		Sent:           conv.sent,
+		Prefix:         hex.EncodeToString(conv.prefix[:]),
+		System:         hex.EncodeToString(conv.system[:]),
+		Pending:        conv.pending,
+		PendingHash:    hex.EncodeToString(conv.pendingHash[:]),
+	}
+}
+
+// ImportCLIMeta restores a previously exported resume state so that the next
+// turn can resume the CLI conversation instead of starting fresh.
+func (c *claudeCLI) ImportCLIMeta(meta *contracts.ClaudeCLIMeta) {
+	if meta == nil {
+		return
+	}
+	c.conversation.mu.Lock()
+	defer c.conversation.mu.Unlock()
+
+	prefix, err := hex.DecodeString(meta.Prefix)
+	if err != nil || len(prefix) != 32 {
+		return
+	}
+	system, err := hex.DecodeString(meta.System)
+	if err != nil || len(system) != 32 {
+		return
+	}
+	pendingHash, err := hex.DecodeString(meta.PendingHash)
+	if err != nil || len(pendingHash) != 32 {
+		return
+	}
+
+	conv := &c.conversation
+	conv.id = meta.ConversationID
+	conv.sent = meta.Sent
+	copy(conv.prefix[:], prefix)
+	copy(conv.system[:], system)
+	conv.pending = meta.Pending
+	copy(conv.pendingHash[:], pendingHash)
+	conv.dirty = false
 }

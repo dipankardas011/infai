@@ -1,11 +1,14 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/models"
+	"github.com/google/uuid"
 )
 
 func (s *InfaiAgentSession) CurrentSessionModelContextWindow() uint64 {
@@ -169,4 +172,23 @@ func (s *InfaiAgentSession) ProviderAuthNeedsRefresh(now time.Time) (bool, error
 	default:
 		return false, nil
 	}
+}
+
+// snapshotProviderState captures the model adaptor's resume state into the
+// session metadata. The caller must hold s.mu.
+func (s *InfaiAgentSession) snapshotProviderState() {
+	if exporter, ok := s.model.(contracts.ClaudeCLIStateExporter); ok {
+		s.meta.ClaudeCLIMeta = exporter.ExportCLIMeta()
+	}
+}
+
+// sessionSeed derives a stable sampling seed from the session id, so every
+// request in one session samples from the same stream and a resumed session
+// reproduces it. The id is hashed rather than truncated: UUIDv7 and name-based
+// ids put a timestamp or a hash prefix at the front, whose leading bytes alone
+// would collide across sessions. Masking to 31 bits keeps the seed
+// non-negative on every platform, since the provider takes a signed integer.
+func sessionSeed(id uuid.UUID) int {
+	sum := sha256.Sum256(id[:])
+	return int(binary.BigEndian.Uint32(sum[:4]) & 0x7fffffff)
 }

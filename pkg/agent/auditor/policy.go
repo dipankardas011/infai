@@ -58,6 +58,8 @@ func NewDefaultHITLPolicy() *HITLPolicy {
 
 			contracts.DelegateBackgroundSidecarLoopTool: HumanPolicy,
 			contracts.DelegateSidecarLoopTool:           HumanPolicy,
+
+			contracts.MCPToolWildcard: HumanPolicy,
 		},
 	}
 }
@@ -65,6 +67,13 @@ func NewDefaultHITLPolicy() *HITLPolicy {
 func (perm *HITLPolicy) Check(tool contracts.ToolType) PolicyDecision {
 	if policy, ok := perm.ToolMappings[tool]; ok {
 		return policy
+	}
+	// MCP tools share a single wildcard entry so one decision covers every
+	// server-provided tool without listing each by name.
+	if contracts.IsMCPTool(string(tool)) {
+		if policy, ok := perm.ToolMappings[contracts.MCPToolWildcard]; ok {
+			return policy
+		}
 	}
 	return HumanPolicy
 }

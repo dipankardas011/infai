@@ -456,6 +456,47 @@ func TestStatsPageFollowsTheSessionBehindIt(t *testing.T) {
 // The page is drawn to whatever terminal it is given: its blocks are measured
 // before they are rendered, so a heading or a note that wrapped would push the
 // page past the rows and columns it has.
+// TestStatsPagePutsTheScrollbarAtTheRightEdge pins where an overflowing page
+// draws its scrollbar: at the panel's own edge, not after the longest line of
+// text. A horizontal join without padding the text to the window first leaves
+// the bar wherever the text happened to stop.
+func TestStatsPagePutsTheScrollbarAtTheRightEdge(t *testing.T) {
+	m := statsTestModel()
+	m.width, m.height = 100, 20
+	script := "#!/usr/bin/env bash\nset -euo pipefail\nfor i in 1 2 3 4 5 6 7 8; do\n  echo check-$i\ndone\n"
+	m.session.EvalBashScript = &script
+
+	page := renderStatsPage(m)
+
+	// The thumb paints its cell with a background colour, so its column can be
+	// measured even though the cell itself is a blank.
+	thumb := lipgloss.NewStyle().Background(everforest.Muted).Render(" ")
+	if end := strings.IndexByte(thumb, 'm'); end >= 0 {
+		thumb = thumb[:end+1]
+	}
+	if !strings.Contains(page, thumb) {
+		t.Skip("colours are stripped in this run, so the bar cannot be located")
+	}
+
+	// Two left padding cells, the text window, then the bar; two right padding
+	// cells close the row.
+	want := m.width - 3
+	rows := 0
+	for _, line := range strings.Split(page, "\n") {
+		at := strings.Index(line, thumb)
+		if at < 0 {
+			continue
+		}
+		rows++
+		if got := ansi.StringWidth(line[:at]); got != want {
+			t.Fatalf("scrollbar at column %d, want %d:\n%s", got, want, ansi.Strip(line))
+		}
+	}
+	if rows == 0 {
+		t.Fatal("an overflowing page drew no scrollbar")
+	}
+}
+
 func TestStatsPageStaysWithinTheTerminal(t *testing.T) {
 	m := statsTestModel()
 	for _, size := range [][2]int{{100, 30}, {80, 24}, {60, 20}, {44, 16}, {30, 12}} {

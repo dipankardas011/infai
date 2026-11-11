@@ -26,6 +26,7 @@ type Agent struct {
 
 	MaxQ           uint64
 	availableTools []contracts.Tool
+	seed           *int
 
 	shouldAutoCompact  func(*contracts.TokenUsage) bool
 	autoCompact        func(context.Context) ([]contracts.ChatMessage, error)
@@ -37,6 +38,7 @@ type Agent struct {
 type agentOption struct {
 	maxQ          uint64
 	tools         []contracts.Tool
+	seed          *int
 	shouldCompact func(*contracts.TokenUsage) bool
 	autoCompact   func(context.Context) ([]contracts.ChatMessage, error)
 	evalFunc      func(context.Context) error
@@ -54,6 +56,14 @@ func WithMaxTurns(maxTurns uint64) AgentOptions {
 func WithTools(tools ...contracts.Tool) AgentOptions {
 	return func(o *agentOption) error {
 		o.tools = append([]contracts.Tool(nil), tools...)
+		return nil
+	}
+}
+
+// WithSeed pins the provider's sampling RNG for deterministic output.
+func WithSeed(seed int) AgentOptions {
+	return func(o *agentOption) error {
+		o.seed = &seed
 		return nil
 	}
 }
@@ -100,6 +110,7 @@ func NewAgent(
 		model:              model,
 		MaxQ:               o.maxQ,
 		availableTools:     o.tools,
+		seed:               o.seed,
 		shouldAutoCompact:  o.shouldCompact,
 		autoCompact:        o.autoCompact,
 		userCancellation:   userCancellation,
@@ -272,6 +283,7 @@ func (a *Agent) StartLoop(ctx context.Context, activeTimeline []contracts.ChatMe
 
 		reply, usage, err := a.modelClient().Generate(generateCtx, requestMessages, a.availableTools, &contracts.GenerateOptions{
 			Stream: true,
+			Seed:   a.seed,
 			OnDelta: func(kind contracts.EventStreamKind, text string) (isCanceled bool) {
 				return !a.publishEvent(generateCtx, contracts.EventStream{Kind: kind, Timestamp: time.Now().UTC(), Content: &text})
 			},

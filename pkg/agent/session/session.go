@@ -186,7 +186,11 @@ func NewResumedSession(
 	mcpServers map[string]contracts.MCPServerConfig,
 	hitlPolicy *auditor.HITLPolicy,
 ) (*InfaiAgentSession, error) {
-	model, err := models.ProvisionModelClient(chosenModel, meta.Cwd, meta.ID)
+	var provisionOpts []models.ProvisionOption
+	if meta.ClaudeCLIMeta != nil {
+		provisionOpts = append(provisionOpts, models.WithSessionClaudeCLIMeta(meta.ClaudeCLIMeta))
+	}
+	model, err := models.ProvisionModelClient(chosenModel, meta.Cwd, meta.ID, provisionOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -298,10 +302,12 @@ func newRuntimeSession(
 	if meta.MaxTurns != nil {
 		maxTurns = *meta.MaxTurns
 	}
+	seed := sessionSeed(s.meta.ID)
 	opts := append(
 		[]agent.AgentOptions(nil),
 		agent.WithAutoCompaction(s.shouldCompact, s.autoCompact),
 		agent.WithMaxTurns(maxTurns),
+		agent.WithSeed(seed),
 	)
 	if len(s.availableTools) > 0 {
 		opts = append(opts, agent.WithTools(s.availableTools...))

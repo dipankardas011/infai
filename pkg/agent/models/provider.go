@@ -43,18 +43,39 @@ func RefreshProviderAuth(ctx context.Context, providerID contracts.ProviderSlug,
 	}
 }
 
+// ProvisionOption configures provider-specific behaviour at model construction.
+type ProvisionOption func(*provisionOpts)
+
+type provisionOpts struct {
+	claudeCLIMeta *contracts.ClaudeCLIMeta
+}
+
+// WithSessionClaudeCLIMeta passes persisted resume state to the Claude CLI.
+func WithSessionClaudeCLIMeta(meta *contracts.ClaudeCLIMeta) ProvisionOption {
+	return func(o *provisionOpts) { o.claudeCLIMeta = meta }
+}
+
 func ProvisionModelClient(
 	m contracts.ProvisionedModel,
 	workspace string,
 	sessionID uuid.UUID,
+	opts ...ProvisionOption,
 ) (contracts.InfaiModelAdaptor, error) {
+	o := &provisionOpts{}
+	for _, opt := range opts {
+		opt(o)
+	}
 	switch m.ProviderSlug() {
 	case contracts.DeepSeek:
 		return NewDeepSeekAPI(m)
 	case contracts.Codex:
 		return NewOpenAICodexResponsesAPI(m)
 	case contracts.ClaudeCLI:
-		return NewClaudeCLI(m, workspace, sessionID)
+		var cliOpts []ClaudeCLIOption
+		if o.claudeCLIMeta != nil {
+			cliOpts = append(cliOpts, WithClaudeCLIMeta(o.claudeCLIMeta))
+		}
+		return NewClaudeCLI(m, workspace, sessionID, cliOpts...)
 	case contracts.OpenAIGeneric:
 		return NewOpenAICompatableAPI(m)
 	default:

@@ -35,6 +35,10 @@ type SessionMeta struct {
 	Conclusion *SessionConclusion `json:"conclusion,omitempty"`
 
 	LastTurnMeta *LastTurnMeta `json:"last_turn_meta,omitempty"`
+
+	// ClaudeCLIMeta is the Claude Code CLI conversation resume state. Nil for
+	// sessions that do not use the claude-cli provider.
+	ClaudeCLIMeta *contracts.ClaudeCLIMeta `json:"claude_cli_meta,omitempty"`
 }
 
 type SessionConclusion struct {
@@ -65,9 +69,10 @@ type sessionFile struct {
 	UpdatedAt      time.Time           `json:"updated_at"`
 	Conclusion     *SessionConclusion  `json:"conclusion,omitempty"`
 	LastTurnMeta   *LastTurnMeta       `json:"last_turn_meta,omitempty"`
-	AgentKind      contracts.AgentKind `json:"agent_kind"`
-	EvalBashScript *string             `json:"eval_bash_script"`
-	MaxTurns       *uint64             `json:"max_turns,omitempty"`
+	AgentKind      contracts.AgentKind      `json:"agent_kind"`
+	EvalBashScript *string                  `json:"eval_bash_script"`
+	MaxTurns       *uint64                  `json:"max_turns,omitempty"`
+	ClaudeCLIMeta  *contracts.ClaudeCLIMeta `json:"claude_cli_meta,omitempty"`
 }
 
 // this helps when we resume we can use this to get the client connection up.
@@ -100,6 +105,10 @@ func newSessionFile(meta SessionMeta) sessionFile {
 	if meta.LastTurnMeta != nil {
 		lastTurn := *meta.LastTurnMeta
 		file.LastTurnMeta = &lastTurn
+	}
+	if meta.ClaudeCLIMeta != nil {
+		cli := *meta.ClaudeCLIMeta
+		file.ClaudeCLIMeta = &cli
 	}
 	return file
 }
@@ -134,6 +143,10 @@ func (f sessionFile) meta() SessionMeta {
 	if f.LastTurnMeta != nil {
 		lastTurn := *f.LastTurnMeta
 		meta.LastTurnMeta = &lastTurn
+	}
+	if f.ClaudeCLIMeta != nil {
+		cli := *f.ClaudeCLIMeta
+		meta.ClaudeCLIMeta = &cli
 	}
 	return meta
 }

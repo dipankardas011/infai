@@ -32,6 +32,7 @@ var hitlPolicyTools = []contracts.ToolType{
 	contracts.WebSearchTool,
 	contracts.DelegateSidecarLoopTool,
 	contracts.DelegateBackgroundSidecarLoopTool,
+	contracts.MCPToolWildcard,
 }
 
 // hitlDecisionCycle is the order the arrows walk: left moves towards deny, right

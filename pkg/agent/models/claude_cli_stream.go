@@ -90,11 +90,21 @@ type claudeStreamEvent struct {
 		} `json:"content"`
 		Usage claudeTokenUsage `json:"usage"`
 	} `json:"message"`
-	Usage         claudeTokenUsage `json:"usage"`
-	RateLimitInfo struct {
-		Status   string `json:"status"`
-		ResetsAt string `json:"resets_at"`
-	} `json:"rate_limit_info"`
+	Usage         claudeTokenUsage    `json:"usage"`
+	RateLimitInfo claudeRateLimitInfo `json:"rate_limit_info"`
+}
+
+// claudeRateLimitInfo is the quota snapshot the CLI emits on rate_limit_event.
+// The field names are camelCase here even though the event's own top-level
+// keys are snake_case: the CLI serializes this nested object from its own
+// camelCase schema. resetsAt is epoch seconds.
+type claudeRateLimitInfo struct {
+	Status         string  `json:"status"`
+	ResetsAt       int64   `json:"resetsAt"`
+	RateLimitType  string  `json:"rateLimitType"`
+	Utilization    float64 `json:"utilization"`
+	OverageStatus  string  `json:"overageStatus"`
+	IsUsingOverage bool    `json:"isUsingOverage"`
 }
 
 type claudeTokenUsage struct {
@@ -202,10 +212,35 @@ func decodeClaudeStream(ctx context.Context, reader io.Reader, opts *contracts.G
 				}
 			}
 		case "rate_limit_event":
-			if event.RateLimitInfo.Status != "" && event.RateLimitInfo.Status != "allowed" {
-				result.RateLimit = claudeRateLimitMessage(event.RateLimitInfo.ResetsAt)
-				if emit(contracts.EventProviderEvent, result.RateLimit) {
+			info := event.RateLimitInfo
+			switch info.Status {
+			case "", "allowed":
+				// Healthy snapshot: the CLI emits a steady trickle of these.
+			case "allowed_warning":
+				// A warning, not a wall: the turn continues. Never treat it as
+				// an exhausted limit, or a session would fail at 70-85% used.
+				if notice := claudeRateLimitNotice(info); notice != "" {
+					if emit(contracts.EventProviderEvent, notice) {
+						return result, harnessErr.ErrTurnCanceled
+					}
+				}
+			case "rejected":
+				// The only documented status that blocks. Extra usage can still
+				// cover it, in which case the turn succeeds on a notice alone.
+				if emit(contracts.EventProviderEvent, claudeRateLimitMessage(info)) {
 					return result, harnessErr.ErrTurnCanceled
+				}
+				if !info.IsUsingOverage {
+					result.RateLimit = claudeRateLimitMessage(info)
+				}
+			default:
+				// A status this build does not know (a newer CLI). Report it
+				// without failing the turn: an unknown word is not evidence
+				// that the account is out of quota.
+				if notice := claudeRateLimitStatusNotice(info); notice != "" {
+					if emit(contracts.EventProviderEvent, notice) {
+						return result, harnessErr.ErrTurnCanceled
+					}
 				}
 			}
 		case "result":
@@ -276,6 +311,11 @@ func claudeResultError(event claudeStreamEvent, result *claudeStreamResult) erro
 		message = string(event.Error)
 	}
 	if result.RateLimit != "" {
+		// The CLI sometimes puts a precise reset or plan note in the result
+		// text; keep it rather than discarding what we were handed.
+		if detail := strings.TrimSpace(event.Result); detail != "" {
+			return fmt.Errorf("claude cli: %s: %s", result.RateLimit, detail)
+		}
 		return errors.New("claude cli: " + result.RateLimit)
 	}
 	result.Retryable = isClaudeTransientError(event.Subtype + " " + string(event.Error) + " " + message)
@@ -297,12 +337,88 @@ func decodeClaudeOutput(raw json.RawMessage) (*claudeStructuredOutput, error) {
 	return &output, nil
 }
 
-func claudeRateLimitMessage(reset string) string {
-	if reset == "" {
-		return "Claude subscription limit reached"
+// claudeRateLimitMessage names the window the CLI reports as rejected, the
+// share used, and when it says that window lifts. A rejection covered by extra
+// usage says so, because the turn still succeeds in that case.
+func claudeRateLimitMessage(info claudeRateLimitInfo) string {
+	message := "Claude subscription limit reached"
+	if window := claudeRateLimitWindow(info.RateLimitType); window != "" {
+		message += " (" + window + " limit"
+		if info.Utilization > 0 {
+			message += ", " + fmt.Sprintf("%.0f%% used", info.Utilization*100)
+		}
+		message += ")"
 	}
-	if parsed, err := time.Parse(time.RFC3339, reset); err == nil {
-		return "Claude subscription limit reached, resets at " + parsed.Local().Format("15:04")
+	message += claudeRateLimitReset(info.ResetsAt, ", resets ")
+	if info.IsUsingOverage {
+		message += " (using extra usage)"
 	}
-	return "Claude subscription limit reached, resets at " + reset
+	return message
+}
+
+// claudeRateLimitNotice is the warning form for a window that is filling up but
+// has not blocked the turn. It is never fatal.
+func claudeRateLimitNotice(info claudeRateLimitInfo) string {
+	notice := "Claude usage is high"
+	if window := claudeRateLimitWindow(info.RateLimitType); window != "" {
+		notice = "Claude " + window + " usage is high"
+	}
+	if info.Utilization > 0 {
+		notice += fmt.Sprintf(" (%.0f%% used", info.Utilization*100)
+		return notice + claudeRateLimitReset(info.ResetsAt, ", resets ") + ")"
+	}
+	return notice + claudeRateLimitReset(info.ResetsAt, ", resets ")
+}
+
+// claudeRateLimitStatusNotice reports a status this build does not recognise,
+// so a newer CLI's vocabulary is visible without being treated as a quota wall.
+func claudeRateLimitStatusNotice(info claudeRateLimitInfo) string {
+	status := strings.TrimSpace(info.Status)
+	if status == "" {
+		return ""
+	}
+	notice := "Claude rate limit status: " + status
+	if window := claudeRateLimitWindow(info.RateLimitType); window != "" {
+		notice += " (" + window + ")"
+	}
+	return notice + claudeRateLimitReset(info.ResetsAt, ", resets ")
+}
+
+// claudeRateLimitWindow humanizes the window the CLI named. An empty result
+// means the CLI did not say, so the message omits the window.
+func claudeRateLimitWindow(kind string) string {
+	switch kind {
+	case "five_hour":
+		return "5-hour"
+	case "seven_day":
+		return "weekly"
+	case "seven_day_opus":
+		return "weekly (Opus)"
+	case "seven_day_sonnet":
+		return "weekly (Sonnet)"
+	case "seven_day_overage_included":
+		return "weekly (with extra usage)"
+	case "overage":
+		return "extra usage"
+	default:
+		return strings.TrimSpace(kind)
+	}
+}
+
+// claudeRateLimitReset renders an epoch reset time. The CLI reports seconds,
+// but a millisecond value is still recognised so a unit change cannot produce
+// a date thousands of years away.
+func claudeRateLimitReset(epoch int64, prefix string) string {
+	if epoch <= 0 {
+		return ""
+	}
+	at := time.Unix(epoch, 0)
+	if epoch > 1_000_000_000_000 {
+		at = time.UnixMilli(epoch)
+	}
+	local := at.Local()
+	if time.Until(at) > 24*time.Hour {
+		return prefix + local.Format("Mon 15:04")
+	}
+	return prefix + local.Format("15:04")
 }

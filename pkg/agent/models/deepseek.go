@@ -70,6 +70,7 @@ type deepSeekChatRequest struct {
 	Temperature     *float64               `json:"temperature,omitempty"`
 	Thinking        *deepSeekThinking      `json:"thinking,omitempty"`
 	ReasoningEffort string                 `json:"reasoning_effort,omitempty"`
+	Seed            *int                   `json:"seed,omitempty"`
 	Stream          bool                   `json:"stream,omitempty"`
 	StreamOptions   *deepSeekStreamOptions `json:"stream_options,omitempty"`
 	Tools           []deepSeekTool         `json:"tools,omitempty"`
@@ -208,9 +209,12 @@ func (d *deepSeekAPI) buildRequest(messages []contracts.ChatMessage, tools []con
 			},
 		})
 	}
-	if opts != nil && opts.Stream {
-		reqBody.Stream = true
-		reqBody.StreamOptions = &deepSeekStreamOptions{IncludeUsage: true}
+	if opts != nil {
+		if opts.Stream {
+			reqBody.Stream = true
+			reqBody.StreamOptions = &deepSeekStreamOptions{IncludeUsage: true}
+		}
+		reqBody.Seed = opts.Seed
 	}
 	return json.Marshal(reqBody)
 }

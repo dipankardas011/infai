@@ -71,7 +71,17 @@ type claudeCLIOptions struct {
 	pidsMax   int
 }
 
-func NewClaudeCLI(model contracts.ProvisionedModel, workspace string, sessionID uuid.UUID) (*claudeCLI, error) {
+// ClaudeCLIOption configures a Claude CLI adaptor at construction time.
+type ClaudeCLIOption func(*claudeCLI)
+
+// WithClaudeCLIMeta restores a previously persisted conversation resume state.
+func WithClaudeCLIMeta(meta *contracts.ClaudeCLIMeta) ClaudeCLIOption {
+	return func(c *claudeCLI) {
+		c.ImportCLIMeta(meta)
+	}
+}
+
+func NewClaudeCLI(model contracts.ProvisionedModel, workspace string, sessionID uuid.UUID, opts ...ClaudeCLIOption) (*claudeCLI, error) {
 	binary := strings.TrimSpace(model.BaseEndpoint())
 	if binary == "" {
 		binary = "claude"
@@ -82,6 +92,9 @@ func NewClaudeCLI(model contracts.ProvisionedModel, workspace string, sessionID 
 		pidsMax:   claudeCLIPidsMax,
 	}}
 	client.conversation.id = sessionID.String()
+	for _, opt := range opts {
+		opt(client)
+	}
 	return client, nil
 }
 
@@ -96,14 +109,6 @@ func (c *claudeCLI) attempts(ctx context.Context, systemPrompt string, turn clau
 	var last claudeStreamResult
 	var err error
 	for attempt := 1; attempt <= claudeMaxAttempts; attempt++ {
-		// The CLI can spend seconds before its first token, and it emits no
-		// event of its own to say so. One notice per generation step gives the
-		// client something to show while it waits.
-		if attempt == 1 && opts != nil && opts.OnDelta != nil {
-			if opts.OnDelta(contracts.EventProviderEvent, "Claude Code is working") {
-				return last, harnessErr.ErrTurnCanceled
-			}
-		}
 		last, err = c.run(ctx, systemPrompt, turn, attempt, schema, allowed, opts)
 		if err == nil || !last.Retryable || attempt == claudeMaxAttempts {
 			return last, err

@@ -17,6 +17,25 @@ type InfaiModelAdaptor interface {
 	GetModelSpecs() ProvisionedModel
 }
 
+// ClaudeCLIMeta is the persisted resume state for the Claude Code CLI adaptor.
+// It lets a resumed session continue the CLI's conversation instead of starting
+// a fresh one that collides with the on-disk session the CLI already holds.
+type ClaudeCLIMeta struct {
+	ConversationID string `json:"conversation_id"`
+	Sent           int    `json:"sent"`
+	Prefix         string `json:"prefix"` // hex-encoded sha256
+	System         string `json:"system"` // hex-encoded sha256
+	Pending        bool   `json:"pending"`
+	PendingHash    string `json:"pending_hash"` // hex-encoded sha256
+}
+
+// ClaudeCLIStateExporter is implemented by the Claude Code CLI adaptor so the
+// session can snapshot its resume state without depending on the unexported
+// concrete type in the models package.
+type ClaudeCLIStateExporter interface {
+	ExportCLIMeta() *ClaudeCLIMeta
+}
+
 // Model provider cannot override Readonly!
 type ProvisionedModel struct {
 	providerId   ProviderSlug
@@ -136,6 +155,11 @@ type GenerateOptions struct {
 	// full message is still returned as usual.
 	Stream  bool
 	OnDelta func(kind EventStreamKind, text string) bool
+
+	// Seed pins the provider's sampling RNG so that identical prompts inside
+	// the same session produce deterministic output (best-effort, provider
+	// dependent). Nil means the provider picks its own.
+	Seed *int `json:"seed,omitempty"`
 }
 
 type LLMProviders struct {

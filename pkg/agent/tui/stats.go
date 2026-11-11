@@ -101,6 +101,10 @@ func renderStatsPanel(m *modalModel, width, height int, styles harnessStyles) st
 			pos = float64(offset) / float64(maxPos)
 		}
 		vis := float64(rows) / float64(len(lines))
+		// Pad the text to the window it was measured against before adding the
+		// scrollbar. Without this the bar follows the longest line, which is
+		// where the page's text happens to end rather than the panel's edge.
+		body = lipgloss.NewStyle().Width(contentWidth).Render(body)
 		bar := scrollbar(tracks[1].height, pos, vis, styles.scrollTrack, styles.scrollThumb)
 		body = lipgloss.JoinHorizontal(lipgloss.Top, body, bar)
 	}

@@ -73,6 +73,11 @@ const (
 // consumer identifies such a tool from its name alone. § actuators.mcpToolName
 const MCPToolPrefix = "mcp_"
 
+// MCPToolWildcard is the policy key that covers every MCP tool. The HITL
+// policy checks it when an exact tool name is absent and the tool carries the
+// MCP prefix.
+const MCPToolWildcard ToolType = "mcp_*"
+
 func IsMCPTool(name string) bool {
 	return strings.HasPrefix(name, MCPToolPrefix)
 }
