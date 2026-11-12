@@ -995,13 +995,13 @@ func TestTranscriptUsesCompactRoleMarkers(t *testing.T) {
 		{role: "user", text: "question"},
 		{role: "thinking", text: "reasoning"},
 		{role: "skill", text: "green-software"},
-		{role: "tool", toolKind: "call", toolName: "search", text: `search {"path":"."}`, toolStatus: "success"},
+		{role: "tool", toolKind: "call", toolName: "grep", text: `grep {"path":"."}`, toolStatus: "success"},
 		{role: "assistant", text: "answer"},
 	}
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
 
 	content := ansi.Strip(m.View().Content)
-	for _, want := range []string{"● question", "◌ reasoning", "✦ green-software", `▲ search {"path":"."}`, "● answer"} {
+	for _, want := range []string{"● question", "◌ reasoning", "✦ green-software", `▲ grep {"path":"."}`, "● answer"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("chat transcript does not contain %q", want)
 		}
@@ -1054,7 +1054,7 @@ func TestToolCallPreviewFormatsKnownTools(t *testing.T) {
 		{name: "bash", arguments: `{"command":"grep -E 'MemTotal' /proc/meminfo; lscpu","workdir":"scripts"}`, want: []string{"cwd  scripts", "$ grep -E 'MemTotal' /proc/meminfo; lscpu"}},
 		{name: "write", arguments: `{"path":"notes.txt","content":"first\nsecond"}`, want: []string{"→ notes.txt", "2 lines, 12 bytes", "1  first", "2  second"}},
 		{name: "edit", arguments: `{"path":"main.go","old_string":"old\nsame","new_string":"new\nsame","replace_all":true}`, want: []string{"diff --git a/main.go b/main.go", "--- a/main.go", "+++ b/main.go", "@@ -1,2 +1,2 @@", "\n-old\n+new\n same", "(every match)"}},
-		{name: "search", arguments: `{"path":"pkg/agent/tui/selection.go","pattern":"func (m *chatModel) selectionText"}`, want: []string{"func (m *chatModel) selectionText", "path  pkg/agent/tui/selection.go"}},
+		{name: "grep", arguments: `{"path":"pkg/agent/tui/selection.go","pattern":"func (m *chatModel) selectionText"}`, want: []string{"func (m *chatModel) selectionText", "path  pkg/agent/tui/selection.go"}},
 		{name: "glob", arguments: `{"pattern":"pkg/agent/tui/*.go"}`, want: []string{"pkg/agent/tui/*.go"}},
 		{name: "list", arguments: `{"path":"pkg/agent/tui"}`, want: []string{"pkg/agent/tui"}},
 	}
@@ -1075,10 +1075,12 @@ func TestToolCallPreviewFormatsFilesystemToolsWithoutJSON(t *testing.T) {
 		want      []string
 		unwanted  []string
 	}{
-		{name: "search", arguments: `{"path":"pkg/agent/tui","pattern":"selectionText"}`, want: []string{"selectionText", "path  pkg/agent/tui"}, unwanted: []string{"{", `"pattern"`, `"path"`}},
+		{name: "grep", arguments: `{"path":"pkg/agent/tui","pattern":"selectionText"}`, want: []string{"selectionText", "path  pkg/agent/tui"}, unwanted: []string{"{", `"pattern"`, `"path"`}},
 		{name: "glob", arguments: `{"pattern":"pkg/agent/tui/*.go"}`, want: []string{"pkg/agent/tui/*.go"}, unwanted: []string{"{", `"pattern"`}},
 		{name: "list", arguments: `{"path":"pkg/agent/tui"}`, want: []string{"pkg/agent/tui"}, unwanted: []string{"{", `"path"`}},
 		{name: "list", arguments: `{}`, want: []string{"."}, unwanted: []string{"{"}},
+		{name: "git_status", arguments: `{}`, unwanted: []string{"{", "}"}},
+		{name: "git_status", arguments: `{"diffstat":true,"max_files":20}`, want: []string{"diffstat", "max_files=20"}, unwanted: []string{"{", `"diffstat"`}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1244,8 +1246,8 @@ func TestRenderEditDiffBlockDrawsNoFileLineNumbers(t *testing.T) {
 
 func TestToolNameUsesMarkerEmphasis(t *testing.T) {
 	styles := newHarnessStyles()
-	rendered := renderToolMarker("▲", styles.system, styles.tool, "search", `search {"path":"."}`, 60)
-	if !strings.Contains(rendered, styles.system.Bold(true).Render("search")) {
+	rendered := renderToolMarker("▲", styles.system, styles.tool, "grep", `grep {"path":"."}`, 60)
+	if !strings.Contains(rendered, styles.system.Bold(true).Render("grep")) {
 		t.Fatal("tool name does not use the emphasized marker style")
 	}
 }
@@ -2837,7 +2839,7 @@ func TestToolResultDetailShowsWhatTheToolDid(t *testing.T) {
 			output: "one\ntwo\n", want: "",
 		},
 		{
-			name: "a search that worked adds nothing", tool: contracts.SearchTool, status: contracts.ToolExecutionSuccess,
+			name: "a search that worked adds nothing", tool: contracts.GrepTool, status: contracts.ToolExecutionSuccess,
 			output: `[{"path":"main.go","line":3}]`, want: "",
 		},
 		{

@@ -58,12 +58,14 @@ const (
 	EditTool          ToolType = "edit"
 	GlobTool          ToolType = "glob"
 	ListTool          ToolType = "list"
-	SearchTool        ToolType = "search"
+	GrepTool          ToolType = "grep"
 	BashTool          ToolType = "bash"
 	ReadSkillTool     ToolType = "read_skill"
 	TaskChecklistTool ToolType = "task_checklist"
 	WebFetchTool      ToolType = "webfetch"
 	WebSearchTool     ToolType = "websearch"
+
+	GitStatusTool ToolType = "git_status"
 
 	DelegateSidecarLoopTool           ToolType = "delegate_sidecar_loop"
 	DelegateBackgroundSidecarLoopTool ToolType = "delegate_background_sidecar_loop"

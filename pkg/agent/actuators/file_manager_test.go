@@ -173,14 +173,14 @@ func TestFileToolExecutionsReturnOutput(t *testing.T) {
 
 	for _, call := range []contracts.ToolCall{
 		{Function: contracts.Function{Name: contracts.GlobTool, Arguments: `{"pattern":"*.txt"}`}},
-		{Function: contracts.Function{Name: contracts.SearchTool, Arguments: `{"pattern":"needle"}`}},
+		{Function: contracts.Function{Name: contracts.GrepTool, Arguments: `{"pattern":"needle"}`}},
 	} {
 		var out string
 		switch call.Function.Name {
 		case contracts.GlobTool:
 			out, err = m.GlobExecution(ctx, call)
-		case contracts.SearchTool:
-			out, err = m.SearchExecution(ctx, call)
+		case contracts.GrepTool:
+			out, err = m.GrepExecution(ctx, call)
 		}
 		if err != nil {
 			t.Fatalf("%s: %v", call.Function.Name, err)

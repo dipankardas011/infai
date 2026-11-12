@@ -25,10 +25,10 @@ const (
 	searchMaxPattern   = 4096
 )
 
-func SearchTool() contracts.Tool {
+func GrepTool() contracts.Tool {
 	return toolSchema(
-		"search",
-		"Search UTF-8 file contents. Literal by default; set regex=true for a regular expression. Skips hidden paths and .git unless include_hidden is true. Returns path:line:text (content), one path per line (files), or path:count (count). A trailing [truncated: ...] line means more results exist.",
+		"grep",
+		"Grep UTF-8 file contents. Literal by default; set regex=true for a regular expression. Skips hidden paths and .git unless include_hidden is true. Returns path:line:text (content), one path per line (files), or path:count (count). A trailing [truncated: ...] line means more results exist.",
 		map[string]any{
 			"pattern": map[string]any{
 				"type":        "string",
@@ -82,7 +82,7 @@ func SearchTool() contracts.Tool {
 	)
 }
 
-type searchArguments struct {
+type grepArguments struct {
 	Pattern         string   `json:"pattern"`
 	Path            string   `json:"path"`
 	Regex           bool     `json:"regex"`
@@ -98,8 +98,8 @@ type searchArguments struct {
 
 type lineMatcher func(string) bool
 
-func (m *FileManager) SearchExecution(ctx context.Context, tc contracts.ToolCall) (string, error) {
-	args, err := contracts.DecodeToolArguments[searchArguments](contracts.SearchTool, tc)
+func (m *FileManager) GrepExecution(ctx context.Context, tc contracts.ToolCall) (string, error) {
+	args, err := contracts.DecodeToolArguments[grepArguments](contracts.GrepTool, tc)
 	if err != nil {
 		return "", err
 	}
@@ -112,29 +112,29 @@ func (m *FileManager) SearchExecution(ctx context.Context, tc contracts.ToolCall
 	if args.Limit == 0 {
 		args.Limit = searchDefaultLimit
 	}
-	if err := searchToolValidate(&args); err != nil {
-		return "", wrapToolError(contracts.SearchTool, err, "invalid_arguments", "search arguments are invalid")
+	if err := grepToolValidate(&args); err != nil {
+		return "", wrapToolError(contracts.GrepTool, err, "invalid_arguments", "grep arguments are invalid")
 	}
 	matchLine, err := compileSearchMatcher(args)
 	if err != nil {
-		return "", wrapToolError(contracts.SearchTool, err, "invalid_arguments", "search arguments are invalid")
+		return "", wrapToolError(contracts.GrepTool, err, "invalid_arguments", "grep arguments are invalid")
 	}
 
-	return contracts.RunBounded(ctx, contracts.SearchTool, 10*time.Second, func() (string, error) {
-		output, err := m.search(args, matchLine)
+	return contracts.RunBounded(ctx, contracts.GrepTool, 10*time.Second, func() (string, error) {
+		output, err := m.grep(args, matchLine)
 		if err != nil {
-			return "", wrapToolError(contracts.SearchTool, err, "search_failed", "the search could not be completed")
+			return "", wrapToolError(contracts.GrepTool, err, "grep_failed", "the grep could not be completed")
 		}
 		return output, nil
 	})
 }
 
-func searchToolValidate(args *searchArguments) error {
+func grepToolValidate(args *grepArguments) error {
 	if args.Pattern == "" {
-		return contracts.NewToolExecutionError(contracts.SearchTool, "invalid_arguments", "search requires pattern", contracts.ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.GrepTool, "invalid_arguments", "grep requires pattern", contracts.ResponsibilityAgent, nil)
 	}
 	if len(args.Pattern) > searchMaxPattern {
-		return contracts.NewToolExecutionError(contracts.SearchTool, "invalid_arguments", "the search pattern is too long", contracts.ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.GrepTool, "invalid_arguments", "the search pattern is too long", contracts.ResponsibilityAgent, nil)
 	}
 	if err := validateText(args.Pattern, contracts.ResponsibilityAgent); err != nil {
 		return err
@@ -142,19 +142,19 @@ func searchToolValidate(args *searchArguments) error {
 	switch args.Output {
 	case searchOutputContent, searchOutputFiles, searchOutputCount:
 	default:
-		return contracts.NewToolExecutionError(contracts.SearchTool, "invalid_arguments", "output must be content, files, or count", contracts.ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.GrepTool, "invalid_arguments", "output must be content, files, or count", contracts.ResponsibilityAgent, nil)
 	}
 	if args.Limit < 1 || args.Limit > searchMaxLimit {
-		return contracts.NewToolExecutionError(contracts.SearchTool, "invalid_arguments", fmt.Sprintf("limit must be between 1 and %d", searchMaxLimit), contracts.ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.GrepTool, "invalid_arguments", fmt.Sprintf("limit must be between 1 and %d", searchMaxLimit), contracts.ResponsibilityAgent, nil)
 	}
 	if args.Offset < 0 {
-		return contracts.NewToolExecutionError(contracts.SearchTool, "invalid_arguments", "offset must not be negative", contracts.ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.GrepTool, "invalid_arguments", "offset must not be negative", contracts.ResponsibilityAgent, nil)
 	}
 	if args.Context < 0 || args.Context > searchMaxContext {
-		return contracts.NewToolExecutionError(contracts.SearchTool, "invalid_arguments", fmt.Sprintf("context must be between 0 and %d", searchMaxContext), contracts.ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.GrepTool, "invalid_arguments", fmt.Sprintf("context must be between 0 and %d", searchMaxContext), contracts.ResponsibilityAgent, nil)
 	}
 	if args.Output != searchOutputContent && args.Context != 0 {
-		return contracts.NewToolExecutionError(contracts.SearchTool, "invalid_arguments", "context is only used with output=content", contracts.ResponsibilityAgent, nil)
+		return contracts.NewToolExecutionError(contracts.GrepTool, "invalid_arguments", "context is only used with output=content", contracts.ResponsibilityAgent, nil)
 	}
 	for index, pattern := range args.Include {
 		normalized, err := normalizeGlobPattern(pattern)
@@ -175,7 +175,7 @@ func searchToolValidate(args *searchArguments) error {
 
 // compileSearchMatcher uses strings.Contains for the common literal,
 // case-sensitive case and a compiled expression for everything else.
-func compileSearchMatcher(args searchArguments) (lineMatcher, error) {
+func compileSearchMatcher(args grepArguments) (lineMatcher, error) {
 	if !args.Regex && !args.CaseInsensitive {
 		pattern := args.Pattern
 		return func(line string) bool { return strings.Contains(line, pattern) }, nil
@@ -190,7 +190,7 @@ func compileSearchMatcher(args searchArguments) (lineMatcher, error) {
 	compiled, err := regexp.Compile(expression)
 	if err != nil {
 		return nil, contracts.NewToolExecutionError(
-			contracts.SearchTool,
+			contracts.GrepTool,
 			"invalid_arguments",
 			"search pattern is not a valid regular expression: "+err.Error(),
 			contracts.ResponsibilityAgent,
@@ -200,7 +200,7 @@ func compileSearchMatcher(args searchArguments) (lineMatcher, error) {
 	return compiled.MatchString, nil
 }
 
-func (m *FileManager) search(args searchArguments, matchLine lineMatcher) (string, error) {
+func (m *FileManager) grep(args grepArguments, matchLine lineMatcher) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -284,7 +284,7 @@ func (m *FileManager) search(args searchArguments, matchLine lineMatcher) (strin
 		}
 		data, err := os.ReadFile(filePath)
 		if err != nil {
-			return filesystemErr("search_failed", "a file could not be read during search", contracts.ResponsibilityEnvironment, err)
+			return filesystemErr("grep_failed", "a file could not be read during search", contracts.ResponsibilityEnvironment, err)
 		}
 		if !utf8.Valid(data) {
 			return nil

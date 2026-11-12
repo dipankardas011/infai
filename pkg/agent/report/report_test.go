@@ -402,16 +402,16 @@ func TestToolCallSummaryUsesTheIdentifyingArgument(t *testing.T) {
 	}}}
 	searchCall := contracts.NewAssistantMessage("")
 	searchCall.ToolCalls = []contracts.ToolCall{{ID: "s1", Function: contracts.Function{
-		Name: contracts.SearchTool, Arguments: `{"path":"pkg","pattern":"template.Must","include":["*.go"]}`,
+		Name: contracts.GrepTool, Arguments: `{"path":"pkg","pattern":"template.Must","include":["*.go"]}`,
 	}}}
 
 	out := render(t, []store.Event{messageEvent(uuid.Nil, readCall), messageEvent(uuid.Nil, searchCall)}, uuid.Nil)
-	for _, want := range []string{"read path=pkg/agent/report/template.go", "search pattern=template.Must"} {
+	for _, want := range []string{"read path=pkg/agent/report/template.go", "grep pattern=template.Must"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("call summary missing %q", want)
 		}
 	}
-	for _, unwanted := range []string{"read limit=100", "search path=pkg"} {
+	for _, unwanted := range []string{"read limit=100", "grep path=pkg"} {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("call summary identified by a knob: %q", unwanted)
 		}
@@ -529,7 +529,7 @@ func TestBashResultShowsExitAndFirstLine(t *testing.T) {
 
 func TestEveryToolResultShowsItsOutputWhenExpanded(t *testing.T) {
 	cases := []struct{ name, output, marker string }{
-		{string(contracts.SearchTool), "pkg/x.go:1: hit\npkg/y.go:2: hit\n", "pkg/x.go:1: hit"},
+		{string(contracts.GrepTool), "pkg/x.go:1: hit\npkg/y.go:2: hit\n", "pkg/x.go:1: hit"},
 		{string(contracts.ListTool), `[{"name":"nav.tmpl","size":10}]`, "nav.tmpl"},
 		{string(contracts.WriteTool), `{"replacements":1}`, "replacements"},
 		{"mcp_echo", `{"value":"hi"}`, "hi"},

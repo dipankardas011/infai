@@ -19,7 +19,7 @@ func TestFileToolsHaveDescriptiveSchemas(t *testing.T) {
 		actuators.EditTool(),
 		actuators.ListTool(),
 		actuators.GlobTool(),
-		actuators.SearchTool(),
+		actuators.GrepTool(),
 		actuators.BashTool(),
 	}
 	for _, tool := range tools {
@@ -137,7 +137,7 @@ func TestFileToolsRejectInvisibleCharacters(t *testing.T) {
 	execute(t, m, contracts.WriteTool, map[string]any{"path": "allowed.txt", "content": "line 1\nline 2\tvalue"})
 }
 
-func TestGlobListAndSearchToolBehavior(t *testing.T) {
+func TestGlobListAndGrepToolBehavior(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "nested", "deep"), 0o755); err != nil {
 		t.Fatal(err)
@@ -162,7 +162,7 @@ func TestGlobListAndSearchToolBehavior(t *testing.T) {
 		t.Fatal("list returned no entries")
 	}
 
-	searchOut := execute(t, m, contracts.SearchTool, map[string]any{
+	searchOut := execute(t, m, contracts.GrepTool, map[string]any{
 		"pattern": "needle", "path": ".",
 	})
 	if results := strings.Split(searchOut, "\n"); len(results) != 2 {
@@ -203,7 +203,7 @@ func TestFileToolsRejectInvisibleOutputCharacters(t *testing.T) {
 	}
 
 	writeFile(t, root, "content.txt", "needle\u202ehidden")
-	if err := executeError(t, m, contracts.SearchTool, map[string]any{"pattern": "needle"}); !strings.Contains(err, "invisible_character") {
+	if err := executeError(t, m, contracts.GrepTool, map[string]any{"pattern": "needle"}); !strings.Contains(err, "invisible_character") {
 		t.Fatalf("search error = %s", err)
 	}
 }
@@ -213,7 +213,7 @@ func TestFileToolsReturnNoMatches(t *testing.T) {
 	if output := execute(t, m, contracts.GlobTool, map[string]any{"pattern": "*.missing"}); output != "no matches" {
 		t.Fatalf("glob output = %q, want no matches", output)
 	}
-	if output := execute(t, m, contracts.SearchTool, map[string]any{"pattern": "missing"}); output != "no matches" {
+	if output := execute(t, m, contracts.GrepTool, map[string]any{"pattern": "missing"}); output != "no matches" {
 		t.Fatalf("search output = %q, want no matches", output)
 	}
 }
@@ -243,8 +243,8 @@ func dispatch(t *testing.T, manager *actuators.FileManager, tool contracts.ToolT
 		return manager.ListExecution(ctx, call)
 	case contracts.GlobTool:
 		return manager.GlobExecution(ctx, call)
-	case contracts.SearchTool:
-		return manager.SearchExecution(ctx, call)
+	case contracts.GrepTool:
+		return manager.GrepExecution(ctx, call)
 	case contracts.BashTool:
 		return manager.BashExecution(ctx, call)
 	}

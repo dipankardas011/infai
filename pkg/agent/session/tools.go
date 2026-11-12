@@ -25,7 +25,8 @@ func (s *InfaiAgentSession) configureFileTools() {
 		actuators.ReadTool(),
 		actuators.ListTool(),
 		actuators.GlobTool(),
-		actuators.SearchTool(),
+		actuators.GrepTool(),
+		actuators.GitStatusTool(),
 		actuators.WriteTool(),
 		actuators.EditTool(),
 		actuators.BashTool(),
@@ -370,8 +371,32 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					ToolResult: &result,
 				})
 
-			case contracts.SearchTool:
-				output, err := s.fileManager.SearchExecution(s.ctx, tc)
+			case contracts.GrepTool:
+				output, err := s.fileManager.GrepExecution(s.ctx, tc)
+
+				result := contracts.ToolExecutionResult{
+					Status:   contracts.ToolExecutionSuccess,
+					CallID:   tc.ID,
+					Output:   output,
+					CallName: tc.Function.Name,
+				}
+				if err != nil {
+					status = contracts.ToolExecutionError
+					content = err.Error()
+					result.Status = contracts.ToolExecutionError
+					result.Error = content
+				} else {
+					content = output
+				}
+
+				s.publish(contracts.EventStream{
+					Kind:       contracts.EventToolResult,
+					Timestamp:  time.Now().UTC(),
+					ToolResult: &result,
+				})
+
+			case contracts.GitStatusTool:
+				output, err := s.fileManager.GitStatusExecution(s.ctx, tc)
 
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,

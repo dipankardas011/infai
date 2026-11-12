@@ -131,11 +131,11 @@ type chatModel struct {
 	dragScrolling bool
 	// turnTextBlock is the assistant block this turn's text landed in, so a
 	// produced image joins that block instead of opening one of its own.
-	turnTextBlock int
-	composer      textarea.Model
-	checklist      contracts.TaskChecklistState
+	turnTextBlock   int
+	composer        textarea.Model
+	checklist       contracts.TaskChecklistState
 	checklistScroll int // first visible item index, default bottom
-	status         contracts.SessionStatus
+	status          contracts.SessionStatus
 	// sidecars is the latest status reported by each session this one
 	sidecars                []contracts.SidecarStatus
 	sidecarScroll           int // first visible sidecar index, default bottom
@@ -4659,7 +4659,7 @@ func toolCallPreview(name, arguments string) string {
 		}
 		return preview
 
-	case contracts.SearchTool:
+	case contracts.GrepTool:
 		var args struct {
 			Path    string `json:"path"`
 			Pattern string `json:"pattern"`
@@ -4692,6 +4692,25 @@ func toolCallPreview(name, arguments string) string {
 			return "."
 		}
 		return args.Path
+
+	case contracts.GitStatusTool:
+		var args struct {
+			Diffstat bool `json:"diffstat"`
+			MaxFiles int  `json:"max_files"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			return prettyToolArguments(arguments)
+		}
+		// The call is common with no arguments; an empty preview leaves the
+		// transcript showing just the tool name instead of a bare "{}".
+		var parts []string
+		if args.Diffstat {
+			parts = append(parts, "diffstat")
+		}
+		if args.MaxFiles > 0 {
+			parts = append(parts, fmt.Sprintf("max_files=%d", args.MaxFiles))
+		}
+		return strings.Join(parts, "  ")
 
 	case contracts.BashTool:
 		var args struct {
