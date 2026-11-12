@@ -232,21 +232,19 @@ func (m *MCPManager) connect(ctx context.Context, cwd, name string, server contr
 	listing.session = session
 
 	var listingWait sync.WaitGroup
+	var toolErr, promptErr, resourceErr error
 	listingWait.Go(func() {
-		listing.err = m.discoverTools(startupCtx, session, &listing, timeout)
+		toolErr = m.discoverTools(startupCtx, session, &listing, timeout)
 	})
 	listingWait.Go(func() {
-		if err := m.discoverPrompts(startupCtx, session, &listing, timeout); err != nil && listing.err == nil {
-			listing.err = err
-		}
+		promptErr = m.discoverPrompts(startupCtx, session, &listing, timeout)
 	})
 	listingWait.Go(func() {
-		if err := m.discoverResources(startupCtx, session, &listing, timeout); err != nil && listing.err == nil {
-			listing.err = err
-		}
+		resourceErr = m.discoverResources(startupCtx, session, &listing, timeout)
 	})
-
 	listingWait.Wait()
+
+	listing.err = errors.Join(toolErr, promptErr, resourceErr)
 	return listing
 }
 
@@ -413,10 +411,25 @@ func walkPages[T any](next func(cursor string) (items []T, nextCursor string, er
 	}
 }
 
+// serverCapabilities is what the server declared at initialize, or nil when it
+// reported none. A nil result means "unknown", so a caller tries the listing
+// rather than dropping a server for a capability that may exist.
+func serverCapabilities(session *mcp.ClientSession) *mcp.ServerCapabilities {
+	if result := session.InitializeResult(); result != nil {
+		return result.Capabilities
+	}
+	return nil
+}
+
 // discoverTools reads one server's tools into its listing. Names are checked for
 // duplicates within the server here; a name another server also claims is caught
-// when the listings are merged.
+// when the listings are merged. A server that declares no tools capability is
+// skipped: the MCP spec forbids calling an undeclared method, and a strict
+// server answers it with an error that would otherwise drop the whole server.
 func (m *MCPManager) discoverTools(ctx context.Context, session *mcp.ClientSession, listing *mcpServerListing, timeout time.Duration) error {
+	if caps := serverCapabilities(session); caps != nil && caps.Tools == nil {
+		return nil
+	}
 	server := listing.name
 	return walkPages(func(cursor string) ([]*mcp.Tool, string, error) {
 		page, err := session.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
@@ -449,6 +462,9 @@ func mcpPromptKey(server, name string) string  { return server + mcpPromptKeySep
 func mcpResourceKey(server, uri string) string { return server + mcpResourceKeySeparator + uri }
 
 func (m *MCPManager) discoverPrompts(ctx context.Context, session *mcp.ClientSession, listing *mcpServerListing, timeout time.Duration) error {
+	if caps := serverCapabilities(session); caps != nil && caps.Prompts == nil {
+		return nil
+	}
 	server := listing.name
 	return walkPages(func(cursor string) ([]*mcp.Prompt, string, error) {
 		page, err := session.ListPrompts(ctx, &mcp.ListPromptsParams{Cursor: cursor})
@@ -482,7 +498,7 @@ func (m *MCPManager) discoverPrompts(ctx context.Context, session *mcp.ClientSes
 // session.
 func (m *MCPManager) discoverResources(ctx context.Context, session *mcp.ClientSession, listing *mcpServerListing, timeout time.Duration) error {
 	server := listing.name
-	if result := session.InitializeResult(); result != nil && result.Capabilities.Resources == nil {
+	if caps := serverCapabilities(session); caps != nil && caps.Resources == nil {
 		return nil
 	}
 	// Both the duplicate guard and the binding map are server-qualified, so two

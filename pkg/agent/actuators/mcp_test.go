@@ -131,3 +131,54 @@ func TestMCPConnectsAndCallsTool(t *testing.T) {
 		t.Fatalf("output = %q, err = %v", output, err)
 	}
 }
+
+func TestMCPStdioPrompts(t *testing.T) {
+	if os.Getenv("INFAI_MCP_PROMPT_HELPER") != "1" {
+		return
+	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "prompts", Version: "1"}, nil)
+	server.AddPrompt(&mcp.Prompt{Name: "greet", Description: "say hello"},
+		func(_ context.Context, _ *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			return &mcp.GetPromptResult{Messages: []*mcp.PromptMessage{{
+				Role:    mcp.Role("user"),
+				Content: &mcp.TextContent{Text: "hello prompt"},
+			}}}, nil
+		})
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// A server that offers prompts but declares no tools capability must still
+// connect and answer: discovery must not call tools/list on it, since a strict
+// server answers an undeclared method with an error that would drop the server.
+func TestMCPConnectsPromptsOnlyServer(t *testing.T) {
+	manager, err := NewMCPManager(context.Background(), t.TempDir(), slog.New(slog.DiscardHandler), map[string]contracts.MCPServerConfig{
+		"prompts": {
+			Transport: "stdio",
+			Command:   os.Args[0],
+			Args:      []string{"-test.run=^TestMCPStdioPrompts$"},
+			Env:       map[string]string{"INFAI_MCP_PROMPT_HELPER": "1"},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	if status := manager.Status(); len(status) != 0 {
+		t.Fatalf("a prompts-only server was marked unavailable: %+v", status)
+	}
+	if tools := manager.Tools(); len(tools) != 0 {
+		t.Fatalf("tools = %+v, want none", tools)
+	}
+	prompts := manager.Prompts()
+	if len(prompts) != 1 || prompts[0].Name != "greet" || prompts[0].Server != "prompts" {
+		t.Fatalf("prompts = %+v", prompts)
+	}
+	messages, err := manager.RenderPrompt(context.Background(), "prompts", "greet", nil)
+	if err != nil || len(messages) != 1 || messages[0].Text() != "hello prompt" {
+		t.Fatalf("messages = %+v, err = %v", messages, err)
+	}
+}
