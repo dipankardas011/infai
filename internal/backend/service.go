@@ -14,7 +14,9 @@ import (
 
 	"github.com/dipankardas011/infai/internal/db"
 	"github.com/dipankardas011/infai/internal/downloader"
+	"github.com/dipankardas011/infai/internal/hardware"
 	"github.com/dipankardas011/infai/internal/inference"
+	"github.com/dipankardas011/infai/internal/memoryfit"
 	"github.com/dipankardas011/infai/internal/model"
 	"github.com/dipankardas011/infai/internal/scanner"
 )
@@ -23,10 +25,13 @@ import (
 // TUI screens should call this layer and decide how to present results/errors.
 type Service struct {
 	db *db.DB
+	// probeHardware is a field rather than a direct call so tests can pin the
+	// memory snapshot.
+	probeHardware func(context.Context) hardware.Snapshot
 }
 
 func New(database *db.DB) *Service {
-	return &Service{db: database}
+	return &Service{db: database, probeHardware: hardware.Collect}
 }
 
 func (s *Service) GetSetting(key string) (string, error) {
@@ -147,47 +152,75 @@ func (s *Service) MarkRecent(modelID, profileID int64) error {
 	return s.db.MarkRecent(modelID, profileID)
 }
 
-func (s *Service) BuildRunSpec(m model.ModelEntry, p model.Profile, port int) (inference.RunSpec, error) {
+// RunPlan is a launch that has already been evaluated: the resolved command
+// plus the memory verdict measured against the hardware as it is right now.
+type RunPlan struct {
+	Spec    inference.RunSpec
+	Fit     memoryfit.Result
+	Note    string
+	Blocked bool
+}
+
+// PlanRun builds the launch command and decides whether it may start. Callers
+// only present Note and Blocked; the fit itself is never re-derived outside
+// this layer.
+func (s *Service) PlanRun(m model.ModelEntry, p model.Profile, port int) (RunPlan, error) {
+	spec, engine, err := s.buildRunSpec(m, p, port)
+	if err != nil {
+		return RunPlan{}, err
+	}
+	fit, fitErr := EvaluateFit(FitRequest{
+		Model:    m,
+		Engine:   engine,
+		Profile:  p,
+		Hardware: s.probeHardware(context.Background()),
+		Policy:   memoryfit.DefaultPolicy(),
+	})
+	note, blocked := LaunchDecision(fit, fitErr)
+	return RunPlan{Spec: spec, Fit: fit, Note: note, Blocked: blocked}, nil
+}
+
+func (s *Service) buildRunSpec(m model.ModelEntry, p model.Profile, port int) (inference.RunSpec, model.InferenceEngine, error) {
 	if m.ID <= 0 {
-		return inference.RunSpec{}, fmt.Errorf("invalid model")
+		return inference.RunSpec{}, model.InferenceEngine{}, fmt.Errorf("invalid model")
 	}
 	if p.ID <= 0 {
-		return inference.RunSpec{}, fmt.Errorf("invalid profile")
+		return inference.RunSpec{}, model.InferenceEngine{}, fmt.Errorf("invalid profile")
 	}
 	if p.InferenceEngineID == "" {
-		return inference.RunSpec{}, fmt.Errorf("profile has no inference engine")
+		return inference.RunSpec{}, model.InferenceEngine{}, fmt.Errorf("profile has no inference engine")
 	}
 	p.Port = port
 	engine, err := s.db.GetInferenceEngineByID(p.InferenceEngineID)
 	if err != nil {
-		return inference.RunSpec{}, fmt.Errorf("inference engine: %w", err)
+		return inference.RunSpec{}, model.InferenceEngine{}, fmt.Errorf("inference engine: %w", err)
 	}
 	engineBin, err := resolveInferenceEngineBinary(engine.Path, engine.Kind)
 	if err != nil {
-		return inference.RunSpec{}, err
+		return inference.RunSpec{}, model.InferenceEngine{}, err
 	}
 	engine.Path = engineBin
 	var draft *model.ModelEntry
 	if speculativeModeUsesDraft(p.SpeculativeMode) && p.DraftModelID != nil {
 		models, err := s.db.ListModels()
 		if err != nil {
-			return inference.RunSpec{}, fmt.Errorf("list models: %w", err)
+			return inference.RunSpec{}, model.InferenceEngine{}, fmt.Errorf("list models: %w", err)
 		}
 		_, draft = resolveProfileModels(models, p.ModelID, p.DraftModelID)
 	}
 	issues := ValidateProfile(&p, &m, &engine, draft)
 	if issues.HasErrors() {
-		return inference.RunSpec{}, fmt.Errorf("validation: %w", issues.Errors())
+		return inference.RunSpec{}, model.InferenceEngine{}, fmt.Errorf("validation: %w", issues.Errors())
 	}
 	adapter, err := inference.AdapterFor(engine.Kind)
 	if err != nil {
-		return inference.RunSpec{}, err
+		return inference.RunSpec{}, model.InferenceEngine{}, err
 	}
 	launch, err := inference.BuildAdapterLaunchSpec(adapter, engine, m, p, draft)
 	if err != nil {
-		return inference.RunSpec{}, err
+		return inference.RunSpec{}, model.InferenceEngine{}, err
 	}
-	return inference.RunSpec{Launch: launch, Metrics: adapter.NewMetricsSource(p.Host, p.Port)}, nil
+	return inference.RunSpec{Launch: launch, Metrics: adapter.NewMetricsSource(p.Host, p.Port)}, engine, nil
 }
 
 func speculativeModeUsesDraft(mode model.SpeculativeMode) bool {

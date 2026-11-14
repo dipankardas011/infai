@@ -27,6 +27,17 @@ const (
 	FitUnknown    FitLevel = "unknown"
 )
 
+// PoolKind names the memory the estimate was measured against, so callers can
+// tell a GPU-resident plan from one that relies on CPU offload.
+type PoolKind string
+
+const (
+	PoolVRAM    PoolKind = "vram"
+	PoolVRAMRAM PoolKind = "vram+ram"
+	PoolRAM     PoolKind = "ram"
+	PoolUnified PoolKind = "unified"
+)
+
 type Confidence string
 
 const (
@@ -68,6 +79,7 @@ type Breakdown struct {
 type Result struct {
 	PoolTotalBytes     uint64
 	PoolAvailableBytes uint64
+	Pool               PoolKind
 	Utilization        float64
 	Fit                FitLevel
 	UsableContext      uint32
@@ -75,6 +87,13 @@ type Result struct {
 	Breakdown          Breakdown
 	Assumptions        []string
 	Warnings           []string
+}
+
+// BlocksLaunch reports whether the estimate is conclusive enough to refuse a
+// launch. Inconclusive estimates, and failures that lean on the quantization
+// size fallback, stay advisory.
+func (r Result) BlocksLaunch() bool {
+	return r.Fit == FitDoesNotFit && r.Confidence == ConfidenceHigh
 }
 
 func Estimate(req Request) (Result, error) {
@@ -146,6 +165,7 @@ func Estimate(req Request) (Result, error) {
 	return Result{
 		PoolTotalBytes:     pool.total,
 		PoolAvailableBytes: pool.available,
+		Pool:               pool.kind,
 		Utilization:        utilization,
 		Fit:                fit,
 		UsableContext:      contextSize,
@@ -167,6 +187,7 @@ type selectedPool struct {
 	total        uint64
 	available    uint64
 	engineBudget uint64
+	kind         PoolKind
 	assumption   string
 }
 
@@ -201,7 +222,7 @@ func selectPool(req Request) (selectedPool, error) {
 			if req.Hardware.RAM.TotalBytes == 0 || req.Hardware.RAM.AvailableBytes == 0 {
 				return selectedPool{}, cannotEstimate("unified memory capacity is unavailable")
 			}
-			return selectedPool{total: req.Hardware.RAM.TotalBytes, available: req.Hardware.RAM.AvailableBytes, assumption: "unified memory is modeled as one shared RAM and VRAM pool"}, nil
+			return selectedPool{total: req.Hardware.RAM.TotalBytes, available: req.Hardware.RAM.AvailableBytes, kind: PoolUnified, assumption: "unified memory is modeled as one shared RAM and VRAM pool"}, nil
 		}
 		if gpu.TotalVRAMBytes == 0 || gpu.FreeVRAMBytes == 0 {
 			return selectedPool{}, cannotEstimate("GPU memory capacity is unavailable")
@@ -212,6 +233,7 @@ func selectPool(req Request) (selectedPool, error) {
 			return selectedPool{
 				total:      gpu.TotalVRAMBytes + req.Hardware.RAM.TotalBytes,
 				available:  available + req.Hardware.RAM.AvailableBytes,
+				kind:       PoolVRAMRAM,
 				assumption: "llama.cpp NGL=auto is modeled as a combined VRAM and available RAM pool for CPU-offloaded weights",
 			}, nil
 		}
@@ -232,9 +254,9 @@ func selectPool(req Request) (selectedPool, error) {
 				available = configured
 			}
 			assumption = fmt.Sprintf("vLLM may reserve up to %.0f%% of total VRAM for weights, KV cache, CUDA graphs, and runtime buffers", utilization*100)
-			return selectedPool{total: gpu.TotalVRAMBytes, available: available, engineBudget: configured, assumption: assumption}, nil
+			return selectedPool{total: gpu.TotalVRAMBytes, available: available, engineBudget: configured, kind: PoolVRAM, assumption: assumption}, nil
 		}
-		return selectedPool{total: gpu.TotalVRAMBytes, available: available, assumption: assumption}, nil
+		return selectedPool{total: gpu.TotalVRAMBytes, available: available, kind: PoolVRAM, assumption: assumption}, nil
 	}
 	if req.Engine != model.EngineLlamaCPP {
 		return selectedPool{}, cannotEstimate("vLLM requires a detected accelerator")
@@ -242,7 +264,7 @@ func selectPool(req Request) (selectedPool, error) {
 	if req.Hardware.RAM.TotalBytes == 0 || req.Hardware.RAM.AvailableBytes == 0 {
 		return selectedPool{}, cannotEstimate("system memory capacity is unavailable")
 	}
-	return selectedPool{total: req.Hardware.RAM.TotalBytes, available: req.Hardware.RAM.AvailableBytes, assumption: "CPU-only llama.cpp uses available system RAM as the memory pool"}, nil
+	return selectedPool{total: req.Hardware.RAM.TotalBytes, available: req.Hardware.RAM.AvailableBytes, kind: PoolRAM, assumption: "CPU-only llama.cpp uses available system RAM as the memory pool"}, nil
 }
 
 func contextSize(meta model.ModelMetadata, requested int) (uint32, []string) {

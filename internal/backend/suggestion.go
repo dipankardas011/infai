@@ -68,12 +68,9 @@ func CompatibleInferenceEngines(entry model.ModelEntry, engines []model.Inferenc
 }
 
 func SuggestProfile(req SuggestionRequest) (ProfileSuggestion, error) {
-	engineKind := req.Engine.Kind
-	if engineKind == "" {
-		engineKind = model.EngineLlamaCPP
-	}
-	if engineKind != model.EngineLlamaCPP && engineKind != model.EngineVLLM {
-		return ProfileSuggestion{}, fmt.Errorf("unsupported inference engine kind %q", engineKind)
+	engineKind, err := resolveEngineKind(req.Engine.Kind)
+	if err != nil {
+		return ProfileSuggestion{}, err
 	}
 	engine := req.Engine
 	engine.Kind = engineKind

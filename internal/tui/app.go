@@ -56,6 +56,15 @@ type profileSuggestionMsg struct {
 	suggestion backend.ProfileSuggestion
 	err        error
 }
+type runPlannedMsg struct {
+	model      model.ModelEntry
+	profile    model.Profile
+	engine     model.InferenceEngine
+	port       int
+	openDetail bool
+	plan       backend.RunPlan
+	err        error
+}
 type syncDoneMsg struct {
 	removed, updated int
 	err              error
@@ -63,17 +72,21 @@ type syncDoneMsg struct {
 
 // AppModel is the root bubbletea model.
 type AppModel struct {
-	screen       screenKind
-	service      *backend.Service
-	scanDirs     []string
-	width        int
-	height       int
-	errMsg       string
-	errKind      toastKind
-	errMsgTicks  int
-	quitArmed    bool
-	help         help.Model
-	showFullHelp bool
+	screen      screenKind
+	service     *backend.Service
+	scanDirs    []string
+	width       int
+	height      int
+	errMsg      string
+	errKind     toastKind
+	errMsgTicks int
+	errSticky   bool
+	quitArmed   bool
+	// launchingProfile is the profile whose launch plan is in flight, so a
+	// double keypress cannot queue the same profile twice.
+	launchingProfile int64
+	help             help.Model
+	showFullHelp     bool
 
 	// Sub-models
 	home          HomeModel
@@ -142,6 +155,14 @@ func (a *AppModel) setToast(kind toastKind, msg string) {
 	a.errMsg = msg
 	a.errKind = kind
 	a.errMsgTicks = 0
+	a.errSticky = false
+}
+
+// setBlocked keeps the message on screen until the next toast: a refused
+// launch has to stay readable long enough for the user to act on it.
+func (a *AppModel) setBlocked(msg string) {
+	a.setToast(toastError, msg)
+	a.errSticky = true
 }
 
 func (a *AppModel) setErr(msg string)     { a.setToast(toastError, msg) }
@@ -176,6 +197,9 @@ func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, engine model.I
 		a.setInfo(fmt.Sprintf("%s is already running as run #%d", p.Name, existingID))
 		return nil
 	}
+	if a.launchingProfile == p.ID {
+		return nil
+	}
 	if engine.ID == "" && p.InferenceEngineID != "" {
 		var err error
 		engine, err = a.service.GetInferenceEngineByID(p.InferenceEngineID)
@@ -189,13 +213,22 @@ func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, engine model.I
 		a.setErr(err.Error())
 		return nil
 	}
-	spec, err := a.service.BuildRunSpec(m, p, actualPort)
-	if err != nil {
-		a.setErr(err.Error())
-		return nil
+	a.launchingProfile = p.ID
+	service := a.service
+	return func() tea.Msg {
+		plan, err := service.PlanRun(m, p, actualPort)
+		return runPlannedMsg{
+			model: m, profile: p, engine: engine, port: actualPort,
+			openDetail: openDetail, plan: plan, err: err,
+		}
 	}
+}
+
+// startPlannedRun spawns the server for a plan the backend already approved.
+func (a *AppModel) startPlannedRun(msg runPlannedMsg) tea.Cmd {
+	p, m, engine := msg.profile, msg.model, msg.engine
 	runID := a.runs.NewID()
-	sm, cmd, err := NewServerModel(runID, spec, p.Name, m.DisplayName, string(m.Type), p.ContextSize, p.Host, actualPort, a.width, a.height)
+	sm, cmd, err := NewServerModel(runID, msg.plan.Spec, p.Name, m.DisplayName, string(m.Type), p.ContextSize, p.Host, msg.port, a.width, a.height)
 	if err != nil {
 		a.setErr(err.Error())
 		a.refreshHome()
@@ -205,18 +238,18 @@ func (a *AppModel) launchRun(m model.ModelEntry, p model.Profile, engine model.I
 		ID: runID, ProfileID: p.ID, ModelID: m.ID,
 		ProfileName: p.Name, ModelName: m.DisplayName, ModelType: string(m.Type),
 		EngineID: engine.ID, EngineName: engine.Name, EnginePath: engine.Path,
-		Host: p.Host, RequestedPort: p.Port, ActualPort: actualPort,
+		Host: p.Host, RequestedPort: p.Port, ActualPort: msg.port,
 		Model: m, Profile: p,
 		Server: sm,
 	})
 	_ = a.service.MarkRecent(m.ID, p.ID)
 	a.refreshHome()
-	if actualPort != p.Port {
-		a.setWarning(fmt.Sprintf("port %d busy; launched %s as run #%d on :%d", p.Port, p.Name, runID, actualPort))
+	if msg.port != p.Port {
+		a.setWarning(fmt.Sprintf("port %d busy; launched %s as run #%d on :%d (%s)", p.Port, p.Name, runID, msg.port, msg.plan.Note))
 	} else {
-		a.setSuccess(fmt.Sprintf("launched %s as run #%d on :%d — enter opens details", p.Name, runID, actualPort))
+		a.setSuccess(fmt.Sprintf("launched %s as run #%d on :%d (%s) — enter opens details", p.Name, runID, msg.port, msg.plan.Note))
 	}
-	if openDetail {
+	if msg.openDetail {
 		a.screen = screenServerRunning
 	} else {
 		a.home.activeTab = tabRuns
@@ -242,7 +275,7 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case toastTickMsg:
-		if a.errMsg != "" {
+		if a.errMsg != "" && !a.errSticky {
 			a.errMsgTicks++
 			if a.errMsgTicks >= 4 {
 				a.errMsg = ""
@@ -278,6 +311,23 @@ func (a *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case profilesTabLaunchMsg:
 		cmd := a.launchRun(msg.entry.Model, msg.entry.Profile, msg.entry.InferenceEngine, false)
 		return a, cmd
+
+	case runPlannedMsg:
+		a.launchingProfile = 0
+		if msg.err != nil {
+			a.setErr(msg.err.Error())
+			a.refreshHome()
+			return a, nil
+		}
+		if msg.plan.Blocked {
+			a.setBlocked(msg.plan.Note)
+			return a, nil
+		}
+		if existingID, ok := a.runs.ActiveProfileRun(msg.profile.ID); ok {
+			a.setInfo(fmt.Sprintf("%s is already running as run #%d", msg.profile.Name, existingID))
+			return a, nil
+		}
+		return a, a.startPlannedRun(msg)
 
 	case profilesTabNewProfileMsg:
 		return a.openProfileModelPicker(screenHome)
@@ -534,13 +584,17 @@ func (a *AppModel) restartRun(id RunID) (tea.Model, tea.Cmd) {
 		a.setErr(err.Error())
 		return a, nil
 	}
-	spec, err := a.service.BuildRunSpec(run.Model, run.Profile, actualPort)
+	plan, err := a.service.PlanRun(run.Model, run.Profile, actualPort)
 	if err != nil {
 		a.setErr(err.Error())
 		return a, nil
 	}
+	if plan.Blocked {
+		a.setBlocked(plan.Note)
+		return a, nil
+	}
 	nextServer := run.Server
-	nextServer.runSpec = spec
+	nextServer.runSpec = plan.Spec
 	nextServer.port = actualPort
 	sm, cmd, err := nextServer.Restart()
 	if err != nil {
@@ -825,8 +879,8 @@ func suggestionLines(suggestion backend.ProfileSuggestion) []string {
 	confidence := strings.ToUpper(string(fit.Confidence))
 	lines := []string{
 		fmt.Sprintf("Context: %d  |  Model max: %d  |  Fit: %s  |  Confidence: %s", suggestion.Draft.ContextSize, suggestion.NativeContext, fitLabel, confidence),
-		fmt.Sprintf("Required: %s  |  Available: %s", formatMemory(fit.Breakdown.RequiredBytes), formatMemory(fit.PoolAvailableBytes)),
-		fmt.Sprintf("Weights: %s  |  KV cache: %s  |  Runtime: %s  |  Headroom: %s", formatMemory(fit.Breakdown.WeightsBytes), formatMemory(fit.Breakdown.KVCacheBytes), formatMemory(fit.Breakdown.RuntimeOverheadBytes), formatMemory(fit.Breakdown.SafetyHeadroomBytes)),
+		fmt.Sprintf("Required: %s  |  Available: %s", memoryfit.FormatBytes(fit.Breakdown.RequiredBytes), memoryfit.FormatBytes(fit.PoolAvailableBytes)),
+		fmt.Sprintf("Weights: %s  |  KV cache: %s  |  Runtime: %s  |  Headroom: %s", memoryfit.FormatBytes(fit.Breakdown.WeightsBytes), memoryfit.FormatBytes(fit.Breakdown.KVCacheBytes), memoryfit.FormatBytes(fit.Breakdown.RuntimeOverheadBytes), memoryfit.FormatBytes(fit.Breakdown.SafetyHeadroomBytes)),
 	}
 	if len(suggestion.Reasons) > 0 {
 		lines = append(lines, fmt.Sprintf("reasons (%d):", len(suggestion.Reasons)))
@@ -841,14 +895,6 @@ func suggestionLines(suggestion backend.ProfileSuggestion) []string {
 		}
 	}
 	return lines
-}
-
-func formatMemory(bytes uint64) string {
-	const gib = 1024 * 1024 * 1024
-	if bytes >= gib {
-		return fmt.Sprintf("%.1f GiB", float64(bytes)/gib)
-	}
-	return fmt.Sprintf("%.0f MiB", float64(bytes)/(1024*1024))
 }
 
 func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -902,17 +948,20 @@ func (a *AppModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *AppModel) renderToast() string {
+	// The status line is one reserved row, so a long message is clipped rather
+	// than allowed to wrap into the screen body.
+	msg := truncateLine(a.errMsg, max(a.width-3, 8))
 	switch a.errKind {
 	case toastSuccess:
-		return styleSuccess.Render("✓ " + a.errMsg)
+		return styleSuccess.Render("✓ " + msg)
 	case toastWarning:
-		return styleWarning.Bold(true).Render("! " + a.errMsg)
+		return styleWarning.Bold(true).Render("! " + msg)
 	case toastInfo:
-		return styleMuted.Render("• " + a.errMsg)
+		return styleMuted.Render("• " + msg)
 	case toastError:
 		fallthrough
 	default:
-		return styleError.Render("✗ " + a.errMsg)
+		return styleError.Render("✗ " + msg)
 	}
 }
 

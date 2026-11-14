@@ -44,7 +44,7 @@ func TestSaveProfileResolvesDraftModel(t *testing.T) {
 	if _, err := service.SaveProfile(&profile); err != nil {
 		t.Fatalf("save with resolved draft: %v", err)
 	}
-	if _, err := service.BuildRunSpec(target, profile, 8081); err != nil {
-		t.Fatalf("build run spec with resolved draft: %v", err)
+	if _, err := service.PlanRun(target, profile, 8081); err != nil {
+		t.Fatalf("plan run with resolved draft: %v", err)
 	}
 }

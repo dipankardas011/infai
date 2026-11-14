@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/dipankardas011/infai/internal/backend"
 	"github.com/dipankardas011/infai/internal/db"
 	"github.com/dipankardas011/infai/internal/model"
 )
@@ -81,6 +82,45 @@ func TestModalInputStates(t *testing.T) {
 	}
 	if (EnginesTabModel{}).InModalInput() || (ModelsTabModel{}).InModalInput() {
 		t.Fatal("idle tabs must not report modal input")
+	}
+}
+
+func TestRunPlannedBlockedShowsNoteAndStartsNothing(t *testing.T) {
+	app := newTestApp(t)
+	note := "does not fit: needs 21.5 GiB, only 12.0 GiB free now in VRAM (9.5 GiB short) - close other GPU apps or lower the context size"
+	app.Update(runPlannedMsg{
+		profile: model.Profile{ID: 3, Name: "big"},
+		plan:    backend.RunPlan{Blocked: true, Note: note},
+	})
+
+	if app.runs.ActiveCount() != 0 {
+		t.Fatal("a blocked plan must not start a run")
+	}
+	if !strings.Contains(app.errMsg, "does not fit") {
+		t.Fatalf("the backend note must reach the status line, got %q", app.errMsg)
+	}
+	if !app.errSticky || !strings.Contains(app.View(), "does not fit") {
+		t.Fatal("the blocked note must stay visible")
+	}
+}
+
+func TestBlockedToastPersists(t *testing.T) {
+	app := newTestApp(t)
+	app.setBlocked("does not fit: needs 21.5 GiB")
+
+	for i := 0; i < 10; i++ {
+		app.Update(toastTickMsg{})
+	}
+	if app.errMsg == "" {
+		t.Fatal("a blocked launch message must stay on screen until replaced")
+	}
+
+	app.setInfo("launched")
+	for i := 0; i < 10; i++ {
+		app.Update(toastTickMsg{})
+	}
+	if app.errMsg != "" {
+		t.Fatalf("ordinary toasts must still expire, got %q", app.errMsg)
 	}
 }
 
