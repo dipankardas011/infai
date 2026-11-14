@@ -859,12 +859,11 @@ body.is-w section:not(.band) { border-top-color: var(--border-hi); }
 .daemon-sessions { margin-top: 4.5rem; margin-bottom: 0; }
 .daemon-sessions .show-num { font-size: 1rem; letter-spacing: 0.06em; text-transform: uppercase; }
 
-/* the remaining features as a plain list: no boxes, no grid */
-.feat-list { list-style: none; margin: 1rem 0 0; padding: 0; max-width: 860px; }
-.feat-list li { padding: 1.1rem 0; border-top: 1px dashed var(--border-hi); color: var(--text-2); font-size: calc(0.86rem * var(--fs)); line-height: 1.6; }
-.feat-list li:last-child { border-bottom: 1px dashed var(--border-hi); }
-.feat-list b { color: var(--text); font-weight: 500; margin-right: 0.3rem; }
-.feat-list-k { display: block; font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--green); margin-bottom: 0.3rem; }
+/* a row's source: the blog post or the build-log entry it came from */
+.show-link { color: var(--green) !important; text-decoration: none; border-bottom: 1px solid var(--green-glow); }
+.show-link:hover { border-bottom-color: var(--green); }
+/* hand-drawn diagrams are white sketches: give them paper, not a terminal frame */
+.show-img.is-diagram { background: #fff; padding: 1rem; }
 
 /* model switching: providers stacked like a patch bay, one session through all of them */
 .model-swap { padding: 1.8rem 2rem; border: 1px solid var(--text); background: var(--surface); box-shadow: 9px 9px 0 var(--ink-shadow); font-family: var(--mono); }
@@ -875,7 +874,7 @@ body.is-w section:not(.band) { border-top-color: var(--border-hi); }
 .model-swap-row.is-any { border-style: dashed; }
 .model-swap-row.is-any b { color: var(--green); }
 .model-swap-arrow { text-align: center; color: var(--green); font-size: 1rem; line-height: 1.6; }
-.feat-list kbd, .show-keys kbd, .show-cap kbd, .fp-mode kbd {
+.show-text kbd, .show-cap kbd, .fp-mode kbd {
   font-family: var(--mono);
   font-size: 0.85em;
   padding: 0.05em 0.4em;

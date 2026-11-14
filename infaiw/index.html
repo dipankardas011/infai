@@ -426,7 +426,7 @@
     <div class="sec-head">
       <p class="kicker reveal-up">[ 04 / on board ]</p>
       <h2 class="reveal-up">Built for long-running work.</h2>
-      <p class="sec-sub reveal-up">Eight things you will notice in the first hour, then everything else.</p>
+      <p class="sec-sub reveal-up">The things you will notice first, then everything else.</p>
     </div>
 
     <!-- tier 1: show, don't list -->
@@ -534,14 +534,42 @@
       </figure>
     </div>
 
-    <!-- everything else that earns a sentence: a plain list, no boxes -->
-    <ul class="feat-list reveal-up">
-      <li><span class="feat-list-k">long sessions</span><b>Compaction that keeps its place.</b> The latest events stay word for word and older ones are summarised, so the agent resumes mid-task instead of starting over.</li>
-      <li><span class="feat-list-k">long sessions</span><b>Hours of history, still instant.</b> Only the visible part of the transcript is drawn, so a session with thousands of events opens, scrolls and resizes in constant time.</li>
-      <li><span class="feat-list-k">sessions</span><b>Sessions that talk.</b> Every session has a mailbox. Sidecars report back to their parent through the engine, so parallel work comes together on its own.</li>
-      <li><span class="feat-list-k">tools</span><b>Skills as slash commands.</b> Reusable instructions you write once, loaded the same way into every session.</li>
-      <li><span class="feat-list-k">tools</span><b>Beyond text.</b> Paste a screenshot with <kbd>ctrl+v</kbd>. Model-generated images land in the session and are saved to your workspace with a click.</li>
-    </ul>
+    <div class="show-item reveal-up">
+      <div class="show-text">
+        <span class="show-num">09</span>
+        <h3>Stored like git,<br>not like a chat log.</h3>
+        <p>Every session is an append-only timeline of events, each pointing to its parent. <code>HEAD</code> marks the active branch, an index records where each event lives, history is split into chunks, and large records sit in content-addressed blobs that load only when needed. Opening, listing or branching a session reads only what it has to.</p>
+        <p>Compaction builds on the same timeline. At 80% of the context window, the last four messages stay word for word. Everything older is summarised together with the previous summary and the task checklist, and the summary is saved on the timeline as its own event with the originals kept. You can stop worrying about the context going bad.</p>
+        <p class="show-keys"><a class="show-link" href="https://dipankar-das.com/blog/reimagined-how-ai-agent-harness-session-stored/" target="_blank" rel="noopener">how it got here, in eight iterations ↗</a></p>
+      </div>
+      <figure class="show-img is-diagram">
+        <img src="../infaiw-storage.webp" alt="Diagram of an infaiw session on disk: events in chunk files linked to their parents, a HEAD pointer, session.json, an index mapping events to chunks, content-addressed blobs, and a compaction agent whose summary is appended to the timeline" loading="lazy" width="820" height="801">
+      </figure>
+    </div>
+
+    <div class="show-item show-flip reveal-up">
+      <div class="show-text">
+        <span class="show-num">10</span>
+        <h3>Hours of history,<br>still instant.</h3>
+        <p>Only the part of the transcript on screen, plus a buffer above and below, is drawn, in blocks cached for each terminal width. A session with thousands of events opens, scrolls and resizes in constant time. A resize keeps you on the block you were reading, and live output only follows along when you're already at the bottom.</p>
+        <p class="show-keys"><a class="show-link" href="https://x.com/DipankarDas011/status/2104619415346233598" target="_blank" rel="noopener">day 32 on the build log ↗</a></p>
+      </div>
+      <figure class="show-img is-diagram">
+        <img src="../infaiw-render.webp" alt="Sketch of the transcript renderer: only blocks inside the active screen plus a buffer above and below are rendered" loading="lazy" width="1174" height="745">
+      </figure>
+    </div>
+
+    <div class="show-item reveal-up">
+      <div class="show-text">
+        <span class="show-num">11</span>
+        <h3>Beyond<br>text.</h3>
+        <p>Paste a screenshot with <kbd>ctrl+v</kbd> and the model sees it. Models that can generate images, such as OpenAI's through Codex, return them into the same chat: click <code>[Gen Image 1]</code> and the image is saved to the session's working directory.</p>
+        <p class="show-keys"><a class="show-link" href="https://x.com/DipankarDas011/status/2110083337872433325" target="_blank" rel="noopener">day 43 on the build log ↗</a></p>
+      </div>
+      <figure class="show-img">
+        <img src="../infaiw-imagegen.webp" alt="infaiw on gpt-5.5 through openai-codex generating an image of a tabby cat hugging an otter, with the saved PNG open beside it in an image viewer and in the session's working directory" loading="lazy" width="1600" height="867">
+      </figure>
+    </div>
 
     <!-- tier 3: everything else, one line -->
     <div class="feat-also reveal-up">
