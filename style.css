@@ -859,6 +859,98 @@ body.is-w section:not(.band) { border-top-color: var(--border-hi); }
 .daemon-sessions { margin-top: 4.5rem; margin-bottom: 0; }
 .daemon-sessions .show-num { font-size: 1rem; letter-spacing: 0.06em; text-transform: uppercase; }
 
+/* ── Sidecar loop simulator: three sessions as objects, ISAC messages as envelopes on a bus ── */
+.sim { margin: 3rem 0 3.5rem; border: 1px solid var(--text); background: var(--surface); box-shadow: 9px 9px 0 var(--ink-shadow); font-family: var(--mono); }
+.sim-bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.8rem 1.5rem; padding: 0.9rem 1.2rem; border-bottom: 1px solid var(--border-hi); }
+.sim-ctl, .sim-opts, .sim-seg { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+.sim-opts { gap: 0.6rem 1.4rem; }
+.sim-btn, .sim-seg button {
+  font: inherit; font-size: 0.7rem; padding: 0.35rem 0.7rem; cursor: pointer;
+  color: var(--text); background: var(--bg); border: 1px solid var(--border-hi);
+}
+.sim-btn:hover, .sim-seg button:hover { border-color: var(--text); }
+.sim-play { min-width: 6.5rem; background: var(--green); border-color: var(--green); color: var(--bg); font-weight: 500; }
+.sim-seg button[aria-checked="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
+.sim-seg-k { font-size: 0.62rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin-right: 0.2rem; }
+.sim-count { font-size: 0.66rem; color: var(--muted); margin-left: 0.4rem; min-width: 3.5rem; }
+
+.scene { position: relative; display: flex; gap: 2.2rem; padding: 1.6rem 1.4rem 4.6rem; }
+.scene-node {
+  position: relative; flex: 1; min-width: 0; padding: 1rem 1.1rem 1.1rem;
+  background: var(--bg); border: 1px solid var(--border-hi);
+  transition: border-color 0.4s, box-shadow 0.4s var(--ease);
+}
+.scene-node.is-engine { flex: 0.8; }
+.scene-node.is-active { border-color: var(--text); box-shadow: 5px 5px 0 var(--ink-shadow); }
+.scene-k { font-size: 0.64rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+.scene-kind { margin-top: 0.2rem; font-size: 0.66rem; color: var(--green); }
+.scene-status { margin-top: 0.8rem; min-height: 1.3em; font-size: 0.8rem; font-weight: 500; color: var(--text); }
+.scene-status.is-warn { color: var(--yellow); }
+.scene-status.is-wait, .scene-status.is-ok { color: var(--green); }
+.scene-status.is-bad { color: var(--red); }
+.scene-sub { display: block; margin-bottom: 0.3rem; font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+.scene-sub b { margin-left: 0.3rem; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--text); }
+.scene-rec { margin-top: 0.8rem; font-size: 0.7rem; color: var(--text-2); }
+.scene-result { margin-top: 0.6rem; padding: 0.35rem 0.5rem; font-size: 0.66rem; overflow-wrap: anywhere; }
+.scene-result:empty { display: none; }
+.scene-result.is-ok { background: var(--hl); color: var(--hl-ink); }
+.scene-result.is-bad { background: var(--red); color: var(--bg); }
+.scene-mail { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; margin-top: 0.9rem; }
+.scene-mail .scene-sub { width: 100%; margin: 0; }
+.scene-mail i { width: 1.6rem; height: 1.1rem; border: 1px dashed var(--border-hi); }
+.scene-mail i.is-full { border: 1px solid var(--text); background: var(--hl); }
+.scene-mail.is-waiting i:first-of-type { border-style: solid; border-color: var(--green); animation: scene-pulse 1.2s ease-in-out infinite; }
+.scene-port { position: absolute; left: 50%; top: 100%; width: 2px; height: 3rem; background: var(--border-hi); }
+.scene-bus { position: absolute; left: 1.4rem; right: 1.4rem; bottom: 1.6rem; height: 2px; background: var(--text-2); }
+.scene-bus span { position: absolute; left: 0; top: 0.45rem; font-size: 0.6rem; letter-spacing: 0.14em; color: var(--muted); }
+.scene-env {
+  position: absolute; z-index: 2; bottom: calc(1.6rem - 0.75rem); transform: translateX(-50%);
+  display: flex; align-items: center; gap: 0.35rem; height: 1.5rem; padding: 0 0.5rem;
+  background: var(--hl); color: var(--hl-ink); border: 1px solid var(--text); box-shadow: 3px 3px 0 var(--ink-shadow);
+  font-size: 0.64rem; white-space: nowrap; transition: left 1.1s var(--ease);
+}
+.scene-env[hidden] { display: none; }
+
+.scene-node.is-sidecar:not(.is-on) { border-style: dashed; }
+.scene-node.is-sidecar:not(.is-on) > :not(.scene-k):not(.scene-empty):not(.scene-port) { visibility: hidden; }
+.scene-empty { position: absolute; left: 1rem; right: 1rem; top: 45%; text-align: center; font-size: 0.7rem; color: var(--muted); }
+.scene-node.is-sidecar.is-on .scene-empty { display: none; }
+.scene-budget { margin-top: 0.9rem; }
+.scene-cells { display: flex; flex-wrap: wrap; gap: 3px; }
+.scene-cells i { width: calc((100% - 19 * 3px) / 20); aspect-ratio: 1; border: 1px solid var(--border-hi); transition: background 0.3s; }
+.scene-cells i.is-used { background: var(--green); border-color: var(--green); }
+.scene-cells.is-spent i { background: var(--red); border-color: var(--red); }
+.scene-gate { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 0.9rem; padding: 0.55rem 0.6rem; border: 1px solid var(--border-hi); transition: border-color 0.3s; }
+.scene-gate .scene-sub { margin: 0; }
+.scene-gate code { width: 100%; font-family: var(--mono); font-size: 0.66rem; color: var(--text); overflow-wrap: anywhere; }
+.scene-light { width: 0.7rem; height: 0.7rem; border-radius: 50%; background: var(--border-hi); }
+.scene-gate.is-run .scene-light { background: var(--yellow); animation: scene-pulse 0.8s ease-in-out infinite; }
+.scene-gate.is-bad { border-color: var(--red); }
+.scene-gate.is-bad .scene-light { background: var(--red); }
+.scene-gate.is-ok { border-color: var(--green); }
+.scene-gate.is-ok .scene-light { background: var(--green); }
+@keyframes scene-pulse { 50% { opacity: 0.35; } }
+
+/* the same steps as a plain list: the phone layout */
+.sim-rows { display: none; padding: 0 1.2rem 0.6rem; }
+.sim-row { padding: 0.45rem 0; border-bottom: 1px dashed var(--border-hi); font-size: 0.68rem; color: var(--text); opacity: 0.35; transition: opacity 0.4s var(--ease); }
+.sim-row.is-past { opacity: 0.75; }
+.sim-row.is-now { opacity: 1; color: var(--green); font-weight: 500; }
+.sim-cap {
+  min-height: 3.6em; margin: 0; padding: 0.9rem 1.2rem 1.1rem; border-top: 1px solid var(--border-hi);
+  font-family: var(--body); font-size: calc(0.86rem * var(--fs)); color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scene-env, .scene-node, .scene-cells i, .sim-row { transition: none; }
+  .scene-light, .scene-mail i { animation: none !important; }
+}
+@media (max-width: 760px) {
+  .scene { display: none; }
+  .sim-rows { display: block; }
+  .sim { box-shadow: 5px 5px 0 var(--ink-shadow); }
+}
+
 /* a row's source: the blog post or the build-log entry it came from */
 .show-link { color: var(--green) !important; text-decoration: none; border-bottom: 1px solid var(--green-glow); }
 .show-link:hover { border-bottom-color: var(--green); }

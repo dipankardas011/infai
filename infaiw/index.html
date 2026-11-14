@@ -258,6 +258,63 @@
       <h2 class="reveal-up">Subagents that can't<br>just declare victory.</h2>
       <p class="sec-sub reveal-up">Agents love to say "done". A sidecar is a delegated subagent whose "done" doesn't count until a script written by its parent exits 0, within a turn budget the parent picked.</p>
     </div>
+    <!-- how a sidecar loop is created and answers back, as a playable sequence -->
+    <div class="sim reveal-up" id="sim">
+      <div class="sim-bar">
+        <div class="sim-ctl">
+          <button type="button" class="sim-btn" data-sim="prev" aria-label="Previous step">◀</button>
+          <button type="button" class="sim-btn sim-play" data-sim="play">▶ play</button>
+          <button type="button" class="sim-btn" data-sim="next" aria-label="Next step">▶</button>
+          <span class="sim-count" aria-hidden="true"></span>
+        </div>
+        <div class="sim-opts">
+          <div class="sim-seg" role="radiogroup" aria-label="How the parent delegates">
+            <span class="sim-seg-k">caller</span>
+            <button type="button" role="radio" aria-checked="true" data-mode="sync">sync</button>
+            <button type="button" role="radio" aria-checked="false" data-mode="background">background</button>
+          </div>
+          <div class="sim-seg" role="radiogroup" aria-label="How the sidecar ends">
+            <span class="sim-seg-k">outcome</span>
+            <button type="button" role="radio" aria-checked="true" data-outcome="pass">fails once, then passes</button>
+            <button type="button" role="radio" aria-checked="false" data-outcome="budget">runs out of turns</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-stage" aria-hidden="true">
+        <div class="scene">
+          <div class="scene-node" data-node="0">
+            <p class="scene-k">parent session</p>
+            <p class="scene-kind">● interactive</p>
+            <p class="scene-status" data-f="pStatus"></p>
+            <p class="scene-rec"><span class="scene-sub">its sidecars</span><span data-f="record"></span></p>
+            <p class="scene-result" data-f="result"></p>
+            <div class="scene-mail"><span class="scene-sub">mailbox</span><i></i><i></i><i></i></div>
+            <span class="scene-port"></span>
+          </div>
+          <div class="scene-node is-engine" data-node="1">
+            <p class="scene-k">engine</p>
+            <p class="scene-kind">creates sessions · routes every ISAC message</p>
+            <p class="scene-status" data-f="eStatus"></p>
+            <span class="scene-port"></span>
+          </div>
+          <div class="scene-node is-sidecar" data-node="2">
+            <p class="scene-k">sidecar · fix-token-expiry</p>
+            <p class="scene-empty">not created yet</p>
+            <p class="scene-kind">⧉ sidecar_loop</p>
+            <p class="scene-status" data-f="sStatus"></p>
+            <div class="scene-budget"><span class="scene-sub">turn budget <b data-f="turnText"></b></span><div class="scene-cells"></div></div>
+            <div class="scene-gate"><span class="scene-light"></span><span class="scene-sub">acceptance check · runs in this loop</span><code data-f="gText"></code></div>
+            <div class="scene-mail"><span class="scene-sub">mailbox</span><i></i><i></i><i></i></div>
+            <span class="scene-port"></span>
+          </div>
+          <div class="scene-bus"><span>ISAC</span></div>
+          <div class="scene-env" hidden><b>✉</b><span></span></div>
+        </div>
+        <div class="sim-rows"></div>
+      </div>
+      <p class="sim-cap" aria-live="polite">The parent delegates over ISAC, the engine creates the sidecar, the sidecar works and runs its own acceptance script until it passes or the turn budget runs out, and the engine relays the result back to the parent's mailbox.</p>
+    </div>
+
     <div class="eq-points loop-points">
       <div class="eq-point reveal-up" style="--d:0">
         <span class="pt-num">1</span>
@@ -265,7 +322,7 @@
       </div>
       <div class="eq-point reveal-up" style="--d:1">
         <span class="pt-num">2</span>
-        <div><h3>Gate</h3><p>Each time the sidecar claims it's finished, the daemon runs the script. If it fails, the script's output goes back to the sidecar and the work continues.</p></div>
+        <div><h3>Gate</h3><p>Each time the sidecar claims it's finished, its own loop runs the script. If it fails, the script's output goes back into its conversation and the work continues.</p></div>
       </div>
       <div class="eq-point reveal-up" style="--d:2">
         <span class="pt-num">3</span>
@@ -295,7 +352,7 @@
         <figure class="show-img">
           <img src="../infaiw-gate-sidecar.webp" alt="Inside the sidecar session: its final answer ends with an acceptance check section and the acceptance_script success verdict, and the session shows completed" loading="lazy" width="1600" height="1220">
         </figure>
-        <p class="show-cap"><b>Inside the sidecar.</b> Its last answer, then the daemon's verdict. Only after that does the session flip to <em>completed</em> and report back to its parent.</p>
+        <p class="show-cap"><b>Inside the sidecar.</b> Its last answer, then the verdict from its own acceptance check. Only after that does the session flip to <em>completed</em> and report back to its parent.</p>
       </div>
       <div class="gate-step reveal-up" style="--d:1">
         <figure class="show-img">
@@ -793,7 +850,187 @@ brew services start infaiw</code>
       setInterval(() => paint(phase = (phase + 1) % PHASES.length), 3400);
     }
 
-    // ── Build log: calendar + posts from buildlog.json ──
+    // ── Sidecar loop simulator: three sessions as objects, ISAC messages as envelopes on a bus ──
+(() => {
+  const root = document.getElementById('sim');
+  if (!root) return;
+  const LANES = ['parent', 'engine', 'sidecar'];
+  const N = (lane, title, sub, cap, set) => ({ kind: 'note', lane, title, sub, cap, set });
+  const A = (from, to, label, cap, set) => ({ kind: 'arrow', from, to, label, cap, set });
+  const START = {
+    pStatus: '○ idle', pTone: '', record: 'none yet', result: '', rTone: '', mail0: 0,
+    eStatus: 'waiting for messages', sOn: false, sStatus: '', sTone: '', turn: 0, gText: 'not run yet', gTone: '',
+  };
+
+  // Mirrors pkg/agent: session/tools.go dispatches, engine/engine.go creates and relays,
+  // and the sidecar's own loop (agent/agent.go) runs the acceptance script.
+  function buildSteps(mode, outcome) {
+    const bg = mode === 'background', pass = outcome === 'pass';
+    const tool = bg ? 'delegate_background_sidecar_loop' : 'delegate_sidecar_loop';
+    const steps = [
+      N(0, tool, 'task · acceptance_script · max_turns 40',
+        'The parent\'s model delegates. The call carries the task, a bash acceptance script that defines "done", and a budget of 40 turns.',
+        { pStatus: '◐ calling ' + tool, pTone: 'busy' }),
+      N(0, '⚑ waits for you', 'default policy: human',
+        'Under the default policy a delegation waits for your approval, so you see the task and the script before anything starts.',
+        { pStatus: '⚑ waiting for your approval', pTone: 'warn' }),
+      A(0, 1, bg ? 'delegate · background' : 'delegate',
+        'The session\'s tool dispatcher doesn\'t start anything itself. It sends a delegate message over ISAC to the engine.',
+        { pStatus: '◐ delegating', pTone: 'busy' }),
+      N(1, 'creates the sidecar', 'own mailbox · parent\'s model & policy',
+        'The engine creates a new sidecar_loop session with its own mailbox, on the parent\'s model and policy, carrying the turn budget and the acceptance script, and records it as the parent\'s offspring.',
+        { eStatus: 'created fix-token-expiry', sOn: true, sStatus: 'created', sTone: '', gText: 'waiting for a claim' }),
+      A(1, 0, 'session id',
+        'The engine replies over ISAC with the new session\'s id. The parent records it next to the sidecar\'s name.',
+        { eStatus: 'recorded as offspring', record: 'fix-token-expiry · 01a1…' }),
+      N(2, 'starts working', 'sees only the task',
+        'Meanwhile the sidecar starts on its own. It can\'t see the parent\'s conversation, only the task it was given.',
+        { sStatus: '◐ busy', sTone: 'busy', turn: 1 }),
+      bg ? N(0, 'tool returns: started', 'carries on with its own turn',
+             'Background: the tool returns at once with "started; its answer will arrive as a message", and the parent carries on.',
+             { pStatus: '◐ busy · carries on', pTone: 'busy' })
+         : N(0, 'waits in its mailbox', 'the tool call stays open',
+             'Sync: the parent\'s tool call stays open, and the session waits in its mailbox for this sidecar\'s result.',
+             { pStatus: '⧗ waiting in its mailbox', pTone: 'wait' }),
+      N(2, '"done, expiry fixed"', 'turn 7',
+        'At turn 7 the sidecar replies without calling a tool. That reply is a claim that it\'s done.',
+        { turn: 7, sStatus: '⚑ claims done', sTone: 'warn' }),
+      N(2, 'runs its acceptance script', 'bash -s · inside its own loop',
+        'The claim isn\'t taken on trust. The sidecar\'s own loop runs the acceptance script with bash in its working directory, and the model can\'t skip it.',
+        { gText: 'bash -s …', gTone: 'run' }),
+      N(2, 'exit 1  ✗', '--- FAIL: TestRefreshExpiry',
+        'The script exits 1. The exit code is the verdict, not the model\'s opinion of its own work.',
+        { gText: 'exit 1 ✗  --- FAIL: TestRefreshExpiry', gTone: 'bad' }),
+      N(2, 'output fed back', 'the loop continues',
+        'What the script printed goes back into the sidecar\'s conversation, so it knows what to fix. The loop continues.',
+        { sStatus: '◐ busy · fixing', sTone: 'busy' }),
+    ];
+    if (pass) steps.push(
+      N(2, '"compare in UTC, test added"', 'turn 12', 'At turn 12 the sidecar claims it\'s done again, and its loop runs the same script.',
+        { turn: 12, sStatus: '⚑ claims done', sTone: 'warn', gText: 'bash -s …', gTone: 'run' }),
+      N(2, 'exit 0  ✓', 'acceptance passed', 'Exit 0. Only now does the sidecar count as completed.',
+        { gText: 'exit 0 ✓  acceptance passed', gTone: 'ok', sStatus: '✓ completed', sTone: 'ok' }),
+      A(2, 1, 'result · verdict · checklist',
+        'The sidecar sends its result over ISAC: its status, the verdict, its answer and its task checklist.', {}),
+    );
+    else steps.push(
+      N(2, 'tries again, and again', 'turn 40 / 40',
+        'The script never passes. At 40 turns the budget is spent, and the sidecar stops instead of looping on your tokens.',
+        { turn: 40, sStatus: '▲ max iterations reached', sTone: 'bad', gText: 'never exited 0', gTone: 'bad' }),
+      A(2, 1, 'result · max iterations',
+        'It still reports back: the status, the last verdict, its last answer and its task checklist.', {}),
+    );
+    const line = `[sidecar_loop fix-token-expiry (01a1…) ${pass ? 'completed' : 'max_iteration_exhausted'}] [acceptance_script ${pass ? 'success' : 'failure'}]`;
+    steps.push(
+      N(1, 'relays to the parent', 'parent still active?',
+        'The engine checks that the parent session is still active and delivers the result to its mailbox, tagged sync or background.',
+        { eStatus: 'parent active → its mailbox' }),
+      A(1, 0, 'result → mailbox', 'The result takes the last hop over ISAC, into the parent\'s mailbox.', { mail0: 1 }),
+      N(0, bg ? 'arrives as a new message' : 'becomes the tool result', line,
+        bg ? 'Background: the answer lands as a message from the sidecar, and the parent picks it up as new input.'
+           : 'Sync: the open tool call returns with the answer, the verdict on its first lines.',
+        { pStatus: bg ? '✉ new message from the sidecar' : '✓ tool result returned', pTone: pass ? 'ok' : 'bad', result: line, rTone: pass ? 'ok' : 'bad', eStatus: 'waiting for messages' }),
+    );
+    return steps;
+  }
+
+  const scene = root.querySelector('.scene');
+  const nodes = [...scene.querySelectorAll('.scene-node')];
+  const env = scene.querySelector('.scene-env');
+  const cells = scene.querySelector('.scene-cells');
+  for (let i = 0; i < 40; i++) cells.appendChild(document.createElement('i'));
+  const rowsEl = root.querySelector('.sim-rows');
+  const cap = root.querySelector('.sim-cap');
+  const count = root.querySelector('.sim-count');
+  const playBtn = root.querySelector('.sim-play');
+  const STEP_MS = 2000;
+  let mode = 'sync', outcome = 'pass', steps = [], rows = [], at = 0, timer = null;
+
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
+  const setTone = (node, tone) => {
+    ['busy', 'warn', 'wait', 'ok', 'bad', 'run'].forEach(t => node.classList.remove('is-' + t));
+    if (tone) node.classList.add('is-' + tone);
+  };
+
+  function render() {
+    steps = buildSteps(mode, outcome);
+    rows = steps.map(s => el('div', 'sim-row', s.kind === 'note'
+      ? `${LANES[s.lane]} · ${s.title} · ${s.sub}`
+      : `${LANES[s.from]} → ${LANES[s.to]} · ${s.label}`));
+    rowsEl.replaceChildren(...rows);
+  }
+  function paint(st, step) {
+    scene.querySelectorAll('[data-f]').forEach(n => {
+      const k = n.dataset.f;
+      n.textContent = k === 'turnText' ? (st.turn ? `${st.turn} / 40` : '') : st[k];
+    });
+    setTone(nodes[0].querySelector('.scene-status'), st.pTone);
+    setTone(nodes[2].querySelector('.scene-status'), st.sTone);
+    setTone(scene.querySelector('.scene-result'), st.rTone);
+    setTone(scene.querySelector('.scene-gate'), st.gTone);
+    nodes[2].classList.toggle('is-on', st.sOn);
+    [...cells.children].forEach((c, k) => c.classList.toggle('is-used', k < st.turn));
+    cells.classList.toggle('is-spent', st.sTone === 'bad');
+    nodes[0].querySelectorAll('.scene-mail i').forEach((m, k) => m.classList.toggle('is-full', k < st.mail0));
+    nodes[0].querySelector('.scene-mail').classList.toggle('is-waiting', st.pTone === 'wait');
+    const lane = step.kind === 'note' ? step.lane : step.to;
+    nodes.forEach((n, k) => n.classList.toggle('is-active', k === lane));
+  }
+  function fly(step, animate) {
+    env.hidden = true;
+    if (step.kind !== 'arrow' || !animate) return;
+    const x = n => n.offsetLeft + n.offsetWidth / 2;
+    env.querySelector('span').textContent = step.label;
+    env.style.transition = 'none';
+    env.style.left = x(nodes[step.from]) + 'px';
+    env.hidden = false;
+    void env.offsetWidth;
+    env.style.transition = '';
+    env.style.left = x(nodes[step.to]) + 'px';
+  }
+  function show(i, animate) {
+    at = Math.max(0, Math.min(i, steps.length - 1));
+    rows.forEach((r, k) => { r.classList.toggle('is-past', k < at); r.classList.toggle('is-now', k === at); });
+    const st = steps.slice(0, at + 1).reduce((acc, s) => Object.assign(acc, s.set), { ...START });
+    paint(st, steps[at]);
+    fly(steps[at], animate && !reduceMotion);
+    cap.textContent = `${at + 1}. ${steps[at].cap}`;
+    count.textContent = `${at + 1} / ${steps.length}`;
+  }
+  function stop() { clearInterval(timer); timer = null; playBtn.textContent = at === steps.length - 1 ? '↺ replay' : '▶ play'; }
+  function play() {
+    if (at === steps.length - 1) show(0, false);
+    clearInterval(timer);
+    playBtn.textContent = '❚❚ pause';
+    timer = setInterval(() => { show(at + 1, true); if (at === steps.length - 1) stop(); }, STEP_MS);
+  }
+  root.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.sim === 'play') return timer ? stop() : play();
+    if (b.dataset.sim === 'prev') { stop(); show(at - 1, false); return stop(); }
+    if (b.dataset.sim === 'next') { stop(); show(at + 1, true); return stop(); }
+    const group = b.closest('.sim-seg');
+    if (!group) return;
+    group.querySelectorAll('button').forEach(x => x.setAttribute('aria-checked', String(x === b)));
+    if (b.dataset.mode) mode = b.dataset.mode;
+    if (b.dataset.outcome) outcome = b.dataset.outcome;
+    const wasPlaying = !!timer;
+    render(); show(0, false);
+    wasPlaying ? play() : stop();
+  });
+
+  render();
+  if (reduceMotion) { show(steps.length - 1, false); stop(); return; }
+  show(0, false); stop();
+  // Play once when it comes into view; after that it waits for the reader.
+  const seen = new IntersectionObserver(entries => {
+    if (entries.some(en => en.isIntersecting)) { seen.disconnect(); play(); }
+  }, { threshold: 0.35 });
+  seen.observe(root);
+})();
+
+// ── Build log: calendar + posts from buildlog.json ──
     (async () => {
       const root = document.getElementById('buildlog');
       let log;
