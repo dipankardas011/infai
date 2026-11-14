@@ -273,40 +273,38 @@
       </div>
     </div>
 
-    <div class="gate reveal-up">
-      <div class="fx-term gate-term" role="img" aria-label="The parent's delegation: a task, a forty-turn budget, and an acceptance script that runs the auth tests and checks nothing outside internal/auth changed">
-        <p class="fx-bar"><span>parent → delegate_sidecar_loop</span><span class="fx-dim">⚑ waits for your approval</span></p>
-        <div class="fx-body" aria-hidden="true">
-          <p><span class="fx-dim">agent_name</span>  <span class="fx-acc">fix-token-expiry</span></p>
-          <p><span class="fx-dim">max_turns </span>  <span class="fx-hl">40</span></p>
-          <p><span class="fx-dim">task      </span>  fix the refresh-token expiry check;</p>
-          <p>              touch only internal/auth</p>
-          <p class="fx-gap"><span class="fx-dim">acceptance_script</span></p>
-          <p><span class="fx-ok">go test ./internal/auth/... || exit 1</span></p>
-          <p><span class="fx-ok">out=$(git diff --name-only | grep -v '^internal/auth/')</span></p>
-          <p><span class="fx-ok">[ -z "$out" ] || { echo "touched: $out"; exit 1; }</span></p>
-        </div>
-      </div>
-      <div class="fx-term gate-term" role="img" aria-label="The sidecar claims it is done at turn 7, the script fails with a failing test, the output is fed back, and at turn 12 the script passes and the result reaches the parent">
-        <p class="fx-bar"><span>sidecar · fix-token-expiry</span><span class="fx-dim">sidecar_loop</span></p>
-        <div class="fx-body" aria-hidden="true">
-          <p><span class="fx-dim">turn  7</span>  sidecar  "done, expiry fixed"</p>
-          <p><span class="fx-dim">gate   </span>  bash -s → exit 1  <span class="fx-warn">✗ failure</span></p>
-          <p><span class="fx-dim">       </span>  <span class="fx-dim">--- FAIL: TestRefreshExpiry</span></p>
-          <p><span class="fx-dim">       </span>  <span class="fx-dim">↳ output fed back to the sidecar</span></p>
-          <p class="fx-gap"><span class="fx-dim">turn 12</span>  sidecar  "compare in UTC, test added"</p>
-          <p><span class="fx-dim">gate   </span>  bash -s → exit 0  <span class="fx-ok">✓ success</span></p>
-          <p class="fx-gap"><span class="fx-dim">parent </span>  <span class="fx-ok">[acceptance_script success]</span></p>
-          <p><span class="fx-dim">       </span>  12 of 40 turns used</p>
-        </div>
-      </div>
-    </div>
-
     <div class="fp-ratios gate-cards">
       <div class="fp-ratio reveal-up" style="--d:0"><span class="fp-x">exit 0</span><p><strong>The parent decides what "done" means, not the sidecar.</strong> The verdict is a script's exit status, not the model grading its own work.</p></div>
       <div class="fp-ratio reveal-up" style="--d:1"><span class="fp-x">20·40·100</span><p><strong>Every sidecar has a budget.</strong> When it runs out, the sidecar stops and reports "max iterations reached" instead of looping forever on your tokens.</p></div>
       <div class="fp-ratio reveal-up" style="--d:2"><span class="fp-x">any model</span><p><strong>The gate is bash, so it doesn't care which model you use.</strong> DeepSeek, OpenAI Codex or Claude Code: a sidecar runs on its parent's model, and the gate works the same way on all of them.</p></div>
     </div>
+    <!-- a real run: what the parent receives, then what the sidecar went through -->
+    <div class="show-item gate-lead reveal-up">
+      <div class="show-text">
+        <span class="show-num">a real run</span>
+        <h3>The parent gets<br>a checked answer.</h3>
+        <p>A billing integration review was handed to a sidecar. When its answer reached the parent session, it was already marked <code>[acceptance_script success]</code>: the script had passed before the result was delivered. The parent reads findings, not promises.</p>
+        <p class="show-keys">sidecar_loop · completed · 96 probes · report written · production files untouched</p>
+      </div>
+      <figure class="show-img">
+        <img src="../infaiw-gate-parent.webp" alt="The parent infaiw session receiving a sidecar_loop answer marked completed and acceptance_script success, followed by the sidecar's report" loading="lazy" width="1600" height="1183">
+      </figure>
+    </div>
+    <div class="gate-pair">
+      <div class="gate-step reveal-up" style="--d:0">
+        <figure class="show-img">
+          <img src="../infaiw-gate-sidecar.webp" alt="Inside the sidecar session: its final answer ends with an acceptance check section and the acceptance_script success verdict, and the session shows completed" loading="lazy" width="1600" height="1220">
+        </figure>
+        <p class="show-cap"><b>Inside the sidecar.</b> Its last answer, then the daemon's verdict. Only after that does the session flip to <em>completed</em> and report back to its parent.</p>
+      </div>
+      <div class="gate-step reveal-up" style="--d:1">
+        <figure class="show-img">
+          <img src="../infaiw-gate-script.webp" alt="The sidecar's session stats showing the 16-line acceptance script it was created with: the report must exist and contain findings, the build and vet must pass, no deprecated SDK references and no leftover temporary tests" loading="lazy" width="1600" height="791">
+        </figure>
+        <p class="show-cap"><b>The script, on the record.</b> <kbd>ctrl+d</kbd> on the sidecar shows the exact acceptance script it was created with. Every check echoes why it failed, so a failure tells the sidecar what to fix.</p>
+      </div>
+    </div>
+
     <div class="show-item show-wide reveal-up">
       <figure class="show-img">
         <img src="../infaiw-sidecar-loop.webp" alt="Four infaiw sessions side by side: a parent session tracking six sidecar loops that are busy, waiting for approval, completed, or stopped at max iterations, next to three sidecar sessions with pending bash approvals" loading="lazy" width="3840" height="2084">
@@ -346,6 +344,17 @@
         <div class="arch-box"><span class="arch-mb">✉</span>sidecar · backend</div>
         <div class="arch-box"><span class="arch-mb">✉</span>sidecar · tui</div>
       </div>
+    </div>
+    <div class="show-item daemon-sessions reveal-up">
+      <div class="show-text">
+        <span class="show-num">every session, one place</span>
+        <h3>See everything<br>the daemon is running.</h3>
+        <p>One screen lists every session the daemon holds: what kind it is, which model it runs, its working directory, and whether it's busy, idle or done. Sidecars sit under the parent that started them, so you can see which ones completed and which ran out of budget. Search by name and jump into any of them.</p>
+        <p class="show-keys"><kbd>ctrl+o</kbd> sessions · <kbd>/</kbd> search · <kbd>n</kbd> new session</p>
+      </div>
+      <figure class="show-img">
+        <img src="../infaiw-sessions.webp" alt="infaiw session workspace: a searchable list of 129 sessions, each with its model, date, directory, kind and status, and sidecar_loop sessions nested under their parent" loading="lazy" width="1600" height="1140">
+      </figure>
     </div>
   </section>
 
@@ -417,7 +426,7 @@
     <div class="sec-head">
       <p class="kicker reveal-up">[ 04 / on board ]</p>
       <h2 class="reveal-up">Built for long-running work.</h2>
-      <p class="sec-sub reveal-up">Four things you will notice in the first hour, then everything else.</p>
+      <p class="sec-sub reveal-up">Eight things you will notice in the first hour, then everything else.</p>
     </div>
 
     <!-- tier 1: show, don't list -->
@@ -470,49 +479,69 @@
       </figure>
     </div>
 
-    <!-- tier 2: grouped, pain → outcome -->
-    <div class="feat-grid feat-grouped">
-      <div class="feat reveal-up" style="--d:0">
-        <span class="feat-id">LONG SESSIONS</span>
-        <h3>It remembers why</h3>
-        <p>Each checklist item keeps a note of what you actually asked for. After compaction the agent picks up your goal, not just its last step.</p>
+    <div class="show-item reveal-up">
+      <div class="show-text">
+        <span class="show-num">05</span>
+        <h3>It remembers<br>why.</h3>
+        <p>Every checklist item has a title and a description of what you actually asked for. After compaction, or hours into a task, the agent re-reads the goal and not just its last step. A sidecar's checklist comes back with its answer, and the session tree shows which sidecars finished and which ran out of budget.</p>
+        <p class="show-keys"><kbd>ctrl+d</kbd> checklist · sidecar tree · context · last turn</p>
       </div>
-      <div class="feat reveal-up" style="--d:1">
-        <span class="feat-id">LONG SESSIONS</span>
-        <h3>Compaction that keeps its place</h3>
-        <p>The latest events stay word for word and older ones are summarised, so the agent resumes mid-task instead of starting over.</p>
+      <figure class="show-img">
+        <img src="../infaiw-checklist.webp" alt="infaiw session stats: a tree of seven sidecars, some completed and some stopped at max iterations, a six-item task checklist where each item has a title and a description, and context usage" loading="lazy" width="1600" height="1156">
+      </figure>
+    </div>
+
+    <div class="show-item show-flip reveal-up">
+      <div class="show-text">
+        <span class="show-num">06</span>
+        <h3>Switch models<br>mid-session.</h3>
+        <p>Plan with Claude Code, implement with OpenAI Codex, review with DeepSeek, or use a model you host yourself on any OpenAI-compatible endpoint. The session, its timeline and its approvals stay the same; only the model changes. One system prompt works for all of them, and provider catalogs refresh hourly without a restart.</p>
+        <p class="show-keys"><kbd>ctrl+m</kbd> switch model · <kbd>ctrl+t</kbd> thinking level</p>
       </div>
-      <div class="feat reveal-up" style="--d:2">
-        <span class="feat-id">LONG SESSIONS</span>
-        <h3>Hours of history, still instant</h3>
-        <p>Only the visible part of the transcript is drawn, so a session with thousands of events opens, scrolls and resizes in constant time.</p>
-      </div>
-      <div class="feat reveal-up" style="--d:3">
-        <span class="feat-id">SESSIONS</span>
-        <h3>Sessions that talk</h3>
-        <p>Every session has a mailbox. Sidecars report back to their parent through the engine, so parallel work comes together on its own.</p>
-      </div>
-      <div class="feat reveal-up" style="--d:0">
-        <span class="feat-id">TOOLS</span>
-        <h3>MCP, skills &amp; evals</h3>
-        <p>MCP servers with OAuth, elicitation and prompts. Reusable skills as slash commands. Acceptance scripts that grade the work.</p>
-      </div>
-      <div class="feat reveal-up" style="--d:1">
-        <span class="feat-id">TOOLS</span>
-        <h3>Beyond text</h3>
-        <p>Paste a screenshot with <kbd>ctrl+v</kbd>. Model-generated images land in the session and are saved to your workspace with a click.</p>
-      </div>
-      <div class="feat reveal-up" style="--d:2">
-        <span class="feat-id">MODELS</span>
-        <h3>Your model, one prompt</h3>
-        <p>DeepSeek, OpenAI Codex or Claude Code on your existing login. One well-written system prompt works for all of them, with no per-model hacks.</p>
-      </div>
-      <div class="feat reveal-up" style="--d:3">
-        <span class="feat-id">MODELS</span>
-        <h3>Catalogs that keep up</h3>
-        <p>Provider catalogs refresh hourly: a new model or a corrected context window reaches the running daemon without a restart.</p>
+      <div class="model-swap" role="img" aria-label="One session moving between OpenAI Codex, Claude Code, DeepSeek and any OpenAI-compatible endpoint">
+        <p class="model-swap-k" aria-hidden="true">one session · any of these</p>
+        <p class="model-swap-row" aria-hidden="true"><b>OpenAI Codex</b><span>Responses API · OpenAI account login</span></p>
+        <p class="model-swap-arrow" aria-hidden="true">⇅</p>
+        <p class="model-swap-row" aria-hidden="true"><b>Claude Code</b><span>your existing local login</span></p>
+        <p class="model-swap-arrow" aria-hidden="true">⇅</p>
+        <p class="model-swap-row" aria-hidden="true"><b>DeepSeek</b><span>API key</span></p>
+        <p class="model-swap-arrow" aria-hidden="true">⇅</p>
+        <p class="model-swap-row is-any" aria-hidden="true"><b>any OpenAI-compatible</b><span>hosted or local, including models you run with infai</span></p>
       </div>
     </div>
+
+    <div class="show-item reveal-up">
+      <div class="show-text">
+        <span class="show-num">07</span>
+        <h3>Add an MCP server<br>without editing JSON.</h3>
+        <p>A short form: remote URL or local command, a name, and whether it needs OAuth. If it does, infaiw opens the browser login for you. Its prompts show up as slash commands, its questions come to you, and one <code>mcp_*</code> policy line covers every tool it adds.</p>
+        <p class="show-keys"><kbd>infaiw mcp add</kbd> · edit · refresh · remove, or from the TUI</p>
+      </div>
+      <figure class="show-img">
+        <img src="../infaiw-mcp-add.webp" alt="infaiw MCP server form: transport set to streamable-http, a name, a URL, OAuth set to browser login, and a timeout" loading="lazy" width="1600" height="615">
+      </figure>
+    </div>
+
+    <div class="show-item show-flip reveal-up">
+      <div class="show-text">
+        <span class="show-num">08</span>
+        <h3>Scriptable<br>from the shell.</h3>
+        <p>Policies, MCP servers and provider logins are subcommands too, so you can set up a new machine from a script. The TUI attaches to any daemon by host and port, and resumes any saved session by its id.</p>
+        <p class="show-keys"><kbd>hitl_policy</kbd> · <kbd>mcp</kbd> · <kbd>provider</kbd> · <kbd>server</kbd> · <kbd>--session &lt;uuid&gt;</kbd> · <kbd>--host</kbd> <kbd>--port</kbd></p>
+      </div>
+      <figure class="show-img">
+        <img src="../infaiw-cli.webp" alt="infaiw --help listing the completion, hitl_policy, mcp, provider and server subcommands and the host, port, session and version flags" loading="lazy" width="1600" height="989">
+      </figure>
+    </div>
+
+    <!-- everything else that earns a sentence: a plain list, no boxes -->
+    <ul class="feat-list reveal-up">
+      <li><span class="feat-list-k">long sessions</span><b>Compaction that keeps its place.</b> The latest events stay word for word and older ones are summarised, so the agent resumes mid-task instead of starting over.</li>
+      <li><span class="feat-list-k">long sessions</span><b>Hours of history, still instant.</b> Only the visible part of the transcript is drawn, so a session with thousands of events opens, scrolls and resizes in constant time.</li>
+      <li><span class="feat-list-k">sessions</span><b>Sessions that talk.</b> Every session has a mailbox. Sidecars report back to their parent through the engine, so parallel work comes together on its own.</li>
+      <li><span class="feat-list-k">tools</span><b>Skills as slash commands.</b> Reusable instructions you write once, loaded the same way into every session.</li>
+      <li><span class="feat-list-k">tools</span><b>Beyond text.</b> Paste a screenshot with <kbd>ctrl+v</kbd>. Model-generated images land in the session and are saved to your workspace with a click.</li>
+    </ul>
 
     <!-- tier 3: everything else, one line -->
     <div class="feat-also reveal-up">

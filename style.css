@@ -856,9 +856,26 @@ body.is-w section:not(.band) { border-top-color: var(--border-hi); }
 .features .show-item { margin-bottom: 4.5rem; }
 /* a flipped row puts the screenshot first, so it takes the wide column there too */
 .features .show-flip { grid-template-columns: 1.15fr 0.85fr; }
-.feat-grouped { margin-top: 1.5rem; }
-.feat-grouped .feat-id { letter-spacing: 0.18em; }
-.feat kbd, .show-keys kbd, .fp-mode kbd {
+.daemon-sessions { margin-top: 4.5rem; margin-bottom: 0; }
+.daemon-sessions .show-num { font-size: 1rem; letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* the remaining features as a plain list: no boxes, no grid */
+.feat-list { list-style: none; margin: 1rem 0 0; padding: 0; max-width: 860px; }
+.feat-list li { padding: 1.1rem 0; border-top: 1px dashed var(--border-hi); color: var(--text-2); font-size: calc(0.86rem * var(--fs)); line-height: 1.6; }
+.feat-list li:last-child { border-bottom: 1px dashed var(--border-hi); }
+.feat-list b { color: var(--text); font-weight: 500; margin-right: 0.3rem; }
+.feat-list-k { display: block; font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--green); margin-bottom: 0.3rem; }
+
+/* model switching: providers stacked like a patch bay, one session through all of them */
+.model-swap { padding: 1.8rem 2rem; border: 1px solid var(--text); background: var(--surface); box-shadow: 9px 9px 0 var(--ink-shadow); font-family: var(--mono); }
+.model-swap-k { font-size: 0.64rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin-bottom: 1rem; }
+.model-swap-row { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; padding: 0.75rem 1rem; border: 1px solid var(--border-hi); background: var(--bg); }
+.model-swap-row b { font-weight: 500; font-size: 0.9rem; color: var(--text); }
+.model-swap-row span { font-size: 0.66rem; color: var(--muted); text-align: right; }
+.model-swap-row.is-any { border-style: dashed; }
+.model-swap-row.is-any b { color: var(--green); }
+.model-swap-arrow { text-align: center; color: var(--green); font-size: 1rem; line-height: 1.6; }
+.feat-list kbd, .show-keys kbd, .show-cap kbd, .fp-mode kbd {
   font-family: var(--mono);
   font-size: 0.85em;
   padding: 0.05em 0.4em;
@@ -880,32 +897,16 @@ body.is-w section:not(.band) { border-top-color: var(--border-hi); }
 .feat-also > span:not(.feat-also-k) { padding: 0.3rem 0.65rem; border: 1px solid var(--border-hi); background: var(--surface); }
 .feat-also-k { font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--green); margin-right: 0.4rem; }
 
-/* the mini terminals stay dark on paper, like the hero mock */
-.fx-term {
-  --bg: #0d1310; --surface: #121a16; --border-hi: #33433a;
-  --text: #dde5d1; --text-2: #a1ae9d; --muted: #80907f;
-  --green: #83c092; --hl: #c6e39b; --yellow: #dbbc7f; --orange: #e69875;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 0.74rem;
-  line-height: 1.75;
-}
-.fx-bar { display: flex; justify-content: space-between; gap: 1rem; padding: 0.6rem 1rem; background: var(--surface); border-bottom: 1px solid var(--border-hi); color: var(--green); font-weight: 500; }
-.fx-body { padding: 1rem 1.1rem 1.2rem; white-space: pre; overflow-x: auto; }
-.fx-dim { color: var(--muted); }
-.fx-ok { color: var(--green); }
-.fx-hl { color: var(--hl); }
-.fx-warn { color: var(--orange); }
-.fx-acc { color: var(--yellow); }
-.fx-gap { margin-top: 0.6rem; }
-
-/* ── Sidecar acceptance gate: the parent's delegation beside the sidecar's trace ── */
-.gate { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 3rem 0 0; }
-.gate-term { border: 1px solid var(--text); box-shadow: 7px 7px 0 var(--ink-shadow); }
+/* ── Sidecar acceptance gate: the cards, then a real run ── */
 .gate-cards { margin-bottom: 4rem; }
 .gate-cards .fp-x { font-size: 1.9rem; }
 .gate-cards strong { color: var(--text); font-weight: 500; }
+
+.gate-lead { margin-bottom: 2.5rem; }
+.gate-lead .show-num { font-size: 1rem; letter-spacing: 0.06em; text-transform: uppercase; }
+.gate-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-bottom: 4.5rem; align-items: start; }
+.gate-step .show-cap { margin-top: 1rem; }
+.gate-step .show-cap b { font-style: normal; font-weight: 500; color: var(--text); }
 
 .pol-line { margin-top: 1rem; font-family: var(--mono); font-size: 0.68rem !important; line-height: 2; color: var(--text-2) !important; }
 .pol-k { display: block; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
@@ -971,7 +972,7 @@ body.is-w section:not(.band) { border-top-color: var(--border-hi); }
 }
 @media (max-width: 900px) {
   .fp-ratios { grid-template-columns: 1fr; gap: 1rem; }
-  .gate { grid-template-columns: 1fr; }
+  .gate-pair { grid-template-columns: 1fr; }
   .features .show-flip { grid-template-columns: 1fr; }
 }
 @media (max-width: 640px) {
@@ -981,7 +982,6 @@ body.is-w section:not(.band) { border-top-color: var(--border-hi); }
   .fp-row { grid-template-columns: 1fr auto; gap: 0.6rem 1rem; }
   .fp-track { grid-column: 1 / -1; grid-row: 2; }
   .fp-mode-k { width: 100%; }
-  .fx-term { font-size: 0.64rem; }
 }
 
 /* ── Band: an LED marquee on infai, ticker tape on infaiw ── */
