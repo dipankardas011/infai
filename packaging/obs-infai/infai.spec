@@ -1,5 +1,5 @@
 Name:           infai
-Version:        0.24.1
+Version:        0.25.0
 Release:        0
 Summary:        Manage and launch local inference servers from the terminal
 License:        Apache-2.0
@@ -30,5 +30,5 @@ install -D -m 0755 infai %{buildroot}%{_bindir}/infai
 %{_bindir}/infai
 
 %changelog
-* Sun Sep 06 2026 Dipankar Das <dipankardas011@users.noreply.github.com> - 0.24.1-0
-- Package upstream release 0.24.1
+* Sun Sep 06 2026 Dipankar Das <dipankardas011@users.noreply.github.com> - 0.25.0-0
+- Package upstream release 0.25.0
