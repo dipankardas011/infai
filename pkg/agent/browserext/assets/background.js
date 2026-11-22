@@ -1,3 +1,4 @@
+import * as activity from "./lib/activity.js";
 import { forgetTab } from "./lib/cdp.js";
 import { ActionError } from "./lib/errors.js";
 import { runAction } from "./lib/actions.js";
@@ -168,13 +169,16 @@ function enqueueRequest(msg) {
 
 async function executeRequest(msg) {
   let reply;
+  const logId = activity.started(msg);
   try {
     const result = await runAction(msg);
     reply = { type: "response", id: msg.id, ok: true, result: result ?? {} };
+    activity.finished(logId);
   } catch (err) {
     const code = err instanceof ActionError ? err.code : "internal";
     if (code === "internal") console.error("infai: action failed", msg.action, err);
     reply = { type: "response", id: msg.id, ok: false, error: { code, message: String(err?.message ?? err) } };
+    activity.finished(logId, err?.message ?? err);
   }
   try {
     sendMessage(reply);
@@ -196,17 +200,25 @@ async function handleEvent(event, data) {
         return all;
       });
       break;
-    case "session_status":
-      if (!data.session_id) return;
-      await mutate("session_status", (all) => ({
-        ...all,
-        [data.session_id]: { session_name: data.session_name ?? "", status: data.status ?? "", at: Date.now() },
-      }));
-      break;
     default:
       console.info("infai: unhandled event", event);
   }
 }
+
+// The toolbar icon carries the pending-approval count, so a waiting agent is
+// visible even with the side panel closed.
+async function updateBadge() {
+  const { approvals = {} } = await chrome.storage.session.get("approvals");
+  const n = Object.keys(approvals).length;
+  await chrome.action.setBadgeText({ text: n ? String(n) : "" });
+}
+
+chrome.action.setBadgeBackgroundColor({ color: "#dbbc7f" }).catch(() => {});
+chrome.action.setBadgeTextColor?.({ color: "#0d1310" }).catch(() => {});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "session" && "approvals" in changes) updateBadge().catch(() => {});
+});
 
 // The mapping stays until the session acts on it: requireTab then reports
 // tab_closed (the user closed it) instead of no_tab (never navigated).

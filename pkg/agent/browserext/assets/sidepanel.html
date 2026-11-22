@@ -4,40 +4,71 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>infai browser</title>
+    <link rel="icon" href="icons/logo.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="sidepanel.css" />
     <script type="module" src="sidepanel.js"></script>
   </head>
   <body>
+    <div class="glow" aria-hidden="true"></div>
+
     <header>
-      <div class="title-row">
-        <h1>infai browser</h1>
-        <span id="conn" class="conn" data-state="unknown"><span class="dot"></span><span id="conn-text">…</span></span>
+      <div class="brand-row">
+        <div class="brand">
+          <img class="mark" src="icons/logo.svg" alt="" width="28" height="28" />
+          <div>
+            <div class="wordmark"><span class="chev">▸</span>infaiw<span class="cursor">_</span></div>
+            <div class="tagline">browser · you keep the wheel</div>
+          </div>
+        </div>
+        <span id="conn" class="conn" data-state="unknown" role="status">
+          <span class="dot"></span><span id="conn-text">…</span>
+        </span>
       </div>
-      <dl class="meta">
-        <dt>Profile</dt>
-        <dd id="profile">–</dd>
-        <dt>Daemon</dt>
-        <dd id="daemon">–</dd>
-      </dl>
-      <form id="label-form" class="label-form">
-        <label for="label-input">Profile label</label>
-        <input id="label-input" type="text" maxlength="40" placeholder="e.g. Personal" autocomplete="off" spellcheck="false" />
-        <button type="submit">Save</button>
+
+      <div class="strip">
+        <button id="profile-btn" class="strip-item" type="button" title="Name this Chrome profile">
+          <span class="k">profile</span><span id="profile" class="v">–</span><span class="edit">edit</span>
+        </button>
+        <span class="strip-sep" aria-hidden="true">/</span>
+        <span class="strip-item"><span class="k">daemon</span><span id="daemon" class="v">–</span></span>
+      </div>
+
+      <form id="label-form" class="label-form" hidden>
+        <span class="prompt" aria-hidden="true">❯</span>
+        <input id="label-input" type="text" maxlength="40" placeholder="name this profile, e.g. Personal" autocomplete="off" spellcheck="false" aria-label="Profile label" />
+        <button type="submit" class="chip ok">save</button>
       </form>
-      <p id="conn-detail" class="detail" hidden></p>
+
+      <div id="notice" class="notice" hidden>
+        <div id="notice-title" class="notice-title"></div>
+        <div id="notice-body" class="notice-body"></div>
+        <div id="notice-bar" class="notice-bar" hidden><span></span></div>
+      </div>
     </header>
 
     <main>
       <section>
-        <h2>Pending approvals <span id="approval-count" class="count" hidden></span></h2>
+        <h2><span class="slash">//</span> needs you <span id="approval-count" class="count" hidden></span></h2>
         <div id="approvals" class="list"></div>
-        <p id="approvals-empty" class="empty">No pending approvals.</p>
+        <p id="approvals-empty" class="empty">nothing waiting on you<span class="cursor">_</span></p>
+        <p id="approval-keys" class="keys" hidden><kbd>a</kbd> approve <kbd>d</kbd> deny <kbd>r</kbd> reason · oldest first</p>
       </section>
 
       <section>
-        <h2>Sessions</h2>
+        <h2><span class="slash">//</span> sessions</h2>
         <div id="sessions" class="list"></div>
-        <p id="sessions-empty" class="empty">No active sessions.</p>
+        <div id="sessions-empty" class="empty-block">
+          <p>no agent is driving this browser yet.</p>
+          <p class="hint">ask a session to open a page:</p>
+          <pre class="code"><span class="chev">❯</span> open news.ycombinator.com and read the top story</pre>
+          <p class="hint">it gets its own tab group. clicks, typing and choices wait here for your ok.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2><span class="slash">//</span> activity</h2>
+        <ol id="activity" class="activity"></ol>
+        <p id="activity-empty" class="empty">quiet so far<span class="cursor">_</span></p>
       </section>
     </main>
   </body>

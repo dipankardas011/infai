@@ -156,7 +156,7 @@ func Highlight(ctx context.Context, d Driver, sessionID uuid.UUID, sessionName s
 		contracts.BrowserTypeTool:   "type here",
 		contracts.BrowserSelectTool: "choose an option here",
 	}[call.Function.Name]
-	_, err := d.Do(ctx, sessionID, sessionName, "highlight", map[string]string{"ref": args.Ref, "label": "infai wants to " + verb})
+	_, err := d.Do(ctx, sessionID, sessionName, "highlight", map[string]string{"ref": args.Ref, "label": "wants to " + verb})
 	return err
 }
 

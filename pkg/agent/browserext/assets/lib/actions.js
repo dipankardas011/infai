@@ -1,5 +1,6 @@
 import { detach, evaluate, isAttached, send } from "./cdp.js";
 import { ActionError } from "./errors.js";
+import { installOverlay } from "./overlay.js";
 import { formatSnapshot } from "./snapshot.js";
 import {
   clearRefs,
@@ -21,13 +22,54 @@ const WAIT_DEFAULT_MS = 10000;
 const WAIT_MAX_MS = 30000;
 const WAIT_POLL_MS = 250;
 const CLICK_SETTLE_MS = 500;
-const HIGHLIGHT_ID = "__infai_highlight__";
+// Caps how long a cursor glide may delay a real input.
+const GLIDE_MAX_MS = 900;
 const OBJECT_GROUP = "infai";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const INNER_TEXT = "document.body ? document.body.innerText : ''";
-const REMOVE_HIGHLIGHT = `document.getElementById(${JSON.stringify(HIGHLIGHT_ID)})?.remove()`;
+const INSTALL_OVERLAY = `(${installOverlay.toString()})()`;
+const CLEAR_OVERLAY = "window.__infaiOverlay?.clear()";
+const TEARDOWN_OVERLAY = "window.__infaiOverlay?.teardown()";
+
+// The overlay is presentation only: a page that blocks it (or a failure while
+// drawing it) must never fail the action the user approved.
+async function cosmetic(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err?.code === "stale_ref" || err?.code === "tab_closed") throw err;
+    console.debug("infai: overlay skipped", err);
+    return undefined;
+  }
+}
+
+async function showOverlay(tabId) {
+  await evaluate(tabId, INSTALL_OVERLAY);
+}
+
+// Glides the agent cursor to (x, y), plays a press, and waits until it lands.
+async function glideTo(tabId, x, y) {
+  await cosmetic(async () => {
+    await showOverlay(tabId);
+    const ms = await evaluate(tabId, `window.__infaiOverlay.point(${Number(x)}, ${Number(y)}, true)`);
+    await sleep(Math.min(Number(ms) || 0, GLIDE_MAX_MS));
+  });
+}
+
+const GLIDE_TO_NODE_FN = `function() {
+  const r = this.getBoundingClientRect();
+  return window.__infaiOverlay.point(r.left + Math.min(r.width / 2, 16), r.top + r.height / 2, true);
+}`;
+
+async function glideToNode(tabId, backendNodeId) {
+  await cosmetic(async () => {
+    await showOverlay(tabId);
+    const ms = await callOnNode(tabId, backendNodeId, GLIDE_TO_NODE_FN);
+    await sleep(Math.min(Number(ms) || 0, GLIDE_MAX_MS));
+  });
+}
 
 function capText(text, max) {
   return text.length > max ? `${text.slice(0, max)}\n[truncated]` : text;
@@ -162,6 +204,7 @@ async function click({ sessionId, args }) {
   const q = model.content;
   const x = (q[0] + q[2] + q[4] + q[6]) / 4;
   const y = (q[1] + q[3] + q[5] + q[7]) / 4;
+  await glideTo(tabId, x, y);
   await send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none" });
   await send(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
   await send(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
@@ -173,6 +216,7 @@ async function typeText({ sessionId, args }) {
   if (typeof args.text !== "string") throw new ActionError("invalid_args", "text must be a string");
   const { tabId } = await requireTab(sessionId);
   const backendNodeId = await resolveRef(tabId, args);
+  await glideToNode(tabId, backendNodeId);
   await nodeCall(tabId, "DOM.focus", { backendNodeId });
   await callOnNode(tabId, backendNodeId, "function(){ if (this.select) this.select(); }");
   await send(tabId, "Input.insertText", { text: args.text });
@@ -200,38 +244,24 @@ async function selectOption({ sessionId, args }) {
   if (typeof args.value !== "string") throw new ActionError("invalid_args", "value must be a string");
   const { tabId } = await requireTab(sessionId);
   const backendNodeId = await resolveRef(tabId, args);
+  await glideToNode(tabId, backendNodeId);
   const outcome = await callOnNode(tabId, backendNodeId, SELECT_FN, [args.value]);
   if (outcome === "not_select") throw new ActionError("invalid_args", "element is not a <select>; use click instead");
   if (outcome === "no_match") throw new ActionError("invalid_args", `no option matches ${JSON.stringify(args.value)}`);
   return tabInfo(tabId);
 }
 
-const HIGHLIGHT_FN = `function(id, label) {
-  document.getElementById(id)?.remove();
-  const r = this.getBoundingClientRect();
-  const box = document.createElement("div");
-  box.id = id;
-  box.style.cssText = "position:fixed;box-sizing:border-box;border:2px solid red;" +
-    "z-index:2147483647;pointer-events:none;" +
-    "left:" + (r.left - 2) + "px;top:" + (r.top - 2) + "px;" +
-    "width:" + (r.width + 4) + "px;height:" + (r.height + 4) + "px;";
-  const tag = document.createElement("div");
-  tag.textContent = label;
-  tag.style.cssText = "position:absolute;left:-2px;" + (r.top < 24 ? "top:100%;margin-top:2px;" : "bottom:100%;margin-bottom:2px;") +
-    "background:red;color:#fff;font:12px/1.4 system-ui,sans-serif;padding:1px 6px;" +
-    "border-radius:3px;white-space:nowrap;";
-  box.appendChild(tag);
-  (document.body || document.documentElement).appendChild(box);
-}`;
+const FOCUS_FN = "function(label) { window.__infaiOverlay.focus(this, label); }";
 
 async function highlight({ sessionId, args }) {
-  const label = typeof args.label === "string" && args.label !== "" ? args.label : "infai wants to act here";
+  const label = typeof args.label === "string" && args.label !== "" ? args.label : "wants to act here";
   const { tabId } = await requireTab(sessionId);
   const backendNodeId = await resolveRef(tabId, args);
   await nodeCall(tabId, "DOM.scrollIntoViewIfNeeded", { backendNodeId }).catch((err) => {
     if (err.code === "stale_ref") throw err;
   });
-  await callOnNode(tabId, backendNodeId, HIGHLIGHT_FN, [HIGHLIGHT_ID, label]);
+  await showOverlay(tabId);
+  await callOnNode(tabId, backendNodeId, FOCUS_FN, [label]);
   return tabInfo(tabId);
 }
 
@@ -244,7 +274,7 @@ async function clearHighlight({ sessionId }) {
     throw err;
   }
   try {
-    await evaluate(tabId, REMOVE_HIGHLIGHT);
+    await evaluate(tabId, CLEAR_OVERLAY);
   } catch (err) {
     // Pages we cannot attach to (chrome://, Web Store) cannot hold a highlight.
     if (err.code !== "debugger") throw err;
@@ -256,7 +286,7 @@ async function releaseSession({ sessionId }) {
   const mapping = await getMapping(sessionId);
   if (!mapping) return {};
   const { tabId } = mapping;
-  if (isAttached(tabId)) await evaluate(tabId, REMOVE_HIGHLIGHT).catch(() => {});
+  if (isAttached(tabId)) await evaluate(tabId, TEARDOWN_OVERLAY).catch(() => {});
   await detach(tabId);
   await chrome.tabs.remove(tabId).catch(() => {});
   await dropSession(sessionId);

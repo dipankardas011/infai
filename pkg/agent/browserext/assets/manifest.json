@@ -1,8 +1,15 @@
 {
   "manifest_version": 3,
   "name": "infai browser",
+  "description": "Lets the infaiw agent drive this Chrome profile, with every consequential step waiting for your approval.",
   "version": "0.1.0",
   "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "permissions": ["debugger", "tabs", "tabGroups", "storage", "sidePanel"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
@@ -13,6 +20,10 @@
     "default_path": "sidepanel.html"
   },
   "action": {
-    "default_title": "infai browser"
+    "default_title": "infai browser",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
   }
 }

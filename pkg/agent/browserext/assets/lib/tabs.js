@@ -49,7 +49,7 @@ export async function tabInfo(tabId) {
 export async function groupTab(tabId, sessionName) {
   try {
     const groupId = await chrome.tabs.group({ tabIds: [tabId] });
-    await chrome.tabGroups.update(groupId, { title: `infai: ${sessionName}`, color: "blue" });
+    await chrome.tabGroups.update(groupId, { title: `▸ infaiw · ${sessionName}`, color: "green" });
     return groupId;
   } catch (err) {
     console.warn("infai: could not group tab", err);
