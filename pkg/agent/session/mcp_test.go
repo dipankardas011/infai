@@ -96,7 +96,7 @@ func newMCPRuntimeTestSession(t *testing.T, kind contracts.AgentKind, mcpServers
 	if err := hub.RegisterSessionAgent(base.meta.ID); err != nil {
 		t.Fatal(err)
 	}
-	s, err := newRuntimeSession(context.Background(), base.l, base.model, base.meta, nil, base.timeline, base.store, base.agentMailbox, hub.NewSessionAgentComms(base.meta.ID), nil, mcpServers, auditor.NewDefaultHITLPolicy())
+	s, err := newRuntimeSession(context.Background(), base.l, base.model, base.meta, nil, base.timeline, base.store, base.agentMailbox, hub.NewSessionAgentComms(base.meta.ID), nil, mcpServers, auditor.NewDefaultHITLPolicy(), nil)
 	if err != nil {
 		_ = base.timeline.Close()
 		t.Fatal(err)

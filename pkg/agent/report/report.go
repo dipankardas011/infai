@@ -52,6 +52,9 @@ type toolCallView struct {
 	Result             *toolResultView
 	Output             string
 	TaskChecklistItems []taskChecklistItemView
+	// Images are the images an image-bearing tool result (a browser screenshot,
+	// a chart) returned. Results are merged into their call, so they render here.
+	Images []imageView
 }
 
 type toolResultView struct {
@@ -1006,6 +1009,22 @@ func decodeTaskChecklist(text string) []taskChecklistItemView {
 
 // buildToolCall folds a call and the result that answers it into one view. The
 // badge is the whole outcome marker: ok, or err when the call did not succeed.
+// toolResultImages collects the images and artifacts a merged tool result
+// carries, so they render with the call they answer.
+func toolResultImages(result *contracts.ChatMessage) []imageView {
+	if result == nil {
+		return nil
+	}
+	var images []imageView
+	for _, image := range result.Images {
+		images = append(images, imageOf(image.Name, image.MediaType, "", image.Data, image.Width, image.Height))
+	}
+	for _, artifact := range result.Artifacts {
+		images = append(images, imageOf(artifact.Kind, artifact.MediaType, artifact.Prompt, artifact.Data, artifact.Width, artifact.Height))
+	}
+	return images
+}
+
 func buildToolCall(sessionIndex int, eventID uuid.UUID, i int, call contracts.ToolCall, result *contracts.ChatMessage) toolCallView {
 	name := string(call.Function.Name)
 	command, rows := toolCallArgs(call.Function.Arguments)
@@ -1030,6 +1049,7 @@ func buildToolCall(sessionIndex int, eventID uuid.UUID, i int, call contracts.To
 	if name == string(contracts.TaskChecklistTool) {
 		view.TaskChecklistItems = decodeTaskChecklist(result.Text())
 	}
+	view.Images = toolResultImages(result)
 	return view
 }
 

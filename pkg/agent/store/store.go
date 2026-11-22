@@ -21,6 +21,16 @@ func Root() (string, error) {
 	return filepath.Join(cfg, harnessDir), nil
 }
 
+// ExtensionDir is the fixed folder the browser extension is installed from.
+// The path decides the extension's id, so it must not move between runs.
+func ExtensionDir() (string, error) {
+	root, err := Root()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "browser-extension"), nil
+}
+
 func EnsureDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("failed to mkdir -p %s: %w", dir, err)

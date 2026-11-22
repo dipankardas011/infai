@@ -22,6 +22,12 @@ type ChatMessage struct {
 	Eval               *EvalResult         `json:"eval,omitempty"`
 }
 
+func NewToolMessageWithImages(callID, content string, status ToolExecutionStatus, images []ImageInput) ChatMessage {
+	message := ChatMessage{Role: "tool", ToolCallID: callID, Content: &content, Status: status}
+	message.Images = images
+	return message
+}
+
 // EvalResult is the outcome of running a sidecar's acceptance script against
 // one assistant answer. It rides on that message, so the timeline keeps the
 // per-attempt history without a separate record kind.

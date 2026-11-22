@@ -177,7 +177,7 @@ func TestSidecarNameIsPersistedOnCreation(t *testing.T) {
 	// one, and the loop falls back to the session default.
 	parent, err := session.NewSession(e.ctx, parentID, uuid.Nil, "", logger, nil, nil, nil,
 		contracts.NewProvisionedModel(provider.Id, "test", provider.BaseEndpoint, provider.APIType, provider.Auth, model),
-		t.TempDir(), ss, hub.NewSessionAgentComms(parentID), contracts.InteractiveAgent, nil, auditor.NewDefaultHITLPolicy())
+		t.TempDir(), ss, hub.NewSessionAgentComms(parentID), contracts.InteractiveAgent, nil, auditor.NewDefaultHITLPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestEngineNamesTheSessionsTheIdsBelongTo(t *testing.T) {
 	}
 	resident, err := session.NewSession(e.ctx, residentID, uuid.Nil, "Orchestrator", logger, nil, nil, nil,
 		contracts.NewProvisionedModel(provider.Id, "test", provider.BaseEndpoint, provider.APIType, provider.Auth, model),
-		t.TempDir(), ss, hub.NewSessionAgentComms(residentID), contracts.InteractiveAgent, nil, auditor.NewDefaultHITLPolicy())
+		t.TempDir(), ss, hub.NewSessionAgentComms(residentID), contracts.InteractiveAgent, nil, auditor.NewDefaultHITLPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

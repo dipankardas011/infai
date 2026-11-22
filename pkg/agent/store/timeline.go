@@ -189,7 +189,7 @@ func (t *Timeline) appendFromParentLocked(record Record, parentID uuid.UUID, bra
 	}
 	if parentID != rootEventID {
 		if _, ok := t.index[parentID]; !ok {
-			return Event{}, fmt.Errorf("timeline: parent event %d not found", parentID)
+			return Event{}, fmt.Errorf("timeline: parent event %s not found", parentID)
 		}
 	}
 
@@ -315,7 +315,7 @@ func (t *Timeline) LoadEvent(id uuid.UUID) (Event, error) {
 	defer t.mu.Unlock()
 	loc, ok := t.index[id]
 	if !ok {
-		return Event{}, fmt.Errorf("timeline: event %d not found", id)
+		return Event{}, fmt.Errorf("timeline: event %s not found", id)
 	}
 	event, err := t.readAt(id, loc)
 	if err != nil {
@@ -357,12 +357,12 @@ func (t *Timeline) loadFullAncestryLocked(head uuid.UUID) ([]Event, error) {
 	seen := make(map[uuid.UUID]struct{})
 	for head != rootEventID {
 		if _, ok := seen[head]; ok {
-			return nil, fmt.Errorf("timeline: parent cycle at event %d", head)
+			return nil, fmt.Errorf("timeline: parent cycle at event %s", head)
 		}
 		seen[head] = struct{}{}
 		loc, ok := t.index[head]
 		if !ok {
-			return nil, fmt.Errorf("timeline: parent event %d not found", head)
+			return nil, fmt.Errorf("timeline: parent event %s not found", head)
 		}
 		event, err := t.readAt(head, loc)
 		if err != nil {
@@ -397,12 +397,12 @@ func (t *Timeline) LastCompactionSummary() (string, error) {
 	seen := make(map[uuid.UUID]struct{})
 	for head != rootEventID {
 		if _, ok := seen[head]; ok {
-			return "", fmt.Errorf("timeline: parent cycle at event %d", head)
+			return "", fmt.Errorf("timeline: parent cycle at event %s", head)
 		}
 		seen[head] = struct{}{}
 		loc, ok := t.index[head]
 		if !ok {
-			return "", fmt.Errorf("timeline: parent event %d not found", head)
+			return "", fmt.Errorf("timeline: parent event %s not found", head)
 		}
 		event, err := t.readAt(head, loc)
 		if err != nil {
@@ -440,12 +440,12 @@ func (t *Timeline) loadActiveAncestryLocked(head uuid.UUID) ([]Event, error) {
 	seen := make(map[uuid.UUID]struct{})
 	for head != rootEventID {
 		if _, ok := seen[head]; ok {
-			return nil, fmt.Errorf("timeline: parent cycle at event %d", head)
+			return nil, fmt.Errorf("timeline: parent cycle at event %s", head)
 		}
 		seen[head] = struct{}{}
 		loc, ok := t.index[head]
 		if !ok {
-			return nil, fmt.Errorf("timeline: parent event %d not found", head)
+			return nil, fmt.Errorf("timeline: parent event %s not found", head)
 		}
 		event, err := t.readAt(head, loc)
 		if err != nil {
@@ -740,17 +740,17 @@ func (t *Timeline) readAt(id uuid.UUID, loc EventLocation) (Event, error) {
 	}
 	var disk eventDisk
 	if err := json.Unmarshal(data, &disk); err != nil {
-		return Event{}, fmt.Errorf("timeline: decode event %d: %w", id, err)
+		return Event{}, fmt.Errorf("timeline: decode event %s: %w", id, err)
 	}
 	if disk.ID != id {
-		return Event{}, fmt.Errorf("timeline: index points to event %d, requested %d", disk.ID, id)
+		return Event{}, fmt.Errorf("timeline: index points to event %s, requested %s", disk.ID, id)
 	}
 	var record *Record
 	if disk.Record != nil {
 		decoded := *disk.Record
 		record = &decoded
 	} else if disk.BlobHash == "" {
-		return Event{}, fmt.Errorf("timeline: event %d has no record", id)
+		return Event{}, fmt.Errorf("timeline: event %s has no record", id)
 	}
 	kind := disk.Kind
 	if kind == "" && disk.Record != nil {
@@ -772,7 +772,7 @@ func (t *Timeline) resolveRecord(event Event) (Record, error) {
 		return *event.Record, nil
 	}
 	if event.BlobHash == "" {
-		return Record{}, fmt.Errorf("timeline: event %d has no record", event.ID)
+		return Record{}, fmt.Errorf("timeline: event %s has no record", event.ID)
 	}
 	data, err := os.ReadFile(filepath.Join(t.blobsRoot, event.BlobHash))
 	if err != nil {

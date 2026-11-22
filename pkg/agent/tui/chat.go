@@ -4659,6 +4659,14 @@ func toolCallPreview(name, arguments string) string {
 		}
 		return preview
 
+	case contracts.BrowserClientsTool, contracts.BrowserNavigateTool, contracts.BrowserReadTool,
+		contracts.BrowserActTool, contracts.BrowserScrollTool:
+		preview, ok := browserToolPreview(contracts.ToolCall{Function: contracts.Function{Name: contracts.ToolType(name), Arguments: arguments}})
+		if !ok {
+			return prettyToolArguments(arguments)
+		}
+		return preview
+
 	case contracts.GrepTool:
 		var args struct {
 			Path    string `json:"path"`

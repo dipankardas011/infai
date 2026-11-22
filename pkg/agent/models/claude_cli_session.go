@@ -17,8 +17,11 @@ type claudeTurnInput struct {
 	images     []contracts.ImageInput
 }
 
-func claudeTurnInputOf(history []contracts.ChatMessage) claudeTurnInput {
+func claudeTurnInputOf(model contracts.LLMModelConfiguration, history []contracts.ChatMessage) claudeTurnInput {
 	transcript, images := claudeTranscriptParts(history)
+	if !model.SupportsInputModality(contracts.ModalityImage) {
+		images = nil
+	}
 	return claudeTurnInput{transcript: transcript, images: images}
 }
 
@@ -77,7 +80,7 @@ func (c *claudeCLI) planTurn(history []contracts.ChatMessage, systemPrompt strin
 	// completed a turn. After that the id may exist on disk, so a new
 	// generation needs a new UUID. An in-use id from an earlier process is
 	// caught by the CLI's "already in use" error and retried the same way.
-	fresh := claudeTurn{full: claudeTurnInputOf(history), sessionID: conversation.id}
+	fresh := claudeTurn{full: claudeTurnInputOf(c.model.Model(), history), sessionID: conversation.id}
 	if conversation.sent > 0 || fresh.sessionID == "" {
 		fresh.sessionID = uuid.NewString()
 	}
@@ -106,7 +109,7 @@ func (c *claudeCLI) planTurn(history []contracts.ChatMessage, systemPrompt strin
 	return claudeTurn{
 		resume:    true,
 		sessionID: conversation.id,
-		delta:     claudeTurnInputOf(history[start:]),
+		delta:     claudeTurnInputOf(c.model.Model(), history[start:]),
 		full:      fresh.full,
 	}
 }

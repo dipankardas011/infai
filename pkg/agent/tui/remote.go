@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sync"
 
+	"github.com/dipankardas011/infai/pkg/agent/browser"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/glue"
 	"github.com/dipankardas011/infai/pkg/agent/models"
@@ -854,4 +855,29 @@ func (c *RemoteClient) putJSONInto(ctx context.Context, path string, body any, w
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
+}
+
+// ---- browser ----
+
+// BaseURL is the daemon address this client talks to.
+func (c *RemoteClient) BaseURL() string {
+	return c.baseURL
+}
+
+func (c *RemoteClient) BrowserStatus(ctx context.Context) (browser.Status, error) {
+	var output browser.Status
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/browser/status", nil)
+	if err != nil {
+		return output, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return output, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return output, readAPIError(resp)
+	}
+	err = json.NewDecoder(resp.Body).Decode(&output)
+	return output, err
 }

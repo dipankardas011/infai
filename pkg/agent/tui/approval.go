@@ -282,6 +282,11 @@ func approvalCompactPreview(call contracts.ToolCall) string {
 		if preview, ok := readToolCallPreview(call.Function.Arguments); ok {
 			return preview
 		}
+	case contracts.BrowserClientsTool, contracts.BrowserNavigateTool, contracts.BrowserReadTool,
+		contracts.BrowserActTool, contracts.BrowserScrollTool:
+		if preview, ok := browserToolPreview(call); ok {
+			return preview
+		}
 	case contracts.WriteTool:
 		if path, content, ok := decodeWriteArgs(call.Function.Arguments); ok {
 			return fmt.Sprintf("%s  (%d lines, %d bytes)", path, textLineCount(content), len([]byte(content)))
@@ -373,6 +378,14 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 			return prettyToolArguments(call.Function.Arguments), ""
 		}
 		return "SOURCE  " + preview, ""
+
+	case contracts.BrowserClientsTool, contracts.BrowserNavigateTool, contracts.BrowserReadTool,
+		contracts.BrowserActTool, contracts.BrowserScrollTool:
+		body, ok := browserApprovalBody(call)
+		if !ok {
+			return prettyToolArguments(call.Function.Arguments), ""
+		}
+		return body, ""
 
 	case contracts.BashTool:
 		var args struct {

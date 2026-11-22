@@ -9,6 +9,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/browser"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 )
 
@@ -29,6 +30,7 @@ type basicPromptData struct {
 	Skills          []contracts.Skill
 	Tools           []contracts.Tool
 	HasSidecarTools bool
+	HasBrowserTools bool
 }
 
 func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd string) (string, error) {
@@ -50,6 +52,12 @@ func GetBasicSystemPrompt(tools []contracts.Tool, skills []contracts.Skill, cwd 
 		if availableTools.Name == string(contracts.DelegateBackgroundSidecarLoopTool) ||
 			availableTools.Name == string(contracts.DelegateSidecarLoopTool) {
 			data.HasSidecarTools = true
+			break
+		}
+	}
+	for _, tool := range tools {
+		if browser.IsTool(contracts.ToolType(tool.Name)) {
+			data.HasBrowserTools = true
 			break
 		}
 	}
@@ -104,7 +112,12 @@ Use delegate_sidecar_loop by default when delegating: it waits and returns the r
 </sidecar_loop>
 {{ end }}
 </delegation>
-
+{{ if .HasBrowserTools }}
+<browser>
+- browser_* tools drive the user's own browser with their real logins. Never submit, post, purchase, or send unless the user asked for that exact outcome.
+- Use webfetch for public pages; use the browser only when the page needs the user's session or interaction.
+</browser>
+{{ end }}
 <tool_discipline>
 - A tag in the form "[file:relative/path]" is an inline reference/path to a file/folder under the workspace root. Use the read tool to inspect its current contents before reasoning from it.
 - A tag in the form "[skill:skill_name]" names a skill from <available_skills>; load it with read_skill using that exact name before applying its instructions. This is a reference convention, not a file path or a request to decode/read arbitrary content.

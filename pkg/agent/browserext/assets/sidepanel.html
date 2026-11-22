@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>infai browser</title>
+    <link rel="icon" href="icons/logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="sidepanel.css" />
+    <script type="module" src="sidepanel.js"></script>
+  </head>
+  <body>
+    <div class="glow" aria-hidden="true"></div>
+
+    <header>
+      <div class="brand-row">
+        <div class="brand">
+          <img class="mark" src="icons/logo.svg" alt="" width="28" height="28" />
+          <div>
+            <div class="wordmark"><span class="chev">▸</span>infaiw<span class="cursor">_</span></div>
+            <div class="tagline">browser · you keep the wheel</div>
+          </div>
+        </div>
+        <span id="conn" class="conn" data-state="unknown" role="status">
+          <span class="dot"></span><span id="conn-text">…</span>
+        </span>
+      </div>
+
+      <dl class="strip">
+        <dt>client</dt>
+        <dd><span id="profile" class="v">–</span><button id="profile-btn" class="edit" type="button" title="Name this browser profile">rename</button></dd>
+        <dt>daemon</dt>
+        <dd><span id="daemon" class="v">–</span></dd>
+      </dl>
+
+      <form id="label-form" class="label-form" hidden>
+        <span class="prompt" aria-hidden="true">❯</span>
+        <span id="label-prefix" class="prefix"></span>
+        <input id="label-input" type="text" maxlength="40" placeholder="personal" autocomplete="off" spellcheck="false" aria-label="Profile name" />
+        <button type="submit" class="chip ok">save</button>
+      </form>
+
+      <div id="notice" class="notice" hidden>
+        <div id="notice-title" class="notice-title"></div>
+        <div id="notice-body" class="notice-body"></div>
+        <div id="notice-bar" class="notice-bar" hidden><span></span></div>
+      </div>
+    </header>
+
+    <main>
+      <section>
+        <h2><span class="slash">//</span> needs you <span id="approval-count" class="count" hidden></span></h2>
+        <div id="approvals" class="list"></div>
+        <p id="approvals-empty" class="empty">nothing waiting on you<span class="cursor">_</span></p>
+        <p id="approval-keys" class="keys" hidden><kbd>a</kbd> approve <kbd>d</kbd> deny <kbd>r</kbd> reason · oldest first</p>
+      </section>
+
+      <section>
+        <h2><span class="slash">//</span> sessions</h2>
+        <div id="sessions" class="list"></div>
+        <div id="sessions-empty" class="empty-block">
+          <p>no agent is driving this browser yet.</p>
+          <p class="hint">ask a session to open a page:</p>
+          <pre class="code"><span class="chev">❯</span> open news.ycombinator.com and read the top story</pre>
+          <p class="hint">it gets its own tab group. clicks, typing and choices wait here for your ok.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2><span class="slash">//</span> activity</h2>
+        <ol id="activity" class="activity"></ol>
+        <p id="activity-empty" class="empty">quiet so far<span class="cursor">_</span></p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -67,6 +67,12 @@ const (
 
 	GitStatusTool ToolType = "git_status"
 
+	BrowserClientsTool  ToolType = "browser_clients"
+	BrowserNavigateTool ToolType = "browser_navigate"
+	BrowserReadTool     ToolType = "browser_read"
+	BrowserActTool      ToolType = "browser_act"
+	BrowserScrollTool   ToolType = "browser_scroll"
+
 	DelegateSidecarLoopTool           ToolType = "delegate_sidecar_loop"
 	DelegateBackgroundSidecarLoopTool ToolType = "delegate_background_sidecar_loop"
 )
