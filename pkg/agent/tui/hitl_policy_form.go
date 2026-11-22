@@ -33,6 +33,13 @@ var hitlPolicyTools = []contracts.ToolType{
 	contracts.GitStatusTool,
 	contracts.DelegateSidecarLoopTool,
 	contracts.DelegateBackgroundSidecarLoopTool,
+	contracts.BrowserNavigateTool,
+	contracts.BrowserSnapshotTool,
+	contracts.BrowserReadTool,
+	contracts.BrowserWaitForTool,
+	contracts.BrowserClickTool,
+	contracts.BrowserTypeTool,
+	contracts.BrowserSelectTool,
 	contracts.MCPToolWildcard,
 }
 

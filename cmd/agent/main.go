@@ -54,6 +54,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newProviderCmd())
 	cmd.AddCommand(newMCPCmd())
 	cmd.AddCommand(newHITLPolicyCmd())
+	cmd.AddCommand(newBrowserCmd())
 	return cmd
 }
 
@@ -237,6 +238,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	syncBrowserExtension(ctx, wlog, cfg, eng.BrowserToken())
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	srv := server.New(wlog, eng, addr, cfg.EnableHealthz)

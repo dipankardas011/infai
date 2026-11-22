@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dipankardas011/infai/pkg/agent/auditor"
+	"github.com/dipankardas011/infai/pkg/agent/browser"
 	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/config"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
@@ -46,6 +47,9 @@ type InfaiAgentEngine struct {
 	aseComms            *comms.AgentComms
 	children            map[uuid.UUID]map[uuid.UUID]comms.AgentCommKind
 
+	browser      *browser.Bridge
+	browserToken string
+
 	stopOnce sync.Once
 	stopCh   chan struct{}
 }
@@ -54,6 +58,16 @@ func NewInfaiAgentEngine(parent context.Context, bgLogger *slog.Logger, cfg *con
 	sessionStore, err := store.OpenSessionStore()
 	if err != nil {
 		return nil, err
+	}
+
+	storeRoot, rootErr := store.Root()
+	var browserToken string
+	if rootErr != nil {
+		bgLogger.Warn("browser extension disabled: cannot locate the config dir", "error", rootErr)
+	} else if token, tokenErr := browser.LoadOrCreateToken(storeRoot); tokenErr != nil {
+		bgLogger.Warn("browser extension disabled: cannot persist the pairing token", "error", tokenErr)
+	} else {
+		browserToken = token
 	}
 
 	eCtx, eCancel := context.WithCancelCause(parent)
@@ -68,8 +82,12 @@ func NewInfaiAgentEngine(parent context.Context, bgLogger *slog.Logger, cfg *con
 		stopCh:              make(chan struct{}),
 		aseComms:            comms.NewAgentComms(),
 		engineCfg:           cfg,
+		browserToken:        browserToken,
 	}
 
+	if browserToken != "" {
+		engine.browser = browser.NewBridge(bgLogger.WithGroup("browser"), browserToken)
+	}
 	go engine.listenForAgentComms()
 
 	ctx, cancel := context.WithTimeoutCause(context.Background(), time.Minute, fmt.Errorf("toke > 1minute to get provider configs"))
@@ -250,6 +268,7 @@ func (e *InfaiAgentEngine) createSidecarSession(parentID uuid.UUID, request comm
 		contracts.SidecarLoopAgent,
 		toolConfig.MCPServers,
 		activePolicy,
+		e.sessionBrowser(),
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(id)
@@ -405,6 +424,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		opts.AgentKind,
 		toolConfig.MCPServers,
 		activePolicy,
+		e.sessionBrowser(),
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(sessID)
@@ -504,6 +524,7 @@ func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgent
 		e.aseComms.NewSessionAgentComms(sessionID),
 		toolConfig.MCPServers,
 		activePolicy,
+		e.sessionBrowser(),
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(sessionID)
@@ -753,33 +774,54 @@ func (e *InfaiAgentEngine) CompactSession(ctx context.Context, id uuid.UUID) err
 
 func (e *InfaiAgentEngine) CloseSession(id uuid.UUID) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	sess, ok := e.activeSessionAgents[id]
 	if !ok {
+		e.mu.Unlock()
 		return harnessErr.ErrSessionNotFound
 	}
 	if meta := sess.Meta(); meta.AgentKind == contracts.SidecarLoopAgent {
+		e.mu.Unlock()
 		return fmt.Errorf("%w: sidecar_loop session cannot be closed directly; close its caller session %s", harnessErr.ErrInvalidInput, meta.ParentID)
 	}
-	e.closeSessionTree(id)
+	closed := e.closeSessionTree(id)
+	e.mu.Unlock()
+
+	e.releaseBrowsers(closed)
 	return nil
 }
 
 // closeSessionTree is called with e.mu held so a new child cannot appear
-// between closing descendants and closing their parent.
-func (e *InfaiAgentEngine) closeSessionTree(id uuid.UUID) {
+// between closing descendants and closing their parent. It returns every
+// session it closed, so the caller can release their browser tabs after
+// unlocking: releasing waits on the extension and must not hold e.mu.
+func (e *InfaiAgentEngine) closeSessionTree(id uuid.UUID) []uuid.UUID {
 	sess, ok := e.activeSessionAgents[id]
 	if !ok {
-		return
+		return nil
 	}
+	var closed []uuid.UUID
 	for childID := range e.children[id] {
-		e.closeSessionTree(childID)
+		closed = append(closed, e.closeSessionTree(childID)...)
 	}
 	delete(e.children, id)
 	sess.Close()
 	e.aseComms.UnregisterSessionAgent(id)
 	delete(e.activeSessionAgents, id)
 	e.bgLogger.Info("session closed", "session_id", id)
+	return append(closed, id)
+}
+
+// releaseBrowsers closes the tabs of closed sessions in one background
+// goroutine, so a large tree does not spawn one per session.
+func (e *InfaiAgentEngine) releaseBrowsers(ids []uuid.UUID) {
+	if e.browser == nil || len(ids) == 0 {
+		return
+	}
+	go func() {
+		for _, id := range ids {
+			e.browser.Release(context.Background(), id)
+		}
+	}()
 }
 
 // DeleteSession closes the session when it is resident, then removes its
@@ -803,7 +845,10 @@ func (e *InfaiAgentEngine) DeleteSession(id uuid.UUID) error {
 }
 
 func (e *InfaiAgentEngine) deleteSession(id uuid.UUID) error {
-	e.closeSessionTree(id)
+	e.mu.Lock()
+	closed := e.closeSessionTree(id)
+	e.mu.Unlock()
+	e.releaseBrowsers(closed)
 
 	if err := e.sessionStore.Delete(id); err != nil {
 		return err
@@ -1059,15 +1104,26 @@ func (e *InfaiAgentEngine) Shutdown(ctx context.Context) error {
 
 	e.mu.Lock()
 	closed := 0
+	var closedIDs []uuid.UUID
 	for id, sess := range e.activeSessionAgents {
 		if sess.Meta().ParentID == uuid.Nil {
-			e.closeSessionTree(id)
+			closedIDs = append(closedIDs, e.closeSessionTree(id)...)
 			closed++
 		}
 	}
 	e.mu.Unlock()
 	e.cancel(harnessErr.ErrEngineShuttingDown)
 	e.aseComms.Close()
+	if e.browser != nil {
+		// Tabs are closed before the bridge goes away, or the releases would
+		// fail and every session's tabs would outlive the daemon.
+		releaseCtx, releaseCancel := context.WithTimeout(ctx, 3*time.Second)
+		for _, id := range closedIDs {
+			e.browser.Release(releaseCtx, id)
+		}
+		releaseCancel()
+		_ = e.browser.Close()
+	}
 
 	if err := ctx.Err(); err != nil {
 		e.bgLogger.WarnContext(ctx, "engine teardown outlasted its budget",

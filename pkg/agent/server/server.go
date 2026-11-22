@@ -68,6 +68,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("DELETE /v1/mcp/servers/{name}", s.handleRemoveMCPServer)
 	mux.HandleFunc("POST /v1/mcp/servers/{name}/probe", s.handleProbeMCPServer)
 	mux.HandleFunc("POST /v1/mcp/servers/{name}/login", s.handleLoginMCPServer)
+	mux.HandleFunc("GET /v1/browser/connect", s.handleBrowserConnect)
+	mux.HandleFunc("GET /v1/browser/status", s.handleBrowserStatus)
 
 	// sessions
 	mux.HandleFunc("POST /v1/sessions", s.handleCreateSession)

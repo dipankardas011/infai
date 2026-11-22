@@ -57,6 +57,14 @@ func NewDefaultHITLPolicy() *HITLPolicy {
 			contracts.WebFetchTool:      HumanPolicy,
 			contracts.WebSearchTool:     HumanPolicy,
 
+			contracts.BrowserNavigateTool: HumanPolicy,
+			contracts.BrowserSnapshotTool: AllowPolicy,
+			contracts.BrowserReadTool:     AllowPolicy,
+			contracts.BrowserWaitForTool:  AllowPolicy,
+			contracts.BrowserClickTool:    HumanPolicy,
+			contracts.BrowserTypeTool:     HumanPolicy,
+			contracts.BrowserSelectTool:   HumanPolicy,
+
 			contracts.DelegateBackgroundSidecarLoopTool: HumanPolicy,
 			contracts.DelegateSidecarLoopTool:           HumanPolicy,
 

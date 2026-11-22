@@ -16,6 +16,7 @@ import (
 	"github.com/dipankardas011/infai/pkg/agent/actuators"
 	"github.com/dipankardas011/infai/pkg/agent/agent"
 	"github.com/dipankardas011/infai/pkg/agent/auditor"
+	"github.com/dipankardas011/infai/pkg/agent/browser"
 	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/delegate"
@@ -81,6 +82,7 @@ type InfaiAgentSession struct {
 	availableSkills []contracts.Skill
 	fileManager     *actuators.FileManager
 	mcpManager      *actuators.MCPManager
+	browser         browser.Driver
 	skillRegistry   *memory.SkillRegistry
 	taskChecklist   *memory.TaskChecklist
 
@@ -115,6 +117,7 @@ func NewSession(
 	sessionAgentKind contracts.AgentKind,
 	mcpServers map[string]contracts.MCPServerConfig,
 	hitlPolicy *auditor.HITLPolicy,
+	browserDriver browser.Driver,
 ) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(chosenModel, cwd, id)
 	if err != nil {
@@ -166,7 +169,7 @@ func NewSession(
 		return nil, err
 	}
 
-	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc, mcpServers, hitlPolicy)
+	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc, mcpServers, hitlPolicy, browserDriver)
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -185,6 +188,7 @@ func NewResumedSession(
 	aeComms *comms.ISACChannel,
 	mcpServers map[string]contracts.MCPServerConfig,
 	hitlPolicy *auditor.HITLPolicy,
+	browserDriver browser.Driver,
 ) (*InfaiAgentSession, error) {
 	var provisionOpts []models.ProvisionOption
 	if meta.ClaudeCLIMeta != nil {
@@ -209,7 +213,7 @@ func NewResumedSession(
 		}
 	}
 
-	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc, mcpServers, hitlPolicy)
+	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc, mcpServers, hitlPolicy, browserDriver)
 }
 
 func newRuntimeSession(
@@ -225,6 +229,7 @@ func newRuntimeSession(
 	evalFunc func(context.Context) error,
 	mcpServers map[string]contracts.MCPServerConfig,
 	hitlPolicy *auditor.HITLPolicy,
+	browserDriver browser.Driver,
 ) (*InfaiAgentSession, error) {
 	if engineCtx == nil {
 		return nil, errors.New("session: engine context is required")
@@ -261,6 +266,7 @@ func newRuntimeSession(
 		subscribers:                  make(map[*subscriber]struct{}),
 		aeComms:                      aeComms,
 		agentMailbox:                 am,
+		browser:                      browserDriver,
 	}
 
 	var err error
@@ -283,6 +289,7 @@ func newRuntimeSession(
 	}
 	s.configureMemoryTools()
 	s.configureWebTools()
+	s.configureBrowserTools()
 
 	if s.meta.AgentKind == contracts.InteractiveAgent {
 		s.configureDelegationTools()

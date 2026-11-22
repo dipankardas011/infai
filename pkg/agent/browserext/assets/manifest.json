@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "infai browser",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "permissions": ["debugger", "tabs", "tabGroups", "storage", "sidePanel"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "infai browser"
+  }
+}

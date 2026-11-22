@@ -11,6 +11,7 @@ import (
 
 	"github.com/dipankardas011/infai/pkg/agent/actuators"
 	"github.com/dipankardas011/infai/pkg/agent/auditor"
+	"github.com/dipankardas011/infai/pkg/agent/browser"
 	"github.com/dipankardas011/infai/pkg/agent/comms"
 	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/dipankardas011/infai/pkg/agent/delegate"
@@ -52,6 +53,13 @@ func (s *InfaiAgentSession) configureDelegationTools() {
 
 func (s *InfaiAgentSession) configureWebTools() {
 	s.availableTools = append(s.availableTools, actuators.WebFetchTool(), actuators.WebSearchTool())
+}
+
+func (s *InfaiAgentSession) configureBrowserTools() {
+	if s.browser == nil {
+		return
+	}
+	s.availableTools = append(s.availableTools, browser.Tools()...)
 }
 
 func (s *InfaiAgentSession) closeMCPManager() {
@@ -557,6 +565,50 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
 				})
+			case contracts.BrowserNavigateTool, contracts.BrowserSnapshotTool, contracts.BrowserReadTool, contracts.BrowserWaitForTool,
+				contracts.BrowserClickTool, contracts.BrowserTypeTool, contracts.BrowserSelectTool:
+				sessionName := s.sessionName()
+				var output string
+				err, canceled := s.runTurnCancelable(s.ctx, func(ctx context.Context) error {
+					var runErr error
+					output, runErr = browser.Execute(ctx, s.browser, s.meta.ID, sessionName, tc)
+					return runErr
+				})
+
+				result := contracts.ToolExecutionResult{
+					Status:   contracts.ToolExecutionSuccess,
+					CallID:   tc.ID,
+					Output:   output,
+					CallName: tc.Function.Name,
+				}
+				if canceled {
+					turnCanceled = true
+					status = contracts.ToolExecutionDenied
+					content = contracts.NewToolExecutionError(
+						tc.Function.Name,
+						"turn_canceled",
+						"the turn was canceled by the user while the browser action was running",
+						contracts.ResponsibilityUser,
+						harnessErr.ErrTurnCanceled,
+					).Error()
+					result.Status = status
+					result.Output = ""
+					result.Error = content
+				} else if err != nil {
+					status = contracts.ToolExecutionError
+					content = err.Error()
+					result.Status = contracts.ToolExecutionError
+					result.Error = content
+				} else {
+					content = output
+				}
+
+				s.publish(contracts.EventStream{
+					Kind:       contracts.EventToolResult,
+					Timestamp:  time.Now().UTC(),
+					ToolResult: &result,
+				})
+
 			case contracts.DelegateSidecarLoopTool, contracts.DelegateBackgroundSidecarLoopTool:
 				sidecarID, agentName, err := delegate.RequestSidecar(s.ctx, caller, tc)
 				if err != nil {
@@ -777,7 +829,9 @@ func (s *InfaiAgentSession) performHITL(ctx context.Context, agentID uuid.UUID, 
 		"tool", request.ToolCall.Function.Name,
 	)
 
+	s.browserApprovalOpened(ctx, request)
 	var decision contracts.ApprovalConclusion
+	defer func() { s.browserApprovalClosed(request, decision) }()
 	select {
 	case decision = <-pending.decision:
 	case <-ctx.Done():
@@ -790,16 +844,19 @@ func (s *InfaiAgentSession) performHITL(ctx context.Context, agentID uuid.UUID, 
 		s.pendingApproval = nil
 		s.mu.Unlock()
 
+		// Recorded on the same variable the deferred notify reads, so the panel
+		// never learns of a resolution without a decision.
+		decision = contracts.ApprovalConclusion{
+			ReqID:       request.ID,
+			Fingerprint: request.Fingerprint,
+			Decision:    contracts.ApprovalDeny,
+			Reason:      "session canceled: " + context.Cause(ctx).Error(),
+		}
 		s.publish(contracts.EventStream{
-			Kind:      contracts.EventApprovalResolved,
-			Timestamp: time.Now().UTC(),
-			HITLCall:  &request,
-			HITLResult: &contracts.ApprovalConclusion{
-				ReqID:       request.ID,
-				Fingerprint: request.Fingerprint,
-				Decision:    contracts.ApprovalDeny,
-				Reason:      "session canceled: " + context.Cause(ctx).Error(),
-			},
+			Kind:       contracts.EventApprovalResolved,
+			Timestamp:  time.Now().UTC(),
+			HITLCall:   &request,
+			HITLResult: &decision,
 		})
 		return ctx.Err()
 	}

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>infai browser</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+    <script type="module" src="sidepanel.js"></script>
+  </head>
+  <body>
+    <header>
+      <div class="title-row">
+        <h1>infai browser</h1>
+        <span id="conn" class="conn" data-state="unknown"><span class="dot"></span><span id="conn-text">…</span></span>
+      </div>
+      <dl class="meta">
+        <dt>Profile</dt>
+        <dd id="profile">–</dd>
+        <dt>Daemon</dt>
+        <dd id="daemon">–</dd>
+      </dl>
+      <form id="label-form" class="label-form">
+        <label for="label-input">Profile label</label>
+        <input id="label-input" type="text" maxlength="40" placeholder="e.g. Personal" autocomplete="off" spellcheck="false" />
+        <button type="submit">Save</button>
+      </form>
+      <p id="conn-detail" class="detail" hidden></p>
+    </header>
+
+    <main>
+      <section>
+        <h2>Pending approvals <span id="approval-count" class="count" hidden></span></h2>
+        <div id="approvals" class="list"></div>
+        <p id="approvals-empty" class="empty">No pending approvals.</p>
+      </section>
+
+      <section>
+        <h2>Sessions</h2>
+        <div id="sessions" class="list"></div>
+        <p id="sessions-empty" class="empty">No active sessions.</p>
+      </section>
+    </main>
+  </body>
+</html>
