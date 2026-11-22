@@ -1,6 +1,8 @@
 // Side panel: renders state the service worker keeps in chrome.storage.session
 // and talks to the daemon's HTTP API directly for approvals and cancels.
 
+import { clientID, clientPrefix, slug } from "./lib/client.js";
+
 const $ = (id) => document.getElementById(id);
 
 // The TUI's spinner, so a working session looks the same in both places.
@@ -10,7 +12,8 @@ const config = await loadConfig();
 const approvalCards = new Map();
 const sessionCards = new Map();
 let profileLabel = "";
-let state = { conn: null, approvals: {}, sessions: {}, activity: [] };
+let instanceId = "";
+let state = { conn: null, approvals: {}, sessions: {}, activity: [], client_id: "" };
 
 async function loadConfig() {
   try {
@@ -108,9 +111,10 @@ function notice(connState, conn) {
       body: ["Start ", code("infaiw server"), " — it writes this folder's config — then hit ↻ Reload on this extension in chrome://extensions."],
     };
   }
+  const secs = conn?.retry_at ? Math.max(0, Math.ceil((conn.retry_at - Date.now()) / 1000)) : null;
+  const span = conn?.retry_at && conn?.at ? conn.retry_at - conn.at : 0;
+  const progress = span > 0 ? Math.max(0, Math.min(1, (conn.retry_at - Date.now()) / span)) : null;
   if (connState === "reconnecting") {
-    const secs = conn?.retry_at ? Math.max(0, Math.ceil((conn.retry_at - Date.now()) / 1000)) : null;
-    const span = conn?.retry_at && conn?.at ? conn.retry_at - conn.at : 0;
     return {
       kind: "warn",
       title: `can't reach the daemon${secs !== null ? ` · retrying in ${secs}s` : ""}`,
@@ -119,14 +123,14 @@ function notice(connState, conn) {
         code("infaiw server"),
         ` isn't running at ${hostOf(config.daemon_url)}, or it restarted with a new pairing token — then reload this extension.`,
       ],
-      progress: span > 0 ? Math.max(0, Math.min(1, (conn.retry_at - Date.now()) / span)) : null,
+      progress,
     };
   }
   if (connState === "connected" && !profileLabel) {
     return {
       kind: "ok",
       title: "connected · name this profile",
-      body: ["Click ", code("profile"), " above so ", code("infaiw browser status"), " can tell your Chrome profiles apart."],
+      body: ["Click ", code("client"), " above so the agent can tell this profile apart from your other browsers and profiles."],
     };
   }
   return null;
@@ -137,9 +141,8 @@ function renderHeader() {
   const connState = !config.token ? "not_configured" : (conn?.state ?? "unknown");
   $("conn").dataset.state = connState;
   $("conn-text").textContent = CONN_LABELS[connState] ?? "…";
-  $("profile").textContent = profileLabel || "unnamed";
-  $("daemon").textContent = hostOf(config.daemon_url) || "–";
-  $("daemon").title = config.daemon_url || "";
+  $("profile").textContent = state.client_id || clientID(profileLabel, instanceId);
+  $("daemon").textContent = config.daemon_url || "–";
 
   const n = notice(connState, conn);
   $("notice").hidden = !n;
@@ -155,7 +158,8 @@ function toggleLabelForm(open) {
   const form = $("label-form");
   form.hidden = !open;
   if (open) {
-    $("label-input").value = profileLabel;
+    $("label-prefix").textContent = clientPrefix();
+    $("label-input").value = slug(profileLabel);
     $("label-input").focus();
     $("label-input").select();
   }
@@ -232,9 +236,10 @@ function buildApprovalCard(a) {
 
   const mapping = state.sessions?.[a.session_id];
   if (mapping) {
+    const outlined = verb === "click" || verb === "type" || verb === "choose" ? " — outlined on the page" : "";
     chrome.tabs
       .get(mapping.tabId)
-      .then((tab) => (tabLine.textContent = `on ${tab.title || hostOf(tab.url)} — outlined on the page`))
+      .then((tab) => (tabLine.textContent = `on ${tab.title || hostOf(tab.url)}${outlined}`))
       .catch(() => {});
   }
 
@@ -259,8 +264,8 @@ function buildApprovalCard(a) {
         await removeApproval(a.id);
         return;
       }
-      if (res.status === 409) {
-        showMsg("already answered elsewhere.", "info");
+      if (res.status === 409 || res.status === 404) {
+        showMsg(res.status === 409 ? "already answered elsewhere." : "no longer pending; the daemon restarted.", "info");
         setTimeout(() => removeApproval(a.id), 1500);
         return;
       }
@@ -512,6 +517,7 @@ function renderActivity() {
 
 const RENDERERS = {
   conn: [renderHeader],
+  client_id: [renderHeader],
   approvals: [renderApprovals, renderSessions],
   sessions: [renderSessions],
   activity: [renderActivity, renderSessions],
@@ -521,9 +527,15 @@ $("profile-btn").addEventListener("click", () => toggleLabelForm($("label-form")
 $("label-input").addEventListener("keydown", (e) => {
   if (e.key === "Escape") toggleLabelForm(false);
 });
+// Only id-safe characters can be typed, so what you see is the id you get.
+$("label-input").addEventListener("input", (e) => {
+  const input = e.target;
+  const clean = input.value.toLowerCase().replace(/\s+/g, "-").replace(/[^\p{L}\p{N}-]/gu, "");
+  if (clean !== input.value) input.value = clean;
+});
 $("label-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const value = $("label-input").value.trim().slice(0, 40);
+  const value = slug($("label-input").value).slice(0, 40);
   try {
     await chrome.runtime.sendMessage({ type: "set_label", label: value });
     profileLabel = value;
@@ -535,8 +547,10 @@ $("label-form").addEventListener("submit", async (event) => {
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && "profile_label" in changes) {
-    profileLabel = String(changes.profile_label.newValue ?? "");
+  if (area === "local") {
+    if ("profile_label" in changes) profileLabel = String(changes.profile_label.newValue ?? "");
+    // The worker creates the instance id on first connect, possibly after this panel opened.
+    if ("instance_id" in changes) instanceId = String(changes.instance_id.newValue ?? "");
     renderHeader();
     return;
   }
@@ -544,7 +558,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   const toRun = new Set();
   for (const [key, change] of Object.entries(changes)) {
     if (!(key in RENDERERS)) continue;
-    state[key] = change.newValue ?? (key === "conn" ? null : key === "activity" ? [] : {});
+    const empty = key === "conn" ? null : key === "activity" ? [] : key === "client_id" ? "" : {};
+    state[key] = change.newValue ?? empty;
     RENDERERS[key].forEach((fn) => toRun.add(fn));
   }
   toRun.forEach((fn) => fn());
@@ -552,7 +567,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 const stored = await chrome.storage.session.get(Object.keys(RENDERERS));
 state = { ...state, ...stored };
-profileLabel = String((await chrome.storage.local.get("profile_label")).profile_label ?? "");
+const local = await chrome.storage.local.get(["profile_label", "instance_id"]);
+profileLabel = String(local.profile_label ?? "");
+instanceId = String(local.instance_id ?? "");
 renderHeader();
 renderApprovals();
 renderSessions();

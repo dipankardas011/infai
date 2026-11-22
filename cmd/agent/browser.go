@@ -9,7 +9,7 @@ import (
 func newBrowserCmd() *cobra.Command {
 	browser := &cobra.Command{
 		Use:   "browser",
-		Short: "inspect the infai Chrome extension and the tabs it drives",
+		Short: "inspect the browsers connected to infaiw and the tabs it drives",
 		Args:  cobra.NoArgs,
 	}
 	addServerFlags(browser)

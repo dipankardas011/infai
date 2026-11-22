@@ -90,7 +90,7 @@ type deepSeekWireMessage struct {
 
 // deepSeekWireMessages converts canonical messages into DeepSeek wire
 // messages, dropping harness-only fields and translating image attachments.
-func deepSeekWireMessages(messages []contracts.ChatMessage) []deepSeekWireMessage {
+func deepSeekWireMessages(model contracts.LLMModelConfiguration, messages []contracts.ChatMessage) []deepSeekWireMessage {
 	wire := make([]deepSeekWireMessage, 0, len(messages))
 	for _, message := range messages {
 		wm := deepSeekWireMessage{
@@ -101,6 +101,19 @@ func deepSeekWireMessages(messages []contracts.ChatMessage) []deepSeekWireMessag
 			ToolCalls:        message.ToolCalls,
 		}
 		switch {
+		case message.Role == "tool":
+			if message.Content != nil {
+				wm.Content = *message.Content
+			} else {
+				wm.Content = ""
+			}
+			if len(message.Images) > 0 && model.SupportsInputModality(contracts.ModalityImage) {
+				caption := "Image returned by the previous tool result."
+				wire = append(wire, deepSeekWireMessage{
+					Role:    "user",
+					Content: chatCompletionsContent(contracts.ChatMessage{Content: &caption, Images: message.Images}),
+				})
+			}
 		case len(message.Images) > 0:
 			wm.Content = chatCompletionsContent(message)
 		case message.Content != nil:
@@ -174,7 +187,7 @@ func (d *deepSeekAPI) Generate(ctx context.Context, messages []contracts.ChatMes
 func (d *deepSeekAPI) buildRequest(messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) ([]byte, error) {
 	reqBody := deepSeekChatRequest{
 		Model:       d.b.Model().Id,
-		Messages:    deepSeekWireMessages(messages),
+		Messages:    deepSeekWireMessages(d.b.Model(), messages),
 		MaxTokens:   d.b.Model().MaxOutputTokens,
 		Temperature: d.b.Model().DefaultTemperature,
 	}

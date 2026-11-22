@@ -22,7 +22,7 @@ func (s *InfaiAgentSession) browserApprovalOpened(ctx context.Context, request c
 	if s.browser == nil || !browser.IsTool(request.ToolCall.Function.Name) {
 		return
 	}
-	s.browser.Notify("approval_requested", request)
+	s.browser.Notify(s.meta.ID, "approval_requested", request)
 
 	ctx, cancel := context.WithTimeout(ctx, browserCallTimeout)
 	defer cancel()
@@ -41,7 +41,7 @@ func (s *InfaiAgentSession) browserApprovalClosed(request contracts.ApprovalRequ
 	if err := browser.ClearHighlight(ctx, s.browser, s.meta.ID, request.SessionName, request.ToolCall); err != nil {
 		s.l.Debug("browser clear highlight failed", "session_id", s.meta.ID, "error", err)
 	}
-	s.browser.Notify("approval_resolved", map[string]any{
+	s.browser.Notify(s.meta.ID, "approval_resolved", map[string]any{
 		"req_id":     request.ID,
 		"session_id": request.SessionID,
 		"decision":   decision.Decision,

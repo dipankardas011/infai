@@ -4,10 +4,13 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/dipankardas011/infai/pkg/agent/vision"
 	"github.com/google/uuid"
 	"golang.org/x/net/websocket"
 )
@@ -18,14 +21,32 @@ const (
 	idleTimeout = 60 * time.Second
 	// An unauthenticated socket may only wait this long for its hello.
 	authTimeout = 10 * time.Second
+	// Sockets that have not sent hello yet. Bounds what an unauthenticated
+	// client can hold open.
+	maxPendingAuth = 8
+	// A screenshot reply is a base64 image: at most vision.MaxImageBytes (5 MiB)
+	// of bytes, so ~7 MiB on the wire. The cap reuses the engine's per-turn
+	// image total, so there is one budget for images, not two.
+	maxPayloadBytes = vision.MaxTotalBytes
 )
 
 // inbound is any frame sent by the extension; fields are populated per Type.
+// isOversizeFrame reports whether a read failed because the peer's frame was
+// larger than Config.MaxPayloadBytes (x/net/websocket words it per version).
+func isOversizeFrame(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "frame payload size exceeds") ||
+		strings.Contains(msg, "payload size limit") ||
+		strings.Contains(msg, "max payload")
+}
+
 type inbound struct {
 	Type             string          `json:"type"`
 	Token            string          `json:"token"`
 	ID               string          `json:"id"`
 	Profile          string          `json:"profile"`
+	Instance         string          `json:"instance"`
+	Browser          string          `json:"browser"`
 	ExtensionVersion string          `json:"extension_version"`
 	OK               bool            `json:"ok"`
 	Result           json.RawMessage `json:"result"`
@@ -56,15 +77,26 @@ type typeFrame struct {
 	Type string `json:"type"`
 }
 
+// idFrame tells a panel the client id the daemon assigned it.
+type idFrame struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
 type extConn struct {
 	ws        *websocket.Conn
 	writeMu   sync.Mutex
 	done      chan struct{}
 	closeOnce sync.Once
 
+	// cause explains why the socket closed, when the daemon closed it for a
+	// reason the caller can act on (e.g. an oversized reply).
+	cause       error
 	pending     map[string]chan inbound
 	hello       bool
 	profile     string
+	instance    string
+	browser     string
 	version     string
 	connectedAt time.Time
 }
@@ -86,6 +118,13 @@ func (c *extConn) write(v any) error {
 	return websocket.JSON.Send(c.ws, v)
 }
 
+// failWith records why the daemon is closing this conn, then closes it. Waiters
+// read cause after done is closed, so the write happens-before the read.
+func (c *extConn) failWith(cause error) {
+	c.cause = cause
+	c.close()
+}
+
 // close fails every waiter on this conn (they select on done) and tears down the socket.
 func (c *extConn) close() {
 	c.closeOnce.Do(func() {
@@ -96,7 +135,8 @@ func (c *extConn) close() {
 	})
 }
 
-// ServeHTTP is the WebSocket endpoint the extension dials with ?token=<token>.
+// ServeHTTP is the WebSocket endpoint the extension dials; it authenticates
+// with the token in its first (hello) frame.
 func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	websocket.Server{Handshake: b.handshake, Handler: b.handle}.ServeHTTP(w, r)
 }
@@ -119,32 +159,55 @@ func (b *Bridge) handshake(_ *websocket.Config, _ *http.Request) error {
 }
 
 func (b *Bridge) handle(ws *websocket.Conn) {
-	c := newExtConn(ws)
+	ws.MaxPayloadBytes = maxPayloadBytes
 
+	b.mu.Lock()
+	if b.closed || b.pendingAuth >= maxPendingAuth {
+		b.mu.Unlock()
+		_ = ws.Close()
+		return
+	}
+	b.pendingAuth++
+	b.mu.Unlock()
+
+	c := newExtConn(ws)
+	b.readLoop(c)
+	c.close()
+
+	b.mu.Lock()
+	b.pendingAuth--
+	wasLive := c.instance != "" && b.conns[c.instance] == c
+	if wasLive {
+		delete(b.conns, c.instance)
+	}
+	name := baseID(c)
+	b.mu.Unlock()
+	if wasLive {
+		b.log.Info("browser client disconnected", "client", name)
+		b.broadcastIDs()
+	}
+}
+
+// claim registers an authenticated conn under its extension instance id: one
+// id per browser profile, stable across reconnects. A reconnect from the same
+// profile replaces its own stale socket (e.g. after sleep); other profiles and
+// browsers are separate clients and never evict each other.
+func (b *Bridge) claim(c *extConn, instance string) bool {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		c.close()
-		return
+		return false
 	}
-	old := b.conn
-	b.conn = c
+	c.instance = instance
+	old := b.conns[instance]
+	b.conns[instance] = c
 	b.mu.Unlock()
 
 	if old != nil {
-		b.log.Info("browser extension reconnected, replacing previous connection")
+		b.log.Info("browser client reconnected, replacing its previous connection", "id", shortID(instance))
 		old.close()
 	}
-
-	b.readLoop(c)
-
-	c.close()
-	b.mu.Lock()
-	if b.conn == c {
-		b.conn = nil
-	}
-	b.mu.Unlock()
-	b.log.Info("browser extension disconnected")
+	return true
 }
 
 func (b *Bridge) readLoop(c *extConn) {
@@ -159,6 +222,17 @@ func (b *Bridge) readLoop(c *extConn) {
 		}
 		var data []byte
 		if err := websocket.Message.Receive(c.ws, &data); err != nil {
+			if isOversizeFrame(err) {
+				b.log.Warn("browser client reply exceeded the frame limit",
+					"limit_bytes", maxPayloadBytes, "err", err)
+				c.failWith(&ActionError{
+					Code: "reply_too_large",
+					Message: fmt.Sprintf("the extension's reply exceeded the %d MiB frame limit; "+
+						"capture a smaller screenshot (the daemon scales it to 1280px, so this usually means a huge page region)",
+						maxPayloadBytes>>20),
+				})
+				return
+			}
 			select {
 			case <-c.done:
 			default:
@@ -176,6 +250,13 @@ func (b *Bridge) readLoop(c *extConn) {
 				b.log.Warn("browser extension rejected: bad or missing token in hello")
 				return
 			}
+			if m.Instance == "" {
+				b.log.Warn("browser extension rejected: hello has no instance id; reload the extension")
+				return
+			}
+			if !b.claim(c, m.Instance) {
+				return
+			}
 			authed = true
 		}
 		b.dispatch(c, m)
@@ -189,16 +270,20 @@ func (b *Bridge) dispatch(c *extConn, m inbound) {
 		first := !c.hello
 		c.hello = true
 		c.profile = m.Profile
+		c.browser = m.Browser
 		c.version = m.ExtensionVersion
 		if c.connectedAt.IsZero() {
 			c.connectedAt = time.Now()
 		}
 		b.mu.Unlock()
 		if first {
-			b.log.Info("browser extension connected", "profile", m.Profile, "version", m.ExtensionVersion)
+			b.log.Info("browser client connected", "browser", m.Browser, "profile", m.Profile, "id", shortID(m.Instance), "version", m.ExtensionVersion)
+			b.broadcastIDs()
+			go b.flushPendingReleases(c)
 		} else {
 			// The side panel re-sends hello when the profile label changes.
 			b.log.Debug("browser extension hello refreshed", "profile", m.Profile)
+			b.broadcastIDs()
 		}
 	case "ping":
 		if err := c.write(typeFrame{Type: "pong"}); err != nil {

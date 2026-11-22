@@ -114,7 +114,7 @@ Use delegate_sidecar_loop by default when delegating: it waits and returns the r
 </delegation>
 {{ if .HasBrowserTools }}
 <browser>
-- browser_* tools drive the user's own Chrome profile with their real logins. Never submit, post, purchase, or send unless the user asked for that exact outcome.
+- browser_* tools drive the user's own browser with their real logins. Never submit, post, purchase, or send unless the user asked for that exact outcome.
 - Use webfetch for public pages; use the browser only when the page needs the user's session or interaction.
 </browser>
 {{ end }}

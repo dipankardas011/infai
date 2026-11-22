@@ -1,5 +1,6 @@
 import * as activity from "./lib/activity.js";
-import { forgetTab } from "./lib/cdp.js";
+import { forgetTab, withTimeout } from "./lib/cdp.js";
+import { browserName } from "./lib/client.js";
 import { ActionError } from "./lib/errors.js";
 import { runAction } from "./lib/actions.js";
 import { mutate, write } from "./lib/store.js";
@@ -9,16 +10,27 @@ const EXTENSION_VERSION = "0.1.0";
 const PING_INTERVAL_MS = 20000;
 const BACKOFF_START_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
+const ACTION_TIMEOUT_MS = 40000;
+// Keep replies under the daemon's frame limit, and say so when they are not,
+// rather than letting the socket cut the conversation.
+// Mirrors the daemon's frame cap (vision.MaxTotalBytes), so an oversized reply
+// is refused here with a reason instead of severing the socket.
+const MAX_REPLY_BYTES = 16 * 1024 * 1024;
+// Screenshots are uploaded over HTTP and the socket reply carries only their
+// id, so no reply frame ever holds megabytes.
 
 let config = null;
 let label = "";
 let token = "";
+let instance = "";
 let ws = null;
 let connecting = false;
 let backoffMs = BACKOFF_START_MS;
 let pingTimer = null;
 let reconnectTimer = null;
 let stayAwakeTimer = null;
+let busyTimer = null;
+let busy = 0;
 
 async function loadConfig() {
   if (!config) {
@@ -44,6 +56,50 @@ function setConn(state, extra = {}) {
 async function loadLabel(cfg) {
   const stored = await chrome.storage.local.get("profile_label");
   return String(stored.profile_label ?? "").trim() || String(cfg.profile_label ?? "").trim();
+}
+
+// A stable id per browser profile (storage.local is per profile) makes each
+// profile its own client on the daemon, and lets a reconnect replace its own
+// stale socket.
+async function loadInstance() {
+  const stored = await chrome.storage.local.get("instance_id");
+  if (stored.instance_id) return stored.instance_id;
+  const id = crypto.randomUUID();
+  await chrome.storage.local.set({ instance_id: id });
+  return id;
+}
+
+function base64Bytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+// uploadImage posts the captured bytes to the daemon and returns the id the
+// tool result will reference. The daemon validates it like any attachment.
+async function uploadImage(result) {
+  const base = (config?.daemon_url ?? "").replace(/\/+$/, "");
+  const res = await fetch(`${base}/v1/browser/screenshot`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream", "X-Infai-Browser-Token": token },
+    body: base64Bytes(result.data),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const { id } = await res.json();
+  const { data, ...rest } = result;
+  return { ...rest, image_id: id };
+}
+
+function hello() {
+  return {
+    type: "hello",
+    token,
+    profile: label,
+    instance,
+    browser: browserName(),
+    extension_version: EXTENSION_VERSION,
+  };
 }
 
 // The token is not a query parameter: proxy access logs would capture it.
@@ -75,6 +131,7 @@ async function connect() {
       return;
     }
     label = await loadLabel(cfg);
+    instance = await loadInstance();
     token = cfg.token ?? "";
     await setConn("connecting");
     let socket;
@@ -88,7 +145,10 @@ async function connect() {
     socket.onopen = () => {
       backoffMs = BACKOFF_START_MS;
       stopStayAwake();
-      sendMessage({ type: "hello", token, profile: label, extension_version: EXTENSION_VERSION });
+      sendMessage(hello());
+      // Approvals cached from a previous connection may belong to a daemon that
+      // has since restarted; they would sit in the panel forever otherwise.
+      chrome.storage.session.set({ approvals: {} }).catch(() => {});
       pingTimer = setInterval(() => sendMessage({ type: "ping" }), PING_INTERVAL_MS);
       setConn("connected");
     };
@@ -148,6 +208,11 @@ function onDaemonMessage(raw) {
       break;
     case "pong":
       break;
+    case "client_id":
+      // The daemon's id is authoritative: it adds a suffix when another profile
+      // shares this label, which the panel cannot know on its own.
+      chrome.storage.session.set({ client_id: String(msg.id ?? "") }).catch(() => {});
+      break;
     default:
       console.warn("infai: unknown message type", msg?.type);
   }
@@ -160,18 +225,48 @@ const sessionQueues = new Map();
 function enqueueRequest(msg) {
   const key = String(msg.session_id ?? "");
   const prev = sessionQueues.get(key) ?? Promise.resolve();
-  const run = prev.then(() => executeRequest(msg));
+  const run = prev.then(() => executeRequest(msg), () => executeRequest(msg));
   sessionQueues.set(key, run);
-  run.then(() => {
-    if (sessionQueues.get(key) === run) sessionQueues.delete(key);
-  });
+  run
+    .catch((err) => console.error("infai: action queue failed", err))
+    .finally(() => {
+      if (sessionQueues.get(key) === run) sessionQueues.delete(key);
+    });
+}
+
+// MV3 terminates an idle service worker after ~30s. A slow action (a capture
+// waiting on a frame, a page that never finishes loading) would be killed
+// mid-flight and never reply, which the daemon can only report as a timeout.
+// One cheap API call every 20s keeps the worker alive until the action answers.
+function holdWorker() {
+  busy++;
+  chrome.runtime.getPlatformInfo().catch(() => {});
+  if (busy === 1) busyTimer = setInterval(() => chrome.runtime.getPlatformInfo().catch(() => {}), 20000);
+}
+
+function releaseWorker() {
+  busy = Math.max(0, busy - 1);
+  if (busy === 0) {
+    clearInterval(busyTimer);
+    busyTimer = null;
+  }
 }
 
 async function executeRequest(msg) {
   let reply;
   const logId = activity.started(msg);
+  holdWorker();
   try {
-    const result = await runAction(msg);
+    // Last-resort bound: the daemon gives up at 45s, so an action must answer
+    // before then even if one of its steps hangs.
+    let result = await withTimeout(runAction(msg), ACTION_TIMEOUT_MS, `the action did not finish within ${ACTION_TIMEOUT_MS / 1000}s`);
+    if (result && typeof result.data === "string" && result.data !== "") {
+      try {
+        result = await uploadImage(result);
+      } catch (err) {
+        throw new ActionError("upload_failed", `the screenshot could not be uploaded to the daemon: ${err?.message ?? err}`);
+      }
+    }
     reply = { type: "response", id: msg.id, ok: true, result: result ?? {} };
     activity.finished(logId);
   } catch (err) {
@@ -179,12 +274,38 @@ async function executeRequest(msg) {
     if (code === "internal") console.error("infai: action failed", msg.action, err);
     reply = { type: "response", id: msg.id, ok: false, error: { code, message: String(err?.message ?? err) } };
     activity.finished(logId, err?.message ?? err);
+  } finally {
+    releaseWorker();
   }
+  let frame;
   try {
-    sendMessage(reply);
+    frame = JSON.stringify(reply);
+    console.debug("infai: reply", msg.action, frame.length, "bytes");
   } catch (err) {
-    console.error("infai: could not send response", err);
+    frame = JSON.stringify({
+      type: "response",
+      id: msg.id,
+      ok: false,
+      error: { code: "internal", message: `the reply could not be serialized: ${err?.message ?? err}` },
+    });
   }
+  if (frame.length > MAX_REPLY_BYTES) {
+    const mb = (frame.length / (1024 * 1024)).toFixed(1);
+    frame = JSON.stringify({
+      type: "response",
+      id: msg.id,
+      ok: false,
+      error: {
+        code: "reply_too_large",
+        message: `the reply was ${mb} MB, over the ${MAX_REPLY_BYTES / (1024 * 1024)} MB frame limit; retry with a smaller request`,
+      },
+    });
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.error("infai: could not send response: the daemon socket is closed");
+    return;
+  }
+  ws.send(frame);
 }
 
 async function handleEvent(event, data) {
@@ -249,7 +370,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     chrome.storage.local.set({ profile_label: label }).then(() => {
       // The daemon learns the label from hello, so re-send it when connected.
       if (ws && ws.readyState === WebSocket.OPEN) {
-        sendMessage({ type: "hello", token, profile: label, extension_version: EXTENSION_VERSION });
+        sendMessage(hello());
       }
       sendResponse?.({ ok: true, label });
     });

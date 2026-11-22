@@ -83,6 +83,16 @@
     {{range .TaskChecklistItems}}{{template "checklist-item" .}}{{end}}
   </div>
   {{end}}
+  {{if .Images}}
+  <div class="media-grid">
+    {{range .Images}}
+    <div class="media">
+      {{if .Src}}<img src="{{.Src}}" alt="{{.Name}}" loading="lazy" data-lightbox>{{end}}
+      <div class="media-meta">{{.Name}} · {{.MediaType}} · {{.Size}} bytes{{if .Width}} · {{.Width}}×{{.Height}}{{end}}{{if .Prompt}} · prompt: {{.Prompt}}{{end}}</div>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
 </div>
 {{end}}
 {{if .ToolCallID}}<div class="dim">answers call {{if .CallLink}}<a href="#{{.CallLink}}">{{.ToolCallID}}</a>{{else}}{{.ToolCallID}}{{end}}</div>{{end}}

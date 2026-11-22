@@ -282,9 +282,8 @@ func approvalCompactPreview(call contracts.ToolCall) string {
 		if preview, ok := readToolCallPreview(call.Function.Arguments); ok {
 			return preview
 		}
-	case contracts.BrowserNavigateTool, contracts.BrowserSnapshotTool, contracts.BrowserReadTool,
-		contracts.BrowserWaitForTool, contracts.BrowserClickTool, contracts.BrowserTypeTool,
-		contracts.BrowserSelectTool:
+	case contracts.BrowserClientsTool, contracts.BrowserNavigateTool, contracts.BrowserReadTool,
+		contracts.BrowserActTool, contracts.BrowserScrollTool:
 		if preview, ok := browserToolPreview(call); ok {
 			return preview
 		}
@@ -380,9 +379,8 @@ func formatApprovalToolCall(call contracts.ToolCall) (string, string) {
 		}
 		return "SOURCE  " + preview, ""
 
-	case contracts.BrowserNavigateTool, contracts.BrowserSnapshotTool, contracts.BrowserReadTool,
-		contracts.BrowserWaitForTool, contracts.BrowserClickTool, contracts.BrowserTypeTool,
-		contracts.BrowserSelectTool:
+	case contracts.BrowserClientsTool, contracts.BrowserNavigateTool, contracts.BrowserReadTool,
+		contracts.BrowserActTool, contracts.BrowserScrollTool:
 		body, ok := browserApprovalBody(call)
 		if !ok {
 			return prettyToolArguments(call.Function.Arguments), ""

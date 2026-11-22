@@ -4659,9 +4659,8 @@ func toolCallPreview(name, arguments string) string {
 		}
 		return preview
 
-	case contracts.BrowserNavigateTool, contracts.BrowserSnapshotTool, contracts.BrowserReadTool,
-		contracts.BrowserWaitForTool, contracts.BrowserClickTool, contracts.BrowserTypeTool,
-		contracts.BrowserSelectTool:
+	case contracts.BrowserClientsTool, contracts.BrowserNavigateTool, contracts.BrowserReadTool,
+		contracts.BrowserActTool, contracts.BrowserScrollTool:
 		preview, ok := browserToolPreview(contracts.ToolCall{Function: contracts.Function{Name: contracts.ToolType(name), Arguments: arguments}})
 		if !ok {
 			return prettyToolArguments(arguments)

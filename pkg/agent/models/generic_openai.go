@@ -61,7 +61,7 @@ type openAIWireMessage struct {
 
 // openAIWireMessages converts canonical messages into Chat Completions wire
 // messages, dropping harness-only fields and translating image attachments.
-func openAIWireMessages(messages []contracts.ChatMessage) []openAIWireMessage {
+func openAIWireMessages(model contracts.LLMModelConfiguration, messages []contracts.ChatMessage) []openAIWireMessage {
 	wire := make([]openAIWireMessage, 0, len(messages))
 	for _, message := range messages {
 		wm := openAIWireMessage{
@@ -71,12 +71,26 @@ func openAIWireMessages(messages []contracts.ChatMessage) []openAIWireMessage {
 			ToolCallID:       message.ToolCallID,
 			ToolCalls:        message.ToolCalls,
 		}
-		if parts := chatCompletionsContent(message); parts != nil {
-			wm.Content = parts
-		} else if message.Content != nil {
+		if message.Role != "tool" {
+			if parts := chatCompletionsContent(message); parts != nil {
+				wm.Content = parts
+			} else if message.Content != nil {
+				wm.Content = *message.Content
+			}
+			wire = append(wire, wm)
+			continue
+		}
+		if message.Content != nil {
 			wm.Content = *message.Content
 		}
 		wire = append(wire, wm)
+		if len(message.Images) > 0 && model.SupportsInputModality(contracts.ModalityImage) {
+			caption := "Image returned by the previous tool result."
+			wire = append(wire, openAIWireMessage{
+				Role:    "user",
+				Content: chatCompletionsContent(contracts.ChatMessage{Content: &caption, Images: message.Images}),
+			})
+		}
 	}
 	return wire
 }
@@ -136,7 +150,7 @@ func (o *genericOpenAICompatableAPI) Generate(ctx context.Context, messages []co
 func (o *genericOpenAICompatableAPI) buildRequest(messages []contracts.ChatMessage, tools []contracts.Tool, opts *contracts.GenerateOptions) ([]byte, error) {
 	reqBody := openAIChatRequest{
 		Model:       o.b.Model().Id,
-		Messages:    openAIWireMessages(messages),
+		Messages:    openAIWireMessages(o.b.Model(), messages),
 		MaxTokens:   o.b.Model().MaxOutputTokens,
 		Temperature: o.b.Model().DefaultTemperature,
 	}

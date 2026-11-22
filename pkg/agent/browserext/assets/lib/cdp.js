@@ -11,11 +11,28 @@ export function forgetTab(tabId) {
   attached.delete(tabId);
 }
 
+// Chrome can leave attach() pending on a tab that is mid-navigation or not
+// rendering; a hang here would swallow the whole action.
+const ATTACH_TIMEOUT_MS = 10000;
+
+export function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new ActionError("timeout", message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function ensureAttached(tabId) {
   if (attached.has(tabId)) return;
   try {
-    await chrome.debugger.attach({ tabId }, "1.3");
+    await withTimeout(
+      chrome.debugger.attach({ tabId }, "1.3"),
+      ATTACH_TIMEOUT_MS,
+      "attaching to the tab timed out; bring the tab to the front and retry",
+    );
   } catch (err) {
+    if (err instanceof ActionError) throw err;
     const msg = String(err?.message ?? err);
     if (/no tab with given id/i.test(msg)) throw new ActionError("tab_closed", "the session's tab was closed");
     if (!/already attached/i.test(msg)) throw new ActionError("debugger", `cannot attach debugger: ${msg}`);
@@ -67,6 +84,16 @@ export async function send(tabId, method, params = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// evaluateAwait evaluates an expression that returns a promise and waits for
+// it, e.g. the settle probe.
+export async function evaluateAwait(tabId, expression) {
+  const res = await send(tabId, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+  if (res.exceptionDetails) {
+    throw new ActionError("internal", `page script failed: ${res.exceptionDetails.exception?.description ?? res.exceptionDetails.text}`);
+  }
+  return res.result?.value;
 }
 
 export async function evaluate(tabId, expression) {

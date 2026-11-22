@@ -176,67 +176,55 @@ main {
 
 /* --- ops strip ------------------------------------------------------------ */
 
+/* One row per fact, so values show in full instead of being cut off. */
 .strip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 14px;
-  padding: 6px 10px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 12px;
+  align-items: baseline;
+  margin: 14px 0 0;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   background: var(--bg-deep);
+}
+
+.strip dt {
+  color: var(--muted);
   font-size: 10.5px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  overflow: hidden;
 }
 
-.strip-item {
-  display: inline-flex;
+.strip dd {
+  display: flex;
   align-items: baseline;
-  gap: 6px;
+  justify-content: space-between;
+  gap: 8px;
   min-width: 0;
+  margin: 0;
+}
+
+.strip .v {
+  color: var(--aqua);
+  overflow-wrap: anywhere;
+}
+
+.strip .edit {
+  flex: none;
   padding: 0;
   border: 0;
   background: none;
-  color: inherit;
+  color: var(--muted);
   font: inherit;
-  letter-spacing: inherit;
-  text-transform: inherit;
-}
-
-button.strip-item {
+  font-size: 11px;
   cursor: pointer;
+  transition: color 0.2s;
 }
 
-.strip-item .k {
-  color: var(--muted);
-}
-
-.strip-item .v {
-  overflow: hidden;
-  color: var(--aqua);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-transform: none;
-}
-
-.strip-item .edit {
-  color: var(--muted);
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-
-button.strip-item:hover .edit,
-button.strip-item:focus-visible .edit {
-  opacity: 1;
-}
-
-button.strip-item:hover .v {
+.strip .edit:hover,
+.strip .edit:focus-visible {
+  outline: 0;
   color: var(--hl);
-}
-
-.strip-sep {
-  color: var(--border-hi);
 }
 
 .label-form {
@@ -253,6 +241,12 @@ button.strip-item:hover .v {
 
 .label-form .prompt {
   color: var(--green);
+}
+
+.label-form .prefix {
+  flex: none;
+  color: var(--muted);
+  user-select: none;
 }
 
 .label-form input {

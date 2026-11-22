@@ -184,6 +184,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 			)
 			status := contracts.ToolExecutionSuccess
 			content := ""
+			var toolImages []contracts.ImageInput
 
 			switch policy {
 			case auditor.DenyPolicy:
@@ -194,7 +195,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 				)
 				status = contracts.ToolExecutionDenied
 				content = "tool execution was denied by session policy"
-				toolMessages = append(toolMessages, contracts.NewToolMessage(tc.ID, content, status))
+				toolMessages = append(toolMessages, contracts.NewToolMessageWithImages(tc.ID, content, status, toolImages))
 				s.publish(contracts.EventStream{
 					Kind:      contracts.EventToolResult,
 					Timestamp: time.Now().UTC(),
@@ -246,7 +247,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 							Error:    content,
 						},
 					})
-					toolMessages = append(toolMessages, contracts.NewToolMessage(tc.ID, content, status))
+					toolMessages = append(toolMessages, contracts.NewToolMessageWithImages(tc.ID, content, status, toolImages))
 					continue
 				}
 
@@ -565,10 +566,10 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					Timestamp:  time.Now().UTC(),
 					ToolResult: &result,
 				})
-			case contracts.BrowserNavigateTool, contracts.BrowserSnapshotTool, contracts.BrowserReadTool, contracts.BrowserWaitForTool,
-				contracts.BrowserClickTool, contracts.BrowserTypeTool, contracts.BrowserSelectTool:
+			case contracts.BrowserClientsTool, contracts.BrowserNavigateTool, contracts.BrowserReadTool,
+				contracts.BrowserActTool, contracts.BrowserScrollTool:
 				sessionName := s.sessionName()
-				var output string
+				var output browser.Output
 				err, canceled := s.runTurnCancelable(s.ctx, func(ctx context.Context) error {
 					var runErr error
 					output, runErr = browser.Execute(ctx, s.browser, s.meta.ID, sessionName, tc)
@@ -578,7 +579,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 				result := contracts.ToolExecutionResult{
 					Status:   contracts.ToolExecutionSuccess,
 					CallID:   tc.ID,
-					Output:   output,
+					Output:   output.Text,
 					CallName: tc.Function.Name,
 				}
 				if canceled {
@@ -600,7 +601,8 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 					result.Status = contracts.ToolExecutionError
 					result.Error = content
 				} else {
-					content = output
+					content = output.Text
+					toolImages = output.Images
 				}
 
 				s.publish(contracts.EventStream{
@@ -696,7 +698,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 				})
 			}
 
-			toolMessages = append(toolMessages, contracts.NewToolMessage(tc.ID, content, status))
+			toolMessages = append(toolMessages, contracts.NewToolMessageWithImages(tc.ID, content, status, toolImages))
 		}
 
 		if len(foregroundIDs) > 0 {

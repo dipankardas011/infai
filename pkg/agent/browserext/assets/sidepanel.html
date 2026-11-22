@@ -25,17 +25,17 @@
         </span>
       </div>
 
-      <div class="strip">
-        <button id="profile-btn" class="strip-item" type="button" title="Name this Chrome profile">
-          <span class="k">profile</span><span id="profile" class="v">–</span><span class="edit">edit</span>
-        </button>
-        <span class="strip-sep" aria-hidden="true">/</span>
-        <span class="strip-item"><span class="k">daemon</span><span id="daemon" class="v">–</span></span>
-      </div>
+      <dl class="strip">
+        <dt>client</dt>
+        <dd><span id="profile" class="v">–</span><button id="profile-btn" class="edit" type="button" title="Name this browser profile">rename</button></dd>
+        <dt>daemon</dt>
+        <dd><span id="daemon" class="v">–</span></dd>
+      </dl>
 
       <form id="label-form" class="label-form" hidden>
         <span class="prompt" aria-hidden="true">❯</span>
-        <input id="label-input" type="text" maxlength="40" placeholder="name this profile, e.g. Personal" autocomplete="off" spellcheck="false" aria-label="Profile label" />
+        <span id="label-prefix" class="prefix"></span>
+        <input id="label-input" type="text" maxlength="40" placeholder="personal" autocomplete="off" spellcheck="false" aria-label="Profile name" />
         <button type="submit" class="chip ok">save</button>
       </form>
 

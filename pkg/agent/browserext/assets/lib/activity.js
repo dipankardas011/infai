@@ -10,6 +10,21 @@ const MAX_ENTRIES = 40;
 // Plumbing actions the user did not ask about; they would drown the feed.
 const QUIET = new Set(["highlight", "clear_highlight", "release_session"]);
 
+// The panel names actions the way the agent's tools are named, so a screenshot
+// reads as a read rather than as an unexplained "screenshot".
+const LABELS = {
+  snapshot: "read · elements",
+  read: "read · text",
+  screenshot: "read · screenshot",
+  click: "act · click",
+  type: "act · type",
+  select: "act · select",
+  click_at: "act · click (point)",
+  type_at: "act · type (point)",
+  navigate: "navigate",
+  scroll: "scroll",
+};
+
 function summarize(action, args) {
   const ref = args.ref ? ` ${args.ref}` : "";
   switch (action) {
@@ -33,12 +48,14 @@ export function started(msg) {
     id: String(msg.id),
     session_id: String(msg.session_id ?? ""),
     session_name: String(msg.session_name || msg.session_id || ""),
-    action: String(msg.action ?? ""),
+    action: LABELS[msg.action] ?? String(msg.action ?? ""),
     detail: summarize(msg.action, args),
     state: "running",
     at: Date.now(),
   };
-  mutate(KEY, (list) => [entry, ...list].slice(0, MAX_ENTRIES), []);
+  mutate(KEY, (list) => [entry, ...list].slice(0, MAX_ENTRIES), []).catch((err) =>
+    console.error("infai: activity log write failed", err),
+  );
   return entry.id;
 }
 
@@ -53,5 +70,5 @@ export function finished(id, error) {
           : e,
       ),
     [],
-  );
+  ).catch((err) => console.error("infai: activity log write failed", err));
 }

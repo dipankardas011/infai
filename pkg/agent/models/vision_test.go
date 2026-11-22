@@ -17,8 +17,13 @@ var testImage = contracts.ImageInput{
 
 const testImageDataURL = "data:image/png;base64,cG5nLWJ5dGVz"
 
+var testImageModel = contracts.LLMModelConfiguration{
+	Id:            "test-model",
+	InputModality: []contracts.LLMSupportedModality{contracts.ModalityText, contracts.ModalityImage},
+}
+
 func TestGenericOpenAIWireMessageImageJSON(t *testing.T) {
-	messages := openAIWireMessages([]contracts.ChatMessage{
+	messages := openAIWireMessages(testImageModel, []contracts.ChatMessage{
 		contracts.NewUserMessageWithInput(contracts.UserInput{Text: "Describe this", Images: []contracts.ImageInput{testImage}}),
 	})
 	raw, err := json.Marshal(messages[0])
@@ -32,7 +37,7 @@ func TestGenericOpenAIWireMessageImageJSON(t *testing.T) {
 }
 
 func TestGenericOpenAITextOnlyKeepsStringContent(t *testing.T) {
-	messages := openAIWireMessages([]contracts.ChatMessage{contracts.NewUserMessage("hello")})
+	messages := openAIWireMessages(testImageModel, []contracts.ChatMessage{contracts.NewUserMessage("hello")})
 	raw, err := json.Marshal(messages[0])
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +48,7 @@ func TestGenericOpenAITextOnlyKeepsStringContent(t *testing.T) {
 }
 
 func TestDeepSeekWireMessageImageJSON(t *testing.T) {
-	messages := deepSeekWireMessages([]contracts.ChatMessage{
+	messages := deepSeekWireMessages(testImageModel, []contracts.ChatMessage{
 		contracts.NewUserMessageWithInput(contracts.UserInput{Text: "Describe this", Images: []contracts.ImageInput{testImage}}),
 	})
 	raw, err := json.Marshal(messages[0])
@@ -57,7 +62,7 @@ func TestDeepSeekWireMessageImageJSON(t *testing.T) {
 }
 
 func TestCodexInputImageJSON(t *testing.T) {
-	instructions, input, err := codexInput([]contracts.ChatMessage{
+	instructions, input, err := codexInput(testImageModel, []contracts.ChatMessage{
 		contracts.NewUserMessageWithInput(contracts.UserInput{Text: "Describe this", Images: []contracts.ImageInput{testImage}}),
 	})
 	if err != nil {
@@ -91,7 +96,7 @@ func TestCodexInputImageJSON(t *testing.T) {
 }
 
 func TestCodexInputImageOnlyOmitsTextPart(t *testing.T) {
-	_, input, err := codexInput([]contracts.ChatMessage{
+	_, input, err := codexInput(testImageModel, []contracts.ChatMessage{
 		contracts.NewUserMessageWithInput(contracts.UserInput{Images: []contracts.ImageInput{testImage}}),
 	})
 	if err != nil {
@@ -114,7 +119,7 @@ func TestCodexInputImageOnlyOmitsTextPart(t *testing.T) {
 }
 
 func TestChatCompletionsImageOnlyContent(t *testing.T) {
-	messages := openAIWireMessages([]contracts.ChatMessage{
+	messages := openAIWireMessages(testImageModel, []contracts.ChatMessage{
 		contracts.NewUserMessageWithInput(contracts.UserInput{Images: []contracts.ImageInput{testImage}}),
 	})
 	raw, err := json.Marshal(messages[0])

@@ -349,7 +349,7 @@ type codexReasoning struct {
 }
 
 func (o *openAICodexResponsesAPI) buildRequest(messages []contracts.ChatMessage, tools []contracts.Tool) ([]byte, error) {
-	instructions, input, err := codexInput(messages)
+	instructions, input, err := codexInput(o.b.Model(), messages)
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +405,7 @@ func (o *openAICodexResponsesAPI) Generate(ctx context.Context, messages []contr
 	return o.readStream(ctx, resp.Body, opts)
 }
 
-func codexInput(messages []contracts.ChatMessage) (string, []any, error) {
+func codexInput(model contracts.LLMModelConfiguration, messages []contracts.ChatMessage) (string, []any, error) {
 	var instructions []string
 	input := make([]any, 0, len(messages))
 	for _, message := range messages {
@@ -418,6 +418,14 @@ func codexInput(messages []contracts.ChatMessage) (string, []any, error) {
 			input = append(input, map[string]any{
 				"type": "function_call_output", "call_id": message.ToolCallID, "output": message.Text(),
 			})
+			if len(message.Images) > 0 && model.SupportsInputModality(contracts.ModalityImage) {
+				caption := "Image returned by the previous tool result."
+				input = append(input, map[string]any{
+					"type":    "message",
+					"role":    "user",
+					"content": codexContentParts(contracts.ChatMessage{Content: &caption, Images: message.Images}),
+				})
+			}
 		case "assistant":
 			if message.ReasoningSignature != "" {
 				raw := json.RawMessage(message.ReasoningSignature)
