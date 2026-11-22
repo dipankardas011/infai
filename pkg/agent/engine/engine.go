@@ -268,7 +268,7 @@ func (e *InfaiAgentEngine) createSidecarSession(parentID uuid.UUID, request comm
 		contracts.SidecarLoopAgent,
 		toolConfig.MCPServers,
 		activePolicy,
-		e.sessionBrowser(),
+		e.sessionBrowser(id),
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(id)
@@ -424,7 +424,7 @@ func (e *InfaiAgentEngine) CreateSession(ctx context.Context, opts CreateSession
 		opts.AgentKind,
 		toolConfig.MCPServers,
 		activePolicy,
-		e.sessionBrowser(),
+		e.sessionBrowser(sessID),
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(sessID)
@@ -524,7 +524,7 @@ func (e *InfaiAgentEngine) LoadSession(sessionID uuid.UUID) (*session.InfaiAgent
 		e.aseComms.NewSessionAgentComms(sessionID),
 		toolConfig.MCPServers,
 		activePolicy,
-		e.sessionBrowser(),
+		e.sessionBrowser(sessionID),
 	)
 	if err != nil {
 		e.aseComms.UnregisterSessionAgent(sessionID)

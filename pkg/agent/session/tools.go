@@ -572,7 +572,7 @@ func (s *InfaiAgentSession) GenToolCallDispatchHandler() func([]contracts.ToolCa
 				var output browser.Output
 				err, canceled := s.runTurnCancelable(s.ctx, func(ctx context.Context) error {
 					var runErr error
-					output, runErr = browser.Execute(ctx, s.browser, s.meta.ID, sessionName, tc)
+					output, runErr = s.browser.Execute(ctx, sessionName, tc)
 					return runErr
 				})
 

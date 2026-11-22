@@ -22,11 +22,11 @@ func (s *InfaiAgentSession) browserApprovalOpened(ctx context.Context, request c
 	if s.browser == nil || !browser.IsTool(request.ToolCall.Function.Name) {
 		return
 	}
-	s.browser.Notify(s.meta.ID, "approval_requested", request)
+	s.browser.Notify(contracts.EventApprovalRequested, request)
 
 	ctx, cancel := context.WithTimeout(ctx, browserCallTimeout)
 	defer cancel()
-	if err := browser.Highlight(ctx, s.browser, s.meta.ID, request.SessionName, request.ToolCall); err != nil {
+	if err := s.browser.Highlight(ctx, request.SessionName, request.ToolCall); err != nil {
 		s.l.Debug("browser highlight failed", "session_id", s.meta.ID, "error", err)
 	}
 }
@@ -38,10 +38,10 @@ func (s *InfaiAgentSession) browserApprovalClosed(request contracts.ApprovalRequ
 
 	ctx, cancel := context.WithTimeout(context.Background(), browserCallTimeout)
 	defer cancel()
-	if err := browser.ClearHighlight(ctx, s.browser, s.meta.ID, request.SessionName, request.ToolCall); err != nil {
+	if err := s.browser.ClearHighlight(ctx, request.SessionName, request.ToolCall); err != nil {
 		s.l.Debug("browser clear highlight failed", "session_id", s.meta.ID, "error", err)
 	}
-	s.browser.Notify(s.meta.ID, "approval_resolved", map[string]any{
+	s.browser.Notify(contracts.EventApprovalResolved, map[string]any{
 		"req_id":     request.ID,
 		"session_id": request.SessionID,
 		"decision":   decision.Decision,

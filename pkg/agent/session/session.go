@@ -82,7 +82,7 @@ type InfaiAgentSession struct {
 	availableSkills []contracts.Skill
 	fileManager     *actuators.FileManager
 	mcpManager      *actuators.MCPManager
-	browser         browser.Driver
+	browser         *browser.Session
 	skillRegistry   *memory.SkillRegistry
 	taskChecklist   *memory.TaskChecklist
 
@@ -117,7 +117,7 @@ func NewSession(
 	sessionAgentKind contracts.AgentKind,
 	mcpServers map[string]contracts.MCPServerConfig,
 	hitlPolicy *auditor.HITLPolicy,
-	browserDriver browser.Driver,
+	browserSession *browser.Session,
 ) (*InfaiAgentSession, error) {
 	model, err := models.ProvisionModelClient(chosenModel, cwd, id)
 	if err != nil {
@@ -169,7 +169,7 @@ func NewSession(
 		return nil, err
 	}
 
-	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc, mcpServers, hitlPolicy, browserDriver)
+	sess, err := newRuntimeSession(engineCtx, l, model, meta, nil, timeline, ss, agentMailbox, aeComms, evalFunc, mcpServers, hitlPolicy, browserSession)
 	if err != nil {
 		_ = timeline.Close()
 		return nil, err
@@ -188,7 +188,7 @@ func NewResumedSession(
 	aeComms *comms.ISACChannel,
 	mcpServers map[string]contracts.MCPServerConfig,
 	hitlPolicy *auditor.HITLPolicy,
-	browserDriver browser.Driver,
+	browserSession *browser.Session,
 ) (*InfaiAgentSession, error) {
 	var provisionOpts []models.ProvisionOption
 	if meta.ClaudeCLIMeta != nil {
@@ -213,7 +213,7 @@ func NewResumedSession(
 		}
 	}
 
-	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc, mcpServers, hitlPolicy, browserDriver)
+	return newRuntimeSession(engineCtx, l, model, meta, history, timeline, sessionStore, agentMailbox, aeComms, evalFunc, mcpServers, hitlPolicy, browserSession)
 }
 
 func newRuntimeSession(
@@ -229,7 +229,7 @@ func newRuntimeSession(
 	evalFunc func(context.Context) error,
 	mcpServers map[string]contracts.MCPServerConfig,
 	hitlPolicy *auditor.HITLPolicy,
-	browserDriver browser.Driver,
+	browserSession *browser.Session,
 ) (*InfaiAgentSession, error) {
 	if engineCtx == nil {
 		return nil, errors.New("session: engine context is required")
@@ -266,7 +266,7 @@ func newRuntimeSession(
 		subscribers:                  make(map[*subscriber]struct{}),
 		aeComms:                      aeComms,
 		agentMailbox:                 am,
-		browser:                      browserDriver,
+		browser:                      browserSession,
 	}
 
 	var err error

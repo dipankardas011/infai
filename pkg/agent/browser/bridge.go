@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/dipankardas011/infai/pkg/agent/contracts"
 	"github.com/google/uuid"
 )
 
@@ -29,7 +30,6 @@ const (
 	// would be reported as a bridge timeout instead.
 	defaultRequestTimeout = 45 * time.Second
 	releaseTimeout        = 5 * time.Second
-	releaseAction         = "release_session"
 	shortIDLen            = 8
 )
 
@@ -294,7 +294,7 @@ func (b *Bridge) Bind(ctx context.Context, sessionID uuid.UUID, sessionName, sel
 }
 
 // Do sends action to the client the session is bound to and returns the raw result.
-func (b *Bridge) Do(ctx context.Context, sessionID uuid.UUID, sessionName, action string, args any) (json.RawMessage, error) {
+func (b *Bridge) Do(ctx context.Context, sessionID uuid.UUID, sessionName string, action Action, args any) (json.RawMessage, error) {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -368,7 +368,7 @@ func (b *Bridge) flushPendingReleases(c *extConn) {
 	}
 }
 
-func (b *Bridge) request(ctx context.Context, c *extConn, sessionID uuid.UUID, sessionName, action string, args any, timeout time.Duration) (json.RawMessage, error) {
+func (b *Bridge) request(ctx context.Context, c *extConn, sessionID uuid.UUID, sessionName string, action Action, args any, timeout time.Duration) (json.RawMessage, error) {
 	rawArgs := json.RawMessage("{}")
 	if args != nil {
 		var err error
@@ -393,7 +393,7 @@ func (b *Bridge) request(ctx context.Context, c *extConn, sessionID uuid.UUID, s
 		ID:          id,
 		SessionID:   sessionID,
 		SessionName: sessionName,
-		Action:      action,
+		Action:      string(action),
 		Args:        rawArgs,
 	}
 	if err := c.write(req); err != nil {
@@ -414,7 +414,7 @@ func (b *Bridge) request(ctx context.Context, c *extConn, sessionID uuid.UUID, s
 			return nil, &ActionError{Code: m.Error.Code, Message: m.Error.Message}
 		}
 		if len(m.Result) == 0 || string(m.Result) == "null" {
-			return nil, &ActionError{Code: "internal", Message: "extension returned no result for " + action}
+			return nil, &ActionError{Code: "internal", Message: "extension returned no result for " + string(action)}
 		}
 		return m.Result, nil
 	case <-ctx.Done():
@@ -443,9 +443,9 @@ func (b *Bridge) request(ctx context.Context, c *extConn, sessionID uuid.UUID, s
 
 // quietActions are plumbing the user did not ask for; they must not overwrite
 // the session's last real action in `infaiw browser status`.
-var quietActions = map[string]bool{"highlight": true, "clear_highlight": true}
+var quietActions = map[Action]bool{ActionHighlight: true, ActionClearHighlight: true}
 
-func (b *Bridge) recordTab(sessionID uuid.UUID, action string, result json.RawMessage) {
+func (b *Bridge) recordTab(sessionID uuid.UUID, action Action, result json.RawMessage) {
 	var info struct {
 		TabID *int    `json:"tab_id"`
 		URL   *string `json:"url"`
@@ -460,8 +460,8 @@ func (b *Bridge) recordTab(sessionID uuid.UUID, action string, result json.RawMe
 	if row == nil {
 		return
 	}
-	if !quietActions[action] {
-		row.LastAction = action
+	if !quietActions[Action(action)] {
+		row.LastAction = string(action)
 	}
 	row.LastUsed = time.Now()
 	if info.TabID != nil {
@@ -518,7 +518,7 @@ func (b *Bridge) Release(ctx context.Context, sessionID uuid.UUID) {
 func (b *Bridge) release(ctx context.Context, c *extConn, sessionID uuid.UUID, sessionName string) {
 	ctx, cancel := context.WithTimeout(ctx, releaseTimeout)
 	defer cancel()
-	_, err := b.request(ctx, c, sessionID, sessionName, releaseAction, nil, releaseTimeout)
+	_, err := b.request(ctx, c, sessionID, sessionName, ActionReleaseSession, nil, releaseTimeout)
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotConnected):
@@ -572,7 +572,7 @@ func (b *Bridge) TakeImage(id string) ([]byte, bool) {
 // approval of its first browser_navigate). A bound session whose client is
 // offline is dropped: its approval carries the tool arguments, so showing it in
 // another profile would leak, and answering it there would fail.
-func (b *Bridge) Notify(sessionID uuid.UUID, event string, data any) {
+func (b *Bridge) Notify(sessionID uuid.UUID, event contracts.EventStreamKind, data any) {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -595,7 +595,7 @@ func (b *Bridge) Notify(sessionID uuid.UUID, event string, data any) {
 	}
 
 	for _, c := range targets {
-		if err := c.write(eventFrame{Type: "event", Event: event, Data: data}); err != nil {
+		if err := c.write(eventFrame{Type: "event", Event: string(event), Data: data}); err != nil {
 			b.log.Warn("browser event send failed", "event", event, "err", err)
 		}
 	}

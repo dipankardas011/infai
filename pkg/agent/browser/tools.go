@@ -14,17 +14,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// Driver is what a session needs from the bridge. A nil Driver means the
-// session offers no browser tools.
-type Driver interface {
-	Clients() []Client
-	Bind(ctx context.Context, sessionID uuid.UUID, sessionName, client string) (Client, error)
-	Do(ctx context.Context, sessionID uuid.UUID, sessionName, action string, args any) (json.RawMessage, error)
-	Notify(sessionID uuid.UUID, event string, data any)
-	// TakeImage hands over a screenshot the extension uploaded out of band.
-	TakeImage(id string) ([]byte, bool)
-}
-
 const (
 	snapshotMaxPage = 10
 	scrollMaxTimes  = 20
@@ -152,7 +141,7 @@ type Output struct {
 
 // step is one extension action a tool call turns into.
 type step struct {
-	action string
+	action Action
 	args   any
 }
 
@@ -162,8 +151,8 @@ type waitArgs struct {
 	TimeoutMS *int   `json:"timeout_ms,omitempty"`
 }
 
-// Execute runs one browser tool call for a session.
-func Execute(ctx context.Context, d Driver, sessionID uuid.UUID, sessionName string, call contracts.ToolCall) (Output, error) {
+// execute runs one browser tool call for a session.
+func execute(ctx context.Context, d *Bridge, sessionID uuid.UUID, sessionName string, call contracts.ToolCall) (Output, error) {
 	name := call.Function.Name
 	if name == contracts.BrowserClientsTool {
 		if _, err := contracts.DecodeToolArguments[struct{}](name, call); err != nil {
@@ -229,7 +218,7 @@ func plan(call contracts.ToolCall) ([]step, string, error) {
 		if strings.TrimSpace(args.Client) == "" {
 			return nil, "", invalidArg(call, "client is required; call browser_clients to see the connected browsers")
 		}
-		return []step{{action: "navigate", args: map[string]string{"url": args.URL}}}, args.Client, nil
+		return []step{{action: ActionNavigate, args: map[string]string{"url": args.URL}}}, args.Client, nil
 
 	case contracts.BrowserReadTool:
 		args, err := contracts.DecodeToolArguments[readArgs](call.Function.Name, call)
@@ -269,7 +258,7 @@ func plan(call contracts.ToolCall) ([]step, string, error) {
 			}
 			forward["times"] = *args.Times
 		}
-		return []step{{action: "scroll", args: forward}}, "", nil
+		return []step{{action: ActionScroll, args: forward}}, "", nil
 	}
 	return nil, "", contracts.NewToolExecutionError(call.Function.Name, "unknown_tool", "not a browser tool", contracts.ResponsibilityAgent, nil)
 }
@@ -288,7 +277,7 @@ func readSteps(call contracts.ToolCall, args readArgs) ([]step, error) {
 		if args.TimeoutMS != nil {
 			wait.TimeoutMS = args.TimeoutMS
 		}
-		steps = append(steps, step{action: "wait_for", args: wait})
+		steps = append(steps, step{action: ActionWaitFor, args: wait})
 	}
 	switch how {
 	case "elements":
@@ -299,7 +288,7 @@ func readSteps(call contracts.ToolCall, args readArgs) ([]step, error) {
 			}
 			forward["page"] = *args.Page
 		}
-		return append(steps, step{action: "snapshot", args: forward}), nil
+		return append(steps, step{action: ActionSnapshot, args: forward}), nil
 	case "text":
 		forward := map[string]int{}
 		if args.MaxChars != nil {
@@ -308,9 +297,9 @@ func readSteps(call contracts.ToolCall, args readArgs) ([]step, error) {
 			}
 			forward["max_chars"] = *args.MaxChars
 		}
-		return append(steps, step{action: "read", args: forward}), nil
+		return append(steps, step{action: ActionRead, args: forward}), nil
 	case "screenshot":
-		return append(steps, step{action: "screenshot", args: nil}), nil
+		return append(steps, step{action: ActionScreenshot, args: nil}), nil
 	}
 	return nil, invalidArg(call, "how must be one of: elements, text, screenshot")
 }
@@ -323,11 +312,11 @@ func actStep(call contracts.ToolCall, args actArgs) (step, error) {
 		}
 		switch args.Action {
 		case "click":
-			return step{action: "click", args: map[string]string{"ref": args.Ref}}, nil
+			return step{action: ActionClick, args: map[string]string{"ref": args.Ref}}, nil
 		case "type":
-			return step{action: "type", args: map[string]any{"ref": args.Ref, "text": args.Text, "submit": args.Submit}}, nil
+			return step{action: ActionType, args: map[string]any{"ref": args.Ref, "text": args.Text, "submit": args.Submit}}, nil
 		case "select":
-			return step{action: "select", args: map[string]string{"ref": args.Ref, "value": args.Value}}, nil
+			return step{action: ActionSelect, args: map[string]string{"ref": args.Ref, "value": args.Value}}, nil
 		}
 		return step{}, invalidArg(call, "action must be one of: click, type, select")
 	case "point":
@@ -339,9 +328,9 @@ func actStep(call contracts.ToolCall, args actArgs) (step, error) {
 		}
 		switch args.Action {
 		case "click":
-			return step{action: "click_at", args: map[string]int{"x": *args.X, "y": *args.Y}}, nil
+			return step{action: ActionClickAt, args: map[string]int{"x": *args.X, "y": *args.Y}}, nil
 		case "type":
-			return step{action: "type_at", args: map[string]any{"x": *args.X, "y": *args.Y, "text": args.Text, "submit": args.Submit}}, nil
+			return step{action: ActionTypeAt, args: map[string]any{"x": *args.X, "y": *args.Y, "text": args.Text, "submit": args.Submit}}, nil
 		case "select":
 			return step{}, invalidArg(call, "a <select> cannot be driven by a point; use by=ref with action=select")
 		}
@@ -350,7 +339,7 @@ func actStep(call contracts.ToolCall, args actArgs) (step, error) {
 	return step{}, invalidArg(call, "by must be ref or point")
 }
 
-func describe(d Driver, call contracts.ToolCall, page pageResult, client Client) (Output, error) {
+func describe(d *Bridge, call contracts.ToolCall, page pageResult, client Client) (Output, error) {
 	switch call.Function.Name {
 	case contracts.BrowserNavigateTool:
 		return Output{Text: fmt.Sprintf("Opened %s (%q) in %s, tab %d. Call browser_read to see its elements.", page.URL, page.Title, client.ID, page.TabID)}, nil
@@ -370,7 +359,7 @@ func describe(d Driver, call contracts.ToolCall, page pageResult, client Client)
 	return Output{Text: fmt.Sprintf("Done. The page is now %s (%q). Earlier refs may be stale; call browser_read before the next action.", page.URL, page.Title)}, nil
 }
 
-func readOutput(d Driver, call contracts.ToolCall, page pageResult) (Output, error) {
+func readOutput(d *Bridge, call contracts.ToolCall, page pageResult) (Output, error) {
 	var args readArgs
 	if raw := strings.TrimSpace(call.Function.Arguments); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &args)
@@ -391,7 +380,7 @@ func readOutput(d Driver, call contracts.ToolCall, page pageResult) (Output, err
 // screenshotOutput turns the extension's base64 image into an attachment the
 // model receives with the tool result. It goes through the same validator as a
 // user-attached image, so the limits and the accepted formats are one set.
-func screenshotOutput(d Driver, page pageResult) (Output, error) {
+func screenshotOutput(d *Bridge, page pageResult) (Output, error) {
 	if page.ImageID == "" {
 		return Output{}, contracts.NewToolExecutionError(contracts.BrowserReadTool, "bad_extension_reply",
 			"the browser extension returned no screenshot id", contracts.ResponsibilityEnvironment, nil)
@@ -421,7 +410,7 @@ func screenshotOutput(d Driver, page pageResult) (Output, error) {
 
 // Highlight shows where an approved act will land: the element outlined by ref,
 // or the agent cursor parked on the point.
-func Highlight(ctx context.Context, d Driver, sessionID uuid.UUID, sessionName string, call contracts.ToolCall) error {
+func highlight(ctx context.Context, d *Bridge, sessionID uuid.UUID, sessionName string, call contracts.ToolCall) error {
 	if d == nil || call.Function.Name != contracts.BrowserActTool {
 		return nil
 	}
@@ -437,25 +426,25 @@ func Highlight(ctx context.Context, d Driver, sessionID uuid.UUID, sessionName s
 		if args.X == nil || args.Y == nil {
 			return nil
 		}
-		_, err := d.Do(ctx, sessionID, sessionName, "highlight", map[string]any{"x": *args.X, "y": *args.Y, "label": "wants to " + verb})
+		_, err := d.Do(ctx, sessionID, sessionName, ActionHighlight, map[string]any{"x": *args.X, "y": *args.Y, "label": "wants to " + verb})
 		return err
 	}
 	if args.Ref == "" {
 		return nil
 	}
-	_, err := d.Do(ctx, sessionID, sessionName, "highlight", map[string]string{"ref": args.Ref, "label": "wants to " + verb})
+	_, err := d.Do(ctx, sessionID, sessionName, ActionHighlight, map[string]string{"ref": args.Ref, "label": "wants to " + verb})
 	return err
 }
 
-func ClearHighlight(ctx context.Context, d Driver, sessionID uuid.UUID, sessionName string, call contracts.ToolCall) error {
+func clearHighlight(ctx context.Context, d *Bridge, sessionID uuid.UUID, sessionName string, call contracts.ToolCall) error {
 	if d == nil || call.Function.Name != contracts.BrowserActTool {
 		return nil
 	}
-	_, err := d.Do(ctx, sessionID, sessionName, "clear_highlight", nil)
+	_, err := d.Do(ctx, sessionID, sessionName, ActionClearHighlight, nil)
 	return err
 }
 
-func listClients(d Driver) (string, error) {
+func listClients(d *Bridge) (string, error) {
 	var clients []Client
 	if d != nil {
 		clients = d.Clients()
