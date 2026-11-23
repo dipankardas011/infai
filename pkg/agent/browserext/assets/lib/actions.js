@@ -24,6 +24,11 @@ const SNAPSHOT_MAX_PAGES = 10;
 // One pageful is less than a viewport so no element is skipped between pages.
 const SCROLL_PAGE_RATIO = 0.75;
 const SETTLE_MS = 300;
+// A scroll starts work the page did not do before: a lazy list fetches, a
+// section plays its entrance. The offset is already final (SCROLL_FN scrolls
+// instantly), but what the next read sees needs a moment that is longer than a
+// typical entrance animation and the first paint of a lazily loaded row.
+const SCROLL_SETTLE_MS = 1000;
 const READ_MAX_CHARS = 20000;
 const WAIT_DEFAULT_MS = 10000;
 const WAIT_MAX_MS = 30000;
@@ -36,9 +41,11 @@ const OBJECT_GROUP = "infai";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const INNER_TEXT = "document.body ? document.body.innerText : ''";
-// Next scroll offset by less than a viewport, clamped to the document end.
-const SCROLL_STEP = `Math.min(Math.round(window.innerHeight * ${SCROLL_PAGE_RATIO}), ` +
-  "Math.max(0, (document.documentElement.scrollHeight || 0) - window.innerHeight))";
+// Instant, because a page that opts into `scroll-behavior: smooth` animates an
+// ordinary scroll: reading scrollY right after reports the old offset, so the
+// scroll looks like a no-op while it is still travelling.
+const SCROLL_TO = `function(top) { window.scrollTo({ top, behavior: "instant" }); return window.scrollY; }`;
+const SCROLL_DELTA = `Math.round(window.innerHeight * ${SCROLL_PAGE_RATIO})`;
 const INSTALL_OVERLAY = `(${installOverlay.toString()})()`;
 const CLEAR_OVERLAY = "window.__infaiOverlay?.clear()";
 const TEARDOWN_OVERLAY = "window.__infaiOverlay?.teardown()";
@@ -234,7 +241,7 @@ async function snapshot({ sessionId, args }) {
   const page = optionalLimit(args, "page", 1, SNAPSHOT_MAX_PAGES);
   await send(tabId, "Accessibility.enable");
   for (let i = 1; i < page; i++) {
-    await evaluate(tabId, `window.scrollBy(0, ${SCROLL_STEP}); window.scrollY`);
+    await evaluate(tabId, `(${SCROLL_TO})(window.scrollY + ${SCROLL_DELTA})`);
     await sleep(SETTLE_MS);
   }
   const { nodes } = await send(tabId, "Accessibility.getFullAXTree");
@@ -590,23 +597,52 @@ const SCROLL_FN = `function(to, times) {
   const maxY = Math.max(0, (doc.scrollHeight || 0) - vh);
   const step = Math.max(1, Math.round(vh * ${SCROLL_PAGE_RATIO}));
   const before = window.scrollY;
-  // Instant, not smooth: the caller reads after this returns, so a smooth
-  // scroll would report a position that has not been reached yet.
-  if (to === "top") window.scrollTo(0, 0);
-  else if (to === "bottom") window.scrollTo(0, maxY);
-  else for (let i = 0; i < times; i++) window.scrollBy(0, to === "up" ? -step : step);
-  return { before, after: window.scrollY, max: maxY, vh, docHeight: doc.scrollHeight || 0 };
+  const target = to === "top" ? 0
+    : to === "bottom" ? maxY
+    : before + (to === "up" ? -step : step) * times;
+  window.scrollTo({ top: Math.max(0, Math.min(maxY, target)), behavior: "instant" });
+  return { before, after: window.scrollY, max: maxY };
 }`;
 
-// Reports what actually moved: a page already at its edge, or one whose content
-// sits in an inner scroll box, does not move and the model must know that.
+// For a page whose own scrolling is off (a fixed layout with the content in an
+// inner box), scroll the scrollable element under the viewport centre instead.
+const SCROLL_INNER_FN = `function(to, times) {
+  const vh = window.innerHeight;
+  const step = Math.max(1, Math.round(vh * ${SCROLL_PAGE_RATIO}));
+  const stack = document.elementsFromPoint(Math.round(window.innerWidth / 2), Math.round(vh / 2));
+  const box = stack.find((el) => el !== document.scrollingElement &&
+    el !== document.documentElement && el !== document.body &&
+    /^(auto|scroll|overlay)$/.test(getComputedStyle(el).overflowY) &&
+    el.scrollHeight > el.clientHeight + 1);
+  if (!box) return null;
+  const before = box.scrollTop;
+  const max = Math.max(0, box.scrollHeight - box.clientHeight);
+  const target = to === "top" ? 0
+    : to === "bottom" ? max
+    : before + (to === "up" ? -step : step) * times;
+  box.scrollTo({ top: Math.max(0, Math.min(max, target)), behavior: "instant" });
+  return { before, after: box.scrollTop, max, container: box.tagName.toLowerCase() + (box.id ? "#" + box.id : "") };
+}`;
+
+// Reports what actually moved: a page already at its edge does not move and the
+// model must know that. A window that cannot move at all, or a window that did
+// not move while not at its edge, is scrolled through its inner box instead, and
+// the result names which one moved.
 async function scroll({ sessionId, args }) {
   const to = requireEnum(args, "to", ["down", "up", "top", "bottom"], "down");
   const times = optionalLimit(args, "times", 1, SCROLL_TIMES_MAX);
   const { tabId } = await requireTab(sessionId);
-  const pos = await evaluate(tabId, `(${SCROLL_FN})(${JSON.stringify(to)}, ${times})`);
-  await sleep(SETTLE_MS);
-  return { ...(await tabInfo(tabId)), ...pos };
+  const call = `(${JSON.stringify(to)}, ${times})`;
+  let pos = await evaluate(tabId, `(${SCROLL_FN})${call}`);
+  // A window with nothing to scroll (max 0) always defers to the inner box;
+  // otherwise only a window that could move but did not is worth a second try.
+  const edge = (to === "down" || to === "bottom") ? pos.before >= pos.max : pos.before <= 0;
+  if (pos.after === pos.before && (pos.max === 0 || !edge)) {
+    const inner = await evaluate(tabId, `(${SCROLL_INNER_FN})${call}`);
+    if (inner) pos = inner;
+  }
+  await sleep(SCROLL_SETTLE_MS);
+  return { ...(await tabInfo(tabId)), ...pos, container: pos.container || "" };
 }
 
 const HANDLERS = {

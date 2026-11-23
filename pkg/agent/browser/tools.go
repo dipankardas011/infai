@@ -122,6 +122,9 @@ type pageResult struct {
 	Before int `json:"before"`
 	After  int `json:"after"`
 	Max    int `json:"max"`
+	// Container is empty when the page itself scrolled, or names the inner
+	// element that scrolled instead.
+	Container string `json:"container"`
 
 	Width   int     `json:"width"`
 	Height  int     `json:"height"`
@@ -347,10 +350,14 @@ func describe(d *Bridge, call contracts.ToolCall, page pageResult, client Client
 		return readOutput(d, call, page)
 	case contracts.BrowserScrollTool:
 		if page.After == page.Before {
-			return Output{Text: fmt.Sprintf("The page did not move (scroll offset %d of %d): it is already at that edge, or its content sits in an inner scroll box. "+
+			return Output{Text: fmt.Sprintf("The page did not move (scroll offset %d of %d): it is already at that edge. "+
 				"Act on an element ref instead; that scrolls to the element itself.", page.After, page.Max)}, nil
 		}
-		return Output{Text: fmt.Sprintf("Scrolled from %d to %d of %d on %s (%q). Call browser_read to see what loaded.", page.Before, page.After, page.Max, page.URL, page.Title)}, nil
+		where := "the page"
+		if page.Container != "" {
+			where = fmt.Sprintf("an inner %s scroll box", page.Container)
+		}
+		return Output{Text: fmt.Sprintf("Scrolled %s from %d to %d of %d on %s (%q). Call browser_read to see what loaded.", where, page.Before, page.After, page.Max, page.URL, page.Title)}, nil
 	}
 	// browser_act
 	if page.X != 0 || page.Y != 0 {
