@@ -117,7 +117,7 @@ function notice(connState, conn) {
   if (connState === "reconnecting") {
     return {
       kind: "warn",
-      title: `can't reach the daemon${secs !== null ? ` · retrying in ${secs}s` : ""}`,
+      title: `can't reach the daemon${conn?.error ? ` · ${conn.error}` : ""}${secs !== null ? ` · retrying in ${secs}s` : ""}`,
       body: [
         "Either ",
         code("infaiw server"),

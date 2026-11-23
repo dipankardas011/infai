@@ -162,7 +162,7 @@ infaiw provider login    # sign in to a model provider
 infaiw                   # open the TUI and start a session
 ```
 
-The TUI attaches to `localhost:6000` by default. Use `--host` and `--port` to reach
+The TUI attaches to `localhost:7000` by default. Use `--host` and `--port` to reach
 another server, and `--session <uuid>` to resume a saved session.
 
 #### Claude Code
@@ -263,7 +263,7 @@ with `--no-enable`.
 ### Configuration
 
 `infaiw server` is configured only through `INFAI_AGENT_*` environment variables, for
-example `INFAI_AGENT_PORT=6000`. Background services do not inherit your shell
+example `INFAI_AGENT_PORT=7000`. Background services do not inherit your shell
 environment, so put them in `~/.config/infaiw/server.env` (`chmod 600` if it holds
 secrets) and restart the service.
 

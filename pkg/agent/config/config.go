@@ -63,7 +63,12 @@ func LoadConfig() (*AgentEngineConfig, error) {
 	viper.SetDefault("enable_healthz", false)
 
 	viper.SetDefault("host", "localhost")
-	viper.SetDefault("port", 6000)
+	// 7000, not 6000: Chrome refuses to connect to some ports at all and
+	// answers net::ERR_UNSAFE_PORT without attempting a socket. Its blocklist
+	// (net/base/port_util.cc) covers everything below 1024 plus service ports
+	// including 6000 (X11), so a daemon on 6000 is unreachable from the browser
+	// extension while every other client works. The default stays off that list.
+	viper.SetDefault("port", 7000)
 	viper.SetDefault("enable_metrics", false)
 	viper.SetDefault("enable_healthz", true)
 

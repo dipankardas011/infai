@@ -48,7 +48,9 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 	cmd.Flags().StringVar(&host, "host", "localhost", "agent server host to attach to")
-	cmd.Flags().IntVar(&port, "port", 6000, "agent server port to attach to")
+	// 7000 matches the server default; 6000 is on Chrome's unsafe-port list and
+	// the browser extension cannot connect to it (net::ERR_UNSAFE_PORT).
+	cmd.Flags().IntVar(&port, "port", 7000, "agent server port to attach to")
 	cmd.Flags().StringVar(&sessionID, "session", "", "resume a saved session by uuid")
 	cmd.AddCommand(newServerCmd())
 	cmd.AddCommand(newProviderCmd())
@@ -115,7 +117,8 @@ func remoteClient() *tui.RemoteClient {
 // INFAI_AGENT_* environment and accepts no flags at all.
 func addServerFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().StringVar(&host, "host", "localhost", "agent server host to attach to")
-	cmd.PersistentFlags().IntVar(&port, "port", 6000, "agent server port to attach to")
+	// Same default and same reason as the root flag: 6000 is blocked by Chrome.
+	cmd.PersistentFlags().IntVar(&port, "port", 7000, "agent server port to attach to")
 }
 
 func newMCPCmd() *cobra.Command {

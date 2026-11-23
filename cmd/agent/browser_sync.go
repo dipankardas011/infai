@@ -34,10 +34,29 @@ func syncBrowserExtension(ctx context.Context, l *slog.Logger, cfg *config.Agent
 		l.WarnContext(ctx, "browser extension install failed", "dir", dir, "error", err)
 		return
 	}
+	if unsafePort(cfg.Port) {
+		l.WarnContext(ctx, "browser extension cannot connect to this port",
+			"port", cfg.Port,
+			"reason", "Chrome blocks WebSocket connections to this port (net::ERR_UNSAFE_PORT; 6000 is X11)",
+			"fix", "start the daemon on another port, e.g. INFAI_AGENT_PORT=7000")
+	}
 	id, _ := browserext.ExtensionID(dir)
 	l.InfoContext(ctx, "browser extension ready",
 		"dir", dir, "extension_id", id, "updated", changed,
 		"note", "if updated is true, click Reload on the extension in chrome://extensions")
+}
+
+// unsafePort reports whether Chrome refuses connections to a port. The list is
+// net/base/port_util.cc: below 1024, plus a set of well-known service ports.
+func unsafePort(port int) bool {
+	if port > 0 && port < 1024 {
+		return true
+	}
+	switch port {
+	case 2049, 3659, 4045, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080:
+		return true
+	}
+	return false
 }
 
 // browserDaemonURL is the address the extension dials. A wildcard bind address
