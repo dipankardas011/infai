@@ -1604,6 +1604,7 @@ a.bl-cell:hover, a.bl-cell:focus-visible { transform: scale(1.18); outline-color
 .cta h2 em { color: var(--green); font-style: normal; text-shadow: 0 0 30px var(--green-glow); }
 body.is-w .cta h2 em { text-shadow: none; color: var(--text); background: linear-gradient(transparent 58%, var(--hl) 58%, var(--hl) 92%, transparent 92%); }
 .cta .hero-actions { justify-content: center; }
+.btn-ph { display: inline-flex; align-items: center; } .btn-ph img { display: block; }
 
 /* ── Footer ── */
 footer { border-top: 1px solid var(--border); background: var(--bg-deep); }
